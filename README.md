@@ -82,7 +82,8 @@ Floptle/
 │  ├─ floptle-script/      # Lua host + hot reload
 │  ├─ floptle-net/         # networking (deferred stub)
 │  ├─ floptle-editor/      # the authoring tool (bin: `floptle`)
-│  └─ floptle-runtime/     # game player / export host (bin)
+│  ├─ floptle-runtime/     # game player / export host (bin)
+│  └─ floptle-proof/       # Beat 1: standalone raymarch "proof slice" (bin)
 ├─ docs/
 │  ├─ VISION.md            # the north star
 │  ├─ ARCHITECTURE.md      # how it all fits together

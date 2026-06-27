@@ -26,6 +26,11 @@
 > whole bet — if a stranger doesn't ask "what *is* that," you learn it in weeks, not
 > years. Build it before breadth, then let one small game pull the rest of the
 > phases into existence on demand. (Synthesized from the vision advisory pass.)
+>
+> **Status — Beat 1 exists.** `cargo run -p floptle-proof --release` flies a free
+> camera through a time-morphing Mandelbox with the feedback post stack (half-res
+> HDR + upscale, FPS in the title). Hand-written WGSL, no engine — the go/no-go
+> look test. See [`crates/floptle-proof/`](../crates/floptle-proof/README.md).
 
 ---
 
