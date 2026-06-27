@@ -1,0 +1,11 @@
+[package]
+name = "floptle-core"
+description = "Core: math, ECS, node/scene-graph facade, events, time, object pools."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

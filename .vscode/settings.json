@@ -1,0 +1,12 @@
+{
+  "rust-analyzer.cargo.allFeatures": false,
+  "rust-analyzer.check.command": "clippy",
+  "files.associations": {
+    "*.ron": "ruby",
+    "*.flsl": "wgsl"
+  },
+  "editor.formatOnSave": true,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  }
+}

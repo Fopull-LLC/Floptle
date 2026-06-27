@@ -1,0 +1,18 @@
+[package]
+name = "floptle-physics"
+description = "SDF-first collision + movement: collide against morphing fractal worlds the same math the renderer draws."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-field = { path = "../floptle-field" }
+# Optional, added when needed (see docs/subsystems/physics.md):
+#   parry3d  — triangle-mesh BVH queries for static/imported (Blender) meshes
+#   rapier3d — full rigid-body dynamics solver, ONLY if a game needs heavy
+#              object-vs-object stacking/joints. Our SDF world + controllers
+#              are custom regardless.

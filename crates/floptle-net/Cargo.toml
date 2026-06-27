@@ -1,0 +1,12 @@
+[package]
+name = "floptle-net"
+description = "Networking (deferred): clean client/server boundary stub for future authoritative play."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }

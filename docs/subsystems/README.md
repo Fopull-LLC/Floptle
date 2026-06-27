@@ -1,0 +1,31 @@
+# Subsystem designs
+
+Deep-dive design notes for each part of Floptle. Each is opinionated and
+concrete (data structures, data flow, editor UX, what's out of scope). They build
+on the [`../decisions/`](../decisions/) ADRs and the top-level
+[`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+
+### The signature visuals
+- [renderer.md](renderer.md) — the otherworldly render graph; SDF raymarching you fly *into*; reality-bending post.
+- [shaders.md](shaders.md) — the shader IR: one source of truth, edited as graph **and** `.flsl` text → WGSL.
+- [deformable-matter.md](deformable-matter.md) — the unifying idea: everything is malleable matter (morph · blend/soup · soft-body · stick · fracture).
+
+### World & simulation
+- [physics.md](physics.md) — SDF-first collision; character & raycast-vehicle controllers on morphing worlds.
+- [particles-vfx.md](particles-vfx.md) — the timeline particle editor (groups, emit events, per-property curves).
+- [scene-and-nodes.md](scene-and-nodes.md) — Node/Component authoring facade over the archetype ECS.
+- [animation.md](animation.md) — glTF skeletal clips + a lightweight state machine + notify events.
+
+### Interaction & game-feel
+- [input.md](input.md) — action mapping across keyboard/mouse/gamepad.
+- [ui.md](ui.md) — the dead-simple arrange-and-script in-game UI.
+- [camera-and-dialogue.md](camera-and-dialogue.md) — virtual-camera rigs + the built-in typewriter dialogue system.
+- [object-pooling.md](object-pooling.md) — automatic take/return pooling.
+
+### Content pipeline & tooling
+- [materials-and-textures.md](materials-and-textures.md) — easy materials; drag-on, tile-without-a-shader textures.
+- [asset-pipeline.md](asset-pipeline.md) — Blender → glTF import + the asset database & hot reload.
+- [editor.md](editor.md) — the authoring app: scene view, in-scene shape building, all panels, the theme.
+
+### Future
+- [networking-future.md](networking-future.md) — deferred authoritative server + clients on self-hosted infra.

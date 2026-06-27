@@ -1,0 +1,13 @@
+[package]
+name = "floptle-render"
+description = "Renderer: wgpu render graph, materials, and the signature SDF/raymarch look."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-field = { path = "../floptle-field" }

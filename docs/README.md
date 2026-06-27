@@ -1,0 +1,27 @@
+# Floptle documentation
+
+Start here. Floptle is a lightweight, hyperoptimized Rust game engine for surreal,
+otherworldly visuals (Fopull LLC). This repo is currently **planning + scaffold** —
+the design is written before the engine is built.
+
+## Read in this order
+
+1. [VISION.md](VISION.md) — the north star: the feeling we chase, who it's for, the headline features.
+2. [ARCHITECTURE.md](ARCHITECTURE.md) — how the crates and subsystems fit together.
+3. [ROADMAP.md](ROADMAP.md) — the phased build plan; each phase ends in a runnable demo.
+4. [decisions/](decisions/) — ADRs: every significant choice and *why* (start at [the index](decisions/README.md)).
+5. [subsystems/](subsystems/) — deep-dive design per system (start at [the index](subsystems/README.md)).
+
+## The three signature ideas (what makes Floptle unlike other engines)
+
+- **An otherworldly renderer** — SDF raymarching lets you fly *inside* fractals
+  that morph in real time, over a post stack that breaks the laws of light.
+- **Shaders as graph *and* text** — one custom IR, edited visually or as `.flsl`
+  in VSCode (AI-friendly), transpiled to WGSL.
+- **Everything is malleable matter** — one implicit-field substrate so any object
+  can morph, blend like soup, go soft-body, stick, stretch, and (later) tear —
+  and stay cleanly collidable for free.
+
+Plus a maker-first toolkit: a video-editor-style particle timeline, in-scene
+parametric shape building, automatic object pooling, dead-simple UI, a built-in
+dialogue system, and a clean Blender pipeline.
