@@ -1,0 +1,22 @@
+[package]
+name = "floptle-proof"
+description = "Beat 1 'Am I Dreaming?' proof slice: hardcoded-WGSL raymarch flythrough (no engine)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "floptle-proof"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck = { version = "1.25.0", features = ["derive"] }
+env_logger = "0.11.11"
+glam = "0.33.1"
+log = "0.4.33"
+pollster = "0.4.0"
+wgpu = "29.0.3"
+winit = "0.30.13"
