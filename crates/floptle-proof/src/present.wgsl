@@ -52,13 +52,13 @@ fn hash(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let ca = (in.uv - vec2<f32>(0.5)) * 0.004; // chromatic aberration
+    let ca = (in.uv - vec2<f32>(0.5)) * 0.0024; // chromatic aberration
     var col = vec3<f32>(0.0);
     col.r = textureSample(tex, samp, in.uv + ca).r;
     col.g = textureSample(tex, samp, in.uv).g;
     col.b = textureSample(tex, samp, in.uv - ca).b;
 
-    col = aces(col * 1.1);
+    col = aces(col * 0.95);
 
     let vig = smoothstep(1.15, 0.35, length(in.uv - vec2<f32>(0.5)));
     col = col * vig;

@@ -51,7 +51,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     var huv = vec2<f32>(c.x * co - c.y * s, c.x * s + c.y * co) * 0.997 + vec2<f32>(0.5);
     huv = huv + 0.0016 * vec2<f32>(sin(in.uv.y * 11.0 + G.time), cos(in.uv.x * 11.0 + G.time));
 
-    let hist = textureSample(histTex, samp, huv).rgb;
+    // histTex is a render target: sampling it with the same uv convention it
+    // was rendered with flips Y. Uncompensated, the feedback loop accumulates a
+    // vertically-mirrored ghost every frame (the "double vision"). Flip Y here
+    // so the trail re-registers with the live scene — one image, no mirror.
+    let hist = textureSample(histTex, samp, vec2<f32>(huv.x, 1.0 - huv.y)).rgb;
     let col = scene + hist * G.feedback;
     return vec4<f32>(col, 1.0);
 }

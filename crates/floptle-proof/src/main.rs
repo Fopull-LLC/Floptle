@@ -23,6 +23,10 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 
+/// Internal raymarch resolution divisor: 1 = full res (crisp), 2 = half res.
+/// This is the single biggest perf lever — bump to 2 if the frame rate drops.
+const RENDER_DIV: u32 = 1;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
@@ -48,7 +52,15 @@ struct Camera {
 
 impl Camera {
     fn reset() -> Self {
-        Camera { pos: Vec3::new(0.0, 0.0, 5.0), yaw: 0.0, pitch: 0.0, fov: 1.25 }
+        // Off-axis + angled on purpose: looking straight down the Mandelbox's
+        // symmetry axis makes the view 4-fold mirror-symmetric (the "double
+        // vision"), and flying down that axis punches you through the thin
+        // center. Start to the side, aimed toward the structure.
+        let pos = Vec3::new(2.6, 1.4, 3.4);
+        let dir = (-pos).normalize();
+        let yaw = dir.x.atan2(-dir.z);
+        let pitch = dir.y.asin();
+        Camera { pos, yaw, pitch, fov: 1.25 }
     }
     /// (forward, right, up)
     fn basis(&self) -> (Vec3, Vec3, Vec3) {
@@ -59,6 +71,33 @@ impl Camera {
         let up = right.cross(fwd).normalize();
         (fwd, right, up)
     }
+}
+
+/// CPU port of the `map()` Mandelbox distance estimator in `raymarch.wgsl`,
+/// kept in lock-step with it (same morph + iteration count) so we can scale
+/// fly speed by how close the camera is to the surface.
+fn mandelbox_de(p: Vec3, time: f32) -> f32 {
+    let scale = -1.7 + (-0.9) * (0.5 + 0.5 * (time * 0.06).sin()); // mix(-1.7,-2.6,..)
+    let minr2 = 0.20 + 0.12 * (0.5 + 0.5 * (time * 0.045).sin());
+    let fixr2 = 1.0_f32;
+    let mut z = p;
+    let mut dz = 1.0_f32;
+    for _ in 0..14 {
+        z = z.clamp(Vec3::splat(-1.0), Vec3::splat(1.0)) * 2.0 - z; // box fold
+        let r2 = z.dot(z);
+        if r2 < minr2 {
+            let f = fixr2 / minr2;
+            z *= f;
+            dz *= f;
+        } else if r2 < fixr2 {
+            let f = fixr2 / r2;
+            z *= f;
+            dz *= f;
+        }
+        z = z * scale + p + Vec3::new(0.12, -0.07, 0.05); // subtle asymmetry (not the mirror fix)
+        dz = dz * scale.abs() + 1.0;
+    }
+    z.length() / dz.abs()
 }
 
 #[derive(Default)]
@@ -358,7 +397,7 @@ impl State {
             ..Default::default()
         });
 
-        let render_size = (config.width.max(2) / 2, config.height.max(2) / 2);
+        let render_size = (config.width.max(2) / RENDER_DIV, config.height.max(2) / RENDER_DIV);
         let targets =
             build_targets(&device, &queue, &bgl_post, &bgl_present, &sampler, render_size.0, render_size.1);
 
@@ -396,7 +435,7 @@ impl State {
         self.config.width = w;
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
-        self.render_size = (w.max(2) / 2, h.max(2) / 2);
+        self.render_size = (w.max(2) / RENDER_DIV, h.max(2) / RENDER_DIV);
         self.targets = build_targets(
             &self.device,
             &self.queue,
@@ -408,7 +447,7 @@ impl State {
         );
     }
 
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, dt: f32, time: f32) {
         let (fwd, right, up) = self.cam.basis();
         let mut mv = Vec3::ZERO;
         if self.input.w { mv += fwd; }
@@ -418,8 +457,12 @@ impl State {
         if self.input.e { mv += up; }
         if self.input.q { mv -= up; }
         if mv.length_squared() > 0.0 {
-            let speed = if self.input.boost { 7.0 } else { 2.2 };
-            self.cam.pos += mv.normalize() * speed * dt;
+            // Speed scales with the distance to the surface, so you glide to a
+            // crawl as you approach and can dive *infinitely* deep without ever
+            // punching through — you asymptotically approach, never arrive.
+            let prox = mandelbox_de(self.cam.pos, time).clamp(0.03, 1.0);
+            let base = if self.input.boost { 6.5 } else { 2.2 };
+            self.cam.pos += mv.normalize() * base * prox * dt;
         }
 
         let sens = 0.0025;
@@ -439,7 +482,8 @@ impl State {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32().min(0.1);
         self.last = now;
-        self.update(dt);
+        let time = (now - self.start).as_secs_f32();
+        self.update(dt, time);
 
         let (fwd, right, up) = self.cam.basis();
         let cp = self.cam.pos;
@@ -449,10 +493,10 @@ impl State {
             cam_up: [up.x, up.y, up.z, 0.0],
             cam_fwd: [fwd.x, fwd.y, fwd.z, 0.0],
             resolution: [self.render_size.0 as f32, self.render_size.1 as f32],
-            time: (now - self.start).as_secs_f32(),
+            time,
             dt,
             frame: self.frame as f32,
-            feedback: 0.9,
+            feedback: 0.5,
             warp: 1.0,
             fov: self.cam.fov,
         };
