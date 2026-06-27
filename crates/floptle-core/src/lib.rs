@@ -7,6 +7,12 @@
 //! - `math`    : thin re-exports / helpers over `glam`.
 //! - `ecs`     : archetype ECS — the data-oriented runtime under everything.
 //! - `scene`   : the Node + Component *authoring facade* over the ECS.
+//! - `transform`: high-precision (`f64`/`DVec3`) world transform + a derived
+//!                camera-relative `f32` render transform — large-world-safe by
+//!                default (ADR-0015).
+//! - `origin`  : floating origin — keeps the active sim near `(0,0,0)` and rebases
+//!                the world around the player so distance never jitters.
+//! - `frames`  : hierarchical reference frames (galaxy→system→body→local).
 //! - `event`   : engine + input + dialogue event bus.
 //! - `time`    : frame clock, fixed timestep, timers.
 //! - `pool`    : automatic object pooling (see ADR-0008, the "take/return" API).
