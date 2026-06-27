@@ -14,7 +14,8 @@
 //!                the world around the player so distance never jitters.
 //! - `frames`  : hierarchical reference frames (galaxy→system→body→local).
 //! - `event`   : engine + input + dialogue event bus.
-//! - `time`    : frame clock, fixed timestep, timers.
+//! - `time`    : frame clock, fixed timestep, timers; per-entity `LocalTime` +
+//!                the time-rate field `r(p)` for slow/freeze/dilation (ADR-0017).
 //! - `pool`    : automatic object pooling (see ADR-0008, the "take/return" API).
 //! - `serde_ron`: scene/prefab (de)serialization helpers (RON).
 

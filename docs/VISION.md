@@ -111,6 +111,23 @@ whether matter **crushes** under pressure (soft clay) or **resists** (hard metal
 The engine understands space, matter, gravity, and density as one idea. See
 [`subsystems/gravity-and-density.md`](subsystems/gravity-and-density.md) and ADR-0014.
 
+### 4.6 Rules you define, not mechanics you fake
+The deepest version of all of the above: a Floptle game is a small **simulated
+universe**, and the things you'd normally hardcode — how light travels, how time
+flows, how gravity points — are **rules you declare**, not exceptions you script.
+Light becomes a fourth field on the same substrate: bend rays, and the *same* rule
+that makes mass pull can make photons fall ([`light.md`](subsystems/light.md),
+ADR-0016). Time becomes a rate field `r(p)`: slow, freeze, or dilate a region while
+the rest of the world keeps moving ([`time.md`](subsystems/time.md), ADR-0017). A
+world's laws live in one place — a **Lawset** bound to a region (a **Realm**),
+resolved by the SDF inside-test, inheritable and hot-reloadable; a Floptle world is
+literally a `lawset.ron` you can diff and gift as "here are the laws — bend them"
+([`world-rules.md`](subsystems/world-rules.md), ADR-0018). The honest frontier is
+making those rules **compose by design** rather than by coincidence — a
+field-interaction graph where one law feeds another, so worlds surprise you in ways
+you didn't script (ADR-0019). This is *why* a player believes the wall-run: it
+isn't a trick, it's what **must** happen under this world's rules.
+
 ## 5. Constraints & platform
 
 - Ships for **Linux, Windows, macOS** from one codebase.

@@ -22,5 +22,9 @@ reasoning history stays intact.
 | [0013](0013-deformable-matter.md) | **Unified deformable-matter substrate** (field + tiers) | Accepted |
 | [0014](0014-gravity-fields.md) | **Mass/density-driven gravity as a field** | Accepted |
 | [0015](0015-large-world-space.md) | **Large-world / floating-origin space** (default-on) | Accepted |
+| [0016](0016-programmable-light.md) | **Programmable light transport** (light as a field) | Accepted |
+| [0017](0017-time-as-a-field.md) | **Time as a rate field** (local clocks) | Accepted |
+| [0018](0018-lawset-realm.md) | **The Lawset / Realm meta-spine** (a world's laws) | Accepted |
+| [0019](0019-field-interaction-graph.md) | **Field-interaction graph** (composition by design) | Accepted |
 
 > Date format: ISO `YYYY-MM-DD`. Decider: Ty Johnston (Fopull LLC).

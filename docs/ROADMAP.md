@@ -14,8 +14,18 @@
 2. **Vertical slices.** Each phase touches the whole stack thinly rather than
    finishing one crate perfectly.
 3. **Dogfood.** The editor uses the engine; building the editor pressure-tests it.
-4. **Headliners are de-risked first.** The shader IR and raymarch renderer are
-   the riskiest/most novel, so we prototype them early (Phase 2–3), not last.
+4. **De-risk the THESIS, not the tooling.** The raymarch renderer carries the
+   entire "another dimension" payload, so prototype it immediately. The shader IR
+   is *tooling* that produces no new visuals over hand-written WGSL — defer it
+   until you feel the pain of editing WGSL by hand.
+
+> **The proof comes first.** The single highest-leverage build is the
+> **"Am I Dreaming?" slice**: a hardcoded-WGSL raymarch + post flythrough of a
+> morphing fractal (Phases 1 & 4 collapsed into one tiny binary), GPU profiler on
+> from day one. It is the smallest "holy crap" demo *and* the go/no-go gate for the
+> whole bet — if a stranger doesn't ask "what *is* that," you learn it in weeks, not
+> years. Build it before breadth, then let one small game pull the rest of the
+> phases into existence on demand. (Synthesized from the vision advisory pass.)
 
 ---
 
@@ -73,6 +83,9 @@ line, switch back — same shader, both ways.
 - **`floptle-field`** shared substrate (SDF + CSG `smin`/`smax`) online; the
   first deformable-matter tiers — **Morph** (GPU vertex/field displacement) and
   **FieldBlend** (blend/mix/reject "soup") — land here (ADR-0013).
+- **Programmable light**, first tier (ADR-0016): bent-ray transport in the march
+  (`bend = -∇f`, then `bend = g(p)` so light falls under your gravity) — off by
+  default; the cheap headline that proves rules compose.
 - Screen-space post stack (feedback/echo, non-physical color, spatial warp).
 
 **Demo:** fly inside a fractal that morphs in real time, with a post stack that
@@ -83,6 +96,10 @@ makes it feel impossible.
 
 - Lua host + lifecycle + curated engine API (`floptle-script`).
 - Node/Component facade over the ECS; scene (de)serialization to RON.
+- **Lawset/Realm thin seam** (ADR-0018): a `lawset.ron` + resolver wiring just two
+  axes (gravity-as-realm-default + `time.scale`) — so the spine exists before
+  systems calcify, without a big-bang. Proof: cross a `smin` boundary and watch
+  "down" *and* time-rate change together.
 - Hot-reload of scripts; VSCode "open script" integration end-to-end.
 - Input action mapping (kbd/mouse/gamepad) scripts can query (`floptle-input`).
 
@@ -135,6 +152,11 @@ size/rotation/alpha/color over life, scrub the timeline like a video editor.
 - Deformable-matter **SoftBody** tier (XPBD particle cage) + simple **adhesion**
   (sticking/stretch) via `floptle-matter` — objects that squish, stick, and get
   carried; collide as SDF for free (ADR-0013).
+- **Time-rate regions** (ADR-0017): a `TimeRegion` bullet-time dome slowing a
+  region's morph/particles/physics while the rest of the world keeps moving.
+- **Field-interaction seam + one proof** (ADR-0019): heat → a fractal wall melts
+  where heated → density drops → surface gravity weakens and you slide off, shown
+  with the rule-lens overlay. Three authored edges, nothing scripted.
 
 **Demo:** a tiny vertical slice — walk up to an NPC, trigger dialogue + a cutscene
 camera, swing an attack that spawns pooled "360Slash" VFX. And: drive a car
@@ -176,5 +198,10 @@ across a fractal that's morphing underneath you.
 - **Hierarchical reference frames** (`floptle-core::frames`): galaxy→system→body→
   local frames so an entire galaxy is representable, not just a solar system
   (ADR-0015).
+- **Research-grade rule systems** (layered on the thin seams once the look is
+  proven): programmable light **Tier 3** (participating media, signed emission for
+  "dark that emits"), the **full field-interaction graph** (cyclic, damped) +
+  conserved transport, and **time reverse / echoes** (bounded entity traces)
+  (ADR-0016 / 0017 / 0019).
 - Job-system parallelism for sim/culling; deeper profiler; asset bundling.
 - More raymarch primitives, more shader stdlib nodes, more post effects.

@@ -11,6 +11,9 @@
 //! - `material`   : material model binding shaders + textures + params.
 //! - `raymarch`   : SDF / fractal raymarching pass — "go inside the fractal".
 //! - `post`       : screen-space passes that bend conventional light rules.
+//! - `light`      : programmable light transport — tiered, off-by-default; bent
+//!                  rays where `bend` can BE `g(p)`, so light falls under your
+//!                  custom gravity (one rule, two phenomena) (ADR-0016).
 //! - `frame`      : per-frame orchestration, culling, draw submission; uploads
 //!                  positions **camera-relative** so the GPU never sees large
 //!                  coordinates — large-world-safe by default (ADR-0015).

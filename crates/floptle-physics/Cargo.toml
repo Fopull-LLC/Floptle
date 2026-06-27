@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
+floptle-rules = { path = "../floptle-rules" }
 # Optional, added when needed (see docs/subsystems/physics.md):
 #   parry3d  — triangle-mesh BVH queries for static/imported (Blender) meshes
 #   rapier3d — full rigid-body dynamics solver, ONLY if a game needs heavy
