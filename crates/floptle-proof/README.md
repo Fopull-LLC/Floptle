@@ -33,6 +33,40 @@ cargo run -p floptle-proof --release
 | **R** | reset camera |
 | **Esc** | release mouse, or quit if already released |
 
+## Beat 2 — "Stand in the Dream" (`--bin walk`)
+
+A second proof slice (sibling binary, Beat 1 left untouched) for the **SDF-first
+physics** thesis (ADR-0012 / ADR-0014): a kinematic capsule **walks on a morphing
+fractal planetoid**, colliding against the field's own distance function, with
+**SDF-surface gravity** defining "down" so you can run up the shifting walls.
+
+The design was vetted by an adversarial panel that discovered the Mandelbox is a
+great thing to *look at* and a terrible thing to *walk on* (empty interior, ~86°
+normal flips per step). So it's **render-detailed / collide-smooth**: the eye sees
+a fractal crust, but the feet collide against an explicitly-designed **smooth,
+solid macro field** (core sphere + blended hills) that is genuinely walkable
+(measured: solid interior, real horizon, ~3° normal rotation/step, `|∇f|≈1`). The
+**anti-trapping** rule (analytic surface-velocity carry `df/dt = ∇f·∂w/∂t` +
+clamped, momentum-free depenetration) makes a rising wall *lift* the player
+instead of swallowing them.
+
+```bash
+cargo run -p floptle-proof --bin walk --release
+```
+
+| Input | Action |
+|---|---|
+| **W A S D** | walk on the surface (camera-relative, projected onto the ground) |
+| **Space** | jump (with coyote time) |
+| **Shift** | sprint |
+| **Mouse** | orbit camera (click to capture, **Esc** releases) |
+| **F** | toggle third / first person |
+| **R** | respawn above the planet |
+
+The title bar is the HUD: fps, camera mode, `grounded?`, `f` (signed distance at
+the feet — stays `≥ -radius`, i.e. never embedded), and `vsurf` (surface speed
+under you — the money shot is standing still on a heaving wall and riding it).
+
 ## Notes
 
 - It renders at half-res then upscales — that's the single biggest perf lever; if

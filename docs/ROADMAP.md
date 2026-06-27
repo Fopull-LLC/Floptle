@@ -28,9 +28,18 @@
 > phases into existence on demand. (Synthesized from the vision advisory pass.)
 >
 > **Status — Beat 1 exists.** `cargo run -p floptle-proof --release` flies a free
-> camera through a time-morphing Mandelbox with the feedback post stack (half-res
-> HDR + upscale, FPS in the title). Hand-written WGSL, no engine — the go/no-go
-> look test. See [`crates/floptle-proof/`](../crates/floptle-proof/README.md).
+> camera through a time-morphing Mandelbox with the feedback post stack (full-res
+> HDR, FPS in the title). Hand-written WGSL, no engine — the go/no-go look test.
+> See [`crates/floptle-proof/`](../crates/floptle-proof/README.md).
+>
+> **Status — Beat 2 exists.** `cargo run -p floptle-proof --bin walk --release`
+> drops a kinematic capsule onto a *morphing fractal planetoid* and lets you walk
+> and run up its shifting hills under **SDF-surface gravity**, colliding against
+> the field's own distance function (ADR-0012 / ADR-0014). Render-detailed /
+> collide-smooth: the eye sees fractal crust, the feet walk a smooth, solid macro
+> field. The anti-trapping rule (analytic surface-carry + clamped, momentum-free
+> depenetration) makes a rising wall *lift* the player instead of swallowing them.
+> Sibling binary — Beat 1 is untouched.
 
 ---
 
