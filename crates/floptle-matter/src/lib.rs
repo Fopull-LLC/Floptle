@@ -12,6 +12,8 @@
 //!
 //! Planned modules (the deformation tiers, cheapest → heaviest):
 //! - `model`    : the `MatterModel` component — declares behavior + budget.
+//! - `material` : physical material — density (→ mass `m=ρ·V` & gravity emission,
+//!                ADR-0014), bulk modulus & yield (→ can it be crushed or resist?).
 //! - `morph`    : GPU vertex/field displacement (noise/curves/field) — ~free.
 //! - `csg`      : field blend/mix/reject between objects (smin/smax + rules).
 //! - `softbody` : XPBD constraint solver (distance/volume/shape-match).
@@ -42,4 +44,17 @@ pub struct Adhesion {
     pub strength: f32,
     /// Strain (stretch ratio) at which a bond breaks.
     pub break_strain: f32,
+}
+
+/// Physical properties of a matter type. Density drives both inertia and the
+/// gravity field it emits (ADR-0014); bulk modulus + yield decide whether it can
+/// be crushed/compacted (soft clay) or resists (hard metal) (ADR-0013).
+#[derive(Debug, Clone, Copy)]
+pub struct PhysicalMaterial {
+    /// Mass density ρ in kg/m³ (mass = ρ × volume from the SDF/mesh).
+    pub density: f32,
+    /// Resistance to volume change; high = hard to compact.
+    pub bulk_modulus: f32,
+    /// Pressure at which compaction becomes permanent (plastic yield).
+    pub yield_strength: f32,
 }

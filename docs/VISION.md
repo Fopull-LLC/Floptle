@@ -102,10 +102,23 @@ Morph → Field-blend → Soft-body → Viscoelastic): you only pay for the beha
 reach for. This is the engine's most distinctive underlying system. See
 [`subsystems/deformable-matter.md`](subsystems/deformable-matter.md) and ADR-0013.
 
+And because matter has **density**, it has **mass**, and mass **emits gravity** —
+so gravity in Floptle is a *field* `g(p)`, not a global constant. You can run
+around on a fractal and **up its swirling walls**, kept grounded by the field the
+surface emits (not floaty anti-gravity); orbit and then *land and walk on*
+procedural fractal **planets**; or fly a ship between them. Density also decides
+whether matter **crushes** under pressure (soft clay) or **resists** (hard metal).
+The engine understands space, matter, gravity, and density as one idea. See
+[`subsystems/gravity-and-density.md`](subsystems/gravity-and-density.md) and ADR-0014.
+
 ## 5. Constraints & platform
 
 - Ships for **Linux, Windows, macOS** from one codebase.
 - **Lightweight & fast** is a feature, not an afterthought — measured, not hoped.
+- **Large worlds by default**: the world moves around the player (floating-origin /
+  camera-relative space), so you can simulate a whole **galaxy** and travel
+  absurdly far with no precision jitter — automatic, zero developer work. See
+  [`subsystems/large-world-space.md`](subsystems/large-world-space.md) and ADR-0015.
 - **Networking** is explicitly *future* (dedicated server build + clients on the
   maker's own infra), but the architecture must not preclude it.
 

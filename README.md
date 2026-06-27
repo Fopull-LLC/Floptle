@@ -55,6 +55,8 @@ Blender models drop straight in. Nothing is buried under a thousand properties.
 | Serialization | **RON** | (see ARCHITECTURE) |
 | Physics/collision | **Custom SDF-first** (collide morphing fractals) | [0012](docs/decisions/0012-physics-sdf-first.md) |
 | Deformable matter | **Unified field substrate + opt-in tiers** | [0013](docs/decisions/0013-deformable-matter.md) |
+| Gravity & space | **Mass/density gravity fields** (walk on fractals) | [0014](docs/decisions/0014-gravity-fields.md) |
+| World scale | **Large-world / floating-origin** (default-on) | [0015](docs/decisions/0015-large-world-space.md) |
 
 ## Repository layout
 

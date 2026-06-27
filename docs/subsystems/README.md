@@ -12,6 +12,8 @@ on the [`../decisions/`](../decisions/) ADRs and the top-level
 
 ### World & simulation
 - [physics.md](physics.md) — SDF-first collision; character & raycast-vehicle controllers on morphing worlds.
+- [gravity-and-density.md](gravity-and-density.md) — gravity as a field emitted by matter; density → mass, crushability, and "walk up a fractal wall."
+- [large-world-space.md](large-world-space.md) — default-on floating-origin / camera-relative space: simulate a galaxy with no jitter.
 - [particles-vfx.md](particles-vfx.md) — the timeline particle editor (groups, emit events, per-property curves).
 - [scene-and-nodes.md](scene-and-nodes.md) — Node/Component authoring facade over the archetype ECS.
 - [animation.md](animation.md) — glTF skeletal clips + a lightweight state machine + notify events.

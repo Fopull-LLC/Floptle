@@ -8,7 +8,7 @@ reasoning history stays intact.
 | # | Decision | Status |
 |---|---|---|
 | [0001](0001-language-rust.md) | Core language: **Rust** | Accepted |
-| [0002](0002-render-backend-wgpu.md) | GPU portability: **wgpu** (not raw Vulkan) | Accepted · awaiting final sign-off |
+| [0002](0002-render-backend-wgpu.md) | GPU portability: **wgpu** (not raw Vulkan) | Accepted |
 | [0003](0003-scripting-lua.md) | Game scripting: **Lua (LuaJIT/mlua)** | Accepted |
 | [0004](0004-editor-egui.md) | Editor UI: **egui + egui_dock** | Accepted |
 | [0005](0005-scene-model-ecs-node-hybrid.md) | Data model: **ECS core + Node facade** | Accepted |
@@ -20,5 +20,7 @@ reasoning history stays intact.
 | [0011](0011-vscode-integration.md) | "Open in VSCode" workflow | Accepted |
 | [0012](0012-physics-sdf-first.md) | Physics: **custom SDF-first** | Accepted |
 | [0013](0013-deformable-matter.md) | **Unified deformable-matter substrate** (field + tiers) | Accepted |
+| [0014](0014-gravity-fields.md) | **Mass/density-driven gravity as a field** | Accepted |
+| [0015](0015-large-world-space.md) | **Large-world / floating-origin space** (default-on) | Accepted |
 
 > Date format: ISO `YYYY-MM-DD`. Decider: Ty Johnston (Fopull LLC).

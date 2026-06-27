@@ -1,6 +1,6 @@
 # ADR-0002 — GPU portability: wgpu (not raw Vulkan)
 
-- **Status:** Accepted · awaiting final sign-off · 2026-06-27
+- **Status:** Accepted · confirmed 2026-06-27
 - **Decider:** Ty Johnston (Fopull LLC)
 
 ## Context
@@ -32,5 +32,8 @@ that defines how Floptle looks — are built by us on top of wgpu.
   behind wgpu's portability model. Acceptable for our art-driven goals.
 - **Reversible:** the backend is isolated inside `floptle-render::device`/`graph`.
   If we ever need to drop to `ash`, gameplay/editor code is unaffected.
-- This is the one stack choice explicitly flagged for the developer's final
-  confirmation; wgpu is the recommendation.
+- **Confirmed 2026-06-27** to enable shipping games on Steam with first-class
+  Linux + Windows + macOS support; wgpu's portable backends are the deciding
+  factor. Steamworks integration (overlay, achievements, cloud, input) is a
+  later export-time concern layered on the runtime (see ROADMAP Phase 9–10),
+  not a renderer concern.

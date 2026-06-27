@@ -1,11 +1,15 @@
 //! # floptle-field
 //!
-//! The shared **implicit geometry** layer — the single representation that lets
-//! "everything is malleable matter" be true. A surface is a signed-distance
-//! function `f(p, t)`; the renderer raymarches it, physics collides against it,
-//! and matter deforms it. Because geometry is a *field*, combining shapes is just
-//! algebra: blend, mix, or reject become CSG operators with a blend radius.
-//! See `docs/subsystems/deformable-matter.md` + ADR-0013.
+//! The shared **implicit geometry + spatial fields** layer — the single
+//! representation that lets "everything is malleable matter" be true. A surface
+//! is a signed-distance function `f(p, t)`; the renderer raymarches it, physics
+//! collides against it, and matter deforms it. Because geometry is a *field*,
+//! combining shapes is just algebra: blend/mix/reject become CSG operators with a
+//! blend radius. The same machinery carries other spatial fields — density `ρ(p)`
+//! and gravity (potential `Φ(p)`, acceleration `g(p)`) — so the engine can treat
+//! space, matter, gravity, and density uniformly.
+//! See `docs/subsystems/deformable-matter.md` + `docs/subsystems/gravity-and-density.md`
+//! (ADR-0013, ADR-0014).
 //!
 //! Planned modules:
 //! - `sdf`      : SDF trait + analytic primitives (box/sphere/capsule/…/fractals).
@@ -17,6 +21,9 @@
 //! - `sdf2mesh` : field -> mesh (surface nets / dual contouring / marching cubes)
 //!                when an actual triangle mesh is needed.
 //! - `field`    : baked sparse distance field (brickmap) — cheap shared cache.
+//! - `scalar`   : general scalar/vector spatial fields sampled on the brickmap —
+//!                density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
+//!                (ADR-0014).
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
 /// union). The core "geometry blends together cleanly" operator.
@@ -45,3 +52,9 @@ pub enum BlendRule {
     /// Smooth subtraction/intersection — they carve / refuse each other.
     Reject,
 }
+
+/// Mass density (kg/m³) of the matter occupying a region — the source term for
+/// both inertia (`m = ρ·V`) and gravity (`∇²Φ = 4πGρ`). See ADR-0014.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Density(pub f32);
+

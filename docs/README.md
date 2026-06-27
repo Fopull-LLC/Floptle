@@ -25,3 +25,8 @@ the design is written before the engine is built.
 Plus a maker-first toolkit: a video-editor-style particle timeline, in-scene
 parametric shape building, automatic object pooling, dead-simple UI, a built-in
 dialogue system, and a clean Blender pipeline.
+
+And two foundations that "just work" with zero developer effort: **mass/density
+gravity fields** (run on a fractal and up its swirling walls; orbit, land on, and
+walk procedural planets) and **large-world space** (the world moves around the
+player, so you can simulate a galaxy without precision jitter).

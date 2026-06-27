@@ -36,6 +36,8 @@
 - Frame loop with fixed + variable timestep (`floptle-core::time`).
 - Clear-color → first triangle → textured quad.
 - Minimal archetype ECS + Transform + a free-fly debug camera.
+- **Large-world foundations, on by default** (ADR-0015): `f64` transforms +
+  camera-relative rendering + floating origin, so far-from-origin never jitters.
 - In-engine frame profiler overlay (lightweight, stays forever).
 
 **Demo:** fly a camera around a spinning textured quad at a locked frame rate.
@@ -98,9 +100,14 @@ character; edit the script and see it hot-reload.
   BVH for imported meshes; kinematic capsule character controller. The Phase-4
   fractal SDF plugs into this *same* world, so you collide with morphing
   fractals via the renderer's own distance function (ADR-0012).
+- **Field gravity** (`floptle-physics::gravity`) tiers 0–2: global/volume,
+  analytic sources (planets), and **SDF-surface gravity** `g ∝ -∇f`. The
+  controller aligns "up" to `-g`, so you can **run on a fractal and up its
+  swirling walls** (ADR-0014).
 
 **Demo:** right-click → build a staircase and some shapes, texture them, mark
-them collidable, walk on them with the Phase-5 character.
+them collidable, walk on them with the Phase-5 character — then walk straight up
+a vertical fractal wall because its surface gravity keeps you grounded.
 
 ## Phase 7 — The VFX timeline (headliner #3)
 **Goal:** the particle editor you actually want.
@@ -163,5 +170,11 @@ across a fractal that's morphing underneath you.
   true MPM/MLS-MPM "soup", topological **fracture** (stretch sticky matter until
   it tears into stringy strands and splits), live re-meshing. Research-grade;
   sequenced after the core engine is solid (ADR-0013).
+- **Calculated density-field gravity** (`floptle-physics::gravity` tier 3): derive
+  `ρ(p)` from matter and solve Poisson `∇²Φ=4πGρ` (FFT/multigrid, Barnes-Hut) for
+  emergent gravity in huge worlds (ADR-0014).
+- **Hierarchical reference frames** (`floptle-core::frames`): galaxy→system→body→
+  local frames so an entire galaxy is representable, not just a solar system
+  (ADR-0015).
 - Job-system parallelism for sim/culling; deeper profiler; asset bundling.
 - More raymarch primitives, more shader stdlib nodes, more post effects.

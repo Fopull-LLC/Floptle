@@ -86,6 +86,30 @@ render: build render graph ─▶ submit to wgpu ─▶ present
   render graph designed so heavy systems (vfx sim, culling) can move to a job
   pool later **without** reshaping gameplay code.
 
+## 3b. Large-world space (default-on)
+
+The world moves around the player, not the other way around — automatically, with
+no developer work (ADR-0015). `f32` jitters far from the origin and GPUs are
+`f32`-native, so Floptle keeps the active simulation near `(0,0,0)` and treats
+space as large-world-safe by default in three always-on layers (plus one for
+galaxy scale):
+
+- **Camera-relative rendering** — positions are uploaded relative to the camera
+  (model-view formed in `f64`, cast to `f32` last); the GPU never sees big numbers.
+- **Floating origin** — when the camera passes a threshold, the world is **rebased**
+  by the offset between fixed steps (positions shift; velocities are
+  translation-invariant, so they don't), so physics never sees large coordinates.
+- **`f64` authoritative transforms** — `Transform` is double precision; a derived
+  camera-relative `f32` render transform is produced each frame.
+- **Hierarchical reference frames** *(galaxy+)* — nested frames (galaxy → system →
+  body → local); only the player's local frame is simulated at full precision.
+
+This composes with the rest of the engine: SDFs/fractals evaluate in **local**
+coordinates + a frame offset (so "infinitely deep/far" stays precise), the
+fixed-step loop stays deterministic (rebase at a defined point), and the
+player's frame can double as the gravity-aligned frame (§9d). Full design:
+[`subsystems/large-world-space.md`](subsystems/large-world-space.md).
+
 ## 4. Rendering pipeline (overview)
 
 `floptle-render` owns a **render graph**: passes declare their resource reads/
@@ -240,6 +264,31 @@ contouring for field→mesh; XPBD; shape matching; MLS-MPM/APIC as the heavyweig
 *Claybook*. Near-term ships Morph + FieldBlend + basic XPBD + simple adhesion;
 full MPM soup and topological fracture are later/research. Full design + math:
 [`subsystems/deformable-matter.md`](subsystems/deformable-matter.md), ADR-0013.
+
+## 9d. Gravity & density: matter that pulls
+
+Gravity is not a constant — it's a composable **vector field** `g(p)` a body
+samples as "down" (ADR-0014). Because `floptle-field` carries spatial scalar/
+vector fields (not just SDFs), density `ρ(p)` and the gravity it produces live in
+the same substrate as geometry. Contributions compose, cheapest → heaviest:
+
+```
+g(p) = g_global  +  Σ g_source(planets)  +  g_sdfSurface(-∇f)  +  g_densityField(-∇Φ)
+        constant     Newtonian -GM r̂/r²    grounds you on a       Poisson ∇²Φ=4πGρ,
+        /volume                              fractal's walls        Barnes-Hut / FFT
+```
+
+The kinematic character controller (`floptle-physics::character`) samples `g(p)`,
+aligns its up to `-g`, and move-and-slides in that frame — so **running on a
+fractal and up its swirling walls**, **walking on procedural planets**, and
+**spaceship free-flight** are all the same mechanism at different tiers. Density is
+also a physical material property in `floptle-matter`: it sets **mass** (`m=ρ·V`,
+→ inertia + gravity emission) and, with **bulk modulus + yield**, whether matter
+**crushes or resists** (ADR-0013). The `gravity` solver is a module in
+`floptle-physics`, reading density from `floptle-field` — `matter` writes density,
+so there is no dependency cycle. Tiers 0–2 are near-term; the full calculated
+density-field tier for huge/infinite worlds is later. Full design:
+[`subsystems/gravity-and-density.md`](subsystems/gravity-and-density.md).
 
 ## 10. Networking boundary (deferred)
 
