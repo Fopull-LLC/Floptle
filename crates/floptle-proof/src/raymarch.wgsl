@@ -41,13 +41,13 @@ struct Hit { d: f32, trap: vec3<f32> };
 // Mandelbox distance estimator with time-morphing parameters.
 fn map(p: vec3<f32>) -> Hit {
     let tt = G.time;
-    let scale = mix(-1.7, -2.6, 0.5 + 0.5 * sin(tt * 0.15));
-    let minr2 = 0.20 + 0.12 * (0.5 + 0.5 * sin(tt * 0.11));
+    let scale = mix(-1.7, -2.6, 0.5 + 0.5 * sin(tt * 0.06));
+    let minr2 = 0.20 + 0.12 * (0.5 + 0.5 * sin(tt * 0.045));
     let fixr2 = 1.0;
     var z = p;
     var dz = 1.0;
     var trap = vec3<f32>(1e9, 1e9, 1e9);
-    for (var i = 0; i < 11; i = i + 1) {
+    for (var i = 0; i < 14; i = i + 1) {
         z = clamp(z, vec3<f32>(-1.0), vec3<f32>(1.0)) * 2.0 - z; // box fold
         let r2 = dot(z, z);
         if (r2 < minr2) {
@@ -57,7 +57,7 @@ fn map(p: vec3<f32>) -> Hit {
             let f = fixr2 / r2;
             z = z * f; dz = dz * f;
         }
-        z = scale * z + p;
+        z = scale * z + p + vec3<f32>(0.12, -0.07, 0.05); // subtle asymmetry (not the mirror fix)
         dz = dz * abs(scale) + 1.0;
         trap = min(trap, abs(z));
     }
@@ -105,7 +105,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         steps = i;
         let p = ro + rd * t;
         let h = map(p);
-        glow = glow + exp(-h.d * 7.0) * 0.012; // volumetric shimmer in the void
+        glow = glow + exp(-h.d * 9.0) * 0.0045; // volumetric shimmer in the void
         if (h.d < 0.0009 * t + 0.00035) {
             hit = true;
             trap = h.trap;
@@ -124,14 +124,15 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let rim = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
         let ao = 1.0 - f32(steps) / f32(MAXS);
         let base = pal(0.55 + 0.45 * sin(3.0 * (trap.x + trap.y + trap.z) + G.time * 0.2));
-        col = base * (0.18 + 0.9 * diff) * (0.35 + 0.65 * ao);
-        col = col + base * rim * 0.6;
-        col = col + pow(clamp(dot(reflect(rd, n), key), 0.0, 1.0), 24.0) * vec3<f32>(0.4);
-        col = mix(col, vec3<f32>(0.0), clamp(t / 60.0, 0.0, 1.0) * 0.5);
+        col = base * (0.11 + 0.85 * diff) * (0.22 + 0.78 * ao);
+        col = col + base * rim * 0.3;
+        col = col + pow(clamp(dot(reflect(rd, n), key), 0.0, 1.0), 32.0) * vec3<f32>(0.22);
+        col = mix(col, vec3<f32>(0.0), clamp(t / 50.0, 0.0, 1.0) * 0.6);
     } else {
         let bg = pal(0.6 + 0.2 * sin(G.time * 0.1) + 0.3 * rd.y);
-        col = bg * 0.06;
+        col = bg * 0.045;
     }
-    col = col + pal(0.3 + G.time * 0.03) * glow;
+    glow = min(glow, 1.2);
+    col = col + pal(0.3 + G.time * 0.03) * glow * 0.5;
     return vec4<f32>(col, 1.0);
 }
