@@ -12,6 +12,7 @@ resolver = "3"
 members = [
     "crates/floptle-core",     # math, ECS, scene-graph facade, events, time, allocator/pools
     "crates/floptle-field",    # implicit geometry: SDFs + CSG/blend ops (shared substrate)
+    "crates/floptle-rules",    # Lawset/Realm meta-spine + field-interaction graph
     "crates/floptle-render",   # wgpu render graph, materials, the signature SDF/raymarch look
     "crates/floptle-shader",   # shader IR: graph <-> text, transpile to WGSL via naga
     "crates/floptle-vfx",      # timeline-based particle system + runtime

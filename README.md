@@ -57,6 +57,9 @@ Blender models drop straight in. Nothing is buried under a thousand properties.
 | Deformable matter | **Unified field substrate + opt-in tiers** | [0013](docs/decisions/0013-deformable-matter.md) |
 | Gravity & space | **Mass/density gravity fields** (walk on fractals) | [0014](docs/decisions/0014-gravity-fields.md) |
 | World scale | **Large-world / floating-origin** (default-on) | [0015](docs/decisions/0015-large-world-space.md) |
+| Light | **Programmable light transport** (light as a field) | [0016](docs/decisions/0016-programmable-light.md) |
+| Time | **Time as a rate field** (local clocks) | [0017](docs/decisions/0017-time-as-a-field.md) |
+| World rules | **Lawset/Realm spine + field-interaction** | [0018](docs/decisions/0018-lawset-realm.md) · [0019](docs/decisions/0019-field-interaction-graph.md) |
 
 ## Repository layout
 
@@ -66,6 +69,7 @@ Floptle/
 ├─ crates/
 │  ├─ floptle-core/        # math, ECS, node facade, events, time, pools
 │  ├─ floptle-field/       # implicit geometry: SDFs + CSG/blend ops (shared)
+│  ├─ floptle-rules/       # Lawset/Realm meta-spine + field-interaction graph
 │  ├─ floptle-render/      # wgpu render graph + the signature look
 │  ├─ floptle-shader/      # shader IR: graph ⇄ text ⇄ WGSL
 │  ├─ floptle-vfx/         # timeline particle system

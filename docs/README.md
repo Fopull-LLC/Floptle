@@ -21,6 +21,10 @@ the design is written before the engine is built.
 - **Everything is malleable matter** — one implicit-field substrate so any object
   can morph, blend like soup, go soft-body, stick, stretch, and (later) tear —
   and stay cleanly collidable for free.
+- **Rules you declare, not mechanics you fake** — light, time, and gravity are
+  developer-defined *laws* of a world (a hot-reloadable `lawset.ron`), resolved on
+  the same substrate, so a player believes the wall-run because it's what *must*
+  happen here — not a trick. ([world-rules.md](subsystems/world-rules.md))
 
 Plus a maker-first toolkit: a video-editor-style particle timeline, in-scene
 parametric shape building, automatic object pooling, dead-simple UI, a built-in

@@ -32,6 +32,7 @@ dependencies = [
  "floptle-matter",
  "floptle-physics",
  "floptle-render",
+ "floptle-rules",
  "floptle-script",
  "floptle-shader",
  "floptle-ui",
@@ -59,6 +60,7 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-physics",
+ "floptle-rules",
 ]
 
 [[package]]
@@ -74,10 +76,20 @@ version = "0.0.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
+ "floptle-rules",
 ]
 
 [[package]]
 name = "floptle-render"
+version = "0.0.0"
+dependencies = [
+ "floptle-core",
+ "floptle-field",
+ "floptle-rules",
+]
+
+[[package]]
+name = "floptle-rules"
 version = "0.0.0"
 dependencies = [
  "floptle-core",
@@ -96,6 +108,7 @@ dependencies = [
  "floptle-net",
  "floptle-physics",
  "floptle-render",
+ "floptle-rules",
  "floptle-script",
  "floptle-shader",
  "floptle-ui",

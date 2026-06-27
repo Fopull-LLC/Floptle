@@ -20,6 +20,7 @@ floptle-vfx = { path = "../floptle-vfx" }
 floptle-anim = { path = "../floptle-anim" }
 floptle-physics = { path = "../floptle-physics" }
 floptle-matter = { path = "../floptle-matter" }
+floptle-rules = { path = "../floptle-rules" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }

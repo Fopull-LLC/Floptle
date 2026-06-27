@@ -24,9 +24,10 @@ compile, and easy to reason about solo.
         └───────────────┬───────┘   └────────┬───────────┘
                         │                    │
         ┌───────────────┴───────┐            │
-  geo   │   floptle-field       │  (SDFs + CSG/blend ops; shared by render,
-        │  implicit geometry    │   physics, and matter — ADR-0013)
-        └───────────────┬───────┘
+  geo   │ floptle-field ·       │  (field = SDFs + CSG/blend ops; rules = the
+        │ floptle-rules         │   Lawset/Realm meta-spine + field-interaction;
+        │ (geometry + laws)     │   shared by render/physics/matter —
+        └───────────────┬───────┘   ADR-0013 / 0018 / 0019)
                         │
         ┌───────────────┴────────────────────────────────┐
   base  │                floptle-core                      │
@@ -290,6 +291,35 @@ so there is no dependency cycle. Tiers 0–2 are near-term; the full calculated
 density-field tier for huge/infinite worlds is later. Full design:
 [`subsystems/gravity-and-density.md`](subsystems/gravity-and-density.md).
 
+## 9e. The rules meta-spine: laws, light, time, interaction
+
+The thesis — *a game is a simulated universe whose laws you declare* — is made
+concrete by `floptle-rules`, a thin, pure-data crate just above `field`.
+
+- **Lawset / Realm** (ADR-0018): a world's laws are inheritable **data**. A `Lawset`
+  bound to an SDF volume (a `Realm`) declares each law *axis* — gravity, light, time
+  rate, matter, scale — as a lean named model (not property soup); "which laws hold
+  at `p`" is resolved by the **inside-test the engine already runs**, child realms
+  override axis-by-axis, and scalar laws crossfade at `smin` boundaries. Every
+  system reads *effective laws* at a body's position instead of carrying its own
+  copy. A world is a `lawset.ron`.
+- **Light as the fourth field** (ADR-0016): a programmable transport rule sampled
+  along the renderer's existing march — tiered, off by default, composing with
+  gravity (`bend = g(p)` ⇒ light falls under your gravity).
+- **Time as a rate field** (ADR-0017): per-entity local clocks `dτ = r(p)·dt`, with
+  the global fixed step staying the authoritative master clock.
+- **Field-interaction graph** (ADR-0019): the honest part — fields today compose
+  *by coincidence* (one-way readers). The graph makes "field A modulates field B" an
+  authored edge (iterated at low cadence, damped, kept distinct from crate deps), so
+  composition is *by design* and worlds can surprise you. Built as a seam now (one
+  proof: heat → melt → density → gravity slide) precisely because feedback is nearly
+  impossible to retrofit into a one-way architecture.
+
+`floptle-rules` depends only on `core` + `field` and is **read-only** to
+render/physics/matter, so the spine adds one authority without dependency cycles.
+Discipline: ship it as a thin seam wiring only the axes you can prove — it shapes
+the seams cheaply; it must never compete with getting pixels on screen.
+
 ## 10. Networking boundary (deferred)
 
 `floptle-net` exists now only to *hold a seam*. Gameplay logic is written against
@@ -304,6 +334,10 @@ See [`subsystems/networking-future.md`](subsystems/networking-future.md).
 - `floptle-core` stays free of wgpu/winit/egui — it's pure engine data + logic.
 - `floptle-field` (implicit geometry) sits just above core and is the **shared**
   representation: `render`, `physics`, and `matter` depend on it, never vice-versa.
+- `floptle-rules` (Lawset/Realm + field-interaction *data*) sits beside `field`,
+  depends only on `core` + `field`, and is **read-only** to render/physics/matter —
+  the simulation-layer field-interaction *executor* may form feedback cycles the
+  crate graph forbids; keep the two notions of "cycle" explicitly separate.
 - `floptle-matter` depends on `core` + `field` + `physics`; nothing depends on
   `matter` except the binaries — so the deformation system is fully removable.
 - Only `editor` and `runtime` may depend on the windowing/event-loop entrypoint.
