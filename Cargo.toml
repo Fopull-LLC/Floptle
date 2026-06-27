@@ -1,0 +1,72 @@
+# Floptle — workspace root
+#
+# A lightweight, hyperoptimized game engine for surreal / otherworldly visuals.
+# (c) Fopull LLC. Not yet released. See docs/VISION.md.
+#
+# The workspace is split into focused crates so each subsystem stays small,
+# testable, and independently reasoned about. Binaries: floptle-editor (the
+# authoring tool) and floptle-runtime (the game player / exported build host).
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/floptle-core",     # math, ECS, scene-graph facade, events, time, allocator/pools
+    "crates/floptle-field",    # implicit geometry: SDFs + CSG/blend ops (shared substrate)
+    "crates/floptle-render",   # wgpu render graph, materials, the signature SDF/raymarch look
+    "crates/floptle-shader",   # shader IR: graph <-> text, transpile to WGSL via naga
+    "crates/floptle-vfx",      # timeline-based particle system + runtime
+    "crates/floptle-anim",     # skeletal + state-machine animation
+    "crates/floptle-physics",  # SDF-first collision + character/vehicle movement
+    "crates/floptle-matter",   # deformable matter: morph, soft-body, stick, fracture
+    "crates/floptle-input",    # keyboard / mouse / gamepad action mapping
+    "crates/floptle-ui",       # in-game UI (anchors, drag-drop layout, scripted behavior)
+    "crates/floptle-assets",   # glTF import (Blender), textures, asset database
+    "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
+    "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
+    "crates/floptle-editor",   # egui + egui_dock authoring application (bin)
+    "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"            # placeholder; see docs/decisions/0009-license.md
+authors = ["Ty Johnston <tplordtp3@gmail.com>"]
+repository = "https://github.com/Fopull-LLC/Floptle"
+rust-version = "1.96"
+
+# --- Intended external dependency set (NOT yet wired up) -----------------------
+# Listed here as the agreed plan so `cargo build` stays instant during planning.
+# As each subsystem comes online we promote the relevant lines into the owning
+# crate's [dependencies]. Versions are indicative and will be pinned on use.
+#
+# [workspace.dependencies]
+# glam        = "*"   # SIMD math (Vec/Mat/Quat)
+# winit       = "*"   # cross-platform windowing + raw input
+# wgpu        = "*"   # GPU portability layer (Vulkan/Metal/DX12/GL) — see ADR-0002
+# naga        = "*"   # shader IR + WGSL/SPIR-V translation (powers ADR-0007)
+# egui        = "*"   # immediate-mode editor UI
+# egui_dock   = "*"   # dockable panels for the editor
+# mlua        = "*"   # Lua host (LuaJIT feature) for hot-reload scripts — ADR-0003
+# gltf        = "*"   # Blender -> engine asset import — ADR-0006
+# parry3d     = "*"   # triangle-mesh BVH queries for static/imported meshes
+# rapier3d    = "*"   # OPTIONAL rigid-body dynamics (object-vs-object only).
+#                     # Our SDF collision world + controllers are custom — ADR-0012.
+# serde + ron = "*"   # scene / prefab / material / vfx / shader serialization
+# image       = "*"   # texture decoding
+# bytemuck    = "*"   # POD casting for GPU buffers
+# parking_lot = "*"   # faster locks
+# rustc-hash  = "*"   # fast hashmaps for hot paths
+
+[profile.dev]
+opt-level = 1          # keep the editor usably fast even in debug builds
+
+[profile.dev.package."*"]
+opt-level = 3          # always optimize dependencies (renderer/math heavy)
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

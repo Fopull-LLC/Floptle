@@ -1,0 +1,12 @@
+[package]
+name = "floptle-input"
+description = "Input: bind keyboard/mouse/gamepad to named actions; scripts react to actions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }

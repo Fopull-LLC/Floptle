@@ -1,0 +1,26 @@
+[package]
+name = "floptle-editor"
+description = "The Floptle authoring tool: scene view, particle timeline, shader graph, UI/material editors."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "floptle"
+path = "src/main.rs"
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-render = { path = "../floptle-render" }
+floptle-shader = { path = "../floptle-shader" }
+floptle-vfx = { path = "../floptle-vfx" }
+floptle-anim = { path = "../floptle-anim" }
+floptle-physics = { path = "../floptle-physics" }
+floptle-matter = { path = "../floptle-matter" }
+floptle-input = { path = "../floptle-input" }
+floptle-ui = { path = "../floptle-ui" }
+floptle-assets = { path = "../floptle-assets" }
+floptle-script = { path = "../floptle-script" }

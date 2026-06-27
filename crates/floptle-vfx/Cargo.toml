@@ -1,0 +1,13 @@
+[package]
+name = "floptle-vfx"
+description = "Timeline-based particle/VFX system: groups, emit events, per-property curves."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-render = { path = "../floptle-render" }

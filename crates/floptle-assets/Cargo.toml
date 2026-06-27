@@ -1,0 +1,13 @@
+[package]
+name = "floptle-assets"
+description = "Assets: glTF import (Blender), textures with smart tiling, materials, asset DB."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-render = { path = "../floptle-render" }

@@ -1,0 +1,13 @@
+[package]
+name = "floptle-ui"
+description = "In-game UI: anchor/drag-drop layout with scripted behavior. Dead simple by design."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" }
+floptle-render = { path = "../floptle-render" }

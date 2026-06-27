@@ -1,0 +1,24 @@
+# --- Rust ---------------------------------------------------------------------
+/target
+**/*.rs.bk
+# NOTE: Cargo.lock IS committed on purpose — this workspace produces binaries
+# (floptle-editor, floptle-runtime), so a locked dependency set is reproducible.
+
+# --- Editor / OS scratch ------------------------------------------------------
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
+
+# --- TEMPORARY / LEGALLY-SENSITIVE TEST ASSETS --------------------------------
+# Ocarina of Time textures are used ONLY as local placeholder test assets during
+# development. They MUST NOT enter git history (we plan to open-source later, and
+# scrubbing history is painful). Drop them under assets/textures/_oot_temp/.
+# They are git-ignored on purpose; replace with original Fopull textures before
+# any public release. See docs/decisions/0010-temporary-assets.md.
+assets/textures/_oot_temp/
+assets/**/_oot_temp/
+
+# Large / generated binary assets (imported glTF caches, baked data, etc.)
+assets/.cache/
+*.blend1
