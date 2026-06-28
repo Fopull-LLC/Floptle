@@ -31,26 +31,26 @@ const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
 // ---- macro field constants (LOCK-STEP with walk.wgsl) ----
-const R0: f32 = 5.0;
-const KB: f32 = 1.2;
-const WARP_A: f32 = 0.45;
-const WARP_W: f32 = 1.4;
-const WARP_K: f32 = 0.45;
-/// Bump (hill) directions + radii; centers sit at normalize(dir)*(R0-0.8).
+const R0: f32 = 16.0;
+const KB: f32 = 3.0;
+const WARP_A: f32 = 0.8;
+const WARP_W: f32 = 1.0;
+const WARP_K: f32 = 0.2;
+/// Bump (hill) directions + radii; centers sit at normalize(dir)*(R0*0.84).
 const BUMPS: [([f32; 3], f32); 6] = [
-    ([1.0, 0.0, 0.2], 2.2),
-    ([-0.8, 0.3, 0.6], 1.7),
-    ([0.2, 1.0, 0.0], 2.0),
-    ([0.0, -1.0, 0.3], 1.6),
-    ([0.5, 0.2, -1.0], 2.4),
-    ([-0.4, -0.5, -0.8], 1.8),
+    ([1.0, 0.0, 0.2], 6.6),
+    ([-0.8, 0.3, 0.6], 5.1),
+    ([0.2, 1.0, 0.0], 6.0),
+    ([0.0, -1.0, 0.3], 4.8),
+    ([0.5, 0.2, -1.0], 7.2),
+    ([-0.4, -0.5, -0.8], 5.4),
 ];
 
 // ---- character / physics tuning ----
 const CAP_R: f32 = 0.18; // capsule radius
 const CAP_HH: f32 = 0.22; // capsule half-height (segment)
 const G_MAG: f32 = 14.0; // gravity acceleration
-const ACCEL: f32 = 30.0; // tangential input accel
+const ACCEL: f32 = 40.0; // tangential input accel
 const FRIC: f32 = 8.0; // tangential friction (grounded)
 const JUMP_V: f32 = 6.0;
 const SLOPE_COS: f32 = 0.64; // cos(~50deg): steeper than this = not grounded
@@ -104,7 +104,7 @@ fn dwarp_dt(p: Vec3, t: f32) -> Vec3 {
 fn f_macro(q: Vec3) -> f32 {
     let mut d = q.length() - R0;
     for (dir, r) in BUMPS {
-        let c = Vec3::from_array(dir).normalize() * (R0 - 0.8);
+        let c = Vec3::from_array(dir).normalize() * (R0 * 0.84);
         d = smin(d, (q - c).length() - r, KB);
     }
     d
@@ -156,7 +156,7 @@ struct Character {
 impl Character {
     fn spawn() -> Self {
         let dir = Vec3::new(0.3, 1.0, 0.4).normalize();
-        let pos = dir * (R0 + 2.0);
+        let pos = dir * (R0 + 6.0);
         Character {
             pos,
             vel: Vec3::ZERO,
@@ -645,32 +645,29 @@ impl State {
         );
     }
 
-    /// Camera look direction (where the camera faces), built in the stable
-    /// up_smooth frame so the horizon never twitches.
-    fn look_dir(&self) -> Vec3 {
+    /// Stable tangent-plane basis from the smoothed up + camera yaw.
+    /// Returns (up, forward_tangent, right_tangent).
+    fn tangent_basis(&self) -> (Vec3, Vec3, Vec3) {
         let up = self.cc.up_smooth;
         let world_ref = if up.dot(Vec3::Z).abs() < 0.9 { Vec3::Z } else { Vec3::X };
         let f0 = (world_ref - up * world_ref.dot(up)).try_normalize().unwrap_or(Vec3::X);
         let r0 = up.cross(f0).normalize();
         let (sy, cy) = self.cam_yaw.sin_cos();
-        let horiz = (f0 * cy + r0 * sy).normalize();
-        let (sp, cp) = self.cam_pitch.sin_cos();
-        (horiz * cp + up * sp).try_normalize().unwrap_or(horiz)
+        let fwd_t = (f0 * cy + r0 * sy).try_normalize().unwrap_or(f0);
+        let right_t = fwd_t.cross(up).try_normalize().unwrap_or(r0);
+        (up, fwd_t, right_t)
     }
 
     fn update(&mut self, dt: f32, time: f32) {
         // mouse look
         let sens = 0.0025;
         self.cam_yaw += self.input.mouse_dx * sens;
-        self.cam_pitch = (self.cam_pitch - self.input.mouse_dy * sens).clamp(-1.3, 1.3);
+        self.cam_pitch = (self.cam_pitch - self.input.mouse_dy * sens).clamp(-1.0, 1.2);
         self.input.mouse_dx = 0.0;
         self.input.mouse_dy = 0.0;
 
         // camera-relative move on the tangent plane
-        let up = self.cc.up_smooth;
-        let look = self.look_dir();
-        let fwd_t = (look - up * look.dot(up)).try_normalize().unwrap_or(Vec3::X);
-        let right_t = fwd_t.cross(up).try_normalize().unwrap_or(Vec3::Z);
+        let (_up, fwd_t, right_t) = self.tangent_basis();
         let mut wish = Vec3::ZERO;
         if self.input.w {
             wish += fwd_t;
@@ -690,30 +687,37 @@ impl State {
     }
 
     fn camera(&self, time: f32) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
-        let up = self.cc.up_smooth;
-        let look = self.look_dir();
+        let (up, fwd_t, _right_t) = self.tangent_basis();
         let (cam_pos, fwd) = if self.cam_mode == 1 {
+            // first person: look with pitch (positive = up)
+            let (sp, cp) = self.cam_pitch.sin_cos();
+            let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
             (self.cc.pos + up * EYE, look)
         } else {
-            let target = self.cc.pos + up * 0.4;
-            let back = -look;
-            // simple spring-arm: pull in if the boom would clip the planet
+            // third person: orbit ABOVE and BEHIND, always looking down at the
+            // player. The elevation is clamped so the camera can never dip under
+            // the horizon (which is what made the view feel inverted).
+            let target = self.cc.pos + up * (CAP_HH + 0.3);
+            let e = (0.55 - self.cam_pitch * 0.5).clamp(0.15, 1.3);
+            let (se, ce) = e.sin_cos();
+            let dir_to_cam = (-fwd_t * ce + up * se).try_normalize().unwrap_or(up);
+            // spring-arm: pull in if the boom would clip the planet
             let dist: f32;
-            let mut s = 0.25_f32;
+            let mut s = 0.4_f32;
             loop {
-                let d = f_c(target + back * s, time) - 0.15;
+                let d = f_c(target + dir_to_cam * s, time) - 0.2;
                 if d < 0.0 {
-                    dist = s.max(0.4);
+                    dist = s.max(0.5);
                     break;
                 }
-                s += d.max(0.05);
+                s += d.max(0.08);
                 if s >= BOOM {
                     dist = BOOM;
                     break;
                 }
             }
-            let cp = target + back * dist;
-            (cp, (target - cp).try_normalize().unwrap_or(look))
+            let cp_pos = target + dir_to_cam * dist;
+            (cp_pos, (target - cp_pos).try_normalize().unwrap_or(-fwd_t))
         };
         let right = fwd.cross(up).try_normalize().unwrap_or(Vec3::X);
         let camup = right.cross(fwd).normalize();
