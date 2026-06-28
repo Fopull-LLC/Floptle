@@ -633,6 +633,7 @@ dependencies = [
 name = "floptle-runtime"
 version = "0.0.0"
 dependencies = [
+ "env_logger",
  "floptle-anim",
  "floptle-assets",
  "floptle-core",
@@ -646,6 +647,8 @@ dependencies = [
  "floptle-shader",
  "floptle-ui",
  "floptle-vfx",
+ "log",
+ "winit",
 ]
 
 [[package]]

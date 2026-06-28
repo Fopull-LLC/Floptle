@@ -26,3 +26,7 @@ floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
 floptle-script = { path = "../floptle-script" }
 floptle-net = { path = "../floptle-net" }
+
+winit = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
