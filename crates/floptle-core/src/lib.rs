@@ -21,6 +21,20 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+// Phase 1 modules (the foundation the frame loop hangs on). `scene`, `frames`,
+// `pool`, and `serde_ron` arrive in their roadmap phases; these are live.
+pub mod ecs;
+pub mod event;
+pub mod math;
+pub mod origin;
+pub mod time;
+pub mod transform;
+
+pub use ecs::{Entity, World};
+pub use origin::FloatingOrigin;
+pub use time::{FixedTimestep, Time};
+pub use transform::Transform;
+
 /// Engine-wide version string, surfaced in the editor title bar and crash logs.
 pub const ENGINE_NAME: &str = "Floptle";
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");

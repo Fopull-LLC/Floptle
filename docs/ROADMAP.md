@@ -56,13 +56,23 @@
 ## Phase 1 — Window, viewport, camera, core loop
 **Goal:** something on screen and a frame loop to hang everything on.
 
-- winit window + wgpu device/surface bootstrap (`floptle-render::device`).
-- Frame loop with fixed + variable timestep (`floptle-core::time`).
-- Clear-color → first triangle → textured quad.
-- Minimal archetype ECS + Transform + a free-fly debug camera.
-- **Large-world foundations, on by default** (ADR-0015): `f64` transforms +
-  camera-relative rendering + floating origin, so far-from-origin never jitters.
-- In-engine frame profiler overlay (lightweight, stays forever).
+> **Status — architecture skeleton landed.** The crate seams compile and the core
+> loop is real + unit-tested headlessly (`cargo run -p floptle-runtime`):
+> `floptle-core` has `time` (variable clock + deterministic fixed-step), `transform`
+> (`f64` world + camera-relative `f32` render matrix), `origin` (floating-origin
+> rebase), a minimal `ecs` (entities/components/queries) and `event`; `floptle-render`
+> has `device` (`Gpu` lifecycle — `new` is the one window-dependent fill-in), `frame`
+> (camera-relative view/proj), and a `graph` (Pass/RenderGraph) seam. Remaining below.
+
+- [x] Frame loop with fixed + variable timestep (`floptle-core::time`).
+- [x] Minimal ECS + `Transform` (free-fly debug camera still TODO).
+- [x] **Large-world foundations** (ADR-0015): `f64` transforms + camera-relative
+  matrix + floating-origin seam. (Apply-rebase-to-the-ECS wiring still TODO.)
+- [ ] winit window + wgpu device/surface bootstrap (`floptle-render::device::Gpu::new`
+  — lift the proof's working wgpu-29 bootstrap).
+- [ ] Clear-color → first triangle → textured quad (first raster pass).
+- [ ] Free-fly debug camera driving `RenderCamera`.
+- [ ] In-engine frame profiler overlay (lightweight, stays forever).
 
 **Demo:** fly a camera around a spinning textured quad at a locked frame rate.
 
