@@ -1,7 +1,8 @@
-// Beat 3 — render shader: an actual morphing MANDELBULB fractal you walk on,
-// with a moon, the player capsule + clown nose + grapple rope + reticle. Orbit-
-// trap palette coloring (the Beat-1 look) over clean lighting. LOCK-STEP field
-// with descent.rs. Reuses post.wgsl + present_plain.wgsl.
+// Beat 3 — render shader: a morphing, POROUS rounded MENGER SPONGE you delve
+// *inside* of, with a moon, the player capsule + clown nose + grapple rope +
+// reticle. The descent shrinks the player (not the field): walls/corners are
+// colored by cell coordinate + face + depth. LOCK-STEP field with descent.rs.
+// Reuses post.wgsl + present_plain.wgsl.
 
 struct Globals {
     cam_pos: vec4<f32>,
@@ -46,56 +47,51 @@ const MOON_DIST: f32 = 150.0;
 const R_MOON: f32 = 12.0;
 const TAU: f32 = 6.2831853;
 
-// morphing Mandelbulb DE (signed: <0 inside the solid bulb). `iters` grows with
-// the dive to unfold finer detail.
-fn bulb_de(p0: vec3<f32>, t: f32, iters: i32) -> f32 {
-    let power = 8.0 + 1.5 * sin(t * WMORPH);
-    var z = p0;
-    var dr = 1.0;
-    var r = 0.0;
-    for (var i = 0; i < iters; i = i + 1) {
-        r = length(z);
-        if (r > 2.0) { break; }
-        let theta = acos(clamp(z.z / r, -1.0, 1.0));
-        let phi = atan2(z.y, z.x);
-        dr = pow(r, power - 1.0) * power * dr + 1.0;
-        let zr = pow(r, power);
-        let th = theta * power;
-        let ph = phi * power;
-        z = vec3<f32>(sin(th) * cos(ph), sin(th) * sin(ph), cos(th)) * zr + p0;
-    }
-    return 0.5 * log(max(r, 1e-6)) * r / dr;
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
 }
-// orbit trap (min radius during iteration) -> a 0..1-ish value for coloring
-fn bulb_trap(p0: vec3<f32>, t: f32, iters: i32) -> f32 {
-    let power = 8.0 + 1.5 * sin(t * WMORPH);
-    var z = p0;
-    var trap = 1e9;
+fn smax(a: f32, b: f32, k: f32) -> f32 { return -smin(-a, -b, k); }
+fn box_de(p: vec3<f32>, b: f32) -> f32 {
+    let q = abs(p) - vec3<f32>(b);
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+fn roty(p: vec3<f32>, a: f32) -> vec3<f32> {
+    let s = sin(a);
+    let c = cos(a);
+    return vec3<f32>(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+}
+// ROUNDED Menger sponge (porous: f<0 inside walls, f>0 in tunnels). LOCK-STEP w/ Rust.
+fn menger(p0: vec3<f32>, iters: i32) -> f32 {
+    let kr = 0.13;
+    var d = box_de(p0, 1.0);
+    var s = 1.0;
     for (var i = 0; i < iters; i = i + 1) {
-        let r = length(z);
-        if (r > 2.0) { break; }
-        trap = min(trap, r);
-        let theta = acos(clamp(z.z / r, -1.0, 1.0));
-        let phi = atan2(z.y, z.x);
-        let zr = pow(r, power);
-        z = vec3<f32>(sin(theta * power) * cos(phi * power), sin(theta * power) * sin(phi * power), cos(theta * power)) * zr + p0;
+        let v = p0 * s;
+        let a = vec3<f32>(
+            v.x - 2.0 * floor(v.x * 0.5) - 1.0,
+            v.y - 2.0 * floor(v.y * 0.5) - 1.0,
+            v.z - 2.0 * floor(v.z * 0.5) - 1.0,
+        );
+        s = s * 3.0;
+        let r = abs(vec3<f32>(1.0) - 3.0 * abs(a));
+        let da = smax(r.x, r.y, kr);
+        let db = smax(r.y, r.z, kr);
+        let dc = smax(r.z, r.x, kr);
+        let c = (smin(da, smin(db, dc, kr), kr) - 1.0) / s;
+        d = smax(d, c, kr / s);
     }
-    return trap;
+    return d;
 }
 fn moon_de(p: vec3<f32>) -> f32 {
     return length(p - vec3<f32>(0.0, MOON_DIST, 0.0)) - R_MOON;
 }
-// dive-driven planet scale (W shrinks within a level => continuous zoom) + iters
-fn dive_w() -> f32 {
-    let dv = G.dive.x;
-    return MBS * exp2(-(dv - floor(dv)));
-}
 fn dive_iters() -> i32 {
-    return min(8 + i32(floor(G.dive.x)), 12);
+    return min(4 + i32(floor(G.dive.x)), 11);
 }
 fn f_world(p: vec3<f32>) -> f32 {
-    let w = dive_w();
-    return min(w * bulb_de(p / w, G.time, dive_iters()), moon_de(p));
+    let world = MBS * menger(roty(p / MBS, G.time * WMORPH), dive_iters());
+    return min(world, moon_de(p));
 }
 
 fn capsule_de(p: vec3<f32>) -> f32 {
@@ -190,17 +186,20 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             col = vec3<f32>(0.72, 0.74, 0.82) * (0.3 + 0.7 * diff) * (0.4 + 0.6 * ao)
                 + rim * vec3<f32>(0.3, 0.4, 0.6) * 0.3;
         } else {
-            // the fractal: orbit-trap palette (the Beat-1 look) + clean lighting,
-            // tinted by descent depth so deeper octaves read as a chromatic journey
-            let w = dive_w();
-            let trap = bulb_trap(p / w, G.time, dive_iters());
-            let base = pal(0.55 + 0.6 * trap + 0.05 * length(p / w) + 0.04 * G.time + 0.08 * G.dive.x);
+            // the fractal walls: color by local cell coordinate + face orientation +
+            // descent depth, so each octave reads as its own chromatic stratum and the
+            // tunnel walls/corners pick up distinct hues as you delve
+            let cell = roty(p / MBS, G.time * WMORPH);
+            let face = 0.15 * (n.x - n.z) + 0.1 * n.y;
+            let strat = fract(length(cell) * 1.7 + 0.13 * G.dive.x);
+            let base = pal(0.5 + face + 0.18 * strat + 0.09 * G.dive.x + 0.03 * G.time);
             col = base * (0.25 + 0.85 * diff) * (0.35 + 0.65 * ao);
             col = col + base * rim * 0.4;
         }
         col = mix(col, vec3<f32>(0.0), clamp(t / 100.0, 0.0, 1.0) * 0.45);
-        let cd = abs(length(p - G.contact.xyz) - 0.30);
-        col = col + G.contact.w * (1.0 - smoothstep(0.0, 0.1, cd)) * vec3<f32>(0.4, 0.9, 1.0) * 0.8;
+        let csc = exp2(-G.dive.x);
+        let cd = abs(length(p - G.contact.xyz) - 0.30 * csc);
+        col = col + G.contact.w * (1.0 - smoothstep(0.0, 0.1 * csc, cd)) * vec3<f32>(0.4, 0.9, 1.0) * 0.8;
     } else {
         col = pal(0.6 + 0.15 * rd.y + 0.05 * sin(G.time * 0.1)) * 0.05;
     }

@@ -30,12 +30,12 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
-// ---- the map is an actual morphing MANDELBULB fractal (LOCK-STEP with descent.wgsl).
-// Measured walkable: ~10deg surface-normal rotation per 0.18u step, |grad|~0.8,
-// 11% solid interior (collidable), and its normal is ~radial so mass-gravity
-// toward the core gives a stable "up" you can walk on.
-const MBS: f32 = 45.0; // scale the bulb up to a COLOSSAL ~54-radius fractal planet
-const WMORPH: f32 = 0.05; // slow morph rate of the bulb power
+// ---- the map is a morphing, POROUS rounded MENGER SPONGE (LOCK-STEP with descent.wgsl).
+// Measured walkable AND delvable: ~88% open (tunnels + chambers you go INSIDE),
+// ~17deg surface-normal rotation per step, |grad|~0.71. "Down" is -grad f (toward
+// the nearest wall), and you SHRINK as you descend so sub-tunnels open up forever.
+const MBS: f32 = 45.0; // scale the sponge up to a COLOSSAL ~45-radius fractal planet
+const WMORPH: f32 = 0.05; // slow rotation-morph rate of the sponge
 // a moon you spawn on, with the fractal planet on the horizon to jump down to
 const MOON_DIST: f32 = 150.0;
 const R_MOON: f32 = 12.0;
@@ -106,83 +106,92 @@ fn set_dive(v: f32) {
 fn cur_dive() -> f32 {
     DIVE.with(|d| d.get())
 }
-const DIVE_ITER_CAP: i32 = 12; // max bulb iterations (perf); past this the dive is self-similar
+const DIVE_ITER_CAP: i32 = 11; // max menger levels (perf + f32 precision limit)
 
-/// Morphing Mandelbulb distance estimator — the planet is an actual 3D fractal.
-/// `iters` grows as you descend, unfolding finer detail.
-fn bulb_de(p0: Vec3, t: f32, iters: i32) -> f32 {
-    let power = 8.0 + 1.5 * (t * WMORPH).sin(); // slowly morph the fractal power
-    let mut z = p0;
-    let mut dr = 1.0_f32;
-    let mut r = 0.0_f32;
+/// Player scale = 2^(-dive): you SHRINK as you descend so finer sub-tunnels become
+/// walkable. Read by grad/gravity for the right eps, and by step/camera to scale.
+fn cur_scale() -> f32 {
+    (-cur_dive() * std::f32::consts::LN_2).exp()
+}
+
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    (b + (a - b) * h) - k * h * (1.0 - h)
+}
+fn smax(a: f32, b: f32, k: f32) -> f32 {
+    -smin(-a, -b, k)
+}
+fn box_de(p: Vec3, b: f32) -> f32 {
+    let q = p.abs() - Vec3::splat(b);
+    q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+}
+fn roty(p: Vec3, a: f32) -> Vec3 {
+    let (s, c) = a.sin_cos();
+    Vec3::new(c * p.x - s * p.z, p.y, s * p.x + c * p.z)
+}
+
+/// ROUNDED Menger sponge: a porous fractal of tunnels + chambers you go INSIDE.
+/// Smooth (smin/smax) carves => organic walls, not boxy. `iters` grows with the
+/// dive to unfold finer sub-tunnels. Signed: f<0 inside the solid walls.
+fn menger(p0: Vec3, iters: i32) -> f32 {
+    let kr = 0.13; // rounding radius => organic walls
+    let mut d = box_de(p0, 1.0);
+    let mut s = 1.0_f32;
     for _ in 0..iters {
-        r = z.length();
-        if r > 2.0 {
-            break;
-        }
-        let theta = (z.z / r).clamp(-1.0, 1.0).acos();
-        let phi = z.y.atan2(z.x);
-        dr = r.powf(power - 1.0) * power * dr + 1.0;
-        let zr = r.powf(power);
-        let th = theta * power;
-        let ph = phi * power;
-        z = Vec3::new(th.sin() * ph.cos(), th.sin() * ph.sin(), th.cos()) * zr + p0;
+        let a = Vec3::new(
+            (p0.x * s).rem_euclid(2.0) - 1.0,
+            (p0.y * s).rem_euclid(2.0) - 1.0,
+            (p0.z * s).rem_euclid(2.0) - 1.0,
+        );
+        s *= 3.0;
+        let r = (Vec3::splat(1.0) - 3.0 * a.abs()).abs();
+        let da = smax(r.x, r.y, kr);
+        let db = smax(r.y, r.z, kr);
+        let dc = smax(r.z, r.x, kr);
+        let c = (smin(da, smin(db, dc, kr), kr) - 1.0) / s;
+        d = smax(d, c, kr / s);
     }
-    0.5 * r.max(1e-6).ln() * r / dr
+    d
 }
 
-/// The fractal planet (morphing Mandelbulb, INFINITE-DESCENT-zoomed) unioned with
-/// the moon. The dive shrinks the planet scale W and bumps the iteration count, so
-/// you continuously zoom into finer detail; the rebase keeps pos bounded.
+/// The map (rounded Menger sponge, gently rotating-morph) unioned with the moon.
 fn f_c(p: Vec3, t: f32) -> f32 {
-    let dv = cur_dive();
-    let frac = dv - dv.floor();
-    let w = MBS * (-frac * std::f32::consts::LN_2).exp(); // MBS * 2^(-frac)
-    let iters = (8 + dv.floor() as i32).min(DIVE_ITER_CAP);
-    let planet = w * bulb_de(p / w, t, iters);
+    let iters = (4 + cur_dive().floor() as i32).min(DIVE_ITER_CAP);
+    let world = MBS * menger(roty(p / MBS, t * WMORPH), iters);
     let moon = (p - moon_center()).length() - R_MOON;
-    planet.min(moon)
+    world.min(moon)
 }
 
-/// Surface velocity along the normal via a TIME-only central difference of f_c —
-/// the morph is slow, so this is smooth and carries you cleanly as it shifts.
+/// Surface velocity along the normal via a TIME-only central difference of f_c.
 fn df_dt(p: Vec3, t: f32) -> f32 {
     let h = 0.01;
     (f_c(p, t + h) - f_c(p, t - h)) / (2.0 * h)
 }
 
-/// Central-difference gradient, normalized by 2*eps so |grad| ~ 1 on a metric
-/// field. `eps` is decoupled: sharp (EPS_N) for contact, coarse (EPS_G) for up.
+/// Central-difference gradient. eps scales with the player's dive scale so it
+/// resolves the surface at whatever depth you've shrunk to.
 fn grad(p: Vec3, t: f32, eps: f32) -> Vec3 {
-    let dx = f_c(p + Vec3::new(eps, 0.0, 0.0), t) - f_c(p - Vec3::new(eps, 0.0, 0.0), t);
-    let dy = f_c(p + Vec3::new(0.0, eps, 0.0), t) - f_c(p - Vec3::new(0.0, eps, 0.0), t);
-    let dz = f_c(p + Vec3::new(0.0, 0.0, eps), t) - f_c(p - Vec3::new(0.0, 0.0, eps), t);
-    Vec3::new(dx, dy, dz) / (2.0 * eps)
+    let e = eps * cur_scale();
+    let dx = f_c(p + Vec3::new(e, 0.0, 0.0), t) - f_c(p - Vec3::new(e, 0.0, 0.0), t);
+    let dy = f_c(p + Vec3::new(0.0, e, 0.0), t) - f_c(p - Vec3::new(0.0, e, 0.0), t);
+    let dz = f_c(p + Vec3::new(0.0, 0.0, e), t) - f_c(p - Vec3::new(0.0, 0.0, e), t);
+    Vec3::new(dx, dy, dz) / (2.0 * e)
 }
 
-/// Gravity "down" = -(blend of radial backbone and terrain normal). Radial when
-/// far or where the gradient is weak (never degenerate); follows the wall near
-/// the surface (so you can run up it — ADR-0014).
+/// Gravity inside the porous fractal: "down" = toward the nearest wall (-grad f),
+/// so you stand on tunnel floors and walls; near the moon, toward the moon.
 fn gravity_down(p: Vec3, t: f32) -> Vec3 {
-    let f = f_c(p, t);
     let g = grad(p, t, EPS_G);
     let gm = g.length();
-    let radial = p.try_normalize().unwrap_or(Vec3::Y);
-    // backbone: away from whichever body you're near. Near the moon -> moon's
-    // surface; otherwise -> away from the planet center, so "down" falls toward
-    // the planet (and INSIDE the planet, down points to the core => descent).
     let to_moon = p - moon_center();
-    let backbone = if to_moon.length() - R_MOON < MOON_CAPTURE {
-        to_moon.try_normalize().unwrap_or(radial)
-    } else {
-        radial
-    };
-    let n_surf = if gm > 1e-5 { g / gm } else { backbone };
-    // Lean the stable backbone PARTWAY toward the local surface normal so you can
-    // cling to steep lobes, but keep it mostly radial so the chaotic fractal
-    // normal can never tumble you.
-    let w = 0.5 * smoothstep(BLEND_FAR, BLEND_NEAR, f) * smoothstep(G_MIN, 0.5, gm);
-    let up = backbone.lerp(n_surf, w).try_normalize().unwrap_or(backbone);
+    if to_moon.length() - R_MOON < MOON_CAPTURE {
+        let mup = to_moon.try_normalize().unwrap_or(Vec3::Y);
+        let n = if gm > 1e-5 { g / gm } else { mup };
+        let w = smoothstep(BLEND_FAR, BLEND_NEAR, f_c(p, t)) * smoothstep(G_MIN, 0.5, gm);
+        return -mup.lerp(n, w).try_normalize().unwrap_or(mup);
+    }
+    // inside the fractal: grad f points into the tunnel => -grad f = toward wall
+    let up = if gm > 1e-5 { g / gm } else { p.try_normalize().unwrap_or(Vec3::Y) };
     -up
 }
 
@@ -311,9 +320,10 @@ impl Character {
     /// ceiling strut when walking UNDER a bridge).
     fn can_jump(&self, time: f32) -> bool {
         let up = self.up_smooth;
+        let s = cur_scale();
         for o in [-1.0_f32, -0.5] {
-            let cap = self.pos + up * (CAP_HH * o);
-            if f_c(cap, time) <= CAP_R + JUMP_GROUND_EPS {
+            let cap = self.pos + up * (CAP_HH * s * o);
+            if f_c(cap, time) <= (CAP_R + JUMP_GROUND_EPS) * s {
                 let n = grad(cap, time, EPS_N).try_normalize().unwrap_or(up);
                 if n.dot(up) > JUMP_SLOPE {
                     return true;
@@ -328,33 +338,22 @@ impl Character {
         self.jump_lock = (self.jump_lock - dt).max(0.0);
         self.jump_buffer = if c.jump_edge { 0.12 } else { (self.jump_buffer - dt).max(0.0) };
 
-        // INFINITE DESCENT: hold C to descend (zoom into finer fractal detail), X
-        // to ascend. The planet scale W shrinks the surface toward finer detail;
-        // crossing a level rebases pos by 2 — SEAMLESS (same fractal coordinate,
-        // one more iteration of detail) so pos stays bounded forever.
-        let prev_level = self.dive.floor();
-        // only descend while in/near the fractal (not out on the moon)
+        // INFINITE DESCENT: hold C to descend, X to ascend. You SHRINK (scale s)
+        // while the Menger gains iterations of finer sub-tunnels, so you keep
+        // walking deeper INTO the porous fractal. pos stays bounded in the cube.
         if self.pos.length() < MBS * 2.0 {
             self.dive = (self.dive + c.descend * DESCEND_RATE * dt).max(0.0);
         }
-        let lvl = self.dive.floor();
-        if lvl != prev_level {
-            let factor = (lvl - prev_level).exp2();
-            self.pos *= factor;
-            self.vel *= factor;
-            self.contact *= factor;
-            if let Grapple::Attached { anchor, rest_len } = &mut self.grapple {
-                *anchor *= factor;
-                *rest_len *= factor;
-            }
-            self.dive_level = lvl as i32;
-        }
+        self.dive_level = self.dive.floor() as i32;
         set_dive(self.dive);
+        let s = cur_scale(); // player shrink factor: scale all lengths/speeds by it
+        let cap_r = CAP_R * s;
+        let cap_hh = CAP_HH * s;
 
         // grapple: start a shot, advance an in-flight shot, release if let go
         if c.grapple_edge {
             if let Grapple::Idle = self.grapple {
-                self.grapple = Grapple::Firing { tip: self.pos + self.up_smooth * 0.2, dir: c.aim, len: 0.0 };
+                self.grapple = Grapple::Firing { tip: self.pos + self.up_smooth * (0.2 * s), dir: c.aim, len: 0.0 };
             }
         }
         self.update_grapple(time, c);
@@ -363,7 +362,7 @@ impl Character {
         let can = self.can_jump(time);
         self.coyote = if can { COYOTE } else { (self.coyote - dt).max(0.0) };
         if self.jump_buffer > 0.0 && (can || self.coyote > 0.0) {
-            self.vel += self.up_smooth * JUMP_V;
+            self.vel += self.up_smooth * JUMP_V * s;
             self.grounded = false;
             self.ground_count = 0;
             self.coyote = 0.0;
@@ -382,8 +381,8 @@ impl Character {
             g_rest = *rest_len;
         }
         let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
-        let speed = self.vel.length().max(SURF_VMAX).max(if g_attached { 16.0 } else { 0.0 });
-        let n = (((speed * dt) / (0.5 * CAP_R)).ceil().max(4.0) as u32).min(16);
+        let speed = self.vel.length().max(SURF_VMAX * s).max(if g_attached { 16.0 * s } else { 0.0 });
+        let n = (((speed * dt) / (0.5 * cap_r)).ceil().max(4.0) as u32).min(16);
         let sub = dt / n as f32;
 
         for _ in 0..n {
@@ -395,9 +394,9 @@ impl Character {
             if gm > G_MIN {
                 let nrm = gn / gm;
                 let mut vsurf = -df_dt(self.pos, time) / gm.clamp(0.5, 1.5);
-                vsurf = vsurf.clamp(-V_SHOVE_MAX, V_SHOVE_MAX);
+                vsurf = vsurf.clamp(-V_SHOVE_MAX * s, V_SHOVE_MAX * s);
                 self.v_surface = vsurf;
-                if vsurf.abs() > V_DEAD {
+                if vsurf.abs() > V_DEAD * s {
                     self.pos += nrm * vsurf * sub;
                     if self.grounded {
                         let vn = self.vel.dot(nrm);
@@ -423,14 +422,14 @@ impl Character {
             if near_moon {
                 g_mag *= MOON_G; // weak moon gravity => easy to jump off
             }
-            self.vel += gdir * g_mag * sub;
+            self.vel += gdir * g_mag * s * sub;
 
             // (3) MOVEMENT: walk on the ground; JETPACK in the air
             if self.grounded {
                 if c.wish.length_squared() > 1e-6 {
                     if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
-                        let mss = MAX_SPEED * if c.sprint { 1.8 } else { 1.0 };
-                        self.vel += wt * ACCEL * sub;
+                        let mss = MAX_SPEED * s * if c.sprint { 1.8 } else { 1.0 };
+                        self.vel += wt * ACCEL * s * sub;
                         let vn = up * self.vel.dot(up);
                         let mut vt = self.vel - vn;
                         if vt.length() > mss {
@@ -447,17 +446,17 @@ impl Character {
                 // jetpack: WASD air thrust (speed-capped) + Space up-thrust
                 if c.wish.length_squared() > 1e-6 {
                     if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
-                        self.vel += wt * JETPACK_ACCEL * sub;
+                        self.vel += wt * JETPACK_ACCEL * s * sub;
                         let vn = up * self.vel.dot(up);
                         let mut vt = self.vel - vn;
-                        if vt.length() > AIR_MAX {
-                            vt = vt.normalize() * AIR_MAX;
+                        if vt.length() > AIR_MAX * s {
+                            vt = vt.normalize() * AIR_MAX * s;
                         }
                         self.vel = vn + vt;
                     }
                 }
                 if c.jump_held {
-                    self.vel += up * JETPACK_UP * sub;
+                    self.vel += up * JETPACK_UP * s * sub;
                 }
             }
 
@@ -467,7 +466,7 @@ impl Character {
             // (4b) GRAPPLE SWING — reel the rope in, and when it's taut hold to
             // length + remove outward velocity => you SWING on it like a pendulum.
             if g_attached {
-                g_rest = (g_rest - REEL_SPEED * sub).max(2.0);
+                g_rest = (g_rest - REEL_SPEED * s * sub).max(2.0 * s);
                 let to = g_anchor - self.pos;
                 let dist = to.length();
                 if dist > 1e-3 {
@@ -483,22 +482,22 @@ impl Character {
             }
 
             // (5) DEPENETRATION — 5 spheres, position-only, clamped
-            let max_shove = V_SHOVE_MAX * sub;
+            let max_shove = V_SHOVE_MAX * s * sub;
             let mut correction = Vec3::ZERO;
             let mut deepest_f = f32::INFINITY;
             let mut contact_n = up;
             for o in [-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
-                let cap = self.pos + up * (CAP_HH * o);
+                let cap = self.pos + up * (cap_hh * o);
                 let mut cc = cap;
                 for _ in 0..4 {
                     let f = f_c(cc, time);
-                    if f >= CAP_R - SKIN {
+                    if f >= cap_r - SKIN * s {
                         break;
                     }
                     let g = grad(cc, time, EPS_N);
                     let gm = g.length();
                     let nrm = if gm > G_MIN { g / gm } else { up };
-                    cc += nrm * (CAP_R - f).min(max_shove);
+                    cc += nrm * (cap_r - f).min(max_shove);
                 }
                 correction += cc - cap;
                 let f0 = f_c(cap, time);
@@ -510,16 +509,16 @@ impl Character {
             self.pos += correction / 5.0;
 
             // (6) SLIDE
-            if deepest_f < CAP_R + 0.02 {
+            if deepest_f < cap_r + 0.02 * s {
                 let into = self.vel.dot(contact_n).min(0.0);
                 self.vel -= contact_n * into;
             }
 
             // (7) GROUNDED (strict, debounced) + ground stick
-            let lo = self.pos - up * CAP_HH;
+            let lo = self.pos - up * cap_hh;
             let f_lo = f_c(lo, time);
             let n_lo = grad(lo, time, EPS_N).try_normalize().unwrap_or(up);
-            let grounded_now = f_lo <= CAP_R + GROUND_EPS && n_lo.dot(up) > SLOPE_COS;
+            let grounded_now = f_lo <= cap_r + GROUND_EPS * s && n_lo.dot(up) > SLOPE_COS;
             self.ground_count = if grounded_now {
                 (self.ground_count + 1).min(3)
             } else {
@@ -528,8 +527,8 @@ impl Character {
             self.grounded = self.ground_count >= 2;
 
             if self.grounded && self.jump_lock <= 0.0 {
-                if f_lo > CAP_R && f_lo < CAP_R + SNAP_RANGE {
-                    self.pos -= up * (f_lo - CAP_R);
+                if f_lo > cap_r && f_lo < cap_r + SNAP_RANGE * s {
+                    self.pos -= up * (f_lo - cap_r);
                 }
                 let vn = self.vel.dot(up);
                 if vn > 0.0 {
@@ -564,21 +563,22 @@ impl Character {
 
     fn update_grapple(&mut self, time: f32, c: &Ctrl) {
         let pos = self.pos;
+        let s = cur_scale();
         match &mut self.grapple {
             Grapple::Firing { tip, dir, len } => {
                 for _ in 0..64 {
                     let d = f_c(*tip, time);
-                    if d < GRAPPLE_HIT {
+                    if d < GRAPPLE_HIT * s {
                         self.grapple = Grapple::Attached {
                             anchor: *tip,
-                            rest_len: (pos - *tip).length().max(2.0),
+                            rest_len: (pos - *tip).length().max(2.0 * s),
                         };
                         return;
                     }
-                    let step = d.max(0.15);
+                    let step = d.max(0.15 * s);
                     *tip += *dir * step;
                     *len += step;
-                    if *len > GRAPPLE_MAX {
+                    if *len > GRAPPLE_MAX * s {
                         self.grapple = Grapple::Idle;
                         return;
                     }
@@ -591,7 +591,7 @@ impl Character {
                     // stick the anchor to the SHIFTING surface; detach if it
                     // morphs away.
                     let f = f_c(*anchor, time);
-                    if f.abs() > 3.0 {
+                    if f.abs() > 3.0 * s {
                         self.grapple = Grapple::Idle;
                     } else {
                         let g = grad(*anchor, time, EPS_N);
@@ -1097,27 +1097,29 @@ impl State {
     /// Camera pose as vectors: (cam_pos, forward, up).
     fn camera_pose(&self, time: f32) -> (Vec3, Vec3, Vec3) {
         let (up, fwd_t, _right_t) = self.tangent_basis();
+        let sc = cur_scale(); // camera hugs the shrunk player so the fractal reads colossal
         let (cam_pos, fwd) = if self.cam_dist <= FP_DIST {
             let (sp, cp) = self.cam_pitch.sin_cos();
             let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
-            (self.cc.pos + up * EYE, look)
+            (self.cc.pos + up * EYE * sc, look)
         } else {
             // third person: orbit ABOVE and BEHIND, looking down at the player.
-            let target = self.cc.pos + up * (CAP_HH + 0.3);
+            let target = self.cc.pos + up * ((CAP_HH + 0.3) * sc);
             let e = (0.55 - self.cam_pitch * 0.5).clamp(0.15, 1.3);
             let (se, ce) = e.sin_cos();
             let dir_to_cam = (-fwd_t * ce + up * se).try_normalize().unwrap_or(up);
             let dist: f32;
-            let mut s = 0.4_f32;
+            let mut march = 0.4 * sc;
+            let boom = self.cam_dist * sc;
             loop {
-                let d = f_c(target + dir_to_cam * s, time) - 0.2;
+                let d = f_c(target + dir_to_cam * march, time) - 0.2 * sc;
                 if d < 0.0 {
-                    dist = s.max(0.5);
+                    dist = march.max(0.5 * sc);
                     break;
                 }
-                s += d.max(0.08);
-                if s >= self.cam_dist {
-                    dist = self.cam_dist;
+                march += d.max(0.08 * sc);
+                if march >= boom {
+                    dist = boom;
                     break;
                 }
             }
@@ -1142,17 +1144,19 @@ impl State {
     /// Grapple aim = raycast the screen-center crosshair (camera forward) and aim
     /// from the player toward the hit, so THIRD-PERSON aim matches the reticle.
     fn aim_dir(&self, time: f32) -> Vec3 {
+        let sc = cur_scale();
         let (cam_pos, cam_fwd, _up) = self.camera_pose(time);
-        let mut target = cam_pos + cam_fwd * (GRAPPLE_MAX + 20.0);
-        let mut tt = 0.5_f32;
+        let reach = (GRAPPLE_MAX + 20.0) * sc;
+        let mut target = cam_pos + cam_fwd * reach;
+        let mut tt = 0.5 * sc;
         for _ in 0..96 {
             let d = f_c(cam_pos + cam_fwd * tt, time);
-            if d < 0.3 {
+            if d < 0.3 * sc {
                 target = cam_pos + cam_fwd * tt;
                 break;
             }
-            tt += d.max(0.3);
-            if tt > 220.0 {
+            tt += d.max(0.3 * sc);
+            if tt > reach {
                 break;
             }
         }
@@ -1190,9 +1194,9 @@ impl State {
                 self.cc.pos.x,
                 self.cc.pos.y,
                 self.cc.pos.z,
-                if self.cam_dist <= FP_DIST { -1.0 } else { CAP_R },
+                if self.cam_dist <= FP_DIST { -1.0 } else { CAP_R * cur_scale() },
             ],
-            capsule_up: [up.x, up.y, up.z, CAP_HH],
+            capsule_up: [up.x, up.y, up.z, CAP_HH * cur_scale()],
             contact: [
                 self.cc.contact.x,
                 self.cc.contact.y,

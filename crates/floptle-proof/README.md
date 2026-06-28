@@ -75,25 +75,30 @@ under you — the money shot is standing still on a heaving wall and riding it).
 
 ## Beat 3 — "Descent into the Fractal Core" (`--bin descent`)
 
-**The map is an actual morphing MANDELBULB** — a real 3D fractal you walk on. The
-Mandelbox is gorgeous but mathematically un-walkable (chaotic normals, no solid
-interior — measured); the Mandelbulb is the fractal that's *both* beautiful and
-walkable (measured: ~10° normal rotation/step, `|∇f|≈0.8`, a real 11% solid
-interior, and its surface normal is ~radial). That last fact is the key: **gravity
-by mass** — pulling toward the fractal's core — gives a stable "up", so you cling
-to the actual fractal surface and lean *up its lobes* instead of tumbling. As it
-morphs, a time-difference surface-carry **offsets you cleanly** with the shift.
+**The map is a morphing, POROUS rounded MENGER SPONGE** — a real 3D fractal you go
+*inside* of, not a planet you orbit. The Mandelbox is gorgeous but un-walkable
+(chaotic normals, empty interior — measured); the Mandelbulb is walkable but
+*solid* — "just a bumpy planet" you can only skirt the edge of. The Menger sponge
+is the one that's **porous**: ~88% open, a lattice of tunnels and chambers with
+solid walls you can stand on, climb, and **delve through forever inward** (measured:
+~17° normal rotation/step, `|∇f|≈0.71`). **Gravity points down the local distance
+gradient** (`-∇f`) toward the nearest wall, so "down" is whatever surface you're on
+— you walk up the inside of a shaft and the world rolls under you. As it slowly
+rotation-morphs, a time-difference surface-carry **offsets you cleanly** with the
+shift.
 
-You spawn on a **moon** with the fractal planet on the horizon; walk/jump off and
-gravity hands you to the planet. A **grappling hook** (click) and a deliberately
-**no-air-control** platformer (coyote + jump buffering + asymmetric jump arc +
-squash-and-stretch) round it out, plus **noclip (V)** to fly around and inspect.
+You spawn on a **moon** with the sponge on the horizon; walk/jump off and gravity
+hands you to it. A **grappling hook** (click) and a deliberately **no-air-control**
+platformer (coyote + jump buffering + asymmetric jump arc + squash-and-stretch)
+round it out, plus **noclip (V)** to fly around and inspect.
 
-**Infinite descent:** hold **C** to descend. The planet's scale `W` shrinks the
-surface toward finer detail, and each octave the fractal gains an iteration of
-detail; crossing a level rebases your position by 2 — *seamless* (same fractal
-coordinate, just finer), so your coordinates stay bounded and you can descend
-forever into a colossal, ever-unfolding core. **X** ascends back out.
+**Infinite descent — shrink and walk in:** hold **C** and *you shrink* (scale =
+`2^(-dive)`), so the sponge's sub-tunnels open up beneath you into ever-finer
+chambers, and each level the sponge unfolds another iteration of detail. Because
+the player shrinks rather than the field rebasing, there's **no pop** — the world
+just keeps getting bigger around you as you fall inward, octave after octave, to
+the f32-precision limit (~11 levels). Everything — capsule size, walk speed,
+gravity, jump, grapple reach, camera boom — scales with you. **X** ascends back out.
 
 ```bash
 cargo run -p floptle-proof --bin descent --release
@@ -101,7 +106,7 @@ cargo run -p floptle-proof --bin descent --release
 
 | Input | Action |
 |---|---|
-| **C / X** | **descend / ascend** — infinitely zoom into the fractal core |
+| **C / X** | **descend / ascend** — shrink-and-walk-in, infinitely inward through the sponge |
 | **W A S D** | walk (grounded) / **jetpack** thrust (in air) |
 | **Space** | jump on the ground; **hold in the air = jetpack up-thrust** |
 | **Shift** | sprint |
@@ -111,16 +116,13 @@ cargo run -p floptle-proof --bin descent --release
 | **V** | toggle **noclip free-fly** (Space up / Shift down) |
 | **F / R** | reset camera distance / respawn |
 
-You spawn on a **moon** with the bounded fractal **planet** on the horizon; jump/
-walk off toward it and gravity hands you to the planet. The planet is **nested
-solid shells** (radius 32 / 16 / 8 / …) self-similar forever inward — use **V
-noclip** to fly through them and watch the infinite descent. Visuals are
-deliberately **stripped to clean geometry + lighting + palette** (no feedback
-trails / chromatic aberration / noise) so the raw fractal is legible.
+Visuals are deliberately **stripped to clean geometry + lighting + palette** (no
+feedback trails / chromatic aberration / noise) so the raw fractal is legible; the
+tunnel walls and corners are tinted by cell coordinate + face + descent depth so
+each octave reads as its own chromatic stratum.
 
-> Experimental cut. Known next step: the shells are *complete* spheres, so on-foot
-> descent needs **porous shells**; for now fly in with noclip to inspect. Feel
-> (gravity, jump, grapple) is a tuning surface.
+> Experimental cut. Feel (descend rate, gravity-toward-walls, shrink limit, jump,
+> grapple) is a live tuning surface.
 
 ## Notes
 
