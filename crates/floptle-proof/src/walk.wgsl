@@ -45,12 +45,12 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
 }
 
 // ---- macro field constants (LOCK-STEP with walk.rs) ----
-const R0: f32 = 5.0;
-const KB: f32 = 1.2;
-const WARP_A: f32 = 0.45;
-const WARP_W: f32 = 1.4;
-const WARP_K: f32 = 0.45;
-const CRUST_AMP: f32 = 0.22;
+const R0: f32 = 16.0;
+const KB: f32 = 3.0;
+const WARP_A: f32 = 0.8;
+const WARP_W: f32 = 1.0;
+const WARP_K: f32 = 0.2;
+const CRUST_AMP: f32 = 0.3;
 
 fn smin(a: f32, b: f32, k: f32) -> f32 {
     let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
@@ -67,7 +67,7 @@ fn warpv(p: vec3<f32>) -> vec3<f32> {
 }
 
 fn bumpd(q: vec3<f32>, dir: vec3<f32>, r: f32) -> f32 {
-    let c = normalize(dir) * (R0 - 0.8);
+    let c = normalize(dir) * (R0 * 0.84);
     return length(q - c) - r;
 }
 
@@ -75,12 +75,12 @@ fn bumpd(q: vec3<f32>, dir: vec3<f32>, r: f32) -> f32 {
 fn f_macro(p: vec3<f32>) -> f32 {
     let q = p + warpv(p);
     var d = length(q) - R0;
-    d = smin(d, bumpd(q, vec3<f32>(1.0, 0.0, 0.2), 2.2), KB);
-    d = smin(d, bumpd(q, vec3<f32>(-0.8, 0.3, 0.6), 1.7), KB);
-    d = smin(d, bumpd(q, vec3<f32>(0.2, 1.0, 0.0), 2.0), KB);
-    d = smin(d, bumpd(q, vec3<f32>(0.0, -1.0, 0.3), 1.6), KB);
-    d = smin(d, bumpd(q, vec3<f32>(0.5, 0.2, -1.0), 2.4), KB);
-    d = smin(d, bumpd(q, vec3<f32>(-0.4, -0.5, -0.8), 1.8), KB);
+    d = smin(d, bumpd(q, vec3<f32>(1.0, 0.0, 0.2), 6.6), KB);
+    d = smin(d, bumpd(q, vec3<f32>(-0.8, 0.3, 0.6), 5.1), KB);
+    d = smin(d, bumpd(q, vec3<f32>(0.2, 1.0, 0.0), 6.0), KB);
+    d = smin(d, bumpd(q, vec3<f32>(0.0, -1.0, 0.3), 4.8), KB);
+    d = smin(d, bumpd(q, vec3<f32>(0.5, 0.2, -1.0), 7.2), KB);
+    d = smin(d, bumpd(q, vec3<f32>(-0.4, -0.5, -0.8), 5.4), KB);
     return d;
 }
 
@@ -130,8 +130,10 @@ fn pal(t: f32) -> vec3<f32> {
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    // NOTE: unlike Beat 1's raymarch.wgsl, NO ndc.y negation here — with the
+    // render-to-texture pass chain that flip renders the world upside-down,
+    // which is invisible on a symmetric fractal but obvious on a planet.
     var ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
     let aspect = G.resolution.x / max(G.resolution.y, 1.0);
     ndc.x = ndc.x * aspect;
     let tanf = tan(G.fov * 0.5);
