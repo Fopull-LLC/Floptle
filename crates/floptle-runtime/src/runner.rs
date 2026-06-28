@@ -1,19 +1,19 @@
 //! The windowed host: a winit event loop that owns the [`App`], opens a window,
-//! creates the GPU, and drives `App::frame` on every redraw — the real Phase-1
-//! core loop made visible.
+//! creates the GPU, and drives `App::frame` on every redraw — the real core loop
+//! made visible.
 //!
-//! It now renders the Phase-1 demo: a **spinning textured quad** viewed through a
-//! **free-fly camera** (RMB-drag to look, WASD to move, Space/Ctrl for up/down),
-//! with **FPS in the title bar** (the day-one profiler the roadmap asks for). The
-//! camera feeds `RenderCamera`; the quad's `Transform` feeds a camera-relative
-//! model matrix — large-world-safe by construction (ADR-0015).
+//! It renders the Phase-2 scene: procedurally-generated **lit, depth-tested meshes**
+//! (a spinning cube, a still sphere, a counter-spinning cube) viewed through a
+//! **free-fly camera** (RMB-drag look, WASD move, Space/Ctrl up/down), with **FPS in
+//! the title bar**. Each object uploads a camera-relative model matrix
+//! (`Transform::render_matrix`, ADR-0015) into the instanced forward pass.
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_core::math::Mat4;
 use floptle_core::transform::Transform;
-use floptle_render::{Gpu, Raster};
+use floptle_core::Entity;
+use floptle_render::{cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -21,7 +21,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::app::App;
+use crate::app::{App, Renderable, Shape};
 use crate::camera::{FlyCamera, Input};
 
 /// Open a window and run the engine until it's closed. Blocks.
@@ -40,6 +40,8 @@ struct Runner {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     raster: Option<Raster>,
+    /// Registered mesh handles, indexed by `Shape::index()`.
+    mesh_ids: Vec<MeshId>,
     clock: Option<Clock>,
 }
 
@@ -55,11 +57,16 @@ impl ApplicationHandler for Runner {
             return; // already initialized (e.g. on Android resume)
         }
         let attrs = Window::default_attributes()
-            .with_title("Floptle — Phase 1   |   RMB-drag: look   ·   WASD: move")
+            .with_title("Floptle — Phase 2   |   RMB-drag: look   ·   WASD: move")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window.clone());
-        self.raster = Some(Raster::new(&gpu));
+        let mut raster = Raster::new(&gpu);
+        // Registration order defines the Shape→MeshId mapping (Shape::index).
+        let cube_id = raster.register(&gpu, &cube(0.7));
+        let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36));
+        self.mesh_ids = vec![cube_id, sphere_id];
+        self.raster = Some(raster);
         self.gpu = Some(gpu);
         let now = Instant::now();
         self.clock = Some(Clock { last: now, fps_since: now, fps_frames: 0 });
@@ -131,7 +138,7 @@ impl Runner {
     fn render(&mut self) {
         let (Some(gpu), Some(raster), Some(window), Some(clock)) = (
             self.gpu.as_mut(),
-            self.raster.as_ref(),
+            self.raster.as_mut(),
             self.window.as_ref(),
             self.clock.as_mut(),
         ) else {
@@ -143,7 +150,7 @@ impl Runner {
         let dt = (now - clock.last).as_secs_f32();
         clock.last = now;
         self.camera.update(&self.input, dt);
-        self.app.frame(dt); // spins the quad
+        self.app.frame(dt); // spins the meshes
 
         // FPS in the title bar — the day-one profiler (roadmap Phase 1)
         clock.fps_frames += 1;
@@ -151,35 +158,50 @@ impl Runner {
         if since >= 0.5 {
             let fps = clock.fps_frames as f32 / since;
             window.set_title(&format!(
-                "Floptle — Phase 1   |   {fps:.0} fps   |   RMB-drag: look   ·   WASD: move   ·   Space/Ctrl: up/down"
+                "Floptle — Phase 2   |   {fps:.0} fps   |   RMB-drag: look   ·   WASD: move   ·   Space/Ctrl: up/down"
             ));
             clock.fps_frames = 0;
             clock.fps_since = now;
         }
 
-        // camera view·projection + the quad's camera-relative model matrix
+        // camera view·projection + a single directional light → frame globals
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let cam = self.camera.render_camera();
         let view_proj = cam.view_proj(aspect);
-        let model = self
-            .app
-            .world
-            .query::<Transform>()
-            .next()
-            .map(|(_, t)| t.render_matrix(cam.world_position))
-            .unwrap_or(Mat4::IDENTITY);
+        let light = floptle_core::math::Vec3::new(0.4, 0.9, 0.45).normalize();
+        let globals = Globals {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            light_color: [1.0, 0.98, 0.92, 0.0],
+            ambient: [0.12, 0.12, 0.16, 0.0],
+        };
 
-        // a slow indigo color-pulse behind the geometry, so the loop is visibly alive
+        // gather camera-relative instances from the world (collect first so the
+        // Renderable query borrow ends before we look up each Transform)
+        let renderables: Vec<(Entity, Shape, [f32; 3])> =
+            self.app.world.query::<Renderable>().map(|(e, r)| (e, r.shape, r.color)).collect();
+        let mut instances: Vec<(MeshId, InstanceRaw)> = Vec::with_capacity(renderables.len());
+        for (e, shape, color) in renderables {
+            // skip (don't panic) if a shape has no registered mesh yet
+            let Some(&mesh) = self.mesh_ids.get(shape.index()) else { continue };
+            if let Some(t) = self.app.world.get::<Transform>(e) {
+                let model = t.render_matrix(cam.world_position);
+                instances.push((mesh, instance_of(model, color)));
+            }
+        }
+
+        // a quiet, dark indigo backdrop (kept below the objects' shadowed faces so
+        // the lit solids clearly pop) with a barely-there breathing pulse
         let t = self.app.time.elapsed as f32;
         let pulse = |phase: f32, lo: f32, hi: f32| {
             let s = 0.5 + 0.5 * (t * 0.4 + phase).sin();
             (lo + (hi - lo) * s) as f64
         };
-        let color = [pulse(0.0, 0.02, 0.06), pulse(2.0, 0.01, 0.04), pulse(4.0, 0.08, 0.16), 1.0];
+        let clear = [pulse(0.0, 0.005, 0.014), pulse(2.0, 0.004, 0.010), pulse(4.0, 0.014, 0.030), 1.0];
 
         match gpu.acquire() {
             Some(frame) => {
-                raster.draw(gpu, &frame, view_proj, model, color);
+                raster.draw_scene(gpu, &frame, globals, &instances, clear);
                 frame.present();
             }
             None => {

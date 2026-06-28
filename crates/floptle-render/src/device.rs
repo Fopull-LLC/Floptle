@@ -18,6 +18,7 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
+    depth_view: wgpu::TextureView,
 }
 
 /// A surface image acquired for one frame. Render into `view`, then `present()`.
@@ -87,7 +88,36 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        Self { instance, adapter, device, queue, surface, config }
+        let (_, depth_view) = Self::make_depth(&device, config.width, config.height);
+
+        Self { instance, adapter, device, queue, surface, config, depth_view }
+    }
+
+    /// The depth format the renderer uses everywhere (always available as a depth
+    /// attachment; matches wgpu's `0..1` reverse-Z-free convention with `Less`).
+    pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    /// Build a depth target sized to the surface. Recreated on every resize so it
+    /// can never desync from the swapchain (a size mismatch is a hard validation
+    /// error at draw time).
+    fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// The depth view passes attach for depth testing.
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth_view
     }
 
     /// The surface's swapchain format — every pass that targets the screen needs it.
@@ -96,11 +126,14 @@ impl Gpu {
     }
 
     /// Reconfigure the surface after the window resizes. Clamps to a minimum of 1
-    /// so a minimized window (0×0) doesn't produce an invalid configuration.
+    /// so a minimized window (0×0) doesn't produce an invalid configuration, and
+    /// rebuilds the depth target to match.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
         self.surface.configure(&self.device, &self.config);
+        let (_, depth_view) = Self::make_depth(&self.device, self.config.width, self.config.height);
+        self.depth_view = depth_view;
     }
 
     /// Acquire the next swapchain image to render into. Returns `None` on a

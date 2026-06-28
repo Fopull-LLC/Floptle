@@ -56,21 +56,23 @@
 ## Phase 1 — Window, viewport, camera, core loop
 **Goal:** something on screen and a frame loop to hang everything on.
 
-> **Status — window is live.** `cargo run -p floptle-runtime` opens a window, creates
-> the GPU, and drives the real core loop on every redraw (clear pass + FPS in the
-> title). `--headless` runs the loop with no display (CI). `floptle-core` has `time`
-> (variable clock + deterministic fixed-step), `transform` (`f64` world + camera-
-> relative `f32` render matrix), `origin` (floating-origin rebase), a minimal `ecs`
-> and `event`; `floptle-render` has `device` (full `Gpu` bootstrap + clear),
-> `frame` (camera-relative view/proj), and a `graph` (Pass/RenderGraph) seam.
+> **Status — Phase-1 demo is live.** `cargo run -p floptle-runtime` opens a window and
+> flies a **free-fly camera** (RMB-drag look, WASD move, Space/Ctrl up/down) around a
+> **spinning textured quad** drawn through a camera-relative MVP, at thousands of fps
+> with FPS in the title. `--headless` runs the loop with no display (CI). `floptle-core`
+> has `time` (variable clock + deterministic fixed-step), `transform` (`f64` world +
+> camera-relative `f32` render matrix), `origin` (floating-origin rebase), a minimal
+> `ecs` and `event`; `floptle-render` has `device` (full `Gpu` bootstrap), `frame`
+> (camera-relative view/proj), `raster` (the forward textured pass), and a `graph`
+> (Pass/RenderGraph) seam.
 
 - [x] Frame loop with fixed + variable timestep (`floptle-core::time`).
 - [x] Minimal ECS + `Transform`.
 - [x] **Large-world foundations** (ADR-0015): `f64` transforms + camera-relative
   matrix + floating-origin seam. (Apply-rebase-to-the-ECS wiring still TODO.)
 - [x] winit window + wgpu device/surface bootstrap (`floptle-render::device`).
-- [x] Clear-color (first render). [ ] first triangle → [ ] textured quad.
-- [ ] Free-fly debug camera driving `RenderCamera`.
+- [x] Clear-color → [x] first triangle → [x] textured quad (camera-relative MVP).
+- [x] Free-fly debug camera driving `RenderCamera` (RMB-look + WASD).
 - [~] Frame profiler — FPS in the title bar today; in-viewport overlay TODO.
 
 **Demo:** fly a camera around a spinning textured quad at a locked frame rate.
@@ -78,11 +80,18 @@
 ## Phase 2 — Meshes, materials, the Blender pipeline
 **Goal:** get *your* art in.
 
-- glTF import: meshes, UVs, normals, base materials (`floptle-assets`).
-- Mesh upload + a basic raster pass + simple lighting (`floptle-render`).
-- Material asset (RON) binding a shader + textures + params.
-- Texture tiling metadata (repeat/clamp/flip/count) — "drag on and tile".
-- Asset database with hot-reload of textures/models.
+> **Status — lit meshes are live (slice 1).** The forward raster pass now draws
+> procedural `Mesh`es (cube + UV-sphere, `floptle-render::mesh`) **instanced and
+> depth-tested**, with **directional diffuse lighting** and per-object **camera-
+> relative** model matrices (ADR-0015). `cargo run -p floptle-runtime` flies the
+> camera around three lit, spinning solids over a shared detail texture. glTF
+> import, the material/tiling system, and the asset database are the next slices.
+
+- [ ] glTF import: meshes, UVs, normals, base materials (`floptle-assets`).
+- [x] Mesh upload + a basic raster pass + simple lighting (`floptle-render`).
+- [ ] Material asset (RON) binding a shader + textures + params.
+- [ ] Texture tiling metadata (repeat/clamp/flip/count) — "drag on and tile".
+- [ ] Asset database with hot-reload of textures/models.
 
 **Demo:** export a Blender model, drop it in, see it lit and textured; tweak a
 tiling value and watch it update live.
