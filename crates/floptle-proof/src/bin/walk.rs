@@ -22,7 +22,7 @@ use glam::Vec3;
 use wgpu::*;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -31,28 +31,38 @@ const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
 // ---- macro field constants (LOCK-STEP with walk.wgsl) ----
-const R0: f32 = 16.0;
-const KB: f32 = 3.0;
-const WARP_A: f32 = 0.8;
-const WARP_W: f32 = 1.0;
-const WARP_K: f32 = 0.2;
-/// Bump (hill) directions + radii; centers sit at normalize(dir)*(R0*0.84).
+const R0: f32 = 30.0;
+const KB: f32 = 4.0;
+const WARP_A: f32 = 1.0;
+const WARP_W: f32 = 0.8;
+const WARP_K: f32 = 0.10;
+/// Base hills: directions + radii; centers sit at normalize(dir)*(R0*0.86).
 const BUMPS: [([f32; 3], f32); 6] = [
-    ([1.0, 0.0, 0.2], 6.6),
-    ([-0.8, 0.3, 0.6], 5.1),
-    ([0.2, 1.0, 0.0], 6.0),
-    ([0.0, -1.0, 0.3], 4.8),
-    ([0.5, 0.2, -1.0], 7.2),
-    ([-0.4, -0.5, -0.8], 5.4),
+    ([1.0, 0.0, 0.2], 7.0),
+    ([-0.8, 0.3, 0.6], 6.0),
+    ([0.2, 1.0, 0.0], 7.0),
+    ([0.0, -1.0, 0.3], 5.5),
+    ([0.5, 0.2, -1.0], 8.0),
+    ([-0.4, -0.5, -0.8], 6.0),
 ];
+/// Swirling-branch "arm" parameters (LOCK-STEP with walk.wgsl).
+const ARM_STEPS: usize = 10;
+const SWIRLS: f32 = 1.25;
+const LAT0: f32 = -0.25;
+const LATTOP: f32 = 1.15;
+const ARM_RISE: f32 = 22.0;
+const ARM_R: f32 = 5.0;
+const ARM_KB: f32 = 3.0;
 
 // ---- character / physics tuning ----
 const CAP_R: f32 = 0.18; // capsule radius
 const CAP_HH: f32 = 0.22; // capsule half-height (segment)
-const G_MAG: f32 = 14.0; // gravity acceleration
-const ACCEL: f32 = 40.0; // tangential input accel
+const G_MAG: f32 = 28.0; // gravity acceleration
+const ACCEL: f32 = 22.0; // tangential input accel
 const FRIC: f32 = 8.0; // tangential friction (grounded)
-const JUMP_V: f32 = 6.0;
+const JUMP_V: f32 = 12.0;
+const JUMP_LOCK: f32 = 0.18; // disable ground-stick briefly after a jump
+const SNAP_RANGE: f32 = 0.28; // ground-stick: pull foot back to the surface within this
 const SLOPE_COS: f32 = 0.64; // cos(~50deg): steeper than this = not grounded
 const V_SHOVE_MAX: f32 = 3.0; // clamp on depenetration + surface-carry speed
 const V_DEAD: f32 = 0.05; // surface-carry deadband (kills standing jitter)
@@ -66,7 +76,7 @@ const GROUND_EPS: f32 = 0.06;
 const BLEND_NEAR: f32 = 0.15; // gravity follows terrain within this of surface
 const BLEND_FAR: f32 = 0.8; // gravity is radial beyond this
 const COYOTE: f32 = 0.1;
-const BOOM: f32 = 3.0; // third-person boom length
+const FP_DIST: f32 = 1.0; // zoom in past this boom length => first person
 const EYE: f32 = 0.15;
 
 // ----------------------------- the field -----------------------------------
@@ -101,12 +111,31 @@ fn dwarp_dt(p: Vec3, t: f32) -> Vec3 {
         )
 }
 
+/// A "branch": a tapering chain of blended spheres following a helix that winds
+/// around the planet AND lifts off its surface into the sky.
+fn arm(q: Vec3, phase: f32) -> f32 {
+    let mut d = 1e9_f32;
+    for k in 0..ARM_STEPS {
+        let t = k as f32 / (ARM_STEPS - 1) as f32;
+        let lon = phase + std::f32::consts::TAU * SWIRLS * t;
+        let lat = LAT0 + (LATTOP - LAT0) * t;
+        let (slat, clat) = lat.sin_cos();
+        let (slon, clon) = lon.sin_cos();
+        let dir = Vec3::new(clat * clon, slat, clat * slon);
+        let center = dir * (R0 + ARM_RISE * t);
+        d = smin(d, (q - center).length() - ARM_R * (1.0 - 0.5 * t), ARM_KB);
+    }
+    d
+}
+
 fn f_macro(q: Vec3) -> f32 {
     let mut d = q.length() - R0;
     for (dir, r) in BUMPS {
-        let c = Vec3::from_array(dir).normalize() * (R0 * 0.84);
+        let c = Vec3::from_array(dir).normalize() * (R0 * 0.86);
         d = smin(d, (q - c).length() - r, KB);
     }
+    d = smin(d, arm(q, 0.0), ARM_KB);
+    d = smin(d, arm(q, 3.3), ARM_KB);
     d
 }
 
@@ -147,6 +176,7 @@ struct Character {
     up_smooth: Vec3,
     grounded: bool,
     coyote: f32,
+    jump_lock: f32,
     // telemetry for the HUD + contact ring
     contact: Vec3,
     f_player: f32,
@@ -155,14 +185,16 @@ struct Character {
 
 impl Character {
     fn spawn() -> Self {
-        let dir = Vec3::new(0.3, 1.0, 0.4).normalize();
-        let pos = dir * (R0 + 6.0);
+        // spawn over the southern hemisphere, clear of the arms (which climb north)
+        let dir = Vec3::new(0.12, -1.0, 0.15).normalize();
+        let pos = dir * (R0 + 5.0);
         Character {
             pos,
             vel: Vec3::ZERO,
             up_smooth: dir,
             grounded: false,
             coyote: 0.0,
+            jump_lock: 0.0,
             contact: pos,
             f_player: 0.0,
             v_surface: 0.0,
@@ -171,6 +203,7 @@ impl Character {
 
     fn step(&mut self, dt: f32, time: f32, wish: Vec3, sprint: bool, jump: bool) {
         let dt = dt.min(0.033);
+        self.jump_lock = (self.jump_lock - dt).max(0.0);
 
         // jump uses last frame's grounded + coyote window
         self.coyote = if self.grounded { COYOTE } else { (self.coyote - dt).max(0.0) };
@@ -178,6 +211,7 @@ impl Character {
             self.vel += self.up_smooth * JUMP_V;
             self.grounded = false;
             self.coyote = 0.0;
+            self.jump_lock = JUMP_LOCK;
         }
 
         // substep count sized off BOTH travel speed AND surface speed (no tunneling)
@@ -271,6 +305,19 @@ impl Character {
             let n_lo = grad(lo, time, EPS_N).try_normalize().unwrap_or(up);
             self.grounded = f_lo <= CAP_R + GROUND_EPS && n_lo.dot(up) > SLOPE_COS;
 
+            // (7b) GROUND STICK: glue the foot to the surface and kill outward
+            // velocity so you hug convex hills instead of launching off them.
+            // Skipped briefly after a jump so the jump can actually leave.
+            if self.grounded && self.jump_lock <= 0.0 {
+                if f_lo > CAP_R && f_lo < CAP_R + SNAP_RANGE {
+                    self.pos -= up * (f_lo - CAP_R);
+                }
+                let vn = self.vel.dot(up);
+                if vn > 0.0 {
+                    self.vel -= up * vn;
+                }
+            }
+
             let up_target = if self.grounded { n_lo } else { -gravity_down(self.pos, time) };
             let a = 1.0 - (-K_UP * sub).exp();
             self.up_smooth = self.up_smooth.lerp(up_target, a).try_normalize().unwrap_or(up);
@@ -301,6 +348,7 @@ struct Globals {
     capsule_pos: [f32; 4],
     capsule_up: [f32; 4],
     contact: [f32; 4],
+    capsule_fwd: [f32; 4],
 }
 
 #[derive(Default)]
@@ -459,7 +507,7 @@ struct State {
     cc: Character,
     cam_yaw: f32,
     cam_pitch: f32,
-    cam_mode: u32, // 0 = third person, 1 = first person
+    cam_dist: f32, // third-person boom length; < FP_DIST => first person
     input: Input,
     frame: u64,
     start: Instant,
@@ -616,7 +664,7 @@ impl State {
             cc: Character::spawn(),
             cam_yaw: 0.0,
             cam_pitch: 0.25,
-            cam_mode: 0,
+            cam_dist: 7.0,
             input: Input::default(),
             frame: 0,
             start: now,
@@ -661,7 +709,7 @@ impl State {
     fn update(&mut self, dt: f32, time: f32) {
         // mouse look
         let sens = 0.0025;
-        self.cam_yaw += self.input.mouse_dx * sens;
+        self.cam_yaw -= self.input.mouse_dx * sens;
         self.cam_pitch = (self.cam_pitch - self.input.mouse_dy * sens).clamp(-1.0, 1.2);
         self.input.mouse_dx = 0.0;
         self.input.mouse_dy = 0.0;
@@ -688,7 +736,7 @@ impl State {
 
     fn camera(&self, time: f32) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
         let (up, fwd_t, _right_t) = self.tangent_basis();
-        let (cam_pos, fwd) = if self.cam_mode == 1 {
+        let (cam_pos, fwd) = if self.cam_dist <= FP_DIST {
             // first person: look with pitch (positive = up)
             let (sp, cp) = self.cam_pitch.sin_cos();
             let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
@@ -701,7 +749,7 @@ impl State {
             let e = (0.55 - self.cam_pitch * 0.5).clamp(0.15, 1.3);
             let (se, ce) = e.sin_cos();
             let dir_to_cam = (-fwd_t * ce + up * se).try_normalize().unwrap_or(up);
-            // spring-arm: pull in if the boom would clip the planet
+            // spring-arm: pull in if the boom (cam_dist) would clip the planet
             let dist: f32;
             let mut s = 0.4_f32;
             loop {
@@ -711,8 +759,8 @@ impl State {
                     break;
                 }
                 s += d.max(0.08);
-                if s >= BOOM {
-                    dist = BOOM;
+                if s >= self.cam_dist {
+                    dist = self.cam_dist;
                     break;
                 }
             }
@@ -738,6 +786,7 @@ impl State {
 
         let (cam_pos, cam_right, cam_up, cam_fwd) = self.camera(time);
         let up = self.cc.up_smooth;
+        let (_fb_up, face_fwd, _fb_r) = self.tangent_basis();
         let g = Globals {
             cam_pos,
             cam_right,
@@ -750,7 +799,12 @@ impl State {
             feedback: 0.5,
             warp: 1.0,
             fov: 1.25,
-            capsule_pos: [self.cc.pos.x, self.cc.pos.y, self.cc.pos.z, CAP_R],
+            capsule_pos: [
+                self.cc.pos.x,
+                self.cc.pos.y,
+                self.cc.pos.z,
+                if self.cam_dist <= FP_DIST { -1.0 } else { CAP_R },
+            ],
             capsule_up: [up.x, up.y, up.z, CAP_HH],
             contact: [
                 self.cc.contact.x,
@@ -758,6 +812,7 @@ impl State {
                 self.cc.contact.z,
                 if self.cc.grounded { 1.0 } else { 0.0 },
             ],
+            capsule_fwd: [face_fwd.x, face_fwd.y, face_fwd.z, 0.0],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
 
@@ -842,7 +897,7 @@ impl State {
         let since = now - self.fps_t;
         if since.as_secs_f32() >= 0.5 {
             let fps = self.fps_frames as f32 / since.as_secs_f32();
-            let mode = if self.cam_mode == 1 { "1st" } else { "3rd" };
+            let mode = if self.cam_dist <= FP_DIST { "1st" } else { "3rd" };
             self.window.set_title(&format!(
                 "Floptle — Stand in the Dream (Beat 2)  |  {fps:.0} fps  [{mode}]  grounded:{}  f:{:+.2}  vsurf:{:+.2}",
                 self.cc.grounded as u8, self.cc.f_player, self.cc.v_surface
@@ -876,6 +931,13 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.render(),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.05,
+                };
+                state.cam_dist = (state.cam_dist - dy).clamp(0.5, 18.0);
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let w = &state.window;
                 let _ = w
@@ -899,7 +961,7 @@ impl ApplicationHandler for App {
                         KeyCode::KeyD => state.input.d = pressed,
                         KeyCode::Space => state.input.jump = state.input.jump || pressed,
                         KeyCode::ShiftLeft | KeyCode::ShiftRight => state.input.sprint = pressed,
-                        KeyCode::KeyF if pressed => state.cam_mode = (state.cam_mode + 1) % 2,
+                        KeyCode::KeyF if pressed => state.cam_dist = 7.0,
                         KeyCode::KeyR if pressed => state.cc = Character::spawn(),
                         KeyCode::Escape if pressed => {
                             if state.input.captured {

@@ -60,8 +60,14 @@ cargo run -p floptle-proof --bin walk --release
 | **Space** | jump (with coyote time) |
 | **Shift** | sprint |
 | **Mouse** | orbit camera (click to capture, **Esc** releases) |
-| **F** | toggle third / first person |
+| **Scroll** | zoom in / out; zoom all the way in for first person |
+| **F** | reset camera to default distance |
 | **R** | respawn above the planet |
+
+The planet is a big solid sphere with blended hills and two **swirling branch
+landmasses** that helix up off the surface into the sky (you can walk those too).
+The player capsule has a **red clown nose** on its upper-front so you can read
+its facing and which way is "up" at a glance.
 
 The title bar is the HUD: fps, camera mode, `grounded?`, `f` (signed distance at
 the feet — stays `≥ -radius`, i.e. never embedded), and `vsurf` (surface speed
