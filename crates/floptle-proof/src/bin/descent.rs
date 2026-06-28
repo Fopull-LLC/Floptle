@@ -42,6 +42,7 @@ const R_MOON: f32 = 12.0;
 const MOON_CAPTURE: f32 = 20.0; // within this of the moon surface, moon gravity wins
 const MOON_G: f32 = 0.32; // moon gravity is weak so you can jump off it easily
 const NOCLIP_SPEED: f32 = 45.0;
+const DESCEND_RATE: f32 = 0.55; // infinite-descent octaves per second while holding C
 
 fn moon_center() -> Vec3 {
     Vec3::new(0.0, MOON_DIST, 0.0)
@@ -95,16 +96,26 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+// The INFINITE-DESCENT level is held thread-locally so every f_c call sees it
+// without threading a parameter through the whole controller. step()/render()
+// set it before doing any field queries.
+thread_local!(static DIVE: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) });
+fn set_dive(v: f32) {
+    DIVE.with(|d| d.set(v));
+}
+fn cur_dive() -> f32 {
+    DIVE.with(|d| d.get())
+}
+const DIVE_ITER_CAP: i32 = 12; // max bulb iterations (perf); past this the dive is self-similar
+
 /// Morphing Mandelbulb distance estimator — the planet is an actual 3D fractal.
-/// Signed (f<0 inside the solid bulb). Measured walkable (~10deg normal/step,
-/// |grad|~0.8, 11% solid); its normal is ~radial so mass-gravity toward the core
-/// gives a stable, walkable "up".
-fn bulb_de(p0: Vec3, t: f32) -> f32 {
+/// `iters` grows as you descend, unfolding finer detail.
+fn bulb_de(p0: Vec3, t: f32, iters: i32) -> f32 {
     let power = 8.0 + 1.5 * (t * WMORPH).sin(); // slowly morph the fractal power
     let mut z = p0;
     let mut dr = 1.0_f32;
     let mut r = 0.0_f32;
-    for _ in 0..8 {
+    for _ in 0..iters {
         r = z.length();
         if r > 2.0 {
             break;
@@ -120,10 +131,15 @@ fn bulb_de(p0: Vec3, t: f32) -> f32 {
     0.5 * r.max(1e-6).ln() * r / dr
 }
 
-/// The fractal planet (scaled-up morphing Mandelbulb) unioned with the moon.
-/// Source of truth for physics.
+/// The fractal planet (morphing Mandelbulb, INFINITE-DESCENT-zoomed) unioned with
+/// the moon. The dive shrinks the planet scale W and bumps the iteration count, so
+/// you continuously zoom into finer detail; the rebase keeps pos bounded.
 fn f_c(p: Vec3, t: f32) -> f32 {
-    let planet = MBS * bulb_de(p / MBS, t);
+    let dv = cur_dive();
+    let frac = dv - dv.floor();
+    let w = MBS * (-frac * std::f32::consts::LN_2).exp(); // MBS * 2^(-frac)
+    let iters = (8 + dv.floor() as i32).min(DIVE_ITER_CAP);
+    let planet = w * bulb_de(p / w, t, iters);
     let moon = (p - moon_center()).length() - R_MOON;
     planet.min(moon)
 }
@@ -223,6 +239,7 @@ struct Ctrl {
     grapple_edge: bool,
     grapple_held: bool,
     free_orient: bool,
+    descend: f32, // +1 = descend (C), -1 = ascend (X)
 }
 
 struct Character {
@@ -235,6 +252,7 @@ struct Character {
     coyote: f32,
     jump_lock: f32,
     jump_buffer: f32,
+    dive: f32, // continuous infinite-descent level (hold C to descend)
     dive_level: i32,
     world_phase: f32,
     squash: f32,
@@ -261,6 +279,7 @@ impl Character {
             coyote: 0.0,
             jump_lock: 0.0,
             jump_buffer: 0.0,
+            dive: 0.0,
             dive_level: 0,
             world_phase: 0.0,
             squash: 1.0,
@@ -275,6 +294,7 @@ impl Character {
     /// Noclip free-fly (V): no gravity/collision, camera-relative — fly anywhere
     /// to inspect the fractal.
     fn fly(&mut self, dt: f32, time: f32, dir: Vec3) {
+        set_dive(self.dive);
         if dir.length_squared() > 1e-6 {
             self.pos += dir.normalize() * NOCLIP_SPEED * dt;
         }
@@ -307,6 +327,29 @@ impl Character {
         let dt = dt.min(0.033);
         self.jump_lock = (self.jump_lock - dt).max(0.0);
         self.jump_buffer = if c.jump_edge { 0.12 } else { (self.jump_buffer - dt).max(0.0) };
+
+        // INFINITE DESCENT: hold C to descend (zoom into finer fractal detail), X
+        // to ascend. The planet scale W shrinks the surface toward finer detail;
+        // crossing a level rebases pos by 2 — SEAMLESS (same fractal coordinate,
+        // one more iteration of detail) so pos stays bounded forever.
+        let prev_level = self.dive.floor();
+        // only descend while in/near the fractal (not out on the moon)
+        if self.pos.length() < MBS * 2.0 {
+            self.dive = (self.dive + c.descend * DESCEND_RATE * dt).max(0.0);
+        }
+        let lvl = self.dive.floor();
+        if lvl != prev_level {
+            let factor = (lvl - prev_level).exp2();
+            self.pos *= factor;
+            self.vel *= factor;
+            self.contact *= factor;
+            if let Grapple::Attached { anchor, rest_len } = &mut self.grapple {
+                *anchor *= factor;
+                *rest_len *= factor;
+            }
+            self.dive_level = lvl as i32;
+        }
+        set_dive(self.dive);
 
         // grapple: start a shot, advance an in-flight shot, release if let go
         if c.grapple_edge {
@@ -600,6 +643,8 @@ struct Input {
     grapple_held: bool,
     sprint: bool,
     ctrl: bool,
+    descend: bool,
+    ascend: bool,
     captured: bool,
     mouse_dx: f32,
     mouse_dy: f32,
@@ -961,6 +1006,7 @@ impl State {
     }
 
     fn update(&mut self, dt: f32, time: f32) {
+        set_dive(self.cc.dive); // so aim_dir/camera query the field at the right depth
         let sens = 0.0025;
         // CTRL + mouse while airborne = roll/pitch your whole frame (wingsuit).
         let free_orient = self.input.ctrl && !self.cc.noclip && !self.cc.grounded;
@@ -1040,6 +1086,7 @@ impl State {
                 grapple_edge: self.input.grapple_edge,
                 grapple_held: self.input.grapple_held,
                 free_orient,
+                descend: (self.input.descend as i32 - self.input.ascend as i32) as f32,
             };
             self.cc.step(dt, time, &ctrl);
         }
@@ -1154,7 +1201,7 @@ impl State {
             ],
             capsule_fwd: [face_fwd.x, face_fwd.y, face_fwd.z, 0.0],
             dive: [
-                self.cc.dive_level as f32,
+                self.cc.dive,
                 self.cc.world_phase,
                 self.cc.squash,
                 0.0,
@@ -1331,6 +1378,8 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::ShiftLeft | KeyCode::ShiftRight => state.input.sprint = pressed,
                         KeyCode::ControlLeft | KeyCode::ControlRight => state.input.ctrl = pressed,
+                        KeyCode::KeyC => state.input.descend = pressed,
+                        KeyCode::KeyX => state.input.ascend = pressed,
                         KeyCode::KeyF if pressed => state.cam_dist = 7.0,
                         KeyCode::KeyV if pressed => state.cc.noclip = !state.cc.noclip,
                         KeyCode::KeyR if pressed => state.cc = Character::spawn(),

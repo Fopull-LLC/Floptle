@@ -46,13 +46,14 @@ const MOON_DIST: f32 = 150.0;
 const R_MOON: f32 = 12.0;
 const TAU: f32 = 6.2831853;
 
-// morphing Mandelbulb DE (signed: <0 inside the solid bulb)
-fn bulb_de(p0: vec3<f32>, t: f32) -> f32 {
+// morphing Mandelbulb DE (signed: <0 inside the solid bulb). `iters` grows with
+// the dive to unfold finer detail.
+fn bulb_de(p0: vec3<f32>, t: f32, iters: i32) -> f32 {
     let power = 8.0 + 1.5 * sin(t * WMORPH);
     var z = p0;
     var dr = 1.0;
     var r = 0.0;
-    for (var i = 0; i < 8; i = i + 1) {
+    for (var i = 0; i < iters; i = i + 1) {
         r = length(z);
         if (r > 2.0) { break; }
         let theta = acos(clamp(z.z / r, -1.0, 1.0));
@@ -66,11 +67,11 @@ fn bulb_de(p0: vec3<f32>, t: f32) -> f32 {
     return 0.5 * log(max(r, 1e-6)) * r / dr;
 }
 // orbit trap (min radius during iteration) -> a 0..1-ish value for coloring
-fn bulb_trap(p0: vec3<f32>, t: f32) -> f32 {
+fn bulb_trap(p0: vec3<f32>, t: f32, iters: i32) -> f32 {
     let power = 8.0 + 1.5 * sin(t * WMORPH);
     var z = p0;
     var trap = 1e9;
-    for (var i = 0; i < 8; i = i + 1) {
+    for (var i = 0; i < iters; i = i + 1) {
         let r = length(z);
         if (r > 2.0) { break; }
         trap = min(trap, r);
@@ -84,8 +85,17 @@ fn bulb_trap(p0: vec3<f32>, t: f32) -> f32 {
 fn moon_de(p: vec3<f32>) -> f32 {
     return length(p - vec3<f32>(0.0, MOON_DIST, 0.0)) - R_MOON;
 }
+// dive-driven planet scale (W shrinks within a level => continuous zoom) + iters
+fn dive_w() -> f32 {
+    let dv = G.dive.x;
+    return MBS * exp2(-(dv - floor(dv)));
+}
+fn dive_iters() -> i32 {
+    return min(8 + i32(floor(G.dive.x)), 12);
+}
 fn f_world(p: vec3<f32>) -> f32 {
-    return min(MBS * bulb_de(p / MBS, G.time), moon_de(p));
+    let w = dive_w();
+    return min(w * bulb_de(p / w, G.time, dive_iters()), moon_de(p));
 }
 
 fn capsule_de(p: vec3<f32>) -> f32 {
@@ -180,9 +190,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             col = vec3<f32>(0.72, 0.74, 0.82) * (0.3 + 0.7 * diff) * (0.4 + 0.6 * ao)
                 + rim * vec3<f32>(0.3, 0.4, 0.6) * 0.3;
         } else {
-            // the fractal: orbit-trap palette (the Beat-1 look) + clean lighting
-            let trap = bulb_trap(p / MBS, G.time);
-            let base = pal(0.55 + 0.6 * trap + 0.05 * length(p / MBS) + 0.04 * G.time);
+            // the fractal: orbit-trap palette (the Beat-1 look) + clean lighting,
+            // tinted by descent depth so deeper octaves read as a chromatic journey
+            let w = dive_w();
+            let trap = bulb_trap(p / w, G.time, dive_iters());
+            let base = pal(0.55 + 0.6 * trap + 0.05 * length(p / w) + 0.04 * G.time + 0.08 * G.dive.x);
             col = base * (0.25 + 0.85 * diff) * (0.35 + 0.65 * ao);
             col = col + base * rim * 0.4;
         }

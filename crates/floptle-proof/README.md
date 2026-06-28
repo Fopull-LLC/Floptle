@@ -89,10 +89,11 @@ gravity hands you to the planet. A **grappling hook** (click) and a deliberately
 **no-air-control** platformer (coyote + jump buffering + asymmetric jump arc +
 squash-and-stretch) round it out, plus **noclip (V)** to fly around and inspect.
 
-> Honest status: this is the **walk-on-a-real-fractal** milestone. True *infinite
-> descent into the core* is the next focused step — a bounded fractal has a solid
-> center you can't pass on foot; the seamless-zoom-into-detail descent is being
-> built on top of this.
+**Infinite descent:** hold **C** to descend. The planet's scale `W` shrinks the
+surface toward finer detail, and each octave the fractal gains an iteration of
+detail; crossing a level rebases your position by 2 — *seamless* (same fractal
+coordinate, just finer), so your coordinates stay bounded and you can descend
+forever into a colossal, ever-unfolding core. **X** ascends back out.
 
 ```bash
 cargo run -p floptle-proof --bin descent --release
@@ -100,6 +101,7 @@ cargo run -p floptle-proof --bin descent --release
 
 | Input | Action |
 |---|---|
+| **C / X** | **descend / ascend** — infinitely zoom into the fractal core |
 | **W A S D** | walk (grounded) / **jetpack** thrust (in air) |
 | **Space** | jump on the ground; **hold in the air = jetpack up-thrust** |
 | **Shift** | sprint |
