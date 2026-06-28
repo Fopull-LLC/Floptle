@@ -7,10 +7,31 @@ use floptle_core::math::{DVec3, Quat};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, FixedTimestep, Time, World};
 
-/// Demo component: how fast an entity spins (radians/sec about Y). Stands in for
-/// the Phase-1 "spinning textured quad" until the renderer is wired.
+/// Demo component: how fast an entity spins (radians/sec about Y).
 pub struct Spin {
     pub speed: f32,
+}
+
+/// Which procedural primitive an entity renders as. Kept render-agnostic (no GPU
+/// handle) so the world stays free of renderer types; the runner maps a `Shape` to
+/// a registered `MeshId`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Cube,
+    Sphere,
+}
+
+impl Shape {
+    /// Stable index used by the runner to look up the registered mesh handle.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// A drawable: which shape, and a flat tint color (the lit base color).
+pub struct Renderable {
+    pub shape: Shape,
+    pub color: [f32; 3],
 }
 
 pub struct App {
@@ -29,10 +50,22 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let mut world = World::new();
-        // seed the demo scene: one spinning node at the origin
-        let e = world.spawn();
-        world.insert(e, Transform::from_translation(DVec3::ZERO));
-        world.insert(e, Spin { speed: 1.0 });
+
+        // Seed the demo scene: a spinning cube at the origin, a still sphere to one
+        // side (a clean read on the directional light), and a counter-spinning cube
+        // to the other — at distinct world positions so depth + parallax are visible.
+        let scene: [(DVec3, Shape, f32, [f32; 3]); 3] = [
+            (DVec3::new(0.0, 0.0, 0.0), Shape::Cube, 0.8, [0.95, 0.45, 0.35]),
+            (DVec3::new(2.6, 0.0, 0.0), Shape::Sphere, 0.2, [0.40, 0.70, 0.95]),
+            (DVec3::new(-2.6, 0.0, 0.0), Shape::Cube, -0.6, [0.55, 0.85, 0.45]),
+        ];
+        for (pos, shape, speed, color) in scene {
+            let e = world.spawn();
+            world.insert(e, Transform::from_translation(pos));
+            world.insert(e, Spin { speed });
+            world.insert(e, Renderable { shape, color });
+        }
+
         Self { world, time: Time::new(), fixed: FixedTimestep::new(60.0) }
     }
 
@@ -77,7 +110,7 @@ mod tests {
         }
         assert_eq!(app.time.frame, 60);
         assert!((app.time.elapsed - 1.0).abs() < 1e-3);
-        // exactly one demo entity, and it rotated (~1 rad over ~1s)
-        assert_eq!(app.world.len(), 1);
+        // the three seeded demo entities are all live after a second of frames
+        assert_eq!(app.world.len(), 3);
     }
 }

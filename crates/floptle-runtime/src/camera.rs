@@ -37,8 +37,9 @@ pub struct FlyCamera {
 
 impl Default for FlyCamera {
     fn default() -> Self {
-        // Pulled back along +Z, looking toward the origin where the quad spins.
-        Self { position: DVec3::new(0.0, 0.0, 4.0), yaw: 0.0, pitch: 0.0, speed: 4.0, sensitivity: 0.0026 }
+        // Pulled back and slightly up along +Z, framing the three demo meshes
+        // (spread to x = ±2.6) with margin and looking toward the origin.
+        Self { position: DVec3::new(0.0, 0.8, 7.0), yaw: 0.0, pitch: 0.0, speed: 4.0, sensitivity: 0.0026 }
     }
 }
 

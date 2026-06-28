@@ -18,17 +18,18 @@
 //!                  positions **camera-relative** so the GPU never sees large
 //!                  coordinates — large-world-safe by default (ADR-0015).
 
-/// Backends Floptle can target through wgpu. Mac uses Metal automatically.
-// Phase 1 modules. `mesh`, `material`, `raymarch`, `post`, `light` arrive in
-// Phases 2/4; these three are the bootstrap + the camera-relative upload seam.
+// Phase 1–2 modules. `material`, `raymarch`, `post`, `light` arrive in Phases 2/4.
+// `mesh` is the CPU/GPU geometry seam (Phase 2); `raster` is the forward pass.
 pub mod device;
 pub mod frame;
 pub mod graph;
+pub mod mesh;
 pub mod raster;
 
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
-pub use raster::Raster;
+pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, Vertex};
+pub use raster::{instance_of, Globals, InstanceRaw, Raster};
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
