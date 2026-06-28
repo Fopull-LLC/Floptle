@@ -75,24 +75,24 @@ under you — the money shot is standing still on a heaving wall and riding it).
 
 ## Beat 3 — "Descent into the Fractal Core" (`--bin descent`)
 
-The big one. An **infinite fractal planet you descend into forever**. The world is
-a **log-periodic nested-shell field** — you're literally *inside* a hollow fractal
-sphere wrapped in spiral bridges, and the field is mathematically self-similar at
-ratio 2, so as you sink toward the core the world seamlessly rebases an octave and
-keeps unfolding (you asymptotically approach the center and never reach it). The
-HUD shows your `depth` (octave count).
+**The map is an actual morphing MANDELBULB** — a real 3D fractal you walk on. The
+Mandelbox is gorgeous but mathematically un-walkable (chaotic normals, no solid
+interior — measured); the Mandelbulb is the fractal that's *both* beautiful and
+walkable (measured: ~10° normal rotation/step, `|∇f|≈0.8`, a real 11% solid
+interior, and its surface normal is ~radial). That last fact is the key: **gravity
+by mass** — pulling toward the fractal's core — gives a stable "up", so you cling
+to the actual fractal surface and lean *up its lobes* instead of tumbling. As it
+morphs, a time-difference surface-carry **offsets you cleanly** with the shift.
 
-Gravity is a **density field**: gravity bends toward the dense bridges, so you can
-walk on top of, around, and **underneath** the swirling bridges in seemingly
-impossible ways. A **grappling hook** (click) shoots out, grabs a surface, and
-reels you in (pull scaled by distance) — the air-mobility tool for a deliberately
-**no-air-control** platformer (you only gain speed while grounded; coyote time +
-jump buffering + a snappy asymmetric jump arc + squash-and-stretch).
+You spawn on a **moon** with the fractal planet on the horizon; walk/jump off and
+gravity hands you to the planet. A **grappling hook** (click) and a deliberately
+**no-air-control** platformer (coyote + jump buffering + asymmetric jump arc +
+squash-and-stretch) round it out, plus **noclip (V)** to fly around and inspect.
 
-The collision/dive field was gated GREEN by a headless measurement pass before any
-physics was wired (seamless dive `|df|=0.0000` / 0.01° normal rotation, hollow
-cavities, walkable bridges, `|∇f|≈0.9`, density pulls onto bridges at 0.82) — the
-same discipline that killed the Mandelbox in Beat 2.
+> Honest status: this is the **walk-on-a-real-fractal** milestone. True *infinite
+> descent into the core* is the next focused step — a bounded fractal has a solid
+> center you can't pass on foot; the seamless-zoom-into-detail descent is being
+> built on top of this.
 
 ```bash
 cargo run -p floptle-proof --bin descent --release

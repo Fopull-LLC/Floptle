@@ -30,34 +30,16 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const RENDER_DIV: u32 = 1;
 
-// ---- log-periodic nested-shell + spiral-bridge field (LOCK-STEP with descent.wgsl).
-// Measured green by measure_descent.rs: seamless self-similar dive (|df|=0.0000,
-// 0.01 deg normal rot), 37% band solidity, hollow cavities you're INSIDE, walkable
-// struts (2.1 deg/0.18u step), |grad|~0.9, density contrast 0.55 vs 0.00 with
-// grad-rho.toward-bridge 0.82 (so gravity wraps you onto the bridges).
-const S: f32 = 2.0; // octave ratio (the dive zooms by this each level)
-const RREF: f32 = 16.0; // reference shell radius (in the working octave)
-const SHELL_TH: f32 = 2.3; // hollow-shell half-thickness
-const KSH: f32 = 1.6; // smin shell <-> struts
-const NARMS: usize = 3;
-const STEPS: usize = 14;
-const SWIRLS: f32 = 2.0; // integer => the spiral connects seamlessly across octaves
-const LATF: f32 = 1.0; // integer => latitude matches across octaves
-const LATAMP: f32 = 0.55;
-const STRUT_R: f32 = 1.4;
-const KARM: f32 = 1.8;
-const WMORPH: f32 = 0.18; // slow rotation morph (rad/s), applied identically per octave
-const SIGMA: f32 = 2.1; // density gaussian width
-const ARM_PHASE: [f32; 3] = [0.0, 2.094, 4.188];
-const R_TRIG: f32 = 11.3137; // RREF / sqrt(S): inner band edge (rebase trigger)
-const R_OUT: f32 = 22.6274; // RREF * sqrt(S): outer band edge
-const K_DENS: f32 = 0.8; // how hard density bends gravity onto bridges
-// the planet is BOUNDED outward (infinite only INWARD): octaves capped at K_MAX
-const K_MAX: f32 = 1.0; // outer shells at RREF and RREF*S (16 and 32); void beyond
-// a moon you spawn on and jump down from
-const MOON_DIST: f32 = 80.0;
-const R_MOON: f32 = 6.0;
-const MOON_CAPTURE: f32 = 8.0; // within this of the moon surface, moon gravity wins
+// ---- the map is an actual morphing MANDELBULB fractal (LOCK-STEP with descent.wgsl).
+// Measured walkable: ~10deg surface-normal rotation per 0.18u step, |grad|~0.8,
+// 11% solid interior (collidable), and its normal is ~radial so mass-gravity
+// toward the core gives a stable "up" you can walk on.
+const MBS: f32 = 14.0; // scale the bulb up to a ~17-radius fractal planet
+const WMORPH: f32 = 0.05; // slow morph rate of the bulb power
+// a moon you spawn on, with the fractal planet on the horizon to jump down to
+const MOON_DIST: f32 = 55.0;
+const R_MOON: f32 = 5.0;
+const MOON_CAPTURE: f32 = 7.0; // within this of the moon surface, moon gravity wins
 const NOCLIP_SPEED: f32 = 16.0;
 
 fn moon_center() -> Vec3 {
@@ -82,7 +64,7 @@ const JUMP_GROUND_EPS: f32 = 0.18; // generous jump ground detection (3x GROUND_
 const JUMP_SLOPE: f32 = 0.35; // jump allowed on steeper surfaces than walking
 const V_SHOVE_MAX: f32 = 6.0; // clamp on depenetration + surface-carry (> morph speed)
 const V_DEAD: f32 = 0.05; // surface-carry deadband (kills standing jitter)
-const SURF_VMAX: f32 = WMORPH * R_OUT; // morph surface speed bound (~4.1)
+const SURF_VMAX: f32 = 4.0; // morph surface-speed bound for substep sizing
 const K_UP: f32 = 9.0; // up-vector temporal smoothing rate
 const MAX_UP_RATE: f32 = 2.6; // rad/s: clamp on up-TARGET change (anti camera-flip)
 const SQUASH_K: f32 = 18.0; // squash/stretch relax rate
@@ -109,90 +91,44 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
-    (b + (a - b) * h) - k * h * (1.0 - h)
-}
-
-fn roty(p: Vec3, a: f32) -> Vec3 {
-    let (s, c) = a.sin_cos();
-    Vec3::new(c * p.x - s * p.z, p.y, s * p.x + c * p.z)
-}
-
-/// Center of strut sphere at param `u` along arm `a`, in the reference octave:
-/// a helix spiralling from the outer band edge down to the inner edge (one octave).
-fn strut_center(a: usize, u: f32) -> Vec3 {
-    let radius = R_OUT * S.powf(-u);
-    let lon = ARM_PHASE[a] + std::f32::consts::TAU * SWIRLS * u;
-    let lat = LATAMP * (std::f32::consts::TAU * LATF * u + ARM_PHASE[a]).sin();
-    let (sla, cla) = lat.sin_cos();
-    let (slo, clo) = lon.sin_cos();
-    Vec3::new(cla * clo, sla, cla * slo) * radius
-}
-
-/// Reference-octave geometry: a hollow shell (you're INSIDE it) + spiral bridges,
-/// morphing by a slow identical-per-octave rotation.
-fn f_ref(pn: Vec3, t: f32) -> f32 {
-    let q = roty(pn, WMORPH * t);
-    let mut d = (q.length() - RREF).abs() - SHELL_TH;
-    for a in 0..NARMS {
-        let mut da = 1e9_f32;
-        for i in 0..STEPS {
-            let u = i as f32 / (STEPS - 1) as f32;
-            da = smin(da, (q - strut_center(a, u)).length() - STRUT_R, KARM);
+/// Morphing Mandelbulb distance estimator — the planet is an actual 3D fractal.
+/// Signed (f<0 inside the solid bulb). Measured walkable (~10deg normal/step,
+/// |grad|~0.8, 11% solid); its normal is ~radial so mass-gravity toward the core
+/// gives a stable, walkable "up".
+fn bulb_de(p0: Vec3, t: f32) -> f32 {
+    let power = 8.0 + 1.5 * (t * WMORPH).sin(); // slowly morph the fractal power
+    let mut z = p0;
+    let mut dr = 1.0_f32;
+    let mut r = 0.0_f32;
+    for _ in 0..8 {
+        r = z.length();
+        if r > 2.0 {
+            break;
         }
-        d = smin(d, da, KSH);
+        let theta = (z.z / r).clamp(-1.0, 1.0).acos();
+        let phi = z.y.atan2(z.x);
+        dr = r.powf(power - 1.0) * power * dr + 1.0;
+        let zr = r.powf(power);
+        let th = theta * power;
+        let ph = phi * power;
+        z = Vec3::new(th.sin() * ph.cos(), th.sin() * ph.sin(), th.cos()) * zr + p0;
     }
-    d
+    0.5 * r.max(1e-6).ln() * r / dr
 }
 
-/// Nearest power of S that brings |p| into the working octave band — clamped at
-/// K_MAX so the planet is BOUNDED outward (void beyond) but infinite INWARD.
-fn oscale(p: Vec3) -> f32 {
-    let k = (p.length().max(1e-6) / RREF).ln() / S.ln();
-    S.powf(k.round().min(K_MAX))
-}
-
-/// The log-periodic planet field UNIONED with the moon. f(S*p)=S*f(p) inside the
-/// planet => seamless self-similar dive; bounded outward, with the moon a solid
-/// sphere you spawn on. Source of truth for physics.
+/// The fractal planet (scaled-up morphing Mandelbulb) unioned with the moon.
+/// Source of truth for physics.
 fn f_c(p: Vec3, t: f32) -> f32 {
-    let os = oscale(p);
-    let planet = os * f_ref(p / os, t);
+    let planet = MBS * bulb_de(p / MBS, t);
     let moon = (p - moon_center()).length() - R_MOON;
     planet.min(moon)
 }
 
-/// Surface velocity along the normal via a TIME-only central difference of f_c
-/// (the morph is slow rotation, so time-FD is smooth — no spatial jitter).
+/// Surface velocity along the normal via a TIME-only central difference of f_c —
+/// the morph is slow, so this is smooth and carries you cleanly as it shifts.
 fn df_dt(p: Vec3, t: f32) -> f32 {
-    let h = 0.008;
+    let h = 0.01;
     (f_c(p, t + h) - f_c(p, t - h)) / (2.0 * h)
-}
-
-/// Density in [0,1]: gaussians over the bridge axes — high on/near a bridge,
-/// ~0 in open cavity. Its gradient points toward the nearest bridge.
-fn rho(p: Vec3, t: f32) -> f32 {
-    let pn = p / oscale(p);
-    let q = roty(pn, WMORPH * t);
-    let mut s = 0.0;
-    for a in 0..NARMS {
-        for i in 0..STEPS {
-            let u = i as f32 / (STEPS - 1) as f32;
-            let d2 = (q - strut_center(a, u)).length_squared();
-            s += (-d2 / (2.0 * SIGMA * SIGMA)).exp();
-        }
-    }
-    s.min(1.0)
-}
-
-fn grad_rho(p: Vec3, t: f32) -> Vec3 {
-    let e = 0.06;
-    Vec3::new(
-        rho(p + Vec3::new(e, 0.0, 0.0), t) - rho(p - Vec3::new(e, 0.0, 0.0), t),
-        rho(p + Vec3::new(0.0, e, 0.0), t) - rho(p - Vec3::new(0.0, e, 0.0), t),
-        rho(p + Vec3::new(0.0, 0.0, e), t) - rho(p - Vec3::new(0.0, 0.0, e), t),
-    ) / (2.0 * e)
 }
 
 /// Central-difference gradient, normalized by 2*eps so |grad| ~ 1 on a metric
@@ -222,18 +158,12 @@ fn gravity_down(p: Vec3, t: f32) -> Vec3 {
         radial
     };
     let n_surf = if gm > 1e-5 { g / gm } else { backbone };
-    let w_near = smoothstep(BLEND_FAR, BLEND_NEAR, f) * smoothstep(G_MIN, 0.5, gm);
-    let mut up = backbone.lerp(n_surf, w_near);
-    // DENSITY TIER: bend "up" toward the nearest bridge (smooth weights, no hard
-    // gate -> no orientation snap), so you can walk on, around, and UNDER bridges.
-    let gr = grad_rho(p, t);
-    let grm = gr.length();
-    if grm > 1e-4 {
-        let dense_up = gr / grm;
-        let w = K_DENS * smoothstep(0.02, 0.08, grm) * smoothstep(0.1, 0.5, rho(p, t));
-        up += dense_up * w;
-    }
-    -up.try_normalize().unwrap_or(backbone)
+    // Lean the stable backbone PARTWAY toward the local surface normal so you can
+    // cling to steep lobes, but keep it mostly radial so the chaotic fractal
+    // normal can never tumble you.
+    let w = 0.5 * smoothstep(BLEND_FAR, BLEND_NEAR, f) * smoothstep(G_MIN, 0.5, gm);
+    let up = backbone.lerp(n_surf, w).try_normalize().unwrap_or(backbone);
+    -up
 }
 
 // --------------------------- the controller ---------------------------------
@@ -331,8 +261,8 @@ impl Character {
         }
     }
 
-    /// Noclip free-fly (V): no gravity/collision, camera-relative; still rebases
-    /// so you can fly into the core.
+    /// Noclip free-fly (V): no gravity/collision, camera-relative — fly anywhere
+    /// to inspect the fractal.
     fn fly(&mut self, dt: f32, time: f32, dir: Vec3) {
         if dir.length_squared() > 1e-6 {
             self.pos += dir.normalize() * NOCLIP_SPEED * dt;
@@ -342,9 +272,6 @@ impl Character {
         let up = (-gravity_down(self.pos, time)).try_normalize().unwrap_or(self.up_smooth);
         self.up_smooth = slerp_dir(self.up_smooth, up, 1.0 - (-6.0 * dt).exp());
         self.prev_up_target = self.up_smooth;
-        if self.pos.length() < R_TRIG {
-            self.rebase(S);
-        }
         self.f_player = f_c(self.pos, time);
     }
 
@@ -530,24 +457,6 @@ impl Character {
 
         // squash/stretch relaxes back to neutral
         self.squash += (1.0 - self.squash) * (1.0 - (-SQUASH_K * dt).exp());
-
-        // INFINITE DIVE REBASE — INWARD ONLY, so the moon / the fall through the
-        // void stay put; only descending past the inner band edge rebases up an
-        // octave. Seamless because the field is self-similar at S.
-        if self.pos.length() < R_TRIG {
-            self.rebase(S);
-        }
-    }
-
-    fn rebase(&mut self, s: f32) {
-        self.pos *= s;
-        self.vel *= s;
-        self.contact *= s;
-        if let Grapple::Attached { anchor } = &mut self.grapple {
-            *anchor *= s;
-        }
-        self.dive_level += if s > 1.0 { 1 } else { -1 };
-        self.world_phase += if s > 1.0 { 0.37 } else { -0.37 };
     }
 
     fn update_grapple(&mut self, time: f32, c: &Ctrl) {
@@ -1148,7 +1057,7 @@ impl State {
                 self.cc.dive_level as f32,
                 self.cc.world_phase,
                 self.cc.squash,
-                rho(self.cc.pos, time),
+                0.0,
             ],
             grapple: gp,
         };
