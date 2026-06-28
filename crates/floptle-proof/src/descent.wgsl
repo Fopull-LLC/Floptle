@@ -122,8 +122,23 @@ fn rope_de(p: vec3<f32>) -> f32 {
     let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
     return length(pa - ba * h) - 0.03;
 }
+// jetpack exhaust: a tapering plume below the feet, length + girth scale with the
+// thrust intensity G.dive.w (0..1). Emissive in shading => an obvious flame.
+fn jet_de(p: vec3<f32>) -> f32 {
+    if (G.capsule_pos.w <= 0.0 || G.dive.w < 0.03) { return 1e9; }
+    let rr = G.capsule_pos.w;
+    let feet = G.capsule_pos.xyz - G.capsule_up.xyz * G.capsule_up.w;
+    let len = rr * (2.5 + 7.0 * G.dive.w);
+    let a = feet;
+    let b = feet - G.capsule_up.xyz * len;
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    let rad = rr * (1.05 - 0.9 * h); // wide at the feet, tapering to a point
+    return length(pa - ba * h) - max(rad, 0.0001);
+}
 fn map(p: vec3<f32>) -> f32 {
-    return min(min(f_world(p), capsule_de(p)), min(nose_de(p), rope_de(p)));
+    return min(min(min(f_world(p), capsule_de(p)), min(nose_de(p), rope_de(p))), jet_de(p));
 }
 fn normal(p: vec3<f32>) -> vec3<f32> {
     let e = vec2<f32>(0.004, 0.0);
@@ -170,11 +185,21 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let dcap = capsule_de(p);
         let dnose = nose_de(p);
         let drope = rope_de(p);
+        let djet = jet_de(p);
         let key = normalize(vec3<f32>(0.4, 0.8, 0.45));
         let diff = clamp(dot(n, key), 0.0, 1.0);
         let ao = 1.0 - f32(steps) / f32(MAXS);
         let rim = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
-        if (dnose < dcap && dnose < dterr && dnose < drope) {
+        if (djet < dterr && djet < dcap && djet < dnose && djet < drope) {
+            // jetpack flame — EMISSIVE (white-hot core -> orange -> deep red tip),
+            // flickering, so it's unmistakable that the jetpack is firing
+            let feet = G.capsule_pos.xyz - G.capsule_up.xyz * G.capsule_up.w;
+            let along = clamp(dot(feet - p, G.capsule_up.xyz) / (G.capsule_pos.w * 9.0), 0.0, 1.0);
+            let flick = 0.78 + 0.22 * sin(G.time * 55.0 + p.x * 31.0 + p.y * 27.0);
+            let hot = mix(vec3<f32>(1.8, 1.6, 1.1), vec3<f32>(1.5, 0.45, 0.08), smoothstep(0.0, 0.5, along));
+            let flame = mix(hot, vec3<f32>(0.9, 0.12, 0.04), smoothstep(0.5, 1.0, along));
+            col = flame * flick * (0.85 + 0.6 * G.dive.w);
+        } else if (dnose < dcap && dnose < dterr && dnose < drope) {
             col = vec3<f32>(1.0, 0.12, 0.12) * (0.4 + 0.8 * diff) + rim * vec3<f32>(0.5, 0.1, 0.1);
         } else if (drope < dcap && drope < dterr && drope < dnose) {
             col = vec3<f32>(0.9, 1.0, 0.8) * (0.4 + 0.6 * diff);

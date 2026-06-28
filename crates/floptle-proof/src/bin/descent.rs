@@ -42,7 +42,10 @@ const R_MOON: f32 = 12.0;
 const MOON_CAPTURE: f32 = 20.0; // within this of the moon surface, moon gravity wins
 const MOON_G: f32 = 0.32; // moon gravity is weak so you can jump off it easily
 const NOCLIP_SPEED: f32 = 45.0;
-const DESCEND_RATE: f32 = 0.55; // infinite-descent octaves per second while holding C
+const DESCEND_RATE: f32 = 1.3; // infinite-descent octaves per second while holding C
+const DIVE_MAX: f32 = 8.0; // descent floor (Menger iteration / f32 precision limit)
+const AUTO_DIVE_RATE: f32 = 0.6; // octaves/sec auto-descent while flying through a void
+const AUTO_DIVE_CLEAR: f32 = 4.0; // min void clearance (x player scale) to auto-descend
 
 fn moon_center() -> Vec3 {
     Vec3::new(0.0, MOON_DIST, 0.0)
@@ -51,10 +54,10 @@ fn moon_center() -> Vec3 {
 // ---- character / physics tuning ----
 const CAP_R: f32 = 0.18; // capsule radius
 const CAP_HH: f32 = 0.22; // capsule half-height (segment)
-const G_GROUND: f32 = 34.0; // gravity while grounded
-const G_RISE: f32 = 28.0; // gravity while rising + jump held (floaty up)
-const G_CUT: f32 = 46.0; // gravity while rising + jump released (variable height)
-const G_FALL: f32 = 46.0; // gravity while falling (snappy arc)
+const G_GROUND: f32 = 10.0; // gravity while grounded (low => floaty, explorable)
+const G_RISE: f32 = 7.0; // gravity while rising + jump held (floaty up)
+const G_CUT: f32 = 15.0; // gravity while rising + jump released (variable height)
+const G_FALL: f32 = 15.0; // gravity while falling
 const ACCEL: f32 = 50.0; // tangential input accel (high => reach max fast on ground)
 const MAX_SPEED: f32 = 5.0; // ground walk speed (sprint x1.8)
 const FRIC: f32 = 10.0; // tangential friction (grounded, no input)
@@ -84,10 +87,10 @@ const EYE: f32 = 0.15;
 const GRAPPLE_MAX: f32 = 75.0;
 const REEL_SPEED: f32 = 14.0; // rope shorten rate while holding (reel in)
 const GRAPPLE_HIT: f32 = CAP_R * 1.0;
-// jetpack / air control
-const JETPACK_UP: f32 = 24.0; // upward thrust (Space held in air)
-const JETPACK_ACCEL: f32 = 26.0; // horizontal air thrust (WASD in air)
-const AIR_MAX: f32 = 10.0; // max horizontal air speed from the jetpack
+// jetpack / air control — strong (easily beats gravity) and UNLIMITED (no fuel)
+const JETPACK_UP: f32 = 42.0; // upward thrust (Space held in air) — net +35 vs G_RISE
+const JETPACK_ACCEL: f32 = 40.0; // horizontal air thrust (WASD in air)
+const AIR_MAX: f32 = 16.0; // max horizontal air speed from the jetpack
 
 // ----------------------------- the field -----------------------------------
 
@@ -265,6 +268,7 @@ struct Character {
     dive_level: i32,
     world_phase: f32,
     squash: f32,
+    jet: f32, // jetpack-active glow (0..1, smoothed) -> shader exhaust plume
     grapple: Grapple,
     noclip: bool,
     // telemetry for the HUD + render
@@ -292,6 +296,7 @@ impl Character {
             dive_level: 0,
             world_phase: 0.0,
             squash: 1.0,
+            jet: 0.0,
             grapple: Grapple::Idle,
             noclip: false,
             contact: pos,
@@ -338,11 +343,39 @@ impl Character {
         self.jump_lock = (self.jump_lock - dt).max(0.0);
         self.jump_buffer = if c.jump_edge { 0.12 } else { (self.jump_buffer - dt).max(0.0) };
 
-        // INFINITE DESCENT: hold C to descend, X to ascend. You SHRINK (scale s)
-        // while the Menger gains iterations of finer sub-tunnels, so you keep
-        // walking deeper INTO the porous fractal. pos stays bounded in the cube.
-        if self.pos.length() < MBS * 2.0 {
-            self.dive = (self.dive + c.descend * DESCEND_RATE * dt).max(0.0);
+        let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
+
+        // INFINITE DESCENT. dive ↑ => you SHRINK (scale s) and the Menger unfolds
+        // another iteration of finer sub-tunnels, so the world scales UP around you
+        // — an infinite zoom INTO the porous fractal. Three drivers:
+        //   • hold C : deliberate dive (also UN-STICKS you from the surface so you
+        //              sink into the opening instead of riding the receding wall)
+        //   • hold X : ascend back out
+        //   • FREE-FALL THROUGH A VOID : auto-descend, so jumping into a hole opens
+        //              it up and you keep falling deeper, recursively. This is the
+        //              "jump into a hole and the world scales around you" effect.
+        let inside = self.pos.length() < MBS * 1.6 && !near_moon;
+        let diving = c.descend > 0.0 && inside;
+        if inside {
+            self.dive = (self.dive + c.descend * DESCEND_RATE * dt).clamp(0.0, DIVE_MAX);
+            // AUTO-DESCEND: flying/falling through an open pocket of the sponge pulls
+            // you deeper (the world scales up so the hole you dove into opens into
+            // sub-tunnels). Speed-based because "deeper" has no fixed direction in a
+            // sponge; gated on actually being in a void (not hugging a wall) and
+            // moving with intent, so walking/idling never zooms. Descend-only — X
+            // ascends back out.
+            if !self.grounded && !diving {
+                let s0 = cur_scale();
+                let spd = self.vel.length();
+                if f_c(self.pos, time) > AUTO_DIVE_CLEAR * s0 && spd > 0.5 * MAX_SPEED * s0 {
+                    let r = (spd / (MAX_SPEED * s0)).min(2.5) * AUTO_DIVE_RATE;
+                    self.dive = (self.dive + r * dt).clamp(0.0, DIVE_MAX);
+                }
+            }
+        }
+        if diving {
+            self.grounded = false; // let go of the wall so the shrink sinks you in
+            self.ground_count = 0;
         }
         self.dive_level = self.dive.floor() as i32;
         set_dive(self.dive);
@@ -380,11 +413,11 @@ impl Character {
             g_anchor = *anchor;
             g_rest = *rest_len;
         }
-        let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
         let speed = self.vel.length().max(SURF_VMAX * s).max(if g_attached { 16.0 * s } else { 0.0 });
         let n = (((speed * dt) / (0.5 * cap_r)).ceil().max(4.0) as u32).min(16);
         let sub = dt / n as f32;
 
+        let mut thrusting = false; // any jetpack thrust this step -> exhaust glow
         for _ in 0..n {
             let up = self.up_smooth;
 
@@ -443,7 +476,7 @@ impl Character {
                     self.vel = vn + vt * (-FRIC * sub).exp();
                 }
             } else {
-                // jetpack: WASD air thrust (speed-capped) + Space up-thrust
+                // JETPACK (unlimited): WASD air thrust (speed-capped) + Space up-thrust
                 if c.wish.length_squared() > 1e-6 {
                     if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
                         self.vel += wt * JETPACK_ACCEL * s * sub;
@@ -453,10 +486,12 @@ impl Character {
                             vt = vt.normalize() * AIR_MAX * s;
                         }
                         self.vel = vn + vt;
+                        thrusting = true;
                     }
                 }
                 if c.jump_held {
                     self.vel += up * JETPACK_UP * s * sub;
+                    thrusting = true;
                 }
             }
 
@@ -518,7 +553,8 @@ impl Character {
             let lo = self.pos - up * cap_hh;
             let f_lo = f_c(lo, time);
             let n_lo = grad(lo, time, EPS_N).try_normalize().unwrap_or(up);
-            let grounded_now = f_lo <= cap_r + GROUND_EPS * s && n_lo.dot(up) > SLOPE_COS;
+            let grounded_now =
+                !diving && f_lo <= cap_r + GROUND_EPS * s && n_lo.dot(up) > SLOPE_COS;
             self.ground_count = if grounded_now {
                 (self.ground_count + 1).min(3)
             } else {
@@ -536,14 +572,18 @@ impl Character {
                 }
             }
 
-            // up target: stable contact normal when grounded, gravity otherwise;
-            // RATE-LIMITED before the slerp so a small mass can't flip it. SKIPPED
-            // in free-orient (the player controls their own up via Ctrl+mouse).
-            if !c.free_orient {
-                let raw = if self.grounded { n_lo } else { -gravity_down(self.pos, time) };
-                let limited = rate_limit_dir(self.prev_up_target, raw, MAX_UP_RATE * sub);
+            // up target: auto-correct to the surface normal ONLY while grounded
+            // (so you can walk up walls). In the AIR your orientation is fully your
+            // own — gravity never snaps the camera back — and you steer it with
+            // Ctrl+mouse (free-orient) or just keep whatever you had. RATE-LIMITED
+            // before the slerp so a small mass can't flip it.
+            if self.grounded && !c.free_orient {
+                let limited = rate_limit_dir(self.prev_up_target, n_lo, MAX_UP_RATE * sub);
                 self.prev_up_target = limited;
                 self.up_smooth = slerp_dir(self.up_smooth, limited, 1.0 - (-K_UP * sub).exp());
+            } else {
+                // airborne (or free-orient): keep prev synced so landing doesn't snap
+                self.prev_up_target = self.up_smooth;
             }
 
             self.contact = lo - n_lo * f_lo;
@@ -559,6 +599,10 @@ impl Character {
 
         // squash/stretch relaxes back to neutral
         self.squash += (1.0 - self.squash) * (1.0 - (-SQUASH_K * dt).exp());
+
+        // jetpack exhaust glow eases toward the thrust state (drives the shader plume)
+        let jet_target = if thrusting { 1.0 } else { 0.0 };
+        self.jet += (jet_target - self.jet) * (1.0 - (-18.0 * dt).exp());
     }
 
     fn update_grapple(&mut self, time: f32, c: &Ctrl) {
@@ -1208,7 +1252,7 @@ impl State {
                 self.cc.dive,
                 self.cc.world_phase,
                 self.cc.squash,
-                0.0,
+                self.cc.jet, // jetpack exhaust intensity -> shader plume
             ],
             grapple: gp,
         };
@@ -1302,9 +1346,10 @@ impl State {
             } else {
                 "3rd"
             };
+            let jet = if self.cc.jet > 0.3 { "  ▲JET" } else { "" };
             self.window.set_title(&format!(
-                "Floptle — Descent into the Fractal Core (Beat 3)  |  {fps:.0} fps  [{mode}]  depth:{}  grounded:{}  f:{:+.2}",
-                self.cc.dive_level, self.cc.grounded as u8, self.cc.f_player
+                "Floptle — Descent into the Fractal Core (Beat 3)  |  {fps:.0} fps  [{mode}]  depth:{:.2}  grounded:{}  f:{:+.2}{jet}",
+                self.cc.dive, self.cc.grounded as u8, self.cc.f_player
             ));
             self.fps_frames = 0;
             self.fps_t = now;

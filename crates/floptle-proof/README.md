@@ -92,13 +92,24 @@ hands you to it. A **grappling hook** (click) and a deliberately **no-air-contro
 platformer (coyote + jump buffering + asymmetric jump arc + squash-and-stretch)
 round it out, plus **noclip (V)** to fly around and inspect.
 
-**Infinite descent — shrink and walk in:** hold **C** and *you shrink* (scale =
-`2^(-dive)`), so the sponge's sub-tunnels open up beneath you into ever-finer
-chambers, and each level the sponge unfolds another iteration of detail. Because
-the player shrinks rather than the field rebasing, there's **no pop** — the world
-just keeps getting bigger around you as you fall inward, octave after octave, to
-the f32-precision limit (~11 levels). Everything — capsule size, walk speed,
-gravity, jump, grapple reach, camera boom — scales with you. **X** ascends back out.
+**Infinite descent — shrink and walk in:** *you shrink* (scale = `2^(-dive)`), so
+the sponge's sub-tunnels open up around you into ever-finer chambers and each level
+the sponge unfolds another iteration of detail. Because the player shrinks rather
+than the field rebasing, there's **no pop** — the world just keeps getting bigger
+around you, octave after octave, to the f32-precision limit. Everything — capsule
+size, walk speed, gravity, jump, grapple reach, camera boom — scales with you.
+Three ways to dive: **hold C** (deliberate descent — also un-sticks you from the
+wall so you sink into the opening); **fly/fall through a hole** (auto-descent — dive
+into a void and the world scales up so it opens into sub-tunnels you fall through,
+recursively); **hold X** to ascend back out.
+
+**Orientation:** your "up" only auto-corrects to the surface **while you're
+grounded** (so you can walk up walls and around tunnels). In the **air your
+orientation is your own** — gravity never snaps the camera back — steer it with
+**Ctrl + mouse** (roll/pitch, wingsuit-style) or just keep whatever you had; it
+re-levels to the surface when you land. The **jetpack is unlimited and strong**
+(easily beats gravity) and fires an obvious **flame plume** below you whenever it's
+thrusting (Space = up, WASD = directional).
 
 ```bash
 cargo run -p floptle-proof --bin descent --release
@@ -106,11 +117,11 @@ cargo run -p floptle-proof --bin descent --release
 
 | Input | Action |
 |---|---|
-| **C / X** | **descend / ascend** — shrink-and-walk-in, infinitely inward through the sponge |
+| **C / X** | **descend / ascend** — shrink-and-walk-in, infinitely inward through the sponge (C also un-sticks you so you sink into holes) |
 | **W A S D** | walk (grounded) / **jetpack** thrust (in air) |
-| **Space** | jump on the ground; **hold in the air = jetpack up-thrust** |
+| **Space** | jump on the ground; **hold in the air = jetpack up-thrust** (unlimited) |
 | **Shift** | sprint |
-| **Ctrl + Mouse** | **roll / pitch your whole body** in the air (wingsuit-style) |
+| **Ctrl + Mouse** | **roll / pitch your whole body** in the air (wingsuit-style); air orientation never auto-snaps |
 | **Mouse / click** | look; click to capture, click again to **fire + hold the grapple** (swing on the rope; release = slingshot) |
 | **Scroll** | zoom; all the way in for first person |
 | **V** | toggle **noclip free-fly** (Space up / Shift down) |
