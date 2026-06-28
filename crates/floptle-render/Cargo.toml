@@ -12,3 +12,10 @@ rust-version.workspace = true
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
 floptle-rules = { path = "../floptle-rules" }
+
+glam = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }

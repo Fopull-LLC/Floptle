@@ -37,28 +37,31 @@ authors = ["Ty Johnston <tplordtp3@gmail.com>"]
 repository = "https://github.com/Fopull-LLC/Floptle"
 rust-version = "1.96"
 
-# --- Intended external dependency set (NOT yet wired up) -----------------------
-# Listed here as the agreed plan so `cargo build` stays instant during planning.
-# As each subsystem comes online we promote the relevant lines into the owning
-# crate's [dependencies]. Versions are indicative and will be pinned on use.
-#
-# [workspace.dependencies]
-# glam        = "*"   # SIMD math (Vec/Mat/Quat)
-# winit       = "*"   # cross-platform windowing + raw input
-# wgpu        = "*"   # GPU portability layer (Vulkan/Metal/DX12/GL) — see ADR-0002
-# naga        = "*"   # shader IR + WGSL/SPIR-V translation (powers ADR-0007)
-# egui        = "*"   # immediate-mode editor UI
-# egui_dock   = "*"   # dockable panels for the editor
-# mlua        = "*"   # Lua host (LuaJIT feature) for hot-reload scripts — ADR-0003
-# gltf        = "*"   # Blender -> engine asset import — ADR-0006
-# parry3d     = "*"   # triangle-mesh BVH queries for static/imported meshes
-# rapier3d    = "*"   # OPTIONAL rigid-body dynamics (object-vs-object only).
-#                     # Our SDF collision world + controllers are custom — ADR-0012.
-# serde + ron = "*"   # scene / prefab / material / vfx / shader serialization
-# image       = "*"   # texture decoding
-# bytemuck    = "*"   # POD casting for GPU buffers
-# parking_lot = "*"   # faster locks
-# rustc-hash  = "*"   # fast hashmaps for hot paths
+# --- Workspace dependencies ----------------------------------------------------
+# Promoted here as each subsystem comes online (versions pinned, matching the
+# floptle-proof slice). Crates opt in with `dep.workspace = true`. Remaining
+# planned deps (commented) are promoted when their phase lands.
+[workspace.dependencies]
+glam = "0.33.1"                                          # SIMD math + f64 (DVec3) — large-world
+winit = "0.30.13"                                        # cross-platform windowing + raw input
+wgpu = "29.0.3"                                           # GPU portability layer — ADR-0002
+bytemuck = { version = "1.25.0", features = ["derive"] } # POD casting for GPU buffers
+pollster = "0.4.0"                                       # block_on for device bootstrap
+log = "0.4.33"                                            # logging facade
+env_logger = "0.11.11"                                    # logger backend (binaries only)
+
+# Promoted in later phases:
+# naga        = "29"   # shader IR + WGSL transpile — Phase 3, ADR-0007
+# egui        = "*"    # editor UI — Phase 6, ADR-0004
+# egui_dock   = "*"    # dockable editor panels — Phase 6
+# mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003
+# gltf        = "*"    # Blender -> engine import — Phase 2, ADR-0006
+# parry3d     = "*"    # triangle-mesh BVH for imported meshes — Phase 6, ADR-0012
+# rapier3d    = "*"    # OPTIONAL rigid-body dynamics only — later, ADR-0012
+# serde + ron = "*"    # scene / prefab / material serialization — Phase 2/5
+# image       = "*"    # texture decoding — Phase 2
+# parking_lot = "*"    # faster locks
+# rustc-hash  = "*"    # fast hashmaps for hot paths
 
 [profile.dev]
 opt-level = 1          # keep the editor usably fast even in debug builds

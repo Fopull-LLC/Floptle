@@ -19,6 +19,16 @@
 //!                  coordinates — large-world-safe by default (ADR-0015).
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.
+// Phase 1 modules. `mesh`, `material`, `raymarch`, `post`, `light` arrive in
+// Phases 2/4; these three are the bootstrap + the camera-relative upload seam.
+pub mod device;
+pub mod frame;
+pub mod graph;
+
+pub use device::Gpu;
+pub use frame::{Projection, RenderCamera};
+
+/// Backends Floptle can target through wgpu. Mac uses Metal automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Vulkan,
