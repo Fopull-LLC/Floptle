@@ -43,9 +43,15 @@ const MOON_CAPTURE: f32 = 20.0; // within this of the moon surface, moon gravity
 const MOON_G: f32 = 0.32; // moon gravity is weak so you can jump off it easily
 const NOCLIP_SPEED: f32 = 45.0;
 const DESCEND_RATE: f32 = 1.3; // infinite-descent octaves per second while holding C
-const DIVE_MAX: f32 = 8.0; // descent floor (Menger iteration / f32 precision limit)
-const AUTO_DIVE_RATE: f32 = 0.7; // octaves/sec auto-descent while flying through a void
-const AUTO_DIVE_CLEAR: f32 = 2.2; // min void clearance (x player scale) to auto-descend
+const DIVE_MAX: f32 = 7.0; // descent floor — past here iters cap (4+7=11) and f32
+// precision of fine detail runs out; true-infinite needs the floating-origin
+// rebase (ADR-0020), which the rem_euclid Menger can't do cleanly (measured).
+const AUTO_DIVE_RATE: f32 = 1.4; // octaves/sec auto-descent at full gate (open void)
+// Clearance-gated, self-regulating: zoom fast in a big open void, but as you fall
+// TOWARD a wall the clearance drops and the gate closes so you actually LAND;
+// walk off into the next void and it re-opens. Units are capsule-radii.
+const AUTO_DIVE_NEAR: f32 = 8.0; // below this clearance: no auto-descent (you can land)
+const AUTO_DIVE_FAR: f32 = 40.0; // above this clearance: full-rate auto-descent
 
 fn moon_center() -> Vec3 {
     Vec3::new(0.0, MOON_DIST, 0.0)
@@ -360,19 +366,17 @@ impl Character {
         let diving = c.descend > 0.0 && inside;
         if inside {
             self.dive = (self.dive + c.descend * DESCEND_RATE * dt).clamp(0.0, DIVE_MAX);
-            // AUTO-DESCEND: flying/falling through an open pocket of the sponge pulls
-            // you deeper (the world scales up so the hole you dove into opens into
-            // sub-tunnels). Speed-based because "deeper" has no fixed direction in a
-            // sponge; gated on actually being in a void (not hugging a wall) and
-            // moving with intent, so walking/idling never zooms. Descend-only — X
-            // ascends back out.
+            // AUTO-DESCEND (self-regulating): the deeper into open space you are, the
+            // faster the world zooms up around you — but as you fall toward a wall the
+            // clearance drops and the gate closes so you LAND instead of floating past
+            // it forever. Walk/fall off into the next void and it re-opens => the
+            // "land, then keep falling into the detail" loop. X ascends back out.
             if !self.grounded && !diving {
                 let s0 = cur_scale();
-                let spd = self.vel.length();
-                if f_c(self.pos, time) > AUTO_DIVE_CLEAR * s0 && spd > 0.3 * MAX_SPEED * s0 {
-                    // rate tracks speed but is clamped so it can't spike "too fast"
-                    let r = (spd / (MAX_SPEED * s0)).clamp(0.0, 1.5) * AUTO_DIVE_RATE;
-                    self.dive = (self.dive + r * dt).clamp(0.0, DIVE_MAX);
+                let clear = f_c(self.pos, time) / (CAP_R * s0); // capsule-radii to wall
+                let gate = smoothstep(AUTO_DIVE_NEAR, AUTO_DIVE_FAR, clear);
+                if gate > 0.0 {
+                    self.dive = (self.dive + AUTO_DIVE_RATE * gate * dt).clamp(0.0, DIVE_MAX);
                 }
             }
         }
@@ -538,7 +542,9 @@ impl Character {
             for o in [-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
                 let cap = self.pos + up * (cap_hh * o);
                 let mut cc = cap;
-                for _ in 0..4 {
+                // more relaxation iterations + a gentler shove fraction => concave
+                // fractal corners resolve smoothly instead of snapping/jittering
+                for _ in 0..6 {
                     let f = f_c(cc, time);
                     if f >= cap_r - SKIN * s {
                         break;
@@ -546,7 +552,7 @@ impl Character {
                     let g = grad(cc, time, EPS_N);
                     let gm = g.length();
                     let nrm = if gm > G_MIN { g / gm } else { up };
-                    cc += nrm * (cap_r - f).min(max_shove);
+                    cc += nrm * ((cap_r - f) * 0.8).min(max_shove);
                 }
                 correction += cc - cap;
                 let f0 = f_c(cap, time);

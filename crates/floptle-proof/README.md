@@ -92,16 +92,30 @@ hands you to it. A **grappling hook** (click) and a deliberately **no-air-contro
 platformer (coyote + jump buffering + asymmetric jump arc + squash-and-stretch)
 round it out, plus **noclip (V)** to fly around and inspect.
 
-**Infinite descent — shrink and walk in:** *you shrink* (scale = `2^(-dive)`), so
-the sponge's sub-tunnels open up around you into ever-finer chambers and each level
-the sponge unfolds another iteration of detail. Because the player shrinks rather
-than the field rebasing, there's **no pop** — the world just keeps getting bigger
-around you, octave after octave, to the f32-precision limit. Everything — capsule
-size, walk speed, gravity, jump, grapple reach, camera boom — scales with you.
-Three ways to dive: **hold C** (deliberate descent — also un-sticks you from the
-wall so you sink into the opening); **fly/fall through a hole** (auto-descent — dive
-into a void and the world scales up so it opens into sub-tunnels you fall through,
-recursively); **hold X** to ascend back out.
+**Descent — shrink and walk in:** *you shrink* (scale = `2^(-dive)`), so the
+sponge's sub-tunnels open up around you into ever-finer chambers and each level the
+sponge unfolds another iteration of detail. Everything — capsule size, walk speed,
+gravity, jump, grapple reach, camera boom — scales with you, and your **velocity is
+rescaled with you** so control authority stays constant no matter how deep. Three
+ways to dive: **hold C** (deliberate — also un-sticks you from the wall so you sink
+into the opening); **fall through a hole** (**self-regulating auto-descent**: the
+deeper into open space you are the faster the world zooms up around you, but as you
+fall toward a wall the gate closes so you actually **land** — then walk/fall off
+into the next void and it re-opens, the "land, then keep falling into the detail"
+loop); **hold X** to ascend back out.
+
+Practical depth is bounded (~10 self-similar levels): past that, `f32` runs out of
+mantissa to resolve finer detail from a fixed coordinate. Truly *unbounded* descent
+needs a floating-origin **rebase** of the fractal coordinate each level — which the
+current `mod(p·3ⁱ,2)` Menger can't do seamlessly (measured ~140% seam); it needs the
+IFS *folding* form. That's the engine's job, captured in
+[ADR-0020](../../docs/decisions/0020-fractal-shape-primitive.md).
+
+**Optimization — detail exactly where you are:** the renderer uses **distance LOD** —
+full Menger iterations only in a bubble around you (the bubble scales down with the
+dive so it always hugs you), dropping an iteration per bubble-radius beyond. Far
+geometry (scaled way up and far off during a deep dive) is cheap and coarse; the
+space you're in always gets max detail. Collision is always full-detail at your feet.
 
 **Orientation:** your "up" only auto-corrects to the surface **while you're
 grounded** (so you can walk up walls and around tunnels). In the **air your
