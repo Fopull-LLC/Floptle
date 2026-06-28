@@ -39,9 +39,18 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     return o;
 }
 
+// Replace NaN/Inf with 0 / a bound. CRITICAL for the feedback loop: a single
+// non-finite scene pixel, fed back as `hist * feedback`, stays NaN forever (even
+// feedback=0 doesn't kill it: NaN*0 = NaN), and the swirl spreads it into a
+// growing black blob that eats the screen. Sanitizing here breaks that.
+fn sane(v: vec3<f32>) -> vec3<f32> {
+    let no_nan = select(v, vec3<f32>(0.0), v != v); // v != v is true only for NaN
+    return clamp(no_nan, vec3<f32>(-1.0e4), vec3<f32>(1.0e4)); // clamp Inf
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    let scene = textureSample(sceneTex, samp, in.uv).rgb;
+    let scene = sane(textureSample(sceneTex, samp, in.uv).rgb);
 
     // Swirl + zoom the history sample → trails spiral inward and melt.
     let c = in.uv - vec2<f32>(0.5);
@@ -55,7 +64,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // was rendered with flips Y. Uncompensated, the feedback loop accumulates a
     // vertically-mirrored ghost every frame (the "double vision"). Flip Y here
     // so the trail re-registers with the live scene — one image, no mirror.
-    let hist = textureSample(histTex, samp, vec2<f32>(huv.x, 1.0 - huv.y)).rgb;
-    let col = scene + hist * G.feedback;
+    let hist = sane(textureSample(histTex, samp, vec2<f32>(huv.x, 1.0 - huv.y)).rgb);
+    let col = sane(scene + hist * G.feedback);
     return vec4<f32>(col, 1.0);
 }

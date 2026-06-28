@@ -222,9 +222,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             col = col + base * rim * 0.4;
         }
         col = mix(col, vec3<f32>(0.0), clamp(t / 100.0, 0.0, 1.0) * 0.45);
-        let csc = exp2(-G.dive.x);
-        let cd = abs(length(p - G.contact.xyz) - 0.30 * csc);
-        col = col + G.contact.w * (1.0 - smoothstep(0.0, 0.1 * csc, cd)) * vec3<f32>(0.4, 0.9, 1.0) * 0.8;
+        // contact ring — only when grounded (contact.w>0.5), and with a floored
+        // smoothstep edge so a deep dive (csc -> 0) can't divide-by-zero -> NaN.
+        if (G.contact.w > 0.5) {
+            let csc = exp2(-G.dive.x);
+            let cd = abs(length(p - G.contact.xyz) - 0.30 * csc);
+            let edge = max(0.1 * csc, 1.0e-4);
+            col = col + (1.0 - smoothstep(0.0, edge, cd)) * vec3<f32>(0.4, 0.9, 1.0) * 0.8;
+        }
     } else {
         col = pal(0.6 + 0.15 * rd.y + 0.05 * sin(G.time * 0.1)) * 0.05;
     }
@@ -232,5 +237,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     // grapple reticle (screen-center dot)
     let cc = (in.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0);
     col = mix(col, vec3<f32>(1.0, 0.9, 0.6), (1.0 - smoothstep(0.004, 0.008, length(cc))) * 0.6);
+    // final guard: never emit NaN/Inf into the feedback history (blob-proofing)
+    col = select(col, vec3<f32>(0.0), col != col);
+    col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0e4));
     return vec4<f32>(col, 1.0);
 }
