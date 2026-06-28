@@ -100,12 +100,13 @@ cargo run -p floptle-proof --bin descent --release
 
 | Input | Action |
 |---|---|
-| **W A S D** | walk on the surface (grounded only — no air control) |
-| **Space** | jump (coyote time + buffering + variable height) |
+| **W A S D** | walk (grounded) / **jetpack** thrust (in air) |
+| **Space** | jump on the ground; **hold in the air = jetpack up-thrust** |
 | **Shift** | sprint |
-| **Mouse** | look (click to capture; click again to fire/hold the grapple) |
+| **Ctrl + Mouse** | **roll / pitch your whole body** in the air (wingsuit-style) |
+| **Mouse / click** | look; click to capture, click again to **fire + hold the grapple** (swing on the rope; release = slingshot) |
 | **Scroll** | zoom; all the way in for first person |
-| **V** | toggle **noclip free-fly** (Space up / Shift down) — fly into the core |
+| **V** | toggle **noclip free-fly** (Space up / Shift down) |
 | **F / R** | reset camera distance / respawn |
 
 You spawn on a **moon** with the bounded fractal **planet** on the horizon; jump/

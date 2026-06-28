@@ -34,13 +34,14 @@ const RENDER_DIV: u32 = 1;
 // Measured walkable: ~10deg surface-normal rotation per 0.18u step, |grad|~0.8,
 // 11% solid interior (collidable), and its normal is ~radial so mass-gravity
 // toward the core gives a stable "up" you can walk on.
-const MBS: f32 = 14.0; // scale the bulb up to a ~17-radius fractal planet
+const MBS: f32 = 45.0; // scale the bulb up to a COLOSSAL ~54-radius fractal planet
 const WMORPH: f32 = 0.05; // slow morph rate of the bulb power
 // a moon you spawn on, with the fractal planet on the horizon to jump down to
-const MOON_DIST: f32 = 55.0;
-const R_MOON: f32 = 5.0;
-const MOON_CAPTURE: f32 = 7.0; // within this of the moon surface, moon gravity wins
-const NOCLIP_SPEED: f32 = 16.0;
+const MOON_DIST: f32 = 150.0;
+const R_MOON: f32 = 12.0;
+const MOON_CAPTURE: f32 = 20.0; // within this of the moon surface, moon gravity wins
+const MOON_G: f32 = 0.32; // moon gravity is weak so you can jump off it easily
+const NOCLIP_SPEED: f32 = 45.0;
 
 fn moon_center() -> Vec3 {
     Vec3::new(0.0, MOON_DIST, 0.0)
@@ -62,9 +63,9 @@ const SNAP_RANGE: f32 = 0.28; // ground-stick: pull foot back to the surface wit
 const SLOPE_COS: f32 = 0.5; // cos(60deg): movement/stick grounded gate
 const JUMP_GROUND_EPS: f32 = 0.18; // generous jump ground detection (3x GROUND_EPS)
 const JUMP_SLOPE: f32 = 0.35; // jump allowed on steeper surfaces than walking
-const V_SHOVE_MAX: f32 = 6.0; // clamp on depenetration + surface-carry (> morph speed)
+const V_SHOVE_MAX: f32 = 9.0; // clamp on depenetration + surface-carry (> morph speed)
 const V_DEAD: f32 = 0.05; // surface-carry deadband (kills standing jitter)
-const SURF_VMAX: f32 = 4.0; // morph surface-speed bound for substep sizing
+const SURF_VMAX: f32 = 8.0; // morph surface-speed bound for substep sizing
 const K_UP: f32 = 9.0; // up-vector temporal smoothing rate
 const MAX_UP_RATE: f32 = 2.6; // rad/s: clamp on up-TARGET change (anti camera-flip)
 const SQUASH_K: f32 = 18.0; // squash/stretch relax rate
@@ -78,11 +79,14 @@ const BLEND_FAR: f32 = 1.0; // gravity is radial beyond this
 const COYOTE: f32 = 0.12;
 const FP_DIST: f32 = 1.0; // zoom in past this boom length => first person
 const EYE: f32 = 0.15;
-// grapple
-const GRAPPLE_MAX: f32 = 26.0;
-const PULL_K: f32 = 13.0;
-const PULL_MAX: f32 = 20.0;
-const GRAPPLE_HIT: f32 = CAP_R * 0.6;
+// grapple swing
+const GRAPPLE_MAX: f32 = 75.0;
+const REEL_SPEED: f32 = 14.0; // rope shorten rate while holding (reel in)
+const GRAPPLE_HIT: f32 = CAP_R * 1.0;
+// jetpack / air control
+const JETPACK_UP: f32 = 24.0; // upward thrust (Space held in air)
+const JETPACK_ACCEL: f32 = 26.0; // horizontal air thrust (WASD in air)
+const AIR_MAX: f32 = 10.0; // max horizontal air speed from the jetpack
 
 // ----------------------------- the field -----------------------------------
 
@@ -170,6 +174,12 @@ fn gravity_down(p: Vec3, t: f32) -> Vec3 {
 
 /// Great-circle interpolation between two unit directions, antipodal-guarded so
 /// it can never pass through a zero-length (sign-ambiguous) vector.
+/// Rodrigues rotation of `v` about unit `axis` by `angle`.
+fn rotate_around(v: Vec3, axis: Vec3, angle: f32) -> Vec3 {
+    let (s, c) = angle.sin_cos();
+    v * c + axis.cross(v) * s + axis * (axis.dot(v)) * (1.0 - c)
+}
+
 fn slerp_dir(a: Vec3, b: Vec3, t: f32) -> Vec3 {
     let d = a.dot(b).clamp(-1.0, 1.0);
     if d > 0.9995 {
@@ -200,7 +210,7 @@ fn rate_limit_dir(prev: Vec3, target: Vec3, max_angle: f32) -> Vec3 {
 enum Grapple {
     Idle,
     Firing { tip: Vec3, dir: Vec3, len: f32 },
-    Attached { anchor: Vec3 },
+    Attached { anchor: Vec3, rest_len: f32 },
 }
 
 /// Per-frame control inputs.
@@ -212,6 +222,7 @@ struct Ctrl {
     aim: Vec3,
     grapple_edge: bool,
     grapple_held: bool,
+    free_orient: bool,
 }
 
 struct Character {
@@ -318,8 +329,17 @@ impl Character {
             self.squash = 1.35; // stretch on jump
         }
 
-        let pull = matches!(self.grapple, Grapple::Attached { .. });
-        let speed = self.vel.length().max(SURF_VMAX).max(if pull { PULL_MAX } else { 0.0 });
+        // extract grapple swing state (mutated in the substeps, written back after)
+        let mut g_attached = false;
+        let mut g_anchor = Vec3::ZERO;
+        let mut g_rest = 0.0_f32;
+        if let Grapple::Attached { anchor, rest_len } = &self.grapple {
+            g_attached = true;
+            g_anchor = *anchor;
+            g_rest = *rest_len;
+        }
+        let near_moon = (self.pos - moon_center()).length() - R_MOON < MOON_CAPTURE;
+        let speed = self.vel.length().max(SURF_VMAX).max(if g_attached { 16.0 } else { 0.0 });
         let n = (((speed * dt) / (0.5 * CAP_R)).ceil().max(4.0) as u32).min(16);
         let sub = dt / n as f32;
 
@@ -345,19 +365,24 @@ impl Character {
                 self.v_surface = 0.0;
             }
 
-            // (2) GRAVITY (asymmetric for a snappy jump arc)
+            // (2) GRAVITY (asymmetric arc; jetpack floats it; weak near the moon)
             let gdir = gravity_down(self.pos, time);
             let vup = self.vel.dot(up);
-            let g_mag = if self.grounded {
+            let mut g_mag = if self.grounded {
                 G_GROUND
+            } else if c.jump_held {
+                G_RISE // jetpack makes the arc floaty
             } else if vup > 0.0 {
-                if c.jump_held { G_RISE } else { G_CUT }
+                G_CUT
             } else {
                 G_FALL
             };
+            if near_moon {
+                g_mag *= MOON_G; // weak moon gravity => easy to jump off
+            }
             self.vel += gdir * g_mag * sub;
 
-            // (3) INPUT — NO AIR CONTROL: accelerate only while grounded
+            // (3) MOVEMENT: walk on the ground; JETPACK in the air
             if self.grounded {
                 if c.wish.length_squared() > 1e-6 {
                     if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
@@ -375,19 +400,44 @@ impl Character {
                     let vt = self.vel - vn;
                     self.vel = vn + vt * (-FRIC * sub).exp();
                 }
-            }
-
-            // (3b) GRAPPLE PULL — external force (exempt from no-air-control)
-            if let Grapple::Attached { anchor } = self.grapple {
-                let to = anchor - self.pos;
-                let dist = to.length();
-                if dist > CAP_R * 2.0 {
-                    self.vel += (to / dist) * (PULL_K * dist).min(PULL_MAX) * sub;
+            } else {
+                // jetpack: WASD air thrust (speed-capped) + Space up-thrust
+                if c.wish.length_squared() > 1e-6 {
+                    if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
+                        self.vel += wt * JETPACK_ACCEL * sub;
+                        let vn = up * self.vel.dot(up);
+                        let mut vt = self.vel - vn;
+                        if vt.length() > AIR_MAX {
+                            vt = vt.normalize() * AIR_MAX;
+                        }
+                        self.vel = vn + vt;
+                    }
+                }
+                if c.jump_held {
+                    self.vel += up * JETPACK_UP * sub;
                 }
             }
 
             // (4) INTEGRATE
             self.pos += self.vel * sub;
+
+            // (4b) GRAPPLE SWING — reel the rope in, and when it's taut hold to
+            // length + remove outward velocity => you SWING on it like a pendulum.
+            if g_attached {
+                g_rest = (g_rest - REEL_SPEED * sub).max(2.0);
+                let to = g_anchor - self.pos;
+                let dist = to.length();
+                if dist > 1e-3 {
+                    let dir = to / dist;
+                    if dist > g_rest {
+                        self.pos += dir * (dist - g_rest);
+                        let away = self.vel.dot(dir);
+                        if away < 0.0 {
+                            self.vel -= dir * away;
+                        }
+                    }
+                }
+            }
 
             // (5) DEPENETRATION — 5 spheres, position-only, clamped
             let max_shove = V_SHOVE_MAX * sub;
@@ -445,14 +495,24 @@ impl Character {
             }
 
             // up target: stable contact normal when grounded, gravity otherwise;
-            // RATE-LIMITED before the slerp so a small orbiting mass can't flip it.
-            let raw = if self.grounded { n_lo } else { -gravity_down(self.pos, time) };
-            let limited = rate_limit_dir(self.prev_up_target, raw, MAX_UP_RATE * sub);
-            self.prev_up_target = limited;
-            self.up_smooth = slerp_dir(self.up_smooth, limited, 1.0 - (-K_UP * sub).exp());
+            // RATE-LIMITED before the slerp so a small mass can't flip it. SKIPPED
+            // in free-orient (the player controls their own up via Ctrl+mouse).
+            if !c.free_orient {
+                let raw = if self.grounded { n_lo } else { -gravity_down(self.pos, time) };
+                let limited = rate_limit_dir(self.prev_up_target, raw, MAX_UP_RATE * sub);
+                self.prev_up_target = limited;
+                self.up_smooth = slerp_dir(self.up_smooth, limited, 1.0 - (-K_UP * sub).exp());
+            }
 
             self.contact = lo - n_lo * f_lo;
             self.f_player = f_lo;
+        }
+
+        // write the reeled rope length back
+        if g_attached {
+            if let Grapple::Attached { rest_len, .. } = &mut self.grapple {
+                *rest_len = g_rest;
+            }
         }
 
         // squash/stretch relaxes back to neutral
@@ -460,15 +520,19 @@ impl Character {
     }
 
     fn update_grapple(&mut self, time: f32, c: &Ctrl) {
+        let pos = self.pos;
         match &mut self.grapple {
             Grapple::Firing { tip, dir, len } => {
-                for _ in 0..48 {
+                for _ in 0..64 {
                     let d = f_c(*tip, time);
                     if d < GRAPPLE_HIT {
-                        self.grapple = Grapple::Attached { anchor: *tip };
+                        self.grapple = Grapple::Attached {
+                            anchor: *tip,
+                            rest_len: (pos - *tip).length().max(2.0),
+                        };
                         return;
                     }
-                    let step = d.max(0.06);
+                    let step = d.max(0.15);
                     *tip += *dir * step;
                     *len += step;
                     if *len > GRAPPLE_MAX {
@@ -477,14 +541,14 @@ impl Character {
                     }
                 }
             }
-            Grapple::Attached { anchor } => {
+            Grapple::Attached { anchor, .. } => {
                 if !c.grapple_held {
-                    self.grapple = Grapple::Idle; // release keeps momentum
+                    self.grapple = Grapple::Idle; // release keeps momentum (slingshot)
                 } else {
-                    // stick to the SHIFTING surface: snap the anchor back onto
-                    // f=0 each frame; detach if the structure morphed away.
+                    // stick the anchor to the SHIFTING surface; detach if it
+                    // morphs away.
                     let f = f_c(*anchor, time);
-                    if f.abs() > 1.5 {
+                    if f.abs() > 3.0 {
                         self.grapple = Grapple::Idle;
                     } else {
                         let g = grad(*anchor, time, EPS_N);
@@ -535,6 +599,7 @@ struct Input {
     grapple_edge: bool,
     grapple_held: bool,
     sprint: bool,
+    ctrl: bool,
     captured: bool,
     mouse_dx: f32,
     mouse_dy: f32,
@@ -843,7 +908,7 @@ impl State {
             targets,
             render_size,
             cc: Character::spawn(),
-            cam_pitch: -0.15,
+            cam_pitch: -0.25,
             cam_dist: 7.0,
             cam_fwd_t: Vec3::new(0.0, -1.0, 0.0), // look toward the planet on spawn
             input: Input::default(),
@@ -897,24 +962,35 @@ impl State {
 
     fn update(&mut self, dt: f32, time: f32) {
         let sens = 0.0025;
-        let up = self.cc.up_smooth;
-        // yaw: rotate the persistent forward about up (incremental, never rebuilt
-        // from an absolute reference => no frame can flip)
-        let yaw = -self.input.mouse_dx * sens;
-        if yaw != 0.0 {
-            let (s, cz) = yaw.sin_cos();
-            let f = self.cam_fwd_t;
-            self.cam_fwd_t = f * cz + up.cross(f) * s + up * (up.dot(f)) * (1.0 - cz);
+        // CTRL + mouse while airborne = roll/pitch your whole frame (wingsuit).
+        let free_orient = self.input.ctrl && !self.cc.noclip && !self.cc.grounded;
+        if free_orient {
+            let up = self.cc.up_smooth;
+            let right = self.cam_fwd_t.cross(up).try_normalize().unwrap_or(Vec3::X);
+            let pitch_amt = -self.input.mouse_dy * sens * 1.4;
+            let roll_amt = self.input.mouse_dx * sens * 1.4;
+            let nu = rotate_around(up, right, pitch_amt);
+            self.cam_fwd_t = rotate_around(self.cam_fwd_t, right, pitch_amt).normalize();
+            self.cc.up_smooth = rotate_around(nu, self.cam_fwd_t, roll_amt).normalize();
+            self.cc.prev_up_target = self.cc.up_smooth;
+        } else {
+            let up = self.cc.up_smooth;
+            // yaw: rotate the persistent forward about up (incremental => no flips)
+            let yaw = -self.input.mouse_dx * sens;
+            if yaw != 0.0 {
+                let (s, cz) = yaw.sin_cos();
+                let f = self.cam_fwd_t;
+                self.cam_fwd_t = f * cz + up.cross(f) * s + up * (up.dot(f)) * (1.0 - cz);
+            }
+            self.cam_fwd_t = (self.cam_fwd_t - up * self.cam_fwd_t.dot(up))
+                .try_normalize()
+                .unwrap_or(self.cam_fwd_t);
+            self.cam_pitch = (self.cam_pitch - self.input.mouse_dy * sens).clamp(-1.0, 1.2);
         }
-        // parallel-transport: keep forward in the tangent plane as up drifts
-        self.cam_fwd_t = (self.cam_fwd_t - up * self.cam_fwd_t.dot(up))
-            .try_normalize()
-            .unwrap_or(self.cam_fwd_t);
-        self.cam_pitch = (self.cam_pitch - self.input.mouse_dy * sens).clamp(-1.0, 1.2);
         self.input.mouse_dx = 0.0;
         self.input.mouse_dy = 0.0;
 
-        let (_up, fwd_t, right_t) = self.tangent_basis();
+        let (up, fwd_t, right_t) = self.tangent_basis();
         let mut wish = Vec3::ZERO;
         if self.input.w {
             wish += fwd_t;
@@ -929,16 +1005,17 @@ impl State {
             wish -= right_t;
         }
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let aim = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
+        let fly_aim = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
+        let aim = self.aim_dir(time); // grapple aim from the crosshair raycast
 
         if self.cc.noclip {
             // free-fly: full-3D camera-relative (Space up, Shift down)
             let mut dir = Vec3::ZERO;
             if self.input.w {
-                dir += aim;
+                dir += fly_aim;
             }
             if self.input.s {
-                dir -= aim;
+                dir -= fly_aim;
             }
             if self.input.d {
                 dir += right_t;
@@ -962,6 +1039,7 @@ impl State {
                 aim,
                 grapple_edge: self.input.grapple_edge,
                 grapple_held: self.input.grapple_held,
+                free_orient,
             };
             self.cc.step(dt, time, &ctrl);
         }
@@ -969,22 +1047,19 @@ impl State {
         self.input.grapple_edge = false;
     }
 
-    fn camera(&self, time: f32) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+    /// Camera pose as vectors: (cam_pos, forward, up).
+    fn camera_pose(&self, time: f32) -> (Vec3, Vec3, Vec3) {
         let (up, fwd_t, _right_t) = self.tangent_basis();
         let (cam_pos, fwd) = if self.cam_dist <= FP_DIST {
-            // first person: look with pitch (positive = up)
             let (sp, cp) = self.cam_pitch.sin_cos();
             let look = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
             (self.cc.pos + up * EYE, look)
         } else {
-            // third person: orbit ABOVE and BEHIND, always looking down at the
-            // player. The elevation is clamped so the camera can never dip under
-            // the horizon (which is what made the view feel inverted).
+            // third person: orbit ABOVE and BEHIND, looking down at the player.
             let target = self.cc.pos + up * (CAP_HH + 0.3);
             let e = (0.55 - self.cam_pitch * 0.5).clamp(0.15, 1.3);
             let (se, ce) = e.sin_cos();
             let dir_to_cam = (-fwd_t * ce + up * se).try_normalize().unwrap_or(up);
-            // spring-arm: pull in if the boom (cam_dist) would clip the planet
             let dist: f32;
             let mut s = 0.4_f32;
             loop {
@@ -1002,6 +1077,11 @@ impl State {
             let cp_pos = target + dir_to_cam * dist;
             (cp_pos, (target - cp_pos).try_normalize().unwrap_or(-fwd_t))
         };
+        (cam_pos, fwd, up)
+    }
+
+    fn camera(&self, time: f32) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+        let (cam_pos, fwd, up) = self.camera_pose(time);
         let right = fwd.cross(up).try_normalize().unwrap_or(Vec3::X);
         let camup = right.cross(fwd).normalize();
         (
@@ -1010,6 +1090,26 @@ impl State {
             [camup.x, camup.y, camup.z, 0.0],
             [fwd.x, fwd.y, fwd.z, 0.0],
         )
+    }
+
+    /// Grapple aim = raycast the screen-center crosshair (camera forward) and aim
+    /// from the player toward the hit, so THIRD-PERSON aim matches the reticle.
+    fn aim_dir(&self, time: f32) -> Vec3 {
+        let (cam_pos, cam_fwd, _up) = self.camera_pose(time);
+        let mut target = cam_pos + cam_fwd * (GRAPPLE_MAX + 20.0);
+        let mut tt = 0.5_f32;
+        for _ in 0..96 {
+            let d = f_c(cam_pos + cam_fwd * tt, time);
+            if d < 0.3 {
+                target = cam_pos + cam_fwd * tt;
+                break;
+            }
+            tt += d.max(0.3);
+            if tt > 220.0 {
+                break;
+            }
+        }
+        (target - self.cc.pos).try_normalize().unwrap_or(cam_fwd)
     }
 
     fn render(&mut self) {
@@ -1025,7 +1125,7 @@ impl State {
         let gp = match &self.cc.grapple {
             Grapple::Idle => [0.0, 0.0, 0.0, 0.0],
             Grapple::Firing { tip, .. } => [tip.x, tip.y, tip.z, 1.0],
-            Grapple::Attached { anchor } => [anchor.x, anchor.y, anchor.z, 2.0],
+            Grapple::Attached { anchor, .. } => [anchor.x, anchor.y, anchor.z, 2.0],
         };
         let g = Globals {
             cam_pos,
@@ -1230,6 +1330,7 @@ impl ApplicationHandler for App {
                             state.input.jump_held = pressed;
                         }
                         KeyCode::ShiftLeft | KeyCode::ShiftRight => state.input.sprint = pressed,
+                        KeyCode::ControlLeft | KeyCode::ControlRight => state.input.ctrl = pressed,
                         KeyCode::KeyF if pressed => state.cam_dist = 7.0,
                         KeyCode::KeyV if pressed => state.cc.noclip = !state.cc.noclip,
                         KeyCode::KeyR if pressed => state.cc = Character::spawn(),
