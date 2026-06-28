@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_render::Gpu;
+use floptle_render::{Gpu, Raster};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -33,6 +33,7 @@ struct Runner {
     app: App,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
+    raster: Option<Raster>,
     clock: Option<Clock>,
 }
 
@@ -51,7 +52,9 @@ impl ApplicationHandler for Runner {
             .with_title("Floptle — Phase 1")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        self.gpu = Some(Gpu::new(window.clone()));
+        let gpu = Gpu::new(window.clone());
+        self.raster = Some(Raster::new(&gpu));
+        self.gpu = Some(gpu);
         let now = Instant::now();
         self.clock = Some(Clock { last: now, fps_since: now, fps_frames: 0 });
         self.window = Some(window);
@@ -86,9 +89,12 @@ impl ApplicationHandler for Runner {
 
 impl Runner {
     fn render(&mut self) {
-        let (Some(gpu), Some(window), Some(clock)) =
-            (self.gpu.as_mut(), self.window.as_ref(), self.clock.as_mut())
-        else {
+        let (Some(gpu), Some(raster), Some(window), Some(clock)) = (
+            self.gpu.as_mut(),
+            self.raster.as_ref(),
+            self.window.as_ref(),
+            self.clock.as_mut(),
+        ) else {
             return;
         };
 
@@ -108,7 +114,7 @@ impl Runner {
             clock.fps_since = now;
         }
 
-        // minimal render: a slow indigo color-pulse so the loop is visibly alive
+        // a slow indigo color-pulse behind the geometry, so the loop is visibly alive
         let t = self.app.time.elapsed as f32;
         let pulse = |phase: f32, lo: f32, hi: f32| {
             let s = 0.5 + 0.5 * (t * 0.4 + phase).sin();
@@ -118,7 +124,7 @@ impl Runner {
 
         match gpu.acquire() {
             Some(frame) => {
-                gpu.clear(&frame, color);
+                raster.draw(gpu, &frame, color);
                 frame.present();
             }
             None => {
