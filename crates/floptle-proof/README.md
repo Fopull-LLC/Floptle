@@ -73,6 +73,43 @@ The title bar is the HUD: fps, camera mode, `grounded?`, `f` (signed distance at
 the feet — stays `≥ -radius`, i.e. never embedded), and `vsurf` (surface speed
 under you — the money shot is standing still on a heaving wall and riding it).
 
+## Beat 3 — "Descent into the Fractal Core" (`--bin descent`)
+
+The big one. An **infinite fractal planet you descend into forever**. The world is
+a **log-periodic nested-shell field** — you're literally *inside* a hollow fractal
+sphere wrapped in spiral bridges, and the field is mathematically self-similar at
+ratio 2, so as you sink toward the core the world seamlessly rebases an octave and
+keeps unfolding (you asymptotically approach the center and never reach it). The
+HUD shows your `depth` (octave count).
+
+Gravity is a **density field**: gravity bends toward the dense bridges, so you can
+walk on top of, around, and **underneath** the swirling bridges in seemingly
+impossible ways. A **grappling hook** (click) shoots out, grabs a surface, and
+reels you in (pull scaled by distance) — the air-mobility tool for a deliberately
+**no-air-control** platformer (you only gain speed while grounded; coyote time +
+jump buffering + a snappy asymmetric jump arc + squash-and-stretch).
+
+The collision/dive field was gated GREEN by a headless measurement pass before any
+physics was wired (seamless dive `|df|=0.0000` / 0.01° normal rotation, hollow
+cavities, walkable bridges, `|∇f|≈0.9`, density pulls onto bridges at 0.82) — the
+same discipline that killed the Mandelbox in Beat 2.
+
+```bash
+cargo run -p floptle-proof --bin descent --release
+```
+
+| Input | Action |
+|---|---|
+| **W A S D** | walk on the surface (grounded only — no air control) |
+| **Space** | jump (coyote time + buffering + variable height) |
+| **Shift** | sprint |
+| **Mouse** | look (click to capture; click again to fire/hold the grapple) |
+| **Scroll** | zoom; all the way in for first person |
+| **F / R** | reset camera distance / respawn |
+
+> Experimental, first playable cut. The field math is proven; the *feel* (gravity,
+> jump, grapple, the dive cadence) is a tuning surface we iterate on.
+
 ## Notes
 
 - It renders at half-res then upscales — that's the single biggest perf lever; if
