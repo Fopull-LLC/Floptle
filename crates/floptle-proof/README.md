@@ -105,10 +105,19 @@ cargo run -p floptle-proof --bin descent --release
 | **Shift** | sprint |
 | **Mouse** | look (click to capture; click again to fire/hold the grapple) |
 | **Scroll** | zoom; all the way in for first person |
+| **V** | toggle **noclip free-fly** (Space up / Shift down) — fly into the core |
 | **F / R** | reset camera distance / respawn |
 
-> Experimental, first playable cut. The field math is proven; the *feel* (gravity,
-> jump, grapple, the dive cadence) is a tuning surface we iterate on.
+You spawn on a **moon** with the bounded fractal **planet** on the horizon; jump/
+walk off toward it and gravity hands you to the planet. The planet is **nested
+solid shells** (radius 32 / 16 / 8 / …) self-similar forever inward — use **V
+noclip** to fly through them and watch the infinite descent. Visuals are
+deliberately **stripped to clean geometry + lighting + palette** (no feedback
+trails / chromatic aberration / noise) so the raw fractal is legible.
+
+> Experimental cut. Known next step: the shells are *complete* spheres, so on-foot
+> descent needs **porous shells**; for now fly in with noclip to inspect. Feel
+> (gravity, jump, grapple) is a tuning surface.
 
 ## Notes
 
