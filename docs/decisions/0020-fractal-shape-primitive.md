@@ -99,3 +99,19 @@ level on it.
 - This is a **later-phase** feature (it presumes the shape system, shader IR, and
   large-world space exist); near-term it stays hand-written in `floptle-proof`. The
   proof binary is the reference implementation a future subsystem doc grows from.
+
+## Implementation note — descent needs the *folding* estimator form (measured)
+The `descent` proof shows two coupled facts the engine's "delvable" path must honor:
+- **f32 ceiling without rebase ≈ 14 levels.** Resolving Menger detail at level `i`
+  needs the eval coordinate known to `3^-i`; from a unit-cube `f32` coordinate
+  (~`1e-7`) that runs out around level 14 (measured `|∇f|≈0.95` holds to iters 11,
+  then degrades). So *bounded* descent (≤ ~10 levels) works with a fixed coordinate;
+  **true-infinite requires rebasing** to keep the relevant coordinate near-origin
+  with full mantissa (floating origin, ADR-0015, applied per-fractal-level).
+- **The estimator formula must be rebase-friendly.** The common `mod(p·3ⁱ, 2)`
+  ("large-multiply") Menger does **not** admit a clean factor-3 recenter — a rebase
+  centered on the nearest kept sub-cube measured **~140% seam error**. The
+  **IFS folding** form (`abs` → sort → `·3 − 2` → conditional fold per iteration)
+  keeps coordinates bounded *by construction*, is exactly self-similar, and is the
+  form a delvable fractal should use so rebasing is seamless. The engine's estimator
+  library should prefer/require the folding form for any estimator tagged delvable.

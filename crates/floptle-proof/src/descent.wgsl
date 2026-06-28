@@ -86,11 +86,21 @@ fn menger(p0: vec3<f32>, iters: i32) -> f32 {
 fn moon_de(p: vec3<f32>) -> f32 {
     return length(p - vec3<f32>(0.0, MOON_DIST, 0.0)) - R_MOON;
 }
-fn dive_iters() -> i32 {
-    return min(4 + i32(floor(G.dive.x)), 11);
+// DISTANCE LOD: render full Menger detail only in a bubble around the camera/
+// player (it scales DOWN with the dive, so the bubble always hugs you), and drop
+// an iteration per bubble-radius of distance beyond it. Far geometry — which is
+// scaled way up and far away during a deep dive — is cheap and coarse; the space
+// you're actually in always gets max detail. Collision (Rust) is unaffected.
+fn dive_iters_at(p: vec3<f32>) -> i32 {
+    let full = min(4 + i32(floor(G.dive.x)), 11);
+    let scale = exp2(-G.dive.x);
+    let r_full = MBS * 0.4 * scale; // full-detail radius around the camera
+    let d = max(length(p - G.cam_pos.xyz) - r_full, 0.0);
+    let drop = i32(d / (r_full + 1.0e-6));
+    return clamp(full - drop, 3, full);
 }
 fn f_world(p: vec3<f32>) -> f32 {
-    let world = MBS * menger(roty(p / MBS, G.time * WMORPH), dive_iters());
+    let world = MBS * menger(roty(p / MBS, G.time * WMORPH), dive_iters_at(p));
     return min(world, moon_de(p));
 }
 
