@@ -24,9 +24,11 @@
 pub mod device;
 pub mod frame;
 pub mod graph;
+pub mod raster;
 
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
+pub use raster::Raster;
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
