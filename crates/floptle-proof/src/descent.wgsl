@@ -40,10 +40,10 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
 }
 
 // ---- field constants (LOCK-STEP with descent.rs) ----
-const MBS: f32 = 14.0;
+const MBS: f32 = 45.0;
 const WMORPH: f32 = 0.05;
-const MOON_DIST: f32 = 55.0;
-const R_MOON: f32 = 5.0;
+const MOON_DIST: f32 = 150.0;
+const R_MOON: f32 = 12.0;
 const TAU: f32 = 6.2831853;
 
 // morphing Mandelbulb DE (signed: <0 inside the solid bulb)
