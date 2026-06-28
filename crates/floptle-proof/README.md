@@ -120,6 +120,7 @@ cargo run -p floptle-proof --bin descent --release
 | **C / X** | **descend / ascend** — shrink-and-walk-in, infinitely inward through the sponge (C also un-sticks you so you sink into holes) |
 | **W A S D** | walk (grounded) / **jetpack** thrust (in air) |
 | **Space** | jump on the ground; **hold in the air = jetpack up-thrust** (unlimited) |
+| **Q** | **jetpack down-thrust** (in air) / descend (noclip) |
 | **Shift** | sprint |
 | **Ctrl + Mouse** | **roll / pitch your whole body** in the air (wingsuit-style); air orientation never auto-snaps |
 | **Mouse / click** | look; click to capture, click again to **fire + hold the grapple** (swing on the rope; release = slingshot) |

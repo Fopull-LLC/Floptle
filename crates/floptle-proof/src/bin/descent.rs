@@ -44,8 +44,8 @@ const MOON_G: f32 = 0.32; // moon gravity is weak so you can jump off it easily
 const NOCLIP_SPEED: f32 = 45.0;
 const DESCEND_RATE: f32 = 1.3; // infinite-descent octaves per second while holding C
 const DIVE_MAX: f32 = 8.0; // descent floor (Menger iteration / f32 precision limit)
-const AUTO_DIVE_RATE: f32 = 0.6; // octaves/sec auto-descent while flying through a void
-const AUTO_DIVE_CLEAR: f32 = 4.0; // min void clearance (x player scale) to auto-descend
+const AUTO_DIVE_RATE: f32 = 0.7; // octaves/sec auto-descent while flying through a void
+const AUTO_DIVE_CLEAR: f32 = 2.2; // min void clearance (x player scale) to auto-descend
 
 fn moon_center() -> Vec3 {
     Vec3::new(0.0, MOON_DIST, 0.0)
@@ -252,6 +252,7 @@ struct Ctrl {
     grapple_held: bool,
     free_orient: bool,
     descend: f32, // +1 = descend (C), -1 = ascend (X)
+    jet_down: bool, // Q: jetpack DOWN-thrust in the air
 }
 
 struct Character {
@@ -354,6 +355,7 @@ impl Character {
         //   • FREE-FALL THROUGH A VOID : auto-descend, so jumping into a hole opens
         //              it up and you keep falling deeper, recursively. This is the
         //              "jump into a hole and the world scales around you" effect.
+        let s_prev = cur_scale(); // scale BEFORE this frame's dive update (for vel rescale)
         let inside = self.pos.length() < MBS * 1.6 && !near_moon;
         let diving = c.descend > 0.0 && inside;
         if inside {
@@ -367,8 +369,9 @@ impl Character {
             if !self.grounded && !diving {
                 let s0 = cur_scale();
                 let spd = self.vel.length();
-                if f_c(self.pos, time) > AUTO_DIVE_CLEAR * s0 && spd > 0.5 * MAX_SPEED * s0 {
-                    let r = (spd / (MAX_SPEED * s0)).min(2.5) * AUTO_DIVE_RATE;
+                if f_c(self.pos, time) > AUTO_DIVE_CLEAR * s0 && spd > 0.3 * MAX_SPEED * s0 {
+                    // rate tracks speed but is clamped so it can't spike "too fast"
+                    let r = (spd / (MAX_SPEED * s0)).clamp(0.0, 1.5) * AUTO_DIVE_RATE;
                     self.dive = (self.dive + r * dt).clamp(0.0, DIVE_MAX);
                 }
             }
@@ -382,6 +385,13 @@ impl Character {
         let s = cur_scale(); // player shrink factor: scale all lengths/speeds by it
         let cap_r = CAP_R * s;
         let cap_hh = CAP_HH * s;
+        // CRITICAL: when the dive scale changes, rescale velocity by the same ratio
+        // so your momentum stays constant in PLAYER-RELATIVE units. Without this,
+        // old absolute velocity dwarfs the (now s-scaled) thrust/gravity as you
+        // shrink, and you coast in one direction forever with no control authority.
+        if s_prev > 1e-20 && (s - s_prev).abs() > 0.0 {
+            self.vel *= s / s_prev;
+        }
 
         // grapple: start a shot, advance an in-flight shot, release if let go
         if c.grapple_edge {
@@ -491,6 +501,10 @@ impl Character {
                 }
                 if c.jump_held {
                     self.vel += up * JETPACK_UP * s * sub;
+                    thrusting = true;
+                }
+                if c.jet_down {
+                    self.vel -= up * JETPACK_UP * s * sub;
                     thrusting = true;
                 }
             }
@@ -689,6 +703,7 @@ struct Input {
     ctrl: bool,
     descend: bool,
     ascend: bool,
+    jet_down: bool, // Q
     captured: bool,
     mouse_dx: f32,
     mouse_dy: f32,
@@ -1116,7 +1131,7 @@ impl State {
             if self.input.jump_held {
                 dir += up;
             }
-            if self.input.sprint {
+            if self.input.sprint || self.input.jet_down {
                 dir -= up;
             }
             self.cc.fly(dt, time, dir);
@@ -1131,6 +1146,7 @@ impl State {
                 grapple_held: self.input.grapple_held,
                 free_orient,
                 descend: (self.input.descend as i32 - self.input.ascend as i32) as f32,
+                jet_down: self.input.jet_down,
             };
             self.cc.step(dt, time, &ctrl);
         }
@@ -1429,6 +1445,7 @@ impl ApplicationHandler for App {
                         KeyCode::ControlLeft | KeyCode::ControlRight => state.input.ctrl = pressed,
                         KeyCode::KeyC => state.input.descend = pressed,
                         KeyCode::KeyX => state.input.ascend = pressed,
+                        KeyCode::KeyQ => state.input.jet_down = pressed,
                         KeyCode::KeyF if pressed => state.cam_dist = 7.0,
                         KeyCode::KeyV if pressed => state.cc.noclip = !state.cc.noclip,
                         KeyCode::KeyR if pressed => state.cc = Character::spawn(),
