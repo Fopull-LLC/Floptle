@@ -26,5 +26,6 @@ reasoning history stays intact.
 | [0017](0017-time-as-a-field.md) | **Time as a rate field** (local clocks) | Accepted |
 | [0018](0018-lawset-realm.md) | **The Lawset / Realm meta-spine** (a world's laws) | Accepted |
 | [0019](0019-field-interaction-graph.md) | **Field-interaction graph** (composition by design) | Accepted |
+| [0020](0020-fractal-shape-primitive.md) | **Fractal as a first-class shape primitive** (walkable/delvable, out of the box) | Accepted |
 
 > Date format: ISO `YYYY-MM-DD`. Decider: Ty Johnston (Fopull LLC).
