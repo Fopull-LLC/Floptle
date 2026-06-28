@@ -56,23 +56,22 @@
 ## Phase 1 — Window, viewport, camera, core loop
 **Goal:** something on screen and a frame loop to hang everything on.
 
-> **Status — architecture skeleton landed.** The crate seams compile and the core
-> loop is real + unit-tested headlessly (`cargo run -p floptle-runtime`):
-> `floptle-core` has `time` (variable clock + deterministic fixed-step), `transform`
-> (`f64` world + camera-relative `f32` render matrix), `origin` (floating-origin
-> rebase), a minimal `ecs` (entities/components/queries) and `event`; `floptle-render`
-> has `device` (`Gpu` lifecycle — `new` is the one window-dependent fill-in), `frame`
-> (camera-relative view/proj), and a `graph` (Pass/RenderGraph) seam. Remaining below.
+> **Status — window is live.** `cargo run -p floptle-runtime` opens a window, creates
+> the GPU, and drives the real core loop on every redraw (clear pass + FPS in the
+> title). `--headless` runs the loop with no display (CI). `floptle-core` has `time`
+> (variable clock + deterministic fixed-step), `transform` (`f64` world + camera-
+> relative `f32` render matrix), `origin` (floating-origin rebase), a minimal `ecs`
+> and `event`; `floptle-render` has `device` (full `Gpu` bootstrap + clear),
+> `frame` (camera-relative view/proj), and a `graph` (Pass/RenderGraph) seam.
 
 - [x] Frame loop with fixed + variable timestep (`floptle-core::time`).
-- [x] Minimal ECS + `Transform` (free-fly debug camera still TODO).
+- [x] Minimal ECS + `Transform`.
 - [x] **Large-world foundations** (ADR-0015): `f64` transforms + camera-relative
   matrix + floating-origin seam. (Apply-rebase-to-the-ECS wiring still TODO.)
-- [ ] winit window + wgpu device/surface bootstrap (`floptle-render::device::Gpu::new`
-  — lift the proof's working wgpu-29 bootstrap).
-- [ ] Clear-color → first triangle → textured quad (first raster pass).
+- [x] winit window + wgpu device/surface bootstrap (`floptle-render::device`).
+- [x] Clear-color (first render). [ ] first triangle → [ ] textured quad.
 - [ ] Free-fly debug camera driving `RenderCamera`.
-- [ ] In-engine frame profiler overlay (lightweight, stays forever).
+- [~] Frame profiler — FPS in the title bar today; in-viewport overlay TODO.
 
 **Demo:** fly a camera around a spinning textured quad at a locked frame rate.
 
