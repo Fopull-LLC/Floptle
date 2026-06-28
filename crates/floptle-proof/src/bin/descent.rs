@@ -52,6 +52,17 @@ const ARM_PHASE: [f32; 3] = [0.0, 2.094, 4.188];
 const R_TRIG: f32 = 11.3137; // RREF / sqrt(S): inner band edge (rebase trigger)
 const R_OUT: f32 = 22.6274; // RREF * sqrt(S): outer band edge
 const K_DENS: f32 = 0.8; // how hard density bends gravity onto bridges
+// the planet is BOUNDED outward (infinite only INWARD): octaves capped at K_MAX
+const K_MAX: f32 = 1.0; // outer shells at RREF and RREF*S (16 and 32); void beyond
+// a moon you spawn on and jump down from
+const MOON_DIST: f32 = 80.0;
+const R_MOON: f32 = 6.0;
+const MOON_CAPTURE: f32 = 8.0; // within this of the moon surface, moon gravity wins
+const NOCLIP_SPEED: f32 = 16.0;
+
+fn moon_center() -> Vec3 {
+    Vec3::new(0.0, MOON_DIST, 0.0)
+}
 
 // ---- character / physics tuning ----
 const CAP_R: f32 = 0.18; // capsule radius
@@ -135,17 +146,21 @@ fn f_ref(pn: Vec3, t: f32) -> f32 {
     d
 }
 
-/// Nearest power of S that brings |p| into the working octave band.
+/// Nearest power of S that brings |p| into the working octave band — clamped at
+/// K_MAX so the planet is BOUNDED outward (void beyond) but infinite INWARD.
 fn oscale(p: Vec3) -> f32 {
     let k = (p.length().max(1e-6) / RREF).ln() / S.ln();
-    S.powf(k.round())
+    S.powf(k.round().min(K_MAX))
 }
 
-/// The log-periodic world field: f_c(S*p) = S*f_c(p) EXACTLY, so descending an
-/// octave is a seamless self-similar rebase (measured |df|=0). Source of truth.
+/// The log-periodic planet field UNIONED with the moon. f(S*p)=S*f(p) inside the
+/// planet => seamless self-similar dive; bounded outward, with the moon a solid
+/// sphere you spawn on. Source of truth for physics.
 fn f_c(p: Vec3, t: f32) -> f32 {
     let os = oscale(p);
-    os * f_ref(p / os, t)
+    let planet = os * f_ref(p / os, t);
+    let moon = (p - moon_center()).length() - R_MOON;
+    planet.min(moon)
 }
 
 /// Surface velocity along the normal via a TIME-only central difference of f_c
@@ -197,12 +212,18 @@ fn gravity_down(p: Vec3, t: f32) -> Vec3 {
     let g = grad(p, t, EPS_G);
     let gm = g.length();
     let radial = p.try_normalize().unwrap_or(Vec3::Y);
-    // backbone points toward the nearest octave shell (you fall to the shell)
-    let pn_r = p.length() / oscale(p);
-    let shell_up = radial * (pn_r - RREF).signum();
-    let n_surf = if gm > 1e-5 { g / gm } else { shell_up };
+    // backbone: away from whichever body you're near. Near the moon -> moon's
+    // surface; otherwise -> away from the planet center, so "down" falls toward
+    // the planet (and INSIDE the planet, down points to the core => descent).
+    let to_moon = p - moon_center();
+    let backbone = if to_moon.length() - R_MOON < MOON_CAPTURE {
+        to_moon.try_normalize().unwrap_or(radial)
+    } else {
+        radial
+    };
+    let n_surf = if gm > 1e-5 { g / gm } else { backbone };
     let w_near = smoothstep(BLEND_FAR, BLEND_NEAR, f) * smoothstep(G_MIN, 0.5, gm);
-    let mut up = shell_up.lerp(n_surf, w_near);
+    let mut up = backbone.lerp(n_surf, w_near);
     // DENSITY TIER: bend "up" toward the nearest bridge (smooth weights, no hard
     // gate -> no orientation snap), so you can walk on, around, and UNDER bridges.
     let gr = grad_rho(p, t);
@@ -212,7 +233,7 @@ fn gravity_down(p: Vec3, t: f32) -> Vec3 {
         let w = K_DENS * smoothstep(0.02, 0.08, grm) * smoothstep(0.1, 0.5, rho(p, t));
         up += dense_up * w;
     }
-    -up.try_normalize().unwrap_or(shell_up)
+    -up.try_normalize().unwrap_or(backbone)
 }
 
 // --------------------------- the controller ---------------------------------
@@ -277,6 +298,7 @@ struct Character {
     world_phase: f32,
     squash: f32,
     grapple: Grapple,
+    noclip: bool,
     // telemetry for the HUD + render
     contact: Vec3,
     f_player: f32,
@@ -285,11 +307,9 @@ struct Character {
 
 impl Character {
     fn spawn() -> Self {
-        // spawn just above a bridge so you start standing on a swirling strut
-        let c0 = strut_center(0, 0.12);
-        let dir = c0.try_normalize().unwrap_or(Vec3::Y);
-        let pos = dir * (c0.length() + STRUT_R + 0.4);
-        let up = -gravity_down(pos, 0.0);
+        // spawn on the side of the moon, with the planet on the horizon below
+        let pos = moon_center() + Vec3::new(R_MOON + CAP_R + 0.3, 0.0, 0.0);
+        let up = Vec3::X;
         Character {
             pos,
             vel: Vec3::ZERO,
@@ -304,10 +324,28 @@ impl Character {
             world_phase: 0.0,
             squash: 1.0,
             grapple: Grapple::Idle,
+            noclip: false,
             contact: pos,
             f_player: 0.0,
             v_surface: 0.0,
         }
+    }
+
+    /// Noclip free-fly (V): no gravity/collision, camera-relative; still rebases
+    /// so you can fly into the core.
+    fn fly(&mut self, dt: f32, time: f32, dir: Vec3) {
+        if dir.length_squared() > 1e-6 {
+            self.pos += dir.normalize() * NOCLIP_SPEED * dt;
+        }
+        self.vel = Vec3::ZERO;
+        self.grounded = false;
+        let up = (-gravity_down(self.pos, time)).try_normalize().unwrap_or(self.up_smooth);
+        self.up_smooth = slerp_dir(self.up_smooth, up, 1.0 - (-6.0 * dt).exp());
+        self.prev_up_target = self.up_smooth;
+        if self.pos.length() < R_TRIG {
+            self.rebase(S);
+        }
+        self.f_player = f_c(self.pos, time);
     }
 
     /// Generous, ceiling-safe ground test for jumping: only the LOWER half of the
@@ -493,13 +531,11 @@ impl Character {
         // squash/stretch relaxes back to neutral
         self.squash += (1.0 - self.squash) * (1.0 - (-SQUASH_K * dt).exp());
 
-        // INFINITE DIVE REBASE (once/frame, after substeps, one octave max). The
-        // field is self-similar at S, so this is seamless; |pos| stays O(10).
-        let r = self.pos.length();
-        if r < R_TRIG {
+        // INFINITE DIVE REBASE — INWARD ONLY, so the moon / the fall through the
+        // void stay put; only descending past the inner band edge rebases up an
+        // octave. Seamless because the field is self-similar at S.
+        if self.pos.length() < R_TRIG {
             self.rebase(S);
-        } else if r > R_OUT {
-            self.rebase(1.0 / S);
         }
     }
 
@@ -532,9 +568,22 @@ impl Character {
                     }
                 }
             }
-            Grapple::Attached { .. } => {
+            Grapple::Attached { anchor } => {
                 if !c.grapple_held {
                     self.grapple = Grapple::Idle; // release keeps momentum
+                } else {
+                    // stick to the SHIFTING surface: snap the anchor back onto
+                    // f=0 each frame; detach if the structure morphed away.
+                    let f = f_c(*anchor, time);
+                    if f.abs() > 1.5 {
+                        self.grapple = Grapple::Idle;
+                    } else {
+                        let g = grad(*anchor, time, EPS_N);
+                        let gm = g.length();
+                        if gm > 1e-4 {
+                            *anchor -= (g / gm) * f;
+                        }
+                    }
                 }
             }
             Grapple::Idle => {}
@@ -835,8 +884,8 @@ impl State {
         let present_pl = make_pipeline(
             &device,
             &[Some(&bgl_globals), Some(&bgl_present)],
-            include_str!("../present.wgsl"),
-            "present",
+            include_str!("../present_plain.wgsl"),
+            "present_plain",
             config.format,
         );
 
@@ -885,9 +934,9 @@ impl State {
             targets,
             render_size,
             cc: Character::spawn(),
-            cam_pitch: 0.25,
+            cam_pitch: -0.15,
             cam_dist: 7.0,
-            cam_fwd_t: Vec3::X,
+            cam_fwd_t: Vec3::new(0.0, -1.0, 0.0), // look toward the planet on spawn
             input: Input::default(),
             frame: 0,
             start: now,
@@ -973,16 +1022,40 @@ impl State {
         let (sp, cp) = self.cam_pitch.sin_cos();
         let aim = (fwd_t * cp + up * sp).try_normalize().unwrap_or(fwd_t);
 
-        let ctrl = Ctrl {
-            wish,
-            sprint: self.input.sprint,
-            jump_edge: self.input.jump_edge,
-            jump_held: self.input.jump_held,
-            aim,
-            grapple_edge: self.input.grapple_edge,
-            grapple_held: self.input.grapple_held,
-        };
-        self.cc.step(dt, time, &ctrl);
+        if self.cc.noclip {
+            // free-fly: full-3D camera-relative (Space up, Shift down)
+            let mut dir = Vec3::ZERO;
+            if self.input.w {
+                dir += aim;
+            }
+            if self.input.s {
+                dir -= aim;
+            }
+            if self.input.d {
+                dir += right_t;
+            }
+            if self.input.a {
+                dir -= right_t;
+            }
+            if self.input.jump_held {
+                dir += up;
+            }
+            if self.input.sprint {
+                dir -= up;
+            }
+            self.cc.fly(dt, time, dir);
+        } else {
+            let ctrl = Ctrl {
+                wish,
+                sprint: self.input.sprint,
+                jump_edge: self.input.jump_edge,
+                jump_held: self.input.jump_held,
+                aim,
+                grapple_edge: self.input.grapple_edge,
+                grapple_held: self.input.grapple_held,
+            };
+            self.cc.step(dt, time, &ctrl);
+        }
         self.input.jump_edge = false;
         self.input.grapple_edge = false;
     }
@@ -1054,7 +1127,7 @@ impl State {
             time,
             dt,
             frame: self.frame as f32,
-            feedback: 0.5,
+            feedback: 0.0, // feedback trails OFF — clean geometry view
             warp: 1.0,
             fov: 1.25,
             capsule_pos: [
@@ -1162,7 +1235,13 @@ impl State {
         let since = now - self.fps_t;
         if since.as_secs_f32() >= 0.5 {
             let fps = self.fps_frames as f32 / since.as_secs_f32();
-            let mode = if self.cam_dist <= FP_DIST { "1st" } else { "3rd" };
+            let mode = if self.cc.noclip {
+                "noclip"
+            } else if self.cam_dist <= FP_DIST {
+                "1st"
+            } else {
+                "3rd"
+            };
             self.window.set_title(&format!(
                 "Floptle — Descent into the Fractal Core (Beat 3)  |  {fps:.0} fps  [{mode}]  depth:{}  grounded:{}  f:{:+.2}",
                 self.cc.dive_level, self.cc.grounded as u8, self.cc.f_player
@@ -1243,6 +1322,7 @@ impl ApplicationHandler for App {
                         }
                         KeyCode::ShiftLeft | KeyCode::ShiftRight => state.input.sprint = pressed,
                         KeyCode::KeyF if pressed => state.cam_dist = 7.0,
+                        KeyCode::KeyV if pressed => state.cc.noclip = !state.cc.noclip,
                         KeyCode::KeyR if pressed => state.cc = Character::spawn(),
                         KeyCode::Escape if pressed => {
                             if state.input.captured {

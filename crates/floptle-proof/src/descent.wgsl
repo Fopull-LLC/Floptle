@@ -56,6 +56,9 @@ const WMORPH: f32 = 0.18;
 const SIGMA: f32 = 2.1;
 const R_OUT: f32 = 22.6274;
 const TAU: f32 = 6.2831853;
+const K_MAX: f32 = 1.0;       // bound the planet outward (infinite inward)
+const MOON_DIST: f32 = 80.0;
+const R_MOON: f32 = 6.0;
 
 fn smin(a: f32, b: f32, k: f32) -> f32 {
     let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
@@ -89,12 +92,15 @@ fn f_ref(pn: vec3<f32>) -> f32 {
 }
 fn oscale(p: vec3<f32>) -> f32 {
     let k = log(max(length(p), 1e-6) / RREF) / log(S);
-    return pow(S, round(k));
+    return pow(S, min(round(k), K_MAX));
 }
-// log-periodic world: f(S*p) = S*f(p) => seamless infinite dive
+fn moon_de(p: vec3<f32>) -> f32 {
+    return length(p - vec3<f32>(0.0, MOON_DIST, 0.0)) - R_MOON;
+}
+// log-periodic planet (bounded outward) unioned with the moon
 fn f_world(p: vec3<f32>) -> f32 {
     let os = oscale(p);
-    return os * f_ref(p / os);
+    return min(os * f_ref(p / os), moon_de(p));
 }
 
 fn capsule_de(p: vec3<f32>) -> f32 {
@@ -186,7 +192,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         steps = i;
         let p = ro + rd * t;
         let d = map(p);
-        glow = glow + exp(-d * 9.0) * 0.004;
+        glow = glow + exp(-d * 9.0) * 0.0012;
         if (d < 0.0007 * t + 0.0004) {
             hit = true;
             break;
@@ -216,18 +222,21 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             let h = clamp(dot(p - G.capsule_pos.xyz, G.capsule_up.xyz) / G.capsule_up.w * 0.5 + 0.5, 0.0, 1.0);
             col = mix(vec3<f32>(0.3, 0.35, 0.6), vec3<f32>(1.0, 0.97, 0.92), h) * (0.25 + 0.9 * diff)
                 + rim * vec3<f32>(0.3, 0.5, 1.0) * 0.5;
+        } else if (moon_de(p) < 0.4) {
+            // the moon: clean pale body so it reads as a separate world
+            col = vec3<f32>(0.72, 0.74, 0.82) * (0.3 + 0.7 * diff) * (0.4 + 0.6 * ao)
+                + rim * vec3<f32>(0.3, 0.4, 0.6) * 0.3;
         } else {
-            // terrain: surreal triplanar texture + orbit palette + density glow
+            // CLEAN fractal geometry: palette coloring + diffuse + AO + a gentle
+            // radial contour pattern. No noise/glow so the raw geometry is legible.
             let os = oscale(p);
             let pn = p / os;
             let r = rho_at(p);
-            let w = pn * 0.6 + vec3<f32>(vnoise(pn * 0.5 + G.time * 0.03), vnoise(pn * 0.5 + 5.0), vnoise(pn * 0.5 + 9.0)) * 1.2;
-            let tex = 0.5 + 0.5 * sin(w.x * 2.0) * sin(w.y * 2.0) * sin(w.z * 2.0);
-            let base = pal(0.5 + 0.05 * length(pn) + 0.35 * r + 0.07 * lv + G.dive.y * 0.1 + 0.02 * G.time);
-            col = base * (0.5 + 0.7 * tex) * (0.15 + 0.85 * diff) * (0.3 + 0.7 * ao);
-            col = col + base * rim * 0.35;
-            // density glow: dense walkable bridges literally glow
-            col = col + r * r * pal(0.2 + 0.1 * lv) * 0.6;
+            let band = 0.5 + 0.5 * sin(length(pn) * 2.5);
+            let base = pal(0.5 + 0.07 * length(pn) + 0.3 * r + 0.08 * lv + G.dive.y * 0.1);
+            col = base * (0.22 + 0.78 * diff) * (0.4 + 0.6 * ao);
+            col = mix(col, base * 1.25, band * 0.18);
+            col = col + base * rim * 0.25;
         }
         col = mix(col, vec3<f32>(0.0), clamp(t / 110.0, 0.0, 1.0) * 0.45);
         let cd = abs(length(p - G.contact.xyz) - 0.30);
@@ -236,7 +245,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         col = pal(0.55 + 0.1 * sin(G.time * 0.1) + 0.2 * rd.y) * 0.05;
     }
     glow = min(glow, 1.4);
-    col = col + pal(0.3 + G.dive.y * 0.1 + G.time * 0.02) * glow * 0.5;
+    col = col + pal(0.3 + G.dive.y * 0.1) * glow * 0.15;
 
     // grapple reticle (screen-center crosshair dot)
     let cc = (in.uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0);
