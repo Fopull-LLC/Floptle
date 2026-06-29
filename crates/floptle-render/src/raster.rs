@@ -15,7 +15,7 @@
 
 use glam::Mat4;
 
-use crate::device::{Frame, Gpu};
+use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
 /// Frame-global uniform: camera view·projection and the directional light.
@@ -254,12 +254,16 @@ impl Raster {
         self.instance_cap = cap;
     }
 
-    /// Clear `frame` (color + depth) and draw every instance, bucketed by mesh so
-    /// each mesh issues one instanced `draw_indexed` with its own texture bound.
+    /// Clear the given color + depth targets and draw every instance, bucketed by
+    /// mesh so each mesh issues one instanced `draw_indexed` with its own texture
+    /// bound. The targets are passed in (rather than hard-wired to the swapchain) so
+    /// the scene can render either straight to the window or into a low-res retro
+    /// buffer; `color` must use the surface format and `depth` the depth format.
     pub fn draw_scene(
         &mut self,
         gpu: &Gpu,
-        frame: &Frame,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         globals: Globals,
         instances: &[(MeshId, InstanceRaw)],
         clear: [f64; 4],
@@ -293,7 +297,7 @@ impl Raster {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("raster"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: color,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -307,7 +311,7 @@ impl Raster {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: gpu.depth_view(),
+                    view: depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,

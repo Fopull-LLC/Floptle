@@ -25,11 +25,13 @@ pub mod frame;
 pub mod graph;
 pub mod mesh;
 pub mod raster;
+pub mod retro;
 
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use raster::{instance_of, Globals, InstanceRaw, Raster};
+pub use retro::Retro;
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

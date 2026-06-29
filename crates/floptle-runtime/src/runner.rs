@@ -15,7 +15,9 @@ use std::time::Instant;
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::Entity;
-use floptle_render::{cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster};
+use floptle_render::{
+    cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster, Retro,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -42,6 +44,12 @@ struct Runner {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     raster: Option<Raster>,
+    /// Low-res offscreen target for the retro / PS1 look.
+    retro: Option<Retro>,
+    /// Whether the scene renders through the low-res retro target.
+    retro_on: bool,
+    /// Retro internal resolution (rows); width derives from the window aspect.
+    retro_height: u32,
     /// Registered mesh handles, indexed by `Shape::index()`.
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models drawn alongside the procedural primitives — every
@@ -207,6 +215,12 @@ impl ApplicationHandler for Runner {
             }
         }
 
+        // Retro / PS1 look on by default: render the scene at a low internal
+        // resolution and upscale nearest-neighbor. Toggle with P; [ / ] adjust it.
+        self.retro_height = 240;
+        self.retro_on = true;
+        self.retro = Some(Retro::new(&gpu, self.retro_height));
+
         self.raster = Some(raster);
         self.gpu = Some(gpu);
         let now = Instant::now();
@@ -220,6 +234,9 @@ impl ApplicationHandler for Runner {
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
+                    if let Some(retro) = self.retro.as_mut() {
+                        retro.resize(gpu, self.retro_height);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -234,6 +251,13 @@ impl ApplicationHandler for Runner {
                         KeyCode::Space => self.input.up = pressed,
                         KeyCode::ControlLeft => self.input.down = pressed,
                         KeyCode::ShiftLeft => self.input.boost = pressed,
+                        KeyCode::KeyP if pressed => self.retro_on = !self.retro_on,
+                        KeyCode::BracketLeft if pressed => {
+                            self.set_retro_height(self.retro_height.saturating_sub(40))
+                        }
+                        KeyCode::BracketRight if pressed => {
+                            self.set_retro_height(self.retro_height + 40)
+                        }
                         _ => {}
                     }
                 }
@@ -277,9 +301,10 @@ impl ApplicationHandler for Runner {
 
 impl Runner {
     fn render(&mut self) {
-        let (Some(gpu), Some(raster), Some(window), Some(clock)) = (
+        let (Some(gpu), Some(raster), Some(retro), Some(window), Some(clock)) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
+            self.retro.as_ref(),
             self.window.as_ref(),
             self.clock.as_mut(),
         ) else {
@@ -298,8 +323,14 @@ impl Runner {
         let since = now.duration_since(clock.fps_since).as_secs_f32();
         if since >= 0.5 {
             let fps = clock.fps_frames as f32 / since;
+            let mode = if self.retro_on {
+                let (w, h) = retro.resolution();
+                format!("retro {w}×{h}")
+            } else {
+                "retro off".to_string()
+            };
             window.set_title(&format!(
-                "Floptle — Phase 2   |   {fps:.0} fps   |   RMB-drag: look   ·   WASD: move   ·   Space/Ctrl: up/down"
+                "Floptle — Phase 2   |   {fps:.0} fps   |   {mode}   |   P: retro · [ ]: pixel size · RMB+WASD"
             ));
             clock.fps_frames = 0;
             clock.fps_since = now;
@@ -352,7 +383,20 @@ impl Runner {
 
         match gpu.acquire() {
             Some(frame) => {
-                raster.draw_scene(gpu, &frame, globals, &instances, clear);
+                if self.retro_on {
+                    // render the scene into the low-res target, then upscale it
+                    raster.draw_scene(
+                        gpu,
+                        retro.color_view(),
+                        retro.depth_view(),
+                        globals,
+                        &instances,
+                        clear,
+                    );
+                    retro.blit(gpu, &frame);
+                } else {
+                    raster.draw_scene(gpu, &frame.view, gpu.depth_view(), globals, &instances, clear);
+                }
                 frame.present();
             }
             None => {
@@ -360,6 +404,14 @@ impl Runner {
                 let size = window.inner_size();
                 gpu.resize(size.width, size.height);
             }
+        }
+    }
+
+    /// Set the retro internal resolution (clamped) and rebuild the target.
+    fn set_retro_height(&mut self, h: u32) {
+        self.retro_height = h.clamp(80, 1080);
+        if let (Some(retro), Some(gpu)) = (self.retro.as_mut(), self.gpu.as_ref()) {
+            retro.resize(gpu, self.retro_height);
         }
     }
 }
