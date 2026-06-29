@@ -35,13 +35,15 @@ fn main() {
     event_loop.run_app(&mut editor).expect("run editor");
 }
 
+// Field order is drop order: every GPU-resource holder (raster/raymarch/retro/egui)
+// must drop BEFORE `gpu` (the device + surface), so `gpu` is intentionally last.
 #[derive(Default)]
 struct Editor {
     window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
     raster: Option<Raster>,
     raymarch: Option<Raymarch>,
     retro: Option<Retro>,
+    egui: Option<Egui>,
     camera: FlyCamera,
     input: Input,
     world: World,
@@ -50,8 +52,11 @@ struct Editor {
     render: RenderConfigDoc,
     scene_name: String,
     selection: Option<Entity>,
+    /// Left mouse held in the viewport — drag-moves the selected object.
+    left_down: bool,
     last: Option<Instant>,
-    egui: Option<Egui>,
+    started: Option<Instant>,
+    gpu: Option<Gpu>,
 }
 
 struct Egui {
@@ -110,7 +115,9 @@ impl ApplicationHandler for Editor {
 
         self.gpu = Some(gpu);
         self.raster = Some(raster);
-        self.last = Some(Instant::now());
+        let now = Instant::now();
+        self.last = Some(now);
+        self.started = Some(now);
         self.window = Some(window);
     }
 
@@ -151,6 +158,10 @@ impl ApplicationHandler for Editor {
                     }
                 }
             }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                // not consumed → the click is in the viewport: grab to drag-move
+                self.left_down = state == ElementState::Pressed;
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let looking = state == ElementState::Pressed;
                 self.input.looking = looking;
@@ -174,6 +185,12 @@ impl ApplicationHandler for Editor {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
+            } else if self.left_down {
+                // grab-and-drag the selected object (unless the cursor is over a UI widget)
+                let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
+                if !over_ui {
+                    self.drag_selected(delta.0 as f32, delta.1 as f32);
+                }
             }
         }
     }
@@ -191,7 +208,7 @@ impl Editor {
             self.gpu.as_mut(),
             self.raster.as_mut(),
             self.raymarch.as_ref(),
-            self.retro.as_ref(),
+            self.retro.as_mut(),
             self.egui.as_mut(),
             self.window.as_ref(),
         ) else {
@@ -202,6 +219,7 @@ impl Editor {
         let now = Instant::now();
         let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
+        let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.camera.update(&self.input, dt);
 
         // ---- gather the scene from the World ----
@@ -249,7 +267,7 @@ impl Editor {
                 light_dir: [light.x, light.y, light.z, 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [c.x, c.y, c.z, scale.max(0.05)],
-                params: [0.0; 4],
+                params: [elapsed, 0.0, 0.0, 0.0], // time → the blob morphs
                 vol_center: [0.0, 0.0, 0.0, 0.0], // no baked volume in v1
                 vol_half: [1.0, 1.0, 1.0, 0.5],
             }
@@ -264,15 +282,18 @@ impl Editor {
                 (*e, self.world.get::<Name>(*e).map(|n| n.0.clone()).unwrap_or_else(|| "node".into()))
             })
             .collect();
+        let old_retro_h = self.render.retro_height;
         let world = &mut self.world;
         let selection = &mut self.selection;
+        let render = &mut self.render;
         let scene_name = self.scene_name.clone();
         let mut want_save = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
-            egui::Panel::left("inspector").default_size(270.0).show(ui, |ui| {
+            egui::Panel::left("inspector").default_size(280.0).show(ui, |ui| {
                 ui.heading("Floptle Editor");
                 ui.label(format!("scene: {scene_name}"));
                 ui.separator();
+
                 ui.label("Hierarchy");
                 for (e, name) in &entity_names {
                     if ui.selectable_label(*selection == Some(*e), name).clicked() {
@@ -280,6 +301,7 @@ impl Editor {
                     }
                 }
                 ui.separator();
+
                 ui.label("Inspector");
                 if let Some(e) = *selection {
                     if let Some(t) = world.get_mut::<Transform>(e) {
@@ -300,6 +322,28 @@ impl Editor {
                     ui.label("(nothing selected)");
                 }
                 ui.separator();
+
+                ui.collapsing("Rendering (scene)", |ui| {
+                    ui.checkbox(&mut render.retro, "retro pixelization");
+                    ui.add(egui::Slider::new(&mut render.retro_height, 80u32..=1080).text("pixel rows"));
+                    ui.checkbox(&mut render.matter, "SDF matter");
+                });
+                ui.collapsing("Lighting (scene)", |ui| {
+                    ui.label("direction");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut render.light_dir[0]).speed(0.02).prefix("x "));
+                        ui.add(egui::DragValue::new(&mut render.light_dir[1]).speed(0.02).prefix("y "));
+                        ui.add(egui::DragValue::new(&mut render.light_dir[2]).speed(0.02).prefix("z "));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("light");
+                        ui.color_edit_button_rgb(&mut render.light_color);
+                        ui.label("ambient");
+                        ui.color_edit_button_rgb(&mut render.ambient);
+                    });
+                });
+                ui.separator();
+
                 if ui.button("💾  Save scene").clicked() {
                     want_save = true;
                 }
@@ -308,6 +352,9 @@ impl Editor {
             });
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
+        if self.render.retro_height != old_retro_h {
+            retro.resize(gpu, self.render.retro_height.max(80));
+        }
 
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
@@ -377,6 +424,24 @@ impl Editor {
 
         if want_save {
             self.save_scene();
+        }
+    }
+
+    /// Move the selected entity in the camera plane by a screen-pixel delta — the
+    /// "grab and drag in the viewport" gizmo (the object follows the cursor).
+    fn drag_selected(&mut self, dx: f32, dy: f32) {
+        let Some(e) = self.selection else { return };
+        let cam_pos = self.camera.position;
+        let rot = self.camera.rotation();
+        let right = rot * Vec3::X;
+        let up = rot * Vec3::Y;
+        let h = self.gpu.as_ref().map(|g| g.config.height.max(1) as f32).unwrap_or(720.0);
+        if let Some(t) = self.world.get_mut::<Transform>(e) {
+            let dist = (t.translation - cam_pos).length().max(0.1) as f32;
+            // world units per screen pixel at the object's depth (60° vertical fov)
+            let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
+            let d = right * (dx * wpp) - up * (dy * wpp);
+            t.translation += d.as_dvec3();
         }
     }
 

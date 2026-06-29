@@ -1,0 +1,48 @@
+(
+    name: "first",
+    render: (
+        retro: true,
+        retro_height: 240,
+        matter: true,
+        light_dir: (0.4, 0.9, 0.45),
+        light_color: (1.0, 0.98, 0.92),
+        ambient: (0.12, 0.12, 0.16),
+    ),
+    nodes: [
+        (
+            name: "cube",
+            transform: (
+                translation: (-2.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.9, 0.45, 0.35),
+            ),
+        ),
+        (
+            name: "sphere",
+            transform: (
+                translation: (5.4, 11.4, -5.3),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.4, 0.7, 0.95),
+            ),
+        ),
+        (
+            name: "blob",
+            transform: (
+                translation: (43.2, 1.6, 2.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.7, 3.7, 3.7),
+            ),
+            matter: Blob(
+                scale: 1.3,
+            ),
+        ),
+    ],
+)
