@@ -450,6 +450,8 @@ impl Runner {
         let center_cam = (self.matter_center - cam.world_position).as_vec3();
         let vol_cam = (self.volume_world - cam.world_position).as_vec3();
         let present = if self.volume_present { 1.0 } else { 0.0 };
+        let mut blobs = [[0.0f32; 4]; 16];
+        blobs[0] = [center_cam.x, center_cam.y, center_cam.z, self.matter_scale];
         let rm_globals = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -457,10 +459,11 @@ impl Runner {
             light_color: [1.0, 0.98, 0.92, 0.0],
             ambient: [0.12, 0.12, 0.16, 0.0],
             bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
-            center: [center_cam.x, center_cam.y, center_cam.z, self.matter_scale],
-            params: [self.app.time.elapsed as f32, 0.0, 0.0, 0.0],
+            center: [0.0; 4],
+            params: [self.app.time.elapsed as f32, 1.0, 0.0, 0.0],
             vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, present],
             vol_half: [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7],
+            blobs,
         };
 
         match gpu.acquire() {

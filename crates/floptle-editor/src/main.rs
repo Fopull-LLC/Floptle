@@ -912,7 +912,7 @@ impl Editor {
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, InstanceRaw)> = Vec::new();
-        let mut blob: Option<(DVec3, f32)> = None;
+        let mut blobs: Vec<(DVec3, f32)> = Vec::new();
         for (e, matter) in &ents {
             let Some(t) = self.world.get::<Transform>(*e) else { continue };
             match matter {
@@ -923,16 +923,41 @@ impl Editor {
                     }
                 }
                 Matter::Blob { scale } => {
-                    blob = Some((t.translation, scale * t.scale.x));
+                    blobs.push((t.translation, scale * t.scale.x));
                 }
             }
         }
 
-        // Selection outline source: render the selected object's silhouette into the
-        // outline mask (a mesh instance, or the blob via raymarch), then a post-pass
-        // edge-detects it. `mask_mesh` non-empty → mesh; `mask_blob` → the SDF blob.
+        let clear = [0.02f32, 0.02, 0.05, 1.0];
+        // Build raymarch globals for a set of blobs (all of them, or just one for the
+        // selection mask). Up to 16 blobs are folded together in one march.
+        let make_rm = |set: &[(DVec3, f32)]| -> RaymarchGlobals {
+            let mut arr = [[0.0f32; 4]; 16];
+            let n = set.len().min(16);
+            for (i, (center, scale)) in set.iter().take(16).enumerate() {
+                let c = (*center - cam.world_position).as_vec3();
+                arr[i] = [c.x, c.y, c.z, scale.max(0.05)];
+            }
+            RaymarchGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                light_dir: [light.x, light.y, light.z, 0.0],
+                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+                bg: [clear[0], clear[1], clear[2], 1.0],
+                center: [0.0; 4],
+                params: [elapsed, n as f32, 0.0, 0.0],
+                vol_center: [0.0, 0.0, 0.0, 0.0], // no baked volume in v1
+                vol_half: [1.0, 1.0, 1.0, 0.5],
+                blobs: arr,
+            }
+        };
+
+        // Selection outline source: the selected object's silhouette into the mask —
+        // a mesh instance, or (for a blob) a one-blob raymarch so the outline hugs
+        // only the selected blob.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
-        let mut mask_blob = false;
+        let mut mask_blob: Option<RaymarchGlobals> = None;
         if let Some(e) = self.selection.last().copied() {
             if let (Some(m), Some(t)) =
                 (self.world.get::<Matter>(e), self.world.get::<Transform>(e))
@@ -944,27 +969,14 @@ impl Editor {
                             mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
                         }
                     }
-                    Matter::Blob { .. } => mask_blob = true,
+                    Matter::Blob { scale } => {
+                        mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
+                    }
                 }
             }
         }
 
-        let clear = [0.02f32, 0.02, 0.05, 1.0];
-        let rm = blob.map(|(center, scale)| {
-            let c = (center - cam.world_position).as_vec3();
-            RaymarchGlobals {
-                view_proj: view_proj.to_cols_array_2d(),
-                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-                light_dir: [light.x, light.y, light.z, 0.0],
-                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
-                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
-                bg: [clear[0], clear[1], clear[2], 1.0],
-                center: [c.x, c.y, c.z, scale.max(0.05)],
-                params: [elapsed, 0.0, 0.0, 0.0], // time → the blob morphs
-                vol_center: [0.0, 0.0, 0.0, 0.0], // no baked volume in v1
-                vol_half: [1.0, 1.0, 1.0, 0.5],
-            }
-        });
+        let rm = if blobs.is_empty() { None } else { Some(make_rm(&blobs)) };
 
         // ---- build the egui UI (mutating the World) ----
         let raw_input = egui.state.take_egui_input(&window);
@@ -1366,8 +1378,8 @@ impl Editor {
                 let masked = if !mask_mesh.is_empty() {
                     raster.draw_mask(gpu, outline.mask_view(), globals, &mask_mesh);
                     true
-                } else if let (true, Some(rm)) = (mask_blob, rm) {
-                    raymarch.draw_mask(gpu, outline.mask_view(), rm);
+                } else if let Some(brm) = mask_blob {
+                    raymarch.draw_mask(gpu, outline.mask_view(), brm);
                     true
                 } else {
                     false

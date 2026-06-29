@@ -21,15 +21,20 @@ pub struct RaymarchGlobals {
     pub light_color: [f32; 4],
     pub ambient: [f32; 4],
     pub bg: [f32; 4],
-    /// Analytic blob: xyz camera-relative center, w = scale.
+    /// Unused legacy field (blobs now live in `blobs`).
     pub center: [f32; 4],
-    /// x = time.
+    /// x = time, y = blob count.
     pub params: [f32; 4],
     /// Baked volume: xyz camera-relative box center, w = present (1.0/0.0).
     pub vol_center: [f32; 4],
     /// xyz half-extent, w = blend radius k.
     pub vol_half: [f32; 4],
+    /// Up to 16 blobs: each xyz camera-relative center, w = scale.
+    pub blobs: [[f32; 4]; 16],
 }
+
+/// Max blobs the raymarch shader folds together in one pass.
+pub const MAX_BLOBS: usize = 16;
 
 pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,

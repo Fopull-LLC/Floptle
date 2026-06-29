@@ -73,8 +73,9 @@ fn main() {
     ];
 
     // The blob, centered at the origin (dead-center on screen).
-    let blob_center = DVec3::new(0.0, 0.0, 0.0);
-    let c = (blob_center - cam.world_position).as_vec3();
+    let mut blobs = [[0.0f32; 4]; 16];
+    let c = (DVec3::ZERO - cam.world_position).as_vec3();
+    blobs[0] = [c.x, c.y, c.z, blob_scale.max(0.05)];
     let rm = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -82,10 +83,11 @@ fn main() {
         light_color: [1.0, 0.98, 0.92, 0.0],
         ambient: [0.12, 0.12, 0.16, 0.0],
         bg: [0.02, 0.02, 0.05, 1.0],
-        center: [c.x, c.y, c.z, blob_scale.max(0.05)],
-        params: [0.0, 0.0, 0.0, 0.0],
+        center: [0.0; 4],
+        params: [0.0, 1.0, 0.0, 0.0],
         vol_center: [0.0, 0.0, 0.0, 0.0],
         vol_half: [1.0, 1.0, 1.0, 0.5],
+        blobs,
     };
 
     // Same draw order as the editor: blob first (clears + writes depth), then the
