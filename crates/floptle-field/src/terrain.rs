@@ -24,6 +24,8 @@ pub enum Brush {
     Lower,
     /// Pull the surface toward flat (a low-pass on height).
     Smooth,
+    /// Pull the surface toward the height where the stroke landed (level it).
+    Flatten,
     /// Paint the surface color (leaves the shape alone).
     Paint,
 }
@@ -106,16 +108,24 @@ impl Terrain {
         lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz)
     }
 
-    /// March a ray (world space) and return the first surface hit, if any.
+    /// March a ray (world space) and return the first surface hit reached *from
+    /// outside* — so when the camera starts inside/below solid ground we march out
+    /// first instead of immediately reporting the origin (the "sculpts at the
+    /// camera" bug). `None` if the ray never meets the surface from outside.
     pub fn raycast(&self, ro: [f32; 3], rd: [f32; 3]) -> Option<[f32; 3]> {
         let mut t = 0.0f32;
-        for _ in 0..256 {
+        let mut been_outside = false;
+        for _ in 0..400 {
             let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
             let dd = self.sample(p);
-            if dd < 0.02 {
+            if dd > 0.1 {
+                been_outside = true;
+            }
+            if been_outside && dd < 0.02 {
                 return Some(p);
             }
-            t += dd.max(0.02);
+            // `abs` so we still advance while inside solid (where dd is negative).
+            t += dd.abs().max(0.05);
             if t > 500.0 {
                 break;
             }
@@ -149,12 +159,11 @@ impl Terrain {
     /// cells stale makes the raymarcher overshoot. The per-cell work is cheap and
     /// only cells the brush actually changes are written.
     pub fn sculpt(&mut self, brush: Brush, center: [f32; 3], radius: f32, strength: f32) {
-        if brush == Brush::Smooth {
-            self.smooth(center, radius, strength);
-            return;
-        }
-        if brush == Brush::Paint {
-            return;
+        match brush {
+            Brush::Smooth => return self.smooth(center, radius, strength),
+            Brush::Flatten => return self.flatten(center, radius, strength),
+            Brush::Paint => return,
+            _ => {}
         }
         let s = strength.clamp(0.02, 1.0);
         let [w, h, d] = self.baked.dims;
@@ -179,6 +188,43 @@ impl Terrain {
                     }
                 }
             }
+        }
+    }
+
+    /// Level the brushed region toward the height the stroke landed on (`center.y`).
+    fn flatten(&mut self, center: [f32; 3], radius: f32, strength: f32) {
+        let [lo, hi] = self.brush_range(center, radius);
+        let s = strength.clamp(0.02, 1.0);
+        for iz in lo[2]..=hi[2] {
+            for iy in lo[1]..=hi[1] {
+                for ix in lo[0]..=hi[0] {
+                    let p = self.voxel_world(ix, iy, iz);
+                    let dxz = ((p[0] - center[0]).powi(2) + (p[2] - center[2]).powi(2)).sqrt();
+                    if dxz > radius {
+                        continue;
+                    }
+                    let i = self.idx(ix, iy, iz);
+                    let cur = self.baked.distance[i];
+                    let target = p[1] - center[1]; // plane SDF at the hit height
+                    let wgt = s * (1.0 - dxz / radius).clamp(0.0, 1.0);
+                    self.baked.distance[i] = cur + (target - cur) * wgt;
+                }
+            }
+        }
+    }
+
+    /// The surface normal at a world point (the normalized SDF gradient). Used to
+    /// orient the brush telegraph. Falls back to +Y for a degenerate gradient.
+    pub fn normal(&self, p: [f32; 3]) -> [f32; 3] {
+        let e = 0.2; // ~a voxel; large enough to average out f16 grid noise
+        let dx = self.sample([p[0] + e, p[1], p[2]]) - self.sample([p[0] - e, p[1], p[2]]);
+        let dy = self.sample([p[0], p[1] + e, p[2]]) - self.sample([p[0], p[1] - e, p[2]]);
+        let dz = self.sample([p[0], p[1], p[2] + e]) - self.sample([p[0], p[1], p[2] - e]);
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        if len < 1e-6 {
+            [0.0, 1.0, 0.0]
+        } else {
+            [dx / len, dy / len, dz / len]
         }
     }
 

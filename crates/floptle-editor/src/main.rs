@@ -1173,6 +1173,8 @@ struct EditorTabViewer<'a> {
     /// Errors from the last script frame (shown in the Scripting tab).
     script_errors: &'a [String],
     gizmo: Option<&'a GizmoFrame>,
+    /// The terrain brush telegraph to draw over the viewport, if sculpting.
+    terrain_viz: Option<&'a TerrainViz>,
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -1857,6 +1859,28 @@ impl EditorTabViewer<'_> {
                 .with_clip_rect(rect);
             paint_gizmo(&painter, g, self.tool, self.grabbed, self.ppp);
         }
+
+        // Terrain brush telegraph: a ring at the surface + a normal line, so you can
+        // see exactly where (and on what facing) a stroke will land.
+        if let Some(viz) = self.terrain_viz {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_brush")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            if viz.ring.len() >= 2 {
+                let mut pts: Vec<egui::Pos2> = viz.ring.iter().map(|v| pt(*v)).collect();
+                pts.push(pts[0]); // close the loop
+                painter.line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 230, 120)));
+            }
+            if let Some((a, b)) = viz.normal {
+                painter.line_segment(
+                    [pt(a), pt(b)],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 200, 255)),
+                );
+            }
+        }
     }
 
     fn scripting_ui(&mut self, ui: &mut egui::Ui) {
@@ -2371,6 +2395,15 @@ impl Default for TerrainBrush {
     }
 }
 
+/// The on-screen brush telegraph: a projected ring at the terrain hit point + a
+/// surface-normal line, so you can see exactly where (and on what facing) a stroke
+/// will land. Points are full-window physical pixels (divided by ppp when drawn).
+#[derive(Default)]
+struct TerrainViz {
+    ring: Vec<Vec2>,
+    normal: Option<(Vec2, Vec2)>,
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -2410,8 +2443,14 @@ struct Editor {
     terrain_dirty: bool,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
     sculpting: bool,
+    /// A brush stroke is queued for this frame (throttles editing to frame rate).
+    sculpt_pending: bool,
     /// Terrain brush settings.
     terrain_brush: TerrainBrush,
+    /// New-terrain resolution along the long axis (user-controllable detail).
+    terrain_detail: u32,
+    /// The brush telegraph for this frame (projected ring + normal).
+    terrain_viz: Option<TerrainViz>,
     /// Whether the Terrain window is open.
     show_terrain: bool,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
@@ -2539,6 +2578,7 @@ impl ApplicationHandler for Editor {
         self.project_root = PathBuf::from("assets");
         self.dock_state = Some(default_dock());
         self.viewport_zoom = 0.9;
+        self.terrain_detail = 64;
         self.external_editor = load_external_editor();
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
@@ -2636,9 +2676,10 @@ impl ApplicationHandler for Editor {
             // over-UI gate stay correct; device_event only gives deltas.
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
-                // Keep painting/sculpting the terrain while the LMB is held.
+                // Keep painting/sculpting the terrain while the LMB is held (the
+                // stroke is applied once per frame in `terrain_frame_update`).
                 if self.sculpting {
-                    self.apply_terrain_brush();
+                    self.sculpt_pending = true;
                 }
             }
             // Modifier state, tracked separately so Ctrl/Shift combos work even while
@@ -2706,11 +2747,12 @@ impl ApplicationHandler for Editor {
                     let over_scene = self.cursor_over_scene();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
                     if over_scene && self.tool == Tool::Sculpt {
-                        // Sculpt tool: start a brush stroke on the terrain.
+                        // Sculpt tool: start a brush stroke on the terrain (applied
+                        // next frame in terrain_frame_update).
                         self.context_menu = None;
                         if self.terrain.is_some() {
                             self.sculpting = true;
-                            self.apply_terrain_brush();
+                            self.sculpt_pending = true;
                         }
                     } else if over_scene {
                         // Clicking the viewport dismisses an open context menu (but
@@ -2823,6 +2865,10 @@ impl ApplicationHandler for Editor {
 
 impl Editor {
     fn render(&mut self) {
+        // Terrain brush telegraph + throttled stroke (before the destructure, so it
+        // can freely borrow `self`).
+        self.terrain_frame_update();
+
         // Re-upload the terrain volume to the GPU after an edit (needs &mut Raymarch,
         // before the read-only destructure below).
         if self.terrain_dirty {
@@ -2913,13 +2959,14 @@ impl Editor {
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
-            if !self.paused {
-                self.play_t += dt;
-            }
+            // Pausing freezes the clock AND the frame delta scripts see, so
+            // dt-driven motion stops too (not just `time`-driven motion).
+            let sdt = if self.paused { 0.0 } else { dt };
+            self.play_t += sdt;
             // Direct field access (not the `scripts_dir()` method) so we don't take
             // a whole-`self` borrow while gpu/egui are mutably borrowed here.
             let dir = self.project_root.join("scripts");
-            self.script_host.run(&mut self.world, &dir, dt, self.play_t);
+            self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
@@ -3115,7 +3162,12 @@ impl Editor {
         let new_scene_buf = &mut self.new_scene_buf;
         let show_terrain = &mut self.show_terrain;
         let terrain_brush = &mut self.terrain_brush;
+        let terrain_detail = &mut self.terrain_detail;
         let terrain_present = self.terrain.is_some();
+        let terrain_voxels = self.terrain.as_ref().map(|t| {
+            let [a, b, c] = t.baked.dims;
+            (a, b, c)
+        });
         let external_editor = &mut self.external_editor;
         let asset_tree = &self.asset_tree;
         let project_root = self.project_root.as_path();
@@ -3132,6 +3184,7 @@ impl Editor {
         let scene_rect = &mut self.scene_rect;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
+        let terrain_viz = self.terrain_viz.as_ref();
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -3241,6 +3294,7 @@ impl Editor {
                 ide,
                 script_errors,
                 gizmo,
+                terrain_viz,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
@@ -3472,20 +3526,43 @@ impl Editor {
                 .default_width(260.0)
                 .show(ui.ctx(), |ui| {
                     use floptle_field::Brush;
+                    // Detail (resolution) — higher = finer terrain, but heavier.
+                    ui.horizontal(|ui| {
+                        ui.label("detail");
+                        egui::ComboBox::from_id_salt("terrain_detail")
+                            .selected_text(match *terrain_detail {
+                                d if d <= 48 => "Low",
+                                d if d <= 80 => "Medium",
+                                d if d <= 112 => "High",
+                                _ => "Ultra",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut *terrain_detail, 40, "Low");
+                                ui.selectable_value(&mut *terrain_detail, 64, "Medium");
+                                ui.selectable_value(&mut *terrain_detail, 96, "High");
+                                ui.selectable_value(&mut *terrain_detail, 144, "Ultra");
+                            });
+                    });
+                    if let Some((a, b, c)) = terrain_voxels {
+                        ui.small(format!("current: {a}×{b}×{c} voxels"));
+                    }
                     if !terrain_present {
-                        ui.label("No terrain yet.");
                         if ui.button("➕ Create flat terrain").clicked() {
                             cmd.create_terrain = true;
                         }
                         ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
                         return;
                     }
-                    ui.label("Sculpt tool (key 5) — LMB-drag to brush.");
+                    if ui.button("↻ Recreate at this detail").on_hover_text("clears the current terrain").clicked() {
+                        cmd.create_terrain = true;
+                    }
                     ui.separator();
+                    ui.label("Sculpt tool (key 5) — LMB-drag to brush.");
                     ui.label("Brush");
                     ui.horizontal_wrapped(|ui| {
                         ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⬆ Raise");
                         ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⬇ Lower");
+                        ui.selectable_value(&mut terrain_brush.mode, Brush::Flatten, "▱ Flatten");
                         ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "～ Smooth");
                         ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "🎨 Paint");
                     });
@@ -4379,23 +4456,64 @@ impl Editor {
     }
 
     // ---- terrain sculpting --------------------------------------------------
-    /// Apply the current terrain brush where the cursor's ray meets the terrain.
-    fn apply_terrain_brush(&mut self) {
+    /// Once per frame (with the Sculpt tool): cast the cursor ray at the terrain,
+    /// build the brush telegraph (ring + normal), and — if a stroke is queued —
+    /// apply the brush. Editing is throttled here to one stroke per frame so a fast
+    /// drag doesn't stall on the per-voxel work + GPU re-upload.
+    fn terrain_frame_update(&mut self) {
+        self.terrain_viz = None;
+        if self.tool != Tool::Sculpt || self.terrain.is_none() || !self.cursor_over_scene() {
+            self.sculpt_pending = false;
+            return;
+        }
         let (Some(cursor), Some(gpu)) = (self.cursor, self.gpu.as_ref()) else { return };
         let cam = self.camera.render_camera();
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-        let inv = cam.view_proj(w / h).inverse();
+        let vp = cam.view_proj(w / h);
+        let inv = vp.inverse();
         let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
         let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
         let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
-        let ro_rel = near.truncate() / near.w; // camera-relative
+        let ro_rel = near.truncate() / near.w;
         let rd = (far.truncate() / far.w - ro_rel).normalize();
         let ro_world = cam.world_position + ro_rel.as_dvec3();
-        let brush = self.terrain_brush;
-        let Some(terrain) = self.terrain.as_mut() else { return };
         let ro = [ro_world.x as f32, ro_world.y as f32, ro_world.z as f32];
-        let rd = [rd.x, rd.y, rd.z];
-        if let Some(hit) = terrain.raycast(ro, rd) {
+        let rd_a = [rd.x, rd.y, rd.z];
+
+        let terrain = self.terrain.as_ref().unwrap();
+        let Some(hit) = terrain.raycast(ro, rd_a) else {
+            self.sculpt_pending = false;
+            return;
+        };
+        let nrm = terrain.normal(hit);
+        let radius = self.terrain_brush.radius;
+
+        // Telegraph: a ring of `radius` around the hit in the surface tangent plane.
+        let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64);
+        let n = Vec3::new(nrm[0], nrm[1], nrm[2]);
+        let t1 = n.cross(if n.y.abs() > 0.9 { Vec3::X } else { Vec3::Y }).normalize_or_zero();
+        let t2 = n.cross(t1);
+        let mut ring = Vec::with_capacity(40);
+        for i in 0..40 {
+            let a = i as f32 / 40.0 * std::f32::consts::TAU;
+            let wp = hitw + ((t1 * a.cos() + t2 * a.sin()) * radius).as_dvec3();
+            if let Some(s) = project(wp, cam.world_position, vp, w, h) {
+                ring.push(s);
+            }
+        }
+        let normal = match (
+            project(hitw, cam.world_position, vp, w, h),
+            project(hitw + (n * (radius * 0.7)).as_dvec3(), cam.world_position, vp, w, h),
+        ) {
+            (Some(a), Some(b)) => Some((a, b)),
+            _ => None,
+        };
+        self.terrain_viz = Some(TerrainViz { ring, normal });
+
+        // Apply a queued stroke at the hit.
+        if self.sculpting && self.sculpt_pending {
+            let brush = self.terrain_brush;
+            let terrain = self.terrain.as_mut().unwrap();
             match brush.mode {
                 floptle_field::Brush::Paint => {
                     terrain.paint(hit, brush.radius, brush.strength, brush.color)
@@ -4403,13 +4521,20 @@ impl Editor {
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
             }
             self.terrain_dirty = true;
+            self.sculpt_pending = false;
         }
     }
 
-    /// Create a fresh flat terrain centered in front of the camera.
+    /// Voxel dims for the current detail setting over the terrain box (≈2:1:2).
+    fn terrain_dims(&self) -> [u32; 3] {
+        let d = self.terrain_detail.clamp(24, 192);
+        [d, (d * 3 / 8).max(8), d]
+    }
+
+    /// Create a fresh flat terrain at the current detail.
     fn create_terrain(&mut self) {
         self.terrain = Some(floptle_field::Terrain::flat(
-            [112, 48, 112],
+            self.terrain_dims(),
             [0.0, 0.0, 0.0],
             [16.0, 6.0, 16.0],
             0.0,
