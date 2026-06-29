@@ -119,7 +119,11 @@ fn volume(p: vec3<f32>) -> Matter {
     let q = abs(rel) - G.vol_half.xyz;
     let box_d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
     if (box_d > 0.0) {
-        return Matter(box_d, vec3<f32>(1.0)); // outside the brick: step toward it
+        // Outside the brick: step toward it, but never report the box face itself as
+        // a surface — keep the step above the hit threshold so the ray crosses into
+        // the volume, where the real (sampled) SDF takes over. (Without this, a
+        // volume whose matter doesn't fill its box renders the box as a shell.)
+        return Matter(max(box_d, 0.08), vec3<f32>(1.0));
     }
     let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
     let d = textureSampleLevel(dist_tex, vol_samp, local, 0.0).r;
