@@ -7,6 +7,7 @@
 //! today; the dock shell, gizmos, import, and sculpt tools layer on next.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -26,9 +27,6 @@ use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
-
-const SCENE_PATH: &str = "assets/scenes/first.ron";
-const PROJECT_PATH: &str = "assets/project.ron";
 
 // ---- the overlay transform gizmo ----------------------------------------------
 //
@@ -170,6 +168,18 @@ struct EditorCmd {
     drop_script_on: Option<(String, Entity)>,
     /// Save the current primitive color as a named material.
     save_material: Option<(String, [f32; 3])>,
+    /// Switch the active tool (from the Scene-tab tool strip).
+    set_tool: Option<Tool>,
+    /// Save the current scene.
+    save_scene: bool,
+    /// Rescan the project asset tree.
+    refresh_assets: bool,
+    /// Open a script file in the Scripting IDE.
+    open_script: Option<String>,
+    /// Focus the Scripting tab (e.g. after a double-click-to-open).
+    focus_scripting: bool,
+    /// A File-menu project action (New / Open / Close).
+    project_action: Option<ProjectAction>,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -231,31 +241,6 @@ fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
         }
     }
     out
-}
-
-/// Render the asset tree. Files are drag sources: drag a model onto the viewport to
-/// import + spawn it, or a script onto a hierarchy node to attach it.
-fn render_assets(ui: &mut egui::Ui, entries: &[AssetEntry]) {
-    for entry in entries {
-        match entry {
-            AssetEntry::Dir(name, children) => {
-                egui::CollapsingHeader::new(format!("🗀 {name}")).id_salt(name).show(ui, |ui| {
-                    render_assets(ui, children);
-                });
-            }
-            AssetEntry::File { name, path } => {
-                let id = egui::Id::new(("asset", path));
-                let draggable = is_model(path) || is_script(path);
-                if draggable {
-                    ui.dnd_drag_source(id, AssetPayload { path: path.clone() }, |ui| {
-                        ui.label(format!("⠿  {name}"));
-                    });
-                } else {
-                    ui.label(format!("    {name}"));
-                }
-            }
-        }
-    }
 }
 
 fn new_cube() -> MatterDoc {
@@ -540,6 +525,732 @@ fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Opt
     }
 }
 
+// ============================================================================
+// Dockable panel system (egui_dock): Hierarchy / Inspector / Assets / Scene /
+// Scripting. The Scene tab is transparent so the 3D viewport shows through it;
+// all other tabs paint an opaque background over the full-window render.
+// ============================================================================
+
+/// Which dockable panel a tab shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EditorTab {
+    Hierarchy,
+    Inspector,
+    Assets,
+    Scene,
+    Scripting,
+}
+
+impl EditorTab {
+    fn title(self) -> &'static str {
+        match self {
+            EditorTab::Hierarchy => "Hierarchy",
+            EditorTab::Inspector => "Inspector",
+            EditorTab::Assets => "Assets",
+            EditorTab::Scene => "Scene",
+            EditorTab::Scripting => "Scripting",
+        }
+    }
+}
+
+/// The default layout: Hierarchy left, Inspector right, Assets bottom, with the
+/// Scene + Scripting tabs filling the center. Users can drag/re-dock freely.
+fn default_dock() -> egui_dock::DockState<EditorTab> {
+    use egui_dock::{DockState, NodeIndex};
+    let mut dock = DockState::new(vec![EditorTab::Scene, EditorTab::Scripting]);
+    let surface = dock.main_surface_mut();
+    let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
+    let [central, _] = surface.split_right(central, 0.78, vec![EditorTab::Inspector]);
+    let [_, _] = surface.split_below(central, 0.72, vec![EditorTab::Assets]);
+    dock
+}
+
+/// Focus the Scripting tab (used after double-click-to-open-a-script).
+fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    let surface = dock.main_surface_mut();
+    if let Some((node, tab)) = surface.find_tab(&EditorTab::Scripting) {
+        let _ = surface.set_active_tab(node, tab);
+    }
+}
+
+/// Viewport framing presets for the in-Scene resolution simulator.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum AspectMode {
+    #[default]
+    Free,
+    Desktop,
+    Mobile,
+    Square,
+}
+
+impl AspectMode {
+    const ALL: [AspectMode; 4] =
+        [AspectMode::Free, AspectMode::Desktop, AspectMode::Mobile, AspectMode::Square];
+    fn label(self) -> &'static str {
+        match self {
+            AspectMode::Free => "Free",
+            AspectMode::Desktop => "Desktop · 16:9",
+            AspectMode::Mobile => "Mobile · 9:16",
+            AspectMode::Square => "Square · 1:1",
+        }
+    }
+    /// Width / height, or `None` for "fill the panel".
+    fn ratio(self) -> Option<f32> {
+        match self {
+            AspectMode::Free => None,
+            AspectMode::Desktop => Some(16.0 / 9.0),
+            AspectMode::Mobile => Some(9.0 / 16.0),
+            AspectMode::Square => Some(1.0),
+        }
+    }
+}
+
+/// A File-menu project action, applied after the frame.
+#[derive(Clone)]
+enum ProjectAction {
+    New(String),
+    Open(String),
+    Close,
+}
+
+/// The built-in Scripting docs, shown on the IDE's Docs page.
+const SCRIPT_DOCS: &str = "\
+Floptle Scripting — quick start
+================================
+
+A script is a small behavior you attach to an object. Scripts are written as
+RON and live in your project's `scripts/` folder. Each script has a `kind` and
+a list of tunable `params`:
+
+    (
+        kind: \"pulsate\",
+        enabled: true,
+        params: [
+            (\"amplitude\", 0.35),
+            (\"speed\", 2.5),
+            (\"base\", 1.0),
+        ],
+    )
+
+Attaching a script
+------------------
+• Drag a `.ron` script from the Assets panel onto a node in the Hierarchy, or
+  drop it onto the Inspector's Scripting section.
+• Or select a node and use Inspector ▸ Scripting ▸ + Add Script.
+
+Running
+-------
+• Press F1 (or ▶ Play) to run every enabled script. F2 pauses the clock so you
+  can inspect a frozen moment. ⏹ Stop restores the authored scene.
+
+Built-in kinds
+--------------
+• pulsate — breathes an object's scale.   params: amplitude, speed, base
+• rotate  — spins an object about Y.       params: speed (deg/sec)
+
+Editing here
+-----------
+Double-click a script in Assets or the Inspector to open it in this tab. Use
+\"Insert template\" to drop a starter script in, tweak the numbers, then Save.
+The numbers you see in params are the same ones the Inspector edits live.";
+
+/// One script file open in the in-engine IDE.
+struct OpenScript {
+    path: String,
+    name: String,
+    text: String,
+    dirty: bool,
+}
+
+/// State of the Scripting-tab IDE: the open files and which one is shown
+/// (`None` = the built-in Docs page).
+struct IdeState {
+    open: Vec<OpenScript>,
+    active: Option<usize>,
+}
+
+impl Default for IdeState {
+    fn default() -> Self {
+        Self { open: Vec::new(), active: None }
+    }
+}
+
+impl IdeState {
+    /// Open `path` in the IDE (or focus it if already open). Returns false on read error.
+    fn open_file(&mut self, path: &str) -> bool {
+        if let Some(i) = self.open.iter().position(|f| f.path == path) {
+            self.active = Some(i);
+            return true;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return false };
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        self.open.push(OpenScript { path: path.to_string(), name, text, dirty: false });
+        self.active = Some(self.open.len() - 1);
+        true
+    }
+}
+
+/// Renders each dockable tab against borrowed slices of the editor's state, and
+/// records UI intents on `cmd` to be applied after the frame.
+struct EditorTabViewer<'a> {
+    world: &'a mut World,
+    selection: &'a mut Vec<Entity>,
+    entity_names: &'a [(Entity, String)],
+    materials: &'a [(String, [f32; 3])],
+    mat_name_buf: &'a mut String,
+    asset_tree: &'a [AssetEntry],
+    selected_asset: &'a mut Option<String>,
+    ide: &'a mut IdeState,
+    gizmo: Option<&'a GizmoFrame>,
+    grabbed: Option<Handle>,
+    tool: Tool,
+    scene_rect: &'a mut Option<egui::Rect>,
+    aspect: &'a mut AspectMode,
+    zoom: &'a mut f32,
+    scene_name: &'a str,
+    ppp: f32,
+    cmd: &'a mut EditorCmd,
+}
+
+impl egui_dock::TabViewer for EditorTabViewer<'_> {
+    type Tab = EditorTab;
+
+    fn title(&mut self, tab: &mut EditorTab) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn id(&mut self, tab: &mut EditorTab) -> egui::Id {
+        egui::Id::new(("editor_tab", tab.title()))
+    }
+
+    // Core panels can't be closed (no way to bring them back yet).
+    fn is_closeable(&self, _tab: &EditorTab) -> bool {
+        false
+    }
+
+    // The Scene tab is transparent so the 3D render shows through it.
+    fn clear_background(&self, tab: &EditorTab) -> bool {
+        !matches!(tab, EditorTab::Scene)
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut EditorTab) {
+        match tab {
+            EditorTab::Hierarchy => self.hierarchy_ui(ui),
+            EditorTab::Inspector => self.inspector_ui(ui),
+            EditorTab::Assets => self.assets_ui(ui),
+            EditorTab::Scene => self.scene_ui(ui),
+            EditorTab::Scripting => self.scripting_ui(ui),
+        }
+    }
+}
+
+impl EditorTabViewer<'_> {
+    fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("+ Cube").clicked() {
+                self.cmd.add = Some(new_cube());
+            }
+            if ui.small_button("+ Sphere").clicked() {
+                self.cmd.add = Some(new_sphere());
+            }
+            if ui.small_button("+ Blob").clicked() {
+                self.cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
+            }
+        });
+        ui.separator();
+        let names = self.entity_names; // Copy the slice ref so the loop body can &mut self.
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for (e, name) in names {
+                let resp = ui.selectable_label(self.selection.contains(e), name);
+                // Highlight a row a script is being dragged over.
+                let script_hover = resp
+                    .dnd_hover_payload::<AssetPayload>()
+                    .is_some_and(|p| is_script(&p.path));
+                if script_hover {
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        3.0,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 230, 140)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if resp.clicked() {
+                    *self.selected_asset = None;
+                    if ui.input(|i| i.modifiers.shift) {
+                        if let Some(pos) = self.selection.iter().position(|x| x == e) {
+                            self.selection.remove(pos);
+                        } else {
+                            self.selection.push(*e);
+                        }
+                    } else {
+                        self.selection.clear();
+                        self.selection.push(*e);
+                    }
+                }
+                if resp.secondary_clicked() && !self.selection.contains(e) {
+                    self.selection.clear();
+                    self.selection.push(*e);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Duplicate").clicked() {
+                        self.cmd.duplicate = true;
+                        ui.close();
+                    }
+                    if ui.button("Copy").clicked() {
+                        self.cmd.copy = true;
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        self.cmd.delete = true;
+                        ui.close();
+                    }
+                });
+                if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
+                    if is_script(&p.path) {
+                        self.cmd.drop_script_on = Some((p.path.clone(), *e));
+                    }
+                }
+            }
+        });
+    }
+
+    fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("scene: {}", self.scene_name));
+        ui.separator();
+        // An asset selected in the browser shows its info here.
+        if let Some(path) = self.selected_asset.clone() {
+            ui.strong("Asset");
+            ui.small(&path);
+            if is_model(&path) {
+                ui.label("glTF model — drag onto the scene to place it.");
+            } else if is_script(&path) {
+                ui.label("script — drag onto a node, or:");
+                if ui.button("✎  Open in Scripting").clicked() {
+                    self.cmd.open_script = Some(path.clone());
+                    self.cmd.focus_scripting = true;
+                }
+            }
+            ui.separator();
+        }
+
+        let primary = self.selection.last().copied();
+        if self.selection.len() > 1 {
+            ui.small(format!("{} selected", self.selection.len()));
+        }
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        match primary {
+            Some(e) if world.get::<Light>(e).is_some() => {
+                if let Some(l) = world.get_mut::<Light>(e) {
+                    ui.label("Lighting node");
+                    ui.label("direction");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("light");
+                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
+                        ui.label("ambient");
+                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
+                    });
+                }
+            }
+            Some(e) if world.get::<Transform>(e).is_some() => {
+                if let Some(n) = world.get_mut::<Name>(e) {
+                    ui.horizontal(|ui| {
+                        ui.label("name");
+                        cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
+                    });
+                }
+                if let Some(m) = world.get_mut::<Matter>(e) {
+                    match m {
+                        Matter::Primitive { shape, color } => {
+                            ui.horizontal(|ui| {
+                                ui.label("shape");
+                                egui::ComboBox::from_id_salt("shape")
+                                    .selected_text(format!("{shape:?}"))
+                                    .show_ui(ui, |ui| {
+                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
+                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("material");
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                egui::ComboBox::from_id_salt("apply_mat")
+                                    .selected_text("apply…")
+                                    .show_ui(ui, |ui| {
+                                        for (mname, mcol) in self.materials {
+                                            if ui.selectable_label(false, mname).clicked() {
+                                                *color = *mcol;
+                                                cmd.inspector_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(self.mat_name_buf)
+                                        .hint_text("new material name")
+                                        .desired_width(110.0),
+                                );
+                                if ui.button("save").clicked() && !self.mat_name_buf.trim().is_empty() {
+                                    cmd.save_material = Some((self.mat_name_buf.trim().to_string(), *color));
+                                }
+                            });
+                        }
+                        Matter::Blob { scale } => {
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
+                                .changed();
+                        }
+                        Matter::Mesh { asset_path } => {
+                            ui.label("imported mesh");
+                            ui.small(asset_path.as_str());
+                        }
+                    }
+                }
+                if let Some(t) = world.get_mut::<Transform>(e) {
+                    ui.label("translation");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
+                    });
+                    ui.label("rotation (deg)");
+                    let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                    let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                    let mut rot_changed = false;
+                    ui.horizontal(|ui| {
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                    });
+                    if rot_changed {
+                        t.rotation = Quat::from_euler(
+                            EulerRot::YXZ,
+                            deg[0].to_radians(),
+                            deg[1].to_radians(),
+                            deg[2].to_radians(),
+                        );
+                        cmd.inspector_changed = true;
+                    }
+                    ui.label("scale");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                    });
+                }
+                // ---- Scripting ----
+                ui.separator();
+                egui::CollapsingHeader::new("Scripting")
+                    .default_open(world.get::<Scripts>(e).is_some())
+                    .show(ui, |ui| {
+                        // A clear drop target: drag a script here to attach it.
+                        let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
+                            egui::Frame::group(ui.style()),
+                            |ui| {
+                                ui.set_min_height(20.0);
+                                ui.small("⬇  drop a script here to attach");
+                            },
+                        );
+                        if let Some(p) = dropped {
+                            if is_script(&p.path) {
+                                cmd.drop_script_on = Some((p.path.clone(), e));
+                            }
+                        }
+                        let mut remove: Option<usize> = None;
+                        let mut add_kind: Option<&str> = None;
+                        if let Some(scr) = world.get_mut::<Scripts>(e) {
+                            for (i, inst) in scr.0.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
+                                    ui.strong(&inst.kind);
+                                    if ui.small_button("✕").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
+                                for (k, v) in inst.params.iter_mut() {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
+                                        .changed();
+                                }
+                                ui.add_space(4.0);
+                            }
+                            if let Some(i) = remove {
+                                scr.0.remove(i);
+                                cmd.inspector_changed = true;
+                            }
+                        } else {
+                            ui.small("(no scripts — add one or drag from Assets)");
+                        }
+                        ui.menu_button("+ Add Script", |ui| {
+                            for k in SCRIPT_KINDS {
+                                if ui.button(*k).clicked() {
+                                    add_kind = Some(*k);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if let Some(k) = add_kind {
+                            if let Some(scr) = world.get_mut::<Scripts>(e) {
+                                scr.0.push(ScriptInst::new(k));
+                            } else {
+                                world.insert(e, Scripts(vec![ScriptInst::new(k)]));
+                            }
+                            cmd.inspector_changed = true;
+                        }
+                    });
+            }
+            Some(_) => {
+                ui.label("(no editable properties)");
+            }
+            None => {
+                if self.selected_asset.is_none() {
+                    ui.label("(nothing selected)");
+                }
+            }
+        }
+        ui.separator();
+        if ui.button("💾  Save scene").clicked() {
+            cmd.save_scene = true;
+        }
+        ui.add_space(6.0);
+        ui.small("1 select · 2 move · 3 rotate · 4 scale · F1 play · F2 pause");
+        ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
+    }
+
+    fn assets_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Assets");
+            if ui.small_button("⟳").on_hover_text("rescan").clicked() {
+                self.cmd.refresh_assets = true;
+            }
+            ui.separator();
+            ui.small("drag a .glb onto the scene · drag a script onto a node · double-click a script to edit");
+        });
+        ui.separator();
+        let tree = self.asset_tree; // Copy the slice ref so the recursion can &mut self.
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            self.asset_node_ui(ui, tree);
+        });
+    }
+
+    fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry]) {
+        for entry in entries {
+            match entry {
+                AssetEntry::Dir(name, children) => {
+                    egui::CollapsingHeader::new(format!("🗀 {name}")).id_salt(name).show(ui, |ui| {
+                        self.asset_node_ui(ui, children);
+                    });
+                }
+                AssetEntry::File { name, path } => {
+                    let model = is_model(path);
+                    let script = is_script(path);
+                    let selected = self.selected_asset.as_deref() == Some(path.as_str());
+                    let text = if model || script {
+                        format!("⠿  {name}")
+                    } else {
+                        format!("    {name}")
+                    };
+                    let resp = if model || script {
+                        ui.dnd_drag_source(
+                            egui::Id::new(("asset", path)),
+                            AssetPayload { path: path.clone() },
+                            |ui| ui.selectable_label(selected, text),
+                        )
+                        .response
+                    } else {
+                        ui.selectable_label(selected, text)
+                    };
+                    if resp.clicked() {
+                        *self.selected_asset = Some(path.clone());
+                    }
+                    if resp.double_clicked() && script {
+                        self.cmd.open_script = Some(path.clone());
+                        self.cmd.focus_scripting = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn scene_ui(&mut self, ui: &mut egui::Ui) {
+        // This tab's rect IS the 3D viewport; cache it for picking / gizmo gating.
+        let rect = ui.max_rect();
+        *self.scene_rect = Some(rect);
+
+        // Overlay toolbar: tools (left) + resolution simulator (right).
+        egui::Area::new(egui::Id::new("scene_toolbar"))
+            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
+                            if ui.selectable_label(self.tool == t, t.label()).clicked() {
+                                self.cmd.set_tool = Some(t);
+                            }
+                        }
+                        ui.separator();
+                        egui::ComboBox::from_id_salt("aspect_mode")
+                            .selected_text(self.aspect.label())
+                            .show_ui(ui, |ui| {
+                                for m in AspectMode::ALL {
+                                    if ui.selectable_label(*self.aspect == m, m.label()).clicked() {
+                                        *self.aspect = m;
+                                    }
+                                }
+                            });
+                        if self.aspect.ratio().is_some() {
+                            ui.add(egui::Slider::new(self.zoom, 0.4..=1.0).text("fit").show_value(false));
+                        }
+                    });
+                });
+            });
+
+        // Resolution simulator: a centered device frame for the chosen aspect.
+        if let Some(r) = self.aspect.ratio() {
+            let avail = rect.shrink(10.0);
+            let zoom = self.zoom.clamp(0.2, 1.0);
+            let (mut w, mut h) = (avail.width(), avail.height());
+            if w / h > r {
+                w = h * r;
+            } else {
+                h = w / r;
+            }
+            w *= zoom;
+            h *= zoom;
+            let frame = egui::Rect::from_center_size(rect.center(), egui::vec2(w, h));
+            let painter = ui.painter_at(rect);
+            // Dim outside the device frame so the framing is obvious.
+            let shade = egui::Color32::from_black_alpha(150);
+            painter.rect_filled(egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), frame.top())), 0.0, shade);
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left(), frame.bottom()), rect.right_bottom()), 0.0, shade);
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left(), frame.top()), egui::pos2(frame.left(), frame.bottom())), 0.0, shade);
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(frame.right(), frame.top()), egui::pos2(rect.right(), frame.bottom())), 0.0, shade);
+            painter.rect_stroke(frame, 2.0, egui::Stroke::new(1.5, egui::Color32::from_gray(180)), egui::StrokeKind::Inside);
+        }
+
+        // The gizmo paints on a layer above the scene, clipped to this tab.
+        if let Some(g) = self.gizmo {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
+                .with_clip_rect(rect);
+            paint_gizmo(&painter, g, self.tool, self.grabbed, self.ppp);
+        }
+    }
+
+    fn scripting_ui(&mut self, ui: &mut egui::Ui) {
+        // Tab strip: Docs + each open file.
+        ui.horizontal_wrapped(|ui| {
+            if ui.selectable_label(self.ide.active.is_none(), "📖 Docs").clicked() {
+                self.ide.active = None;
+            }
+            let mut close: Option<usize> = None;
+            for i in 0..self.ide.open.len() {
+                let f = &self.ide.open[i];
+                let title = if f.dirty { format!("{} *", f.name) } else { f.name.clone() };
+                if ui.selectable_label(self.ide.active == Some(i), title).clicked() {
+                    self.ide.active = Some(i);
+                }
+                if ui.small_button("✕").clicked() {
+                    close = Some(i);
+                }
+            }
+            if let Some(i) = close {
+                self.ide.open.remove(i);
+                self.ide.active = match self.ide.active {
+                    Some(a) if a == i => None,
+                    Some(a) if a > i => Some(a - 1),
+                    other => other,
+                };
+            }
+        });
+        ui.separator();
+
+        match self.ide.active {
+            None => {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.monospace(SCRIPT_DOCS);
+                });
+            }
+            Some(i) if i < self.ide.open.len() => {
+                ui.horizontal(|ui| {
+                    ui.small(self.ide.open[i].path.clone());
+                    if ui.button("💾 Save").clicked() {
+                        let f = &mut self.ide.open[i];
+                        if std::fs::write(&f.path, &f.text).is_ok() {
+                            f.dirty = false;
+                            self.cmd.refresh_assets = true;
+                        }
+                    }
+                    ui.menu_button("Insert template", |ui| {
+                        for k in SCRIPT_KINDS {
+                            if ui.button(*k).clicked() {
+                                let tmpl = script_template(k);
+                                self.ide.open[i].text.push_str(&tmpl);
+                                self.ide.open[i].dirty = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                // Hints: known param names for whichever kind the file references.
+                let hint = script_hint(&self.ide.open[i].text);
+                if !hint.is_empty() {
+                    ui.small(egui::RichText::new(hint).color(egui::Color32::from_gray(160)));
+                }
+                let resp = egui::ScrollArea::vertical()
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.ide.open[i].text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(20),
+                        )
+                    })
+                    .inner;
+                if resp.changed() {
+                    self.ide.open[i].dirty = true;
+                }
+            }
+            _ => {
+                self.ide.active = None;
+            }
+        }
+    }
+}
+
+/// A starter script body for `kind`, with its default params filled in.
+fn script_template(kind: &str) -> String {
+    let inst = ScriptInst::new(kind);
+    let mut s = format!("(\n    kind: \"{kind}\",\n    enabled: true,\n    params: [\n");
+    for (k, v) in &inst.params {
+        s.push_str(&format!("        (\"{k}\", {v}),\n"));
+    }
+    s.push_str("    ],\n)\n");
+    s
+}
+
+/// A one-line param hint for whichever known kind the text references.
+fn script_hint(text: &str) -> String {
+    for k in SCRIPT_KINDS {
+        if text.contains(&format!("\"{k}\"")) {
+            let inst = ScriptInst::new(k);
+            let params: Vec<&str> = inst.params.iter().map(|(p, _)| p.as_str()).collect();
+            return format!("{k} params: {}", params.join(", "));
+        }
+    }
+    String::new()
+}
+
 fn main() {
     env_logger::init();
     println!("{} editor v{}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
@@ -571,8 +1282,24 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
+    /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
+    project_root: PathBuf,
     /// Whether the Project Settings window is open.
     show_project_settings: bool,
+    /// Whether the New/Open Project window is open, + its path text field.
+    show_project_mgr: bool,
+    project_path_buf: String,
+    /// Dockable panel layout (Hierarchy / Inspector / Assets / Scene / Scripting).
+    dock_state: Option<egui_dock::DockState<EditorTab>>,
+    /// The in-engine Scripting IDE (open files + Docs page).
+    ide: IdeState,
+    /// The asset selected in the browser (shown in the Inspector); `None` = a node.
+    selected_asset: Option<String>,
+    /// Resolution-simulator framing for the Scene tab.
+    aspect_mode: AspectMode,
+    viewport_zoom: f32,
+    /// The Scene tab's rect (logical points), captured each frame — gates picking.
+    scene_rect: Option<egui::Rect>,
     scene_name: String,
     /// Selected entities (multi-select); the gizmo/inspector act on the last one.
     selection: Vec<Entity>,
@@ -655,6 +1382,11 @@ impl ApplicationHandler for Editor {
         if self.window.is_some() {
             return;
         }
+        // The default project is the repo's `assets/` folder; File ▸ Open/New
+        // re-points this elsewhere.
+        self.project_root = PathBuf::from("assets");
+        self.dock_state = Some(default_dock());
+        self.viewport_zoom = 0.9;
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -666,39 +1398,15 @@ impl ApplicationHandler for Editor {
         self.mesh_ids = vec![cube_id, sphere_id];
         self.raymarch = Some(Raymarch::new(&gpu));
 
-        // Load the scene (or fall back to a tiny built-in default).
-        let doc = floptle_scene::load(std::path::Path::new(SCENE_PATH)).unwrap_or_else(|e| {
-            eprintln!("  no scene at {SCENE_PATH} ({e}); using built-in default");
-            default_scene()
-        });
+        // Seed the project folder structure + default assets, then load the scene,
+        // project settings, materials and asset tree from `project_root`.
+        self.seed_project_dirs();
+        let doc = self.load_active_scene_doc();
         self.scene_name = doc.name.clone();
         floptle_scene::spawn_into(&doc, &mut self.world);
-
-        // Project-wide render settings live in their own file, shared across scenes.
-        self.project = floptle_scene::load_project(std::path::Path::new(PROJECT_PATH));
-
-        // Seed a sample project folder structure (no-op if it exists), then scan it
-        // for the bottom asset browser.
-        for d in ["scenes", "textures", "models", "materials", "audio", "scripts"] {
-            let _ = std::fs::create_dir_all(format!("assets/{d}"));
-        }
-        self.asset_tree = build_assets(std::path::Path::new("assets"));
-
-        // Seed default materials (once), then load the material presets.
-        let mat_dir = std::path::Path::new("assets/materials");
-        for (n, c) in [
-            ("white", [1.0, 1.0, 1.0]),
-            ("orange", [0.9, 0.45, 0.35]),
-            ("blue", [0.4, 0.7, 0.95]),
-            ("green", [0.5, 0.85, 0.45]),
-            ("gray", [0.6, 0.6, 0.62]),
-        ] {
-            if !mat_dir.join(format!("{n}.ron")).exists() {
-                let _ = floptle_scene::save_material(n, &floptle_scene::MaterialDoc { color: c }, mat_dir);
-            }
-        }
-        self.materials =
-            floptle_scene::load_materials(mat_dir).into_iter().map(|(n, m)| (n, m.color)).collect();
+        self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.asset_tree = build_assets(&self.project_root);
+        self.materials = self.load_materials();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.outline = Some(Outline::new(&gpu));
@@ -831,11 +1539,11 @@ impl ApplicationHandler for Editor {
                 // not consumed → the click is in the viewport.
                 let pressed = state == ElementState::Pressed;
                 if pressed {
-                    let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
+                    let over_scene = self.cursor_over_scene();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-                    if !over_ui {
+                    if over_scene {
                         // Clicking the viewport dismisses an open context menu (but
-                        // clicking the menu itself, which is over_ui, keeps it).
+                        // clicking a panel/menu, which isn't over_scene, keeps it).
                         self.context_menu = None;
                         if let (Some(h), Some(e)) = (hovered, self.primary()) {
                             // On a gizmo handle → start an undoable edit and grab it.
@@ -868,14 +1576,14 @@ impl ApplicationHandler for Editor {
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let pressed = state == ElementState::Pressed;
-                let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
+                let over_scene = self.cursor_over_scene();
                 if pressed {
                     // Begin a possible look; if the cursor barely moves before release
                     // it's a click → open a context menu instead.
                     self.rmb_press = self.cursor;
                     self.rmb_moved = 0.0;
                     self.context_menu = None;
-                    if !over_ui {
+                    if over_scene {
                         self.input.looking = true;
                         if let Some(window) = self.window.as_ref() {
                             let _ = window
@@ -1106,32 +1814,48 @@ impl Editor {
         let entity_names: Vec<(Entity, String)> =
             self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
         let old_retro_h = self.project.retro_height;
+        let ppp = ctx.pixels_per_point();
+        let dock_state = self.dock_state.get_or_insert_with(default_dock);
         let world = &mut self.world;
         let selection = &mut self.selection;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
+        let show_project_mgr = &mut self.show_project_mgr;
+        let project_path_buf = &mut self.project_path_buf;
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
         let asset_tree = &self.asset_tree;
-        let mut want_refresh_assets = false;
         let playing = self.playing;
         let paused = self.paused;
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
+        let ide = &mut self.ide;
+        let selected_asset = &mut self.selected_asset;
+        let aspect_mode = &mut self.aspect_mode;
+        let viewport_zoom = &mut self.viewport_zoom;
+        let scene_rect = &mut self.scene_rect;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
-        let tool = &mut self.tool;
+        let tool = self.tool;
         let context_menu = self.context_menu;
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
-            let primary = selection.last().copied();
             // ---- top menu bar ----
             egui::Panel::top("menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
+                        if ui.button("New / Open Project…").clicked() {
+                            *show_project_mgr = true;
+                            ui.close();
+                        }
+                        if ui.button("Close Project").clicked() {
+                            cmd.project_action = Some(ProjectAction::Close);
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Save Scene").clicked() {
                             want_save = true;
                             ui.close();
@@ -1195,271 +1919,44 @@ impl Editor {
                 });
             });
 
-            // ---- floating tool strip at the top of the viewport ----
-            egui::Area::new(egui::Id::new("tool_strip"))
-                .anchor(egui::Align2::CENTER_TOP, egui::vec2(140.0, 34.0))
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
-                                if ui.selectable_label(*tool == t, t.label()).clicked() {
-                                    *tool = t;
-                                }
-                            }
-                        });
-                    });
-                });
+            // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
+            // The Scene tab is transparent so the 3D render shows through; the others
+            // paint opaque over it. Users can drag/re-dock/tab these freely.
+            let mut viewer = EditorTabViewer {
+                world,
+                selection,
+                entity_names: &entity_names,
+                materials,
+                mat_name_buf,
+                asset_tree,
+                selected_asset,
+                ide,
+                gizmo,
+                grabbed,
+                tool,
+                scene_rect: &mut *scene_rect,
+                aspect: aspect_mode,
+                zoom: viewport_zoom,
+                scene_name: &scene_name,
+                ppp,
+                cmd: &mut cmd,
+            };
+            egui_dock::DockArea::new(dock_state)
+                .style(egui_dock::Style::from_egui(ui.style()))
+                .show_inside(ui, &mut viewer);
 
-            // ---- left inspector panel ----
-            egui::Panel::left("inspector").default_size(290.0).show(ui, |ui| {
-                ui.heading("Floptle Editor");
-                ui.label(format!("scene: {scene_name}"));
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.label("Hierarchy");
-                    if ui.small_button("+ Cube").clicked() { cmd.add = Some(new_cube()); }
-                    if ui.small_button("+ Sphere").clicked() { cmd.add = Some(new_sphere()); }
-                    if ui.small_button("+ Blob").clicked() { cmd.add = Some(MatterDoc::Blob { scale: 1.0 }); }
-                });
-                for (e, name) in &entity_names {
-                    let resp = ui.selectable_label(selection.contains(e), name);
-                    if resp.clicked() {
-                        if ui.input(|i| i.modifiers.shift) {
-                            if let Some(pos) = selection.iter().position(|x| x == e) {
-                                selection.remove(pos);
-                            } else {
-                                selection.push(*e);
-                            }
-                        } else {
-                            selection.clear();
-                            selection.push(*e);
-                        }
-                    }
-                    if resp.secondary_clicked() && !selection.contains(e) {
-                        selection.clear();
-                        selection.push(*e);
-                    }
-                    resp.context_menu(|ui| {
-                        if ui.button("Duplicate").clicked() { cmd.duplicate = true; ui.close(); }
-                        if ui.button("Copy").clicked() { cmd.copy = true; ui.close(); }
-                        if ui.button("Delete").clicked() { cmd.delete = true; ui.close(); }
-                    });
-                    // Drop a script from the asset browser onto a node to attach it.
-                    if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
-                        if is_script(&p.path) {
-                            cmd.drop_script_on = Some((p.path.clone(), *e));
-                        }
-                    }
-                }
-                ui.separator();
-
-                ui.label("Inspector");
-                if selection.len() > 1 {
-                    ui.small(format!("{} selected", selection.len()));
-                }
-                match primary {
-                    Some(e) if world.get::<Light>(e).is_some() => {
-                        if let Some(l) = world.get_mut::<Light>(e) {
-                            ui.label("Lighting node");
-                            ui.label("direction");
-                            ui.horizontal(|ui| {
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("light");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
-                                ui.label("ambient");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
-                            });
-                        }
-                    }
-                    Some(e) if world.get::<Transform>(e).is_some() => {
-                        // name
-                        if let Some(n) = world.get_mut::<Name>(e) {
-                            ui.horizontal(|ui| {
-                                ui.label("name");
-                                cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
-                            });
-                        }
-                        // matter-specific (shape + color, or blob scale)
-                        if let Some(m) = world.get_mut::<Matter>(e) {
-                            match m {
-                                Matter::Primitive { shape, color } => {
-                                    ui.horizontal(|ui| {
-                                        ui.label("shape");
-                                        egui::ComboBox::from_id_salt("shape")
-                                            .selected_text(format!("{shape:?}"))
-                                            .show_ui(ui, |ui| {
-                                                cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
-                                                cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
-                                            });
-                                    });
-                                    // Material: base color + named presets (apply / save).
-                                    ui.horizontal(|ui| {
-                                        ui.label("material");
-                                        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                        egui::ComboBox::from_id_salt("apply_mat")
-                                            .selected_text("apply…")
-                                            .show_ui(ui, |ui| {
-                                                for (mname, mcol) in materials {
-                                                    if ui.selectable_label(false, mname).clicked() {
-                                                        *color = *mcol;
-                                                        cmd.inspector_changed = true;
-                                                    }
-                                                }
-                                            });
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::TextEdit::singleline(mat_name_buf)
-                                                .hint_text("new material name")
-                                                .desired_width(110.0),
-                                        );
-                                        if ui.button("save").clicked() && !mat_name_buf.trim().is_empty()
-                                        {
-                                            cmd.save_material =
-                                                Some((mat_name_buf.trim().to_string(), *color));
-                                        }
-                                    });
-                                }
-                                Matter::Blob { scale } => {
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
-                                        .changed();
-                                }
-                                Matter::Mesh { asset_path } => {
-                                    ui.label("imported mesh");
-                                    ui.small(asset_path.as_str());
-                                }
-                            }
-                        }
-                        // transform
-                        if let Some(t) = world.get_mut::<Transform>(e) {
-                            ui.label("translation");
-                            ui.horizontal(|ui| {
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
-                            });
-                            ui.label("rotation (deg)");
-                            let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
-                            let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
-                            let mut rot_changed = false;
-                            ui.horizontal(|ui| {
-                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
-                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
-                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
-                            });
-                            if rot_changed {
-                                t.rotation = Quat::from_euler(
-                                    EulerRot::YXZ,
-                                    deg[0].to_radians(),
-                                    deg[1].to_radians(),
-                                    deg[2].to_radians(),
-                                );
-                                cmd.inspector_changed = true;
-                            }
-                            ui.label("scale");
-                            ui.horizontal(|ui| {
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
-                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
-                            });
-                        }
-                        // ---- Scripting ----
-                        ui.separator();
-                        egui::CollapsingHeader::new("Scripting")
-                            .default_open(world.get::<Scripts>(e).is_some())
-                            .show(ui, |ui| {
-                                let mut remove: Option<usize> = None;
-                                let mut add_kind: Option<&str> = None;
-                                if let Some(scr) = world.get_mut::<Scripts>(e) {
-                                    for (i, inst) in scr.0.iter_mut().enumerate() {
-                                        ui.horizontal(|ui| {
-                                            cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
-                                            ui.strong(&inst.kind);
-                                            if ui.small_button("✕").clicked() {
-                                                remove = Some(i);
-                                            }
-                                        });
-                                        for (k, v) in inst.params.iter_mut() {
-                                            cmd.inspector_changed |= ui
-                                                .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
-                                                .changed();
-                                        }
-                                        ui.add_space(4.0);
-                                    }
-                                    if let Some(i) = remove {
-                                        scr.0.remove(i);
-                                        cmd.inspector_changed = true;
-                                    }
-                                } else {
-                                    ui.small("(no scripts — add one or drag from Assets)");
-                                }
-                                ui.menu_button("+ Add Script", |ui| {
-                                    for k in SCRIPT_KINDS {
-                                        if ui.button(*k).clicked() {
-                                            add_kind = Some(*k);
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                                if let Some(k) = add_kind {
-                                    if let Some(scr) = world.get_mut::<Scripts>(e) {
-                                        scr.0.push(ScriptInst::new(k));
-                                    } else {
-                                        world.insert(e, Scripts(vec![ScriptInst::new(k)]));
-                                    }
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                    }
-                    Some(_) => {
-                        ui.label("(no editable properties)");
-                    }
-                    None => {
-                        ui.label("(nothing selected)");
-                    }
-                }
-                ui.separator();
-
-                if ui.button("💾  Save scene").clicked() {
-                    want_save = true;
-                }
-                ui.add_space(8.0);
-                ui.small("1 select · 2 move · 3 rotate · 4 scale");
-                ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
-                ui.small("WASD move · Space/C up/down · Ctrl+Z/Y/C/V/D · Del");
-            });
-
-            // ---- bottom asset / file browser ----
-            egui::Panel::bottom("assets").default_size(150.0).resizable(true).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.strong("Assets");
-                    if ui.small_button("⟳").on_hover_text("rescan").clicked() {
-                        want_refresh_assets = true;
-                    }
-                    ui.separator();
-                    ui.small("drag a .glb model onto the scene · drag a script onto a node");
-                });
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_assets(ui, asset_tree);
-                });
-            });
-
-            // Viewport drop: detect a release over the scene (not over a panel)
-            // WITHOUT allocating an opaque interactive region — so the viewport never
-            // greys out mid-drag. Panel drops (script-on-node) are consumed first.
+            // Viewport drop: spawn a model when an asset is released over the Scene
+            // tab (panel drops — script-on-node — are consumed by those tabs first).
+            // No opaque region is allocated, so the viewport never greys mid-drag.
             if egui::DragAndDrop::has_payload_of_type::<AssetPayload>(ui.ctx())
                 && ui.input(|i| i.pointer.any_released())
-                && !ui.ctx().is_pointer_over_egui()
             {
-                if let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
-                    cmd.drop_asset = Some(p.path.clone());
+                let pos = ui.input(|i| i.pointer.interact_pos());
+                let over_scene = matches!((pos, *scene_rect), (Some(p), Some(r)) if r.contains(p));
+                if over_scene {
+                    if let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
+                        cmd.drop_asset = Some(p.path.clone());
+                    }
                 }
             }
 
@@ -1552,17 +2049,34 @@ impl Editor {
                     });
             }
 
-            // The gizmo paints over the viewport on a top layer (above the scene,
-            // below tooltips), clipped to the area right of the panel so handles
-            // never draw over the inspector. It only draws — interaction is handled
-            // in the window/device events against the cached hit-test.
-            if let Some(g) = gizmo {
-                let painter = ui
-                    .ctx()
-                    .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
-                    .with_clip_rect(ui.available_rect_before_wrap());
-                paint_gizmo(&painter, g, *tool, grabbed, ui.ctx().pixels_per_point());
-            }
+            // ---- new / open project window (rfd unavailable → a text path) ----
+            egui::Window::new("Project")
+                .open(show_project_mgr)
+                .resizable(false)
+                .default_width(420.0)
+                .show(ui.ctx(), |ui| {
+                    ui.label("A project is a folder holding scenes/, models/, scripts/, …");
+                    ui.horizontal(|ui| {
+                        ui.label("path");
+                        ui.add(
+                            egui::TextEdit::singleline(project_path_buf)
+                                .desired_width(290.0)
+                                .hint_text("/path/to/project"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let p = project_path_buf.trim().to_string();
+                        if ui.add_enabled(!p.is_empty(), egui::Button::new("Open")).clicked() {
+                            cmd.project_action = Some(ProjectAction::Open(p.clone()));
+                        }
+                        if ui.add_enabled(!p.is_empty(), egui::Button::new("Create New")).clicked() {
+                            cmd.project_action = Some(ProjectAction::New(p));
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.small("Open loads an existing folder; Create New scaffolds a fresh one.");
+                });
+            // (the gizmo now paints inside the Scene tab, clipped to its rect)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
         if self.project.retro_height != old_retro_h {
@@ -1664,18 +2178,41 @@ impl Editor {
             }
         }
 
-        if want_save {
+        if want_save || cmd.save_scene {
             self.save_scene();
         }
         if want_save_project {
-            if let Err(e) =
-                floptle_scene::save_project(&self.project, std::path::Path::new(PROJECT_PATH))
-            {
+            if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
                 eprintln!("  save project failed: {e}");
             }
         }
 
         // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
+        if let Some(action) = cmd.project_action {
+            match action {
+                ProjectAction::New(p) => self.new_project(PathBuf::from(p)),
+                ProjectAction::Open(p) => {
+                    let path = PathBuf::from(p);
+                    if path.is_dir() {
+                        self.open_project(path);
+                    } else {
+                        eprintln!("  open project: not a folder: {}", path.display());
+                    }
+                }
+                ProjectAction::Close => self.close_project(),
+            }
+        }
+        if let Some(tool) = cmd.set_tool {
+            self.set_tool(tool);
+        }
+        if let Some(path) = cmd.open_script {
+            self.ide.open_file(&path);
+        }
+        if cmd.focus_scripting {
+            if let Some(dock) = self.dock_state.as_mut() {
+                focus_scripting_tab(dock);
+            }
+        }
         if cmd.close_menu {
             self.context_menu = None;
         }
@@ -1722,15 +2259,14 @@ impl Editor {
             self.attach_script_file(&path, Some(e));
         }
         if let Some((name, color)) = cmd.save_material {
-            let dir = std::path::Path::new("assets/materials");
-            let _ = floptle_scene::save_material(&name, &floptle_scene::MaterialDoc { color }, dir);
-            self.materials =
-                floptle_scene::load_materials(dir).into_iter().map(|(n, m)| (n, m.color)).collect();
+            let dir = self.materials_dir();
+            let _ = floptle_scene::save_material(&name, &floptle_scene::MaterialDoc { color }, &dir);
+            self.materials = self.load_materials();
             self.mat_name_buf.clear();
-            self.asset_tree = build_assets(std::path::Path::new("assets"));
+            self.asset_tree = build_assets(&self.project_root);
         }
-        if want_refresh_assets {
-            self.asset_tree = build_assets(std::path::Path::new("assets"));
+        if cmd.refresh_assets {
+            self.asset_tree = build_assets(&self.project_root);
         }
     }
 
@@ -2016,6 +2552,20 @@ impl Editor {
         self.spawn_offset(nodes);
     }
 
+    /// True when the cursor is over the Scene viewport tab and not under a popup —
+    /// the gate for viewport picking, gizmo grabs and camera look. egui_dock keeps
+    /// the side panels in the background layer, so `is_pointer_over_egui` alone
+    /// can't separate them from the viewport; the Scene-tab rect is what does.
+    fn cursor_over_scene(&self) -> bool {
+        let Some(eg) = self.egui.as_ref() else { return false };
+        if eg.ctx.is_pointer_over_egui() {
+            return false; // under a foreground menu / popup / tooltip
+        }
+        let (Some(cursor), Some(rect)) = (self.cursor, self.scene_rect) else { return false };
+        let ppp = eg.ctx.pixels_per_point();
+        rect.contains(egui::pos2(cursor.x / ppp, cursor.y / ppp))
+    }
+
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
     /// or ~6 units in front of the camera if the ray doesn't meet the ground. Used to
     /// place a dropped asset where the cursor is.
@@ -2229,12 +2779,146 @@ impl Editor {
         }
     }
 
+    // ---- project paths (everything resolves against `project_root`) ----
+    fn scene_path(&self) -> PathBuf {
+        self.project_root.join("scenes").join(format!("{}.ron", self.scene_name))
+    }
+    fn project_cfg_path(&self) -> PathBuf {
+        self.project_root.join("project.ron")
+    }
+    fn materials_dir(&self) -> PathBuf {
+        self.project_root.join("materials")
+    }
+
+    /// Create the standard project subfolders + seed default materials (no-op if
+    /// they already exist).
+    fn seed_project_dirs(&self) {
+        for d in ["scenes", "textures", "models", "materials", "audio", "scripts"] {
+            let _ = std::fs::create_dir_all(self.project_root.join(d));
+        }
+        let mat_dir = self.materials_dir();
+        for (n, c) in [
+            ("white", [1.0, 1.0, 1.0]),
+            ("orange", [0.9, 0.45, 0.35]),
+            ("blue", [0.4, 0.7, 0.95]),
+            ("green", [0.5, 0.85, 0.45]),
+            ("gray", [0.6, 0.6, 0.62]),
+        ] {
+            if !mat_dir.join(format!("{n}.ron")).exists() {
+                let _ =
+                    floptle_scene::save_material(n, &floptle_scene::MaterialDoc { color: c }, &mat_dir);
+            }
+        }
+    }
+
+    fn load_materials(&self) -> Vec<(String, [f32; 3])> {
+        floptle_scene::load_materials(&self.materials_dir())
+            .into_iter()
+            .map(|(n, m)| (n, m.color))
+            .collect()
+    }
+
+    /// Load the project's active scene: `scenes/first.ron` if present, else the
+    /// first `.ron` in `scenes/`, else a tiny built-in default.
+    fn load_active_scene_doc(&self) -> floptle_scene::SceneDoc {
+        let first = self.project_root.join("scenes/first.ron");
+        if let Ok(doc) = floptle_scene::load(&first) {
+            return doc;
+        }
+        let scenes = self.project_root.join("scenes");
+        let mut rons: Vec<PathBuf> = std::fs::read_dir(&scenes)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "ron"))
+            .collect();
+        rons.sort();
+        rons.iter().find_map(|p| floptle_scene::load(p).ok()).unwrap_or_else(default_scene)
+    }
+
+    /// Switch the editor to the project rooted at `root`, reloading everything.
+    fn open_project(&mut self, root: PathBuf) {
+        self.project_root = root;
+        self.seed_project_dirs();
+        let doc = self.load_active_scene_doc();
+        self.scene_name = doc.name.clone();
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.materials = self.load_materials();
+        self.asset_tree = build_assets(&self.project_root);
+        self.selection.clear();
+        self.selected_asset = None;
+        self.ide = IdeState::default();
+        self.history = History::default();
+        self.playing = false;
+        self.paused = false;
+        // Re-register any meshes the new scene references.
+        let mesh_paths: Vec<String> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(_, m)| match m {
+                Matter::Mesh { asset_path } => Some(asset_path.clone()),
+                _ => None,
+            })
+            .collect();
+        for p in mesh_paths {
+            self.import_model(&p);
+        }
+        println!("  opened project {}", self.project_root.display());
+    }
+
+    /// Create a fresh project at `root` (folders + a starter scene + example
+    /// scripts), then open it.
+    fn new_project(&mut self, root: PathBuf) {
+        let _ = std::fs::create_dir_all(root.join("scenes"));
+        let _ = std::fs::create_dir_all(root.join("scripts"));
+        // A starter scene if none exists yet.
+        let first = root.join("scenes/first.ron");
+        if !first.exists() {
+            let _ = floptle_scene::save(&default_scene(), &first);
+        }
+        // Example scripts so the IDE/docs have something to show.
+        for (name, kind) in [("pulsate", "pulsate"), ("rotate", "rotate")] {
+            let p = root.join(format!("scripts/{name}.ron"));
+            if !p.exists() {
+                let _ = std::fs::write(&p, script_template(kind));
+            }
+        }
+        self.open_project(root);
+    }
+
+    /// Close the current project: empty world, no selection, clean history.
+    fn close_project(&mut self) {
+        self.world = World::new();
+        floptle_scene::spawn_into(&empty_scene(), &mut self.world);
+        self.scene_name = "untitled".into();
+        self.selection.clear();
+        self.selected_asset = None;
+        self.ide = IdeState::default();
+        self.history = History::default();
+        self.playing = false;
+        self.paused = false;
+    }
+
     fn save_scene(&self) {
+        let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
+        let path = self.scene_path();
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
-        match floptle_scene::save(&doc, std::path::Path::new(SCENE_PATH)) {
-            Ok(()) => println!("  saved {SCENE_PATH}"),
+        match floptle_scene::save(&doc, &path) {
+            Ok(()) => println!("  saved {}", path.display()),
             Err(e) => eprintln!("  save failed: {e}"),
         }
+    }
+}
+
+/// An empty scene (just lighting) — used when a project is closed.
+fn empty_scene() -> floptle_scene::SceneDoc {
+    floptle_scene::SceneDoc {
+        name: "untitled".into(),
+        lighting: floptle_scene::LightDoc::default(),
+        nodes: Vec::new(),
     }
 }
 
