@@ -7,7 +7,7 @@
 //! today; the dock shell, gizmos, import, and sculpt tools layer on next.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -180,6 +180,16 @@ struct EditorCmd {
     focus_scripting: bool,
     /// A File-menu project action (New / Open / Close).
     project_action: Option<ProjectAction>,
+    /// Create a new folder inside this directory (absolute path).
+    new_folder_in: Option<String>,
+    /// Create a new script of `kind` inside this directory: (dir path, kind).
+    new_script_in: Option<(String, String)>,
+    /// Open the rename modal for this asset (absolute path).
+    rename_asset: Option<String>,
+    /// Commit a rename from the modal: (current path, new file/folder name).
+    do_rename: Option<(String, String)>,
+    /// Delete this asset file/folder (absolute path).
+    delete_asset: Option<String>,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -243,6 +253,22 @@ fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
     out
 }
 
+/// A path inside `dir` named `stem[.ext]`, auto-suffixed (`stem_1`, `stem_2`, …)
+/// until it doesn't collide with an existing entry. `ext: None` = a folder name.
+fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf {
+    let make = |name: String| match ext {
+        Some(e) => dir.join(format!("{name}.{e}")),
+        None => dir.join(name),
+    };
+    let mut p = make(stem.to_string());
+    let mut n = 1;
+    while p.exists() {
+        p = make(format!("{stem}_{n}"));
+        n += 1;
+    }
+    p
+}
+
 fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
 }
@@ -303,6 +329,27 @@ fn cursor_ground(
         }
     }
     fallback
+}
+
+/// True when the cursor (physical px) is over the bare Scene viewport — inside the
+/// Scene-tab rect and not under a *floating* egui area (toolbar, combo popup, the
+/// context menu). egui_dock paints the panels and the Scene tab alike in the
+/// Background layer, and egui registers that background as a full-window
+/// interactable area, so `layer_id_at` returns `Some(Background)` over *everything*
+/// in the window — never `None`. We therefore accept the Background layer (it means
+/// "no float on top") and reject only Middle/Foreground areas, then use the Scene
+/// rect to tell the viewport apart from the side panels (which are outside it).
+fn scene_hit(ctx: &egui::Context, cursor: Option<Vec2>, rect: Option<egui::Rect>) -> bool {
+    let (Some(cursor), Some(rect)) = (cursor, rect) else { return false };
+    let ppp = ctx.pixels_per_point();
+    let p = egui::pos2(cursor.x / ppp, cursor.y / ppp);
+    if !rect.contains(p) {
+        return false;
+    }
+    match ctx.layer_id_at(p) {
+        None => true,
+        Some(layer) => layer.order == egui::Order::Background,
+    }
 }
 
 /// Distance from point `p` to segment `a`–`b` (pixel space).
@@ -729,6 +776,8 @@ struct EditorTabViewer<'a> {
     materials: &'a [(String, [f32; 3])],
     mat_name_buf: &'a mut String,
     asset_tree: &'a [AssetEntry],
+    /// The project root — the directory the asset browser is rooted at.
+    project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
     ide: &'a mut IdeState,
     gizmo: Option<&'a GizmoFrame>,
@@ -1061,49 +1110,96 @@ impl EditorTabViewer<'_> {
     }
 
     fn assets_ui(&mut self, ui: &mut egui::Ui) {
+        let root = self.project_root.to_path_buf();
         ui.horizontal(|ui| {
             ui.strong("Assets");
             if ui.small_button("⟳").on_hover_text("rescan").clicked() {
                 self.cmd.refresh_assets = true;
             }
+            ui.menu_button("➕ New", |ui| {
+                self.new_asset_menu(ui, &root);
+            });
             ui.separator();
-            ui.small("drag a .glb onto the scene · drag a script onto a node · double-click a script to edit");
+            ui.small("right-click for New Folder / New Script · double-click a script to edit · drag onto the scene or a node");
         });
         ui.separator();
         let tree = self.asset_tree; // Copy the slice ref so the recursion can &mut self.
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.asset_node_ui(ui, tree);
+        let resp = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.asset_node_ui(ui, tree, &root);
+                // Catch right-clicks on the empty space below the list so New
+                // Folder / New Script is reachable even when the tree is short.
+                ui.allocate_response(ui.available_size(), egui::Sense::click())
+            })
+            .inner;
+        resp.context_menu(|ui| {
+            self.new_asset_menu(ui, &root);
         });
     }
 
-    fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry]) {
+    /// The shared "New Folder / New Script ▸ kind" submenu, targeting `dir`.
+    fn new_asset_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
+        if ui.button("🗀 New Folder").clicked() {
+            self.cmd.new_folder_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        ui.menu_button("✎ New Script", |ui| {
+            for k in SCRIPT_KINDS {
+                if ui.button(*k).clicked() {
+                    self.cmd.new_script_in = Some((dir.to_string_lossy().to_string(), (*k).to_string()));
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry], dir: &Path) {
         for entry in entries {
             match entry {
                 AssetEntry::Dir(name, children) => {
-                    egui::CollapsingHeader::new(format!("🗀 {name}")).id_salt(name).show(ui, |ui| {
-                        self.asset_node_ui(ui, children);
+                    let child_dir = dir.join(name);
+                    let header = egui::CollapsingHeader::new(format!("🗀 {name}"))
+                        .id_salt(name)
+                        .show(ui, |ui| {
+                            self.asset_node_ui(ui, children, &child_dir);
+                        });
+                    header.header_response.context_menu(|ui| {
+                        self.new_asset_menu(ui, &child_dir);
+                        ui.separator();
+                        if ui.button("🗑 Delete folder").clicked() {
+                            self.cmd.delete_asset = Some(child_dir.to_string_lossy().to_string());
+                            ui.close();
+                        }
                     });
                 }
                 AssetEntry::File { name, path } => {
                     let model = is_model(path);
                     let script = is_script(path);
+                    let draggable = model || script;
                     let selected = self.selected_asset.as_deref() == Some(path.as_str());
-                    let text = if model || script {
-                        format!("⠿  {name}")
+                    let label = if draggable { format!("⠿  {name}") } else { format!("    {name}") };
+                    // A single widget that senses BOTH click and drag. (The old
+                    // dnd_drag_source layered a drag-sense interaction over the label,
+                    // and the drag sense swallowed double-clicks — so a script could
+                    // only be dragged, never opened.) One click_and_drag widget lets
+                    // egui tell a tap from a drag cleanly: tap → select / double-tap
+                    // → open; press-and-move → drag a payload onto the scene or a node.
+                    let resp = if draggable {
+                        let text = if selected {
+                            egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        let r = ui.add(
+                            egui::Label::new(text)
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+                        r.dnd_set_drag_payload(AssetPayload { path: path.clone() });
+                        r
                     } else {
-                        format!("    {name}")
-                    };
-                    // Use the INNER label's response: a drag source's own response
-                    // only senses drag, so it never reports click / double-click.
-                    let resp = if model || script {
-                        ui.dnd_drag_source(
-                            egui::Id::new(("asset", path)),
-                            AssetPayload { path: path.clone() },
-                            |ui| ui.selectable_label(selected, text),
-                        )
-                        .inner
-                    } else {
-                        ui.selectable_label(selected, text)
+                        ui.selectable_label(selected, label)
                     };
                     if resp.clicked() {
                         *self.selected_asset = Some(path.clone());
@@ -1112,6 +1208,23 @@ impl EditorTabViewer<'_> {
                         self.cmd.open_script = Some(path.clone());
                         self.cmd.focus_scripting = true;
                     }
+                    resp.context_menu(|ui| {
+                        if script && ui.button("✎ Open in Scripting").clicked() {
+                            self.cmd.open_script = Some(path.clone());
+                            self.cmd.focus_scripting = true;
+                            ui.close();
+                        }
+                        if ui.button("✏ Rename…").clicked() {
+                            self.cmd.rename_asset = Some(path.clone());
+                            ui.close();
+                        }
+                        if ui.button("🗑 Delete").clicked() {
+                            self.cmd.delete_asset = Some(path.clone());
+                            ui.close();
+                        }
+                        ui.separator();
+                        self.new_asset_menu(ui, dir);
+                    });
                 }
             }
         }
@@ -1296,6 +1409,17 @@ fn main() {
     event_loop.run_app(&mut editor).expect("run editor");
 }
 
+/// Seconds an F-key focus glide takes to settle.
+const FOCUS_SECS: f32 = 0.35;
+
+/// An in-progress camera focus glide (the F key): ease the position from `from` to
+/// `to` over [`FOCUS_SECS`] while the view angle is held fixed.
+struct FocusAnim {
+    from: DVec3,
+    to: DVec3,
+    t: f32,
+}
+
 // Field order is drop order: every GPU-resource holder (raster/raymarch/retro/egui)
 // must drop BEFORE `gpu` (the device + surface), so `gpu` is intentionally last.
 #[derive(Default)]
@@ -1382,6 +1506,10 @@ struct Editor {
     /// Accumulated play-mode seconds (advances only while playing and not paused).
     play_t: f32,
     play_snapshot: Option<SceneDoc>,
+    /// Active camera focus glide (F), or `None`.
+    focus_anim: Option<FocusAnim>,
+    /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.
+    rename_target: Option<(String, String)>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -1490,13 +1618,16 @@ impl ApplicationHandler for Editor {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Feed egui first; if it consumed the event, the viewport ignores it.
-        let consumed = if let (Some(egui), Some(window)) = (self.egui.as_mut(), self.window.as_ref())
-        {
-            egui.state.on_window_event(window, &event).consumed
-        } else {
-            false
-        };
+        // Always feed egui so its widgets stay live. We deliberately IGNORE the
+        // returned `consumed` flag: egui_dock paints the whole editor in the
+        // Background layer, which makes egui report `consumed == true` for mouse
+        // input even over the *transparent* Scene tab — so trusting it would (and
+        // previously did) kill viewport look / pick / context-menu entirely. We
+        // instead gate viewport actions geometrically via `cursor_over_scene()`,
+        // and gate keyboard shortcuts on `typing`, so panels and viewport coexist.
+        if let (Some(egui), Some(window)) = (self.egui.as_mut(), self.window.as_ref()) {
+            let _ = egui.state.on_window_event(window, &event);
+        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -1524,22 +1655,24 @@ impl ApplicationHandler for Editor {
                 self.shift = mods.state().shift_key();
                 self.input.boost = self.shift;
             }
-            _ if consumed => {}
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
-                // Don't trigger shortcuts/tools while typing into a field.
+                // Don't trigger shortcuts/tools (or fly the camera) while typing
+                // into a field. `typing` is read live each event.
                 let typing = self.egui.as_ref().is_some_and(|e| e.ctx.egui_wants_keyboard_input());
                 if let PhysicalKey::Code(code) = event.physical_key {
-                    // Held movement keys (suppressed while Ctrl is down so Ctrl+key
-                    // combos don't also fly the camera). C moves DOWN (rebound from
-                    // Ctrl, which is now the shortcut modifier).
+                    // Held movement keys. The bit is `pressed && !typing && !ctrl`:
+                    // a RELEASE (pressed == false) always clears it, so a key can
+                    // never stick on if the release lands while a field is focused
+                    // (e.g. hold W, click into the IDE, release W). C moves DOWN.
+                    let mv = pressed && !typing;
                     match code {
-                        KeyCode::KeyW if !self.ctrl => self.input.forward = pressed,
-                        KeyCode::KeyS if !self.ctrl => self.input.back = pressed,
-                        KeyCode::KeyA if !self.ctrl => self.input.left = pressed,
-                        KeyCode::KeyD if !self.ctrl => self.input.right = pressed,
-                        KeyCode::Space => self.input.up = pressed,
-                        KeyCode::KeyC if !self.ctrl => self.input.down = pressed,
+                        KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
+                        KeyCode::KeyS => self.input.back = mv && !self.ctrl,
+                        KeyCode::KeyA => self.input.left = mv && !self.ctrl,
+                        KeyCode::KeyD => self.input.right = mv && !self.ctrl,
+                        KeyCode::Space => self.input.up = mv,
+                        KeyCode::KeyC => self.input.down = mv && !self.ctrl,
                         _ => {}
                     }
                     // Discrete commands fire on press only.
@@ -1573,7 +1706,8 @@ impl ApplicationHandler for Editor {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                // not consumed → the click is in the viewport.
+                // Gated geometrically: `cursor_over_scene()` is true only over the bare
+                // viewport, so a press on a panel/toolbar falls through to egui untouched.
                 let pressed = state == ElementState::Pressed;
                 if pressed {
                     let over_scene = self.cursor_over_scene();
@@ -1715,6 +1849,33 @@ impl Editor {
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.camera.update(&self.input, dt);
 
+        // Glide an in-progress focus (F). Any WASD/Space/C input hands control back
+        // to the user immediately. Only the camera position eases; the view angle is
+        // left to mouse-look, so you can look around mid-glide.
+        if self.focus_anim.is_some() {
+            let moving = self.input.forward
+                || self.input.back
+                || self.input.left
+                || self.input.right
+                || self.input.up
+                || self.input.down;
+            if moving {
+                self.focus_anim = None;
+            } else {
+                let (from, to, t) = {
+                    let a = self.focus_anim.as_mut().unwrap();
+                    a.t += dt;
+                    (a.from, a.to, a.t)
+                };
+                let k = (t / FOCUS_SECS).clamp(0.0, 1.0);
+                let eased = 1.0 - (1.0 - k).powi(3); // ease-out cubic
+                self.camera.position = from.lerp(to, eased as f64);
+                if k >= 1.0 {
+                    self.focus_anim = None;
+                }
+            }
+        }
+
         // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
         // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
         // so it only touches disjoint fields while gpu/egui are borrowed. Not while
@@ -1761,8 +1922,12 @@ impl Editor {
 
         // A model being dragged from Assets shows a live ghost at the cursor's
         // ground point, so you see it follow the cursor and land where you drop.
-        let drag_ghost: Option<(String, DVec3)> =
-            egui::DragAndDrop::payload::<AssetPayload>(&egui.ctx).filter(|p| is_model(&p.path)).map(
+        // Only while the cursor is actually over the viewport (not over an opaque
+        // panel), matching where the drop is accepted.
+        let ghost_over_scene = scene_hit(&egui.ctx, self.cursor, self.scene_rect);
+        let drag_ghost: Option<(String, DVec3)> = egui::DragAndDrop::payload::<AssetPayload>(&egui.ctx)
+            .filter(|p| is_model(&p.path) && ghost_over_scene)
+            .map(
                 |p| {
                     let pos = cursor_ground(
                         cam.world_position,
@@ -1887,7 +2052,9 @@ impl Editor {
         let project_path_buf = &mut self.project_path_buf;
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
+        let rename_target = &mut self.rename_target;
         let asset_tree = &self.asset_tree;
+        let project_root = self.project_root.as_path();
         let playing = self.playing;
         let paused = self.paused;
         let materials = &self.materials;
@@ -1985,6 +2152,13 @@ impl Editor {
             // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
             // The Scene tab is transparent so the 3D render shows through; the others
             // paint opaque over it. Users can drag/re-dock/tab these freely.
+            //
+            // Clear the Scene rect first: egui_dock only runs the ACTIVE tab's `ui`,
+            // so if Scene is tabbed behind Scripting, scene_ui never runs and the rect
+            // would otherwise stay pinned to the old viewport region — letting clicks,
+            // context-menus and model-drops fall through onto whatever panel now
+            // occupies that space. `scene_ui` re-arms it only on frames it draws.
+            *scene_rect = None;
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
@@ -1992,6 +2166,7 @@ impl Editor {
                 materials,
                 mat_name_buf,
                 asset_tree,
+                project_root,
                 selected_asset,
                 ide,
                 gizmo,
@@ -2139,6 +2314,38 @@ impl Editor {
                     ui.add_space(4.0);
                     ui.small("Open loads an existing folder; Create New scaffolds a fresh one.");
                 });
+
+            // ---- rename modal (for the asset browser) ----
+            if let Some((path, buf)) = rename_target.as_mut() {
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new("Rename asset")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(320.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.small(path.as_str());
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(buf).desired_width(280.0).hint_text("new name"),
+                        );
+                        edit.request_focus();
+                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            let valid = !buf.trim().is_empty();
+                            if ui.add_enabled(valid, egui::Button::new("Rename")).clicked() || (enter && valid) {
+                                cmd.do_rename = Some((path.clone(), buf.clone()));
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *rename_target = None;
+                }
+            }
             // (the gizmo now paints inside the Scene tab, clipped to its rect)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
@@ -2330,6 +2537,26 @@ impl Editor {
         }
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
+        }
+        if let Some(dir) = cmd.new_folder_in {
+            self.new_folder(&dir);
+        }
+        if let Some((dir, kind)) = cmd.new_script_in {
+            self.new_script(&dir, &kind);
+        }
+        if let Some(path) = cmd.rename_asset {
+            // Seed the rename modal with the current file/folder name.
+            let name = Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            self.rename_target = Some((path, name));
+        }
+        if let Some((from, to)) = cmd.do_rename {
+            self.rename_asset(&from, &to);
+        }
+        if let Some(path) = cmd.delete_asset {
+            self.delete_asset(&path);
         }
         // Pre-warm a model being dragged so its live ghost can render next frame
         // (the gather can't import — gpu/raster are borrowed there).
@@ -2631,18 +2858,7 @@ impl Editor {
     /// can't separate them from the viewport; the Scene-tab rect is what does.
     fn cursor_over_scene(&self) -> bool {
         let Some(eg) = self.egui.as_ref() else { return false };
-        let (Some(cursor), Some(rect)) = (self.cursor, self.scene_rect) else { return false };
-        let ppp = eg.ctx.pixels_per_point();
-        let p = egui::pos2(cursor.x / ppp, cursor.y / ppp);
-        if !rect.contains(p) {
-            return false;
-        }
-        // egui_dock draws the whole editor in the background layer, so
-        // `is_pointer_over_egui` reads "over egui" across the entire dock and can't
-        // separate the viewport from the panels. Instead: the bare viewport has no
-        // egui Area on top of it, whereas the floating toolbar, combo popups and the
-        // context menu each register an interactable Area — so layer_id_at is Some.
-        eg.ctx.layer_id_at(p).is_none()
+        scene_hit(&eg.ctx, self.cursor, self.scene_rect)
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
@@ -2674,7 +2890,11 @@ impl Editor {
         };
         let radius = (base * scale).max(0.3);
         let distance = (radius * 3.0 + 2.0).clamp(2.5, 80.0);
-        self.camera.focus(target, distance);
+        // Keep the current view direction; glide the position so the target ends up
+        // `distance` straight ahead. The eased move runs in the per-frame update.
+        let forward = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+        let dest = target - forward * distance;
+        self.focus_anim = Some(FocusAnim { from: self.camera.position, to: dest, t: 0.0 });
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px).
@@ -2874,6 +3094,99 @@ impl Editor {
     }
     fn materials_dir(&self) -> PathBuf {
         self.project_root.join("materials")
+    }
+    fn scripts_dir(&self) -> PathBuf {
+        self.project_root.join("scripts")
+    }
+
+    // ---- asset file operations (the in-engine create / rename / delete) --------
+    /// Create a new folder inside `dir` (auto-numbered if `new_folder` is taken),
+    /// then rescan so it appears in the browser.
+    fn new_folder(&mut self, dir: &str) {
+        let target = unique_path(Path::new(dir), "new_folder", None);
+        if let Err(e) = std::fs::create_dir_all(&target) {
+            eprintln!("  new folder failed: {e}");
+            return;
+        }
+        self.asset_tree = build_assets(&self.project_root);
+        self.selected_asset = Some(target.to_string_lossy().to_string());
+    }
+
+    /// Create a new `.ron` script (seeded with `kind`'s default template) and open
+    /// it in the IDE. Scripts must live under a `scripts/` path to be recognised, so
+    /// a `dir` that isn't already inside one falls back to the project `scripts/`.
+    fn new_script(&mut self, dir: &str, kind: &str) {
+        let dirp = PathBuf::from(dir);
+        let target_dir = if dir.replace('\\', "/").contains("/scripts") {
+            dirp
+        } else {
+            self.scripts_dir()
+        };
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            eprintln!("  new script failed: {e}");
+            return;
+        }
+        let path = unique_path(&target_dir, kind, Some("ron"));
+        if let Err(e) = std::fs::write(&path, script_template(kind)) {
+            eprintln!("  new script failed: {e}");
+            return;
+        }
+        self.asset_tree = build_assets(&self.project_root);
+        let p = path.to_string_lossy().to_string();
+        self.ide.open_file(&p);
+        if let Some(dock) = self.dock_state.as_mut() {
+            focus_scripting_tab(dock);
+        }
+        self.selected_asset = Some(p);
+    }
+
+    /// Rename a file/folder to `new_name` within its current parent directory.
+    fn rename_asset(&mut self, from: &str, new_name: &str) {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return;
+        }
+        let src = PathBuf::from(from);
+        let dst = src.parent().unwrap_or(Path::new(".")).join(new_name);
+        if dst == src {
+            return;
+        }
+        if dst.exists() {
+            eprintln!("  rename: {} already exists", dst.display());
+            return;
+        }
+        if let Err(e) = std::fs::rename(&src, &dst) {
+            eprintln!("  rename failed: {e}");
+            return;
+        }
+        let dst_str = dst.to_string_lossy().to_string();
+        // Follow the file in any open IDE tab and the asset selection.
+        for f in &mut self.ide.open {
+            if f.path == from {
+                f.path = dst_str.clone();
+                f.name = new_name.to_string();
+            }
+        }
+        if self.selected_asset.as_deref() == Some(from) {
+            self.selected_asset = Some(dst_str);
+        }
+        self.asset_tree = build_assets(&self.project_root);
+    }
+
+    /// Delete a file or folder (recursively) and drop any references to it.
+    fn delete_asset(&mut self, path: &str) {
+        let p = Path::new(path);
+        let res = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        if let Err(e) = res {
+            eprintln!("  delete failed: {e}");
+            return;
+        }
+        self.ide.open.retain(|f| f.path != path);
+        self.ide.active = self.ide.active.filter(|&i| i < self.ide.open.len());
+        if self.selected_asset.as_deref() == Some(path) {
+            self.selected_asset = None;
+        }
+        self.asset_tree = build_assets(&self.project_root);
     }
 
     /// Create the standard project subfolders + seed default materials (no-op if
