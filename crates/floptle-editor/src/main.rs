@@ -278,6 +278,33 @@ fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<V
     Some(Vec2::new((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
 }
 
+/// The world point under `cursor` (physical px) — its ray's hit on the ground
+/// plane y=0, or ~6 units ahead of the camera if the ray misses. `inv_vp` is the
+/// inverse of the camera's view-projection at this `w`/`h` aspect.
+fn cursor_ground(
+    cam_world: DVec3,
+    cam_rot: Quat,
+    inv_vp: Mat4,
+    w: f32,
+    h: f32,
+    cursor: Option<Vec2>,
+) -> DVec3 {
+    let fallback = cam_world + (cam_rot * Vec3::NEG_Z * 6.0).as_dvec3();
+    let Some(cursor) = cursor else { return fallback };
+    let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
+    let near = inv_vp * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+    let far = inv_vp * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+    let ro = near.truncate() / near.w; // camera-relative
+    let rd = (far.truncate() / far.w - ro).normalize();
+    if rd.y.abs() > 1e-4 {
+        let t = -(cam_world.y as f32 + ro.y) / rd.y;
+        if (0.1..1000.0).contains(&t) {
+            return cam_world + (ro + rd * t).as_dvec3();
+        }
+    }
+    fallback
+}
+
 /// Distance from point `p` to segment `a`–`b` (pixel space).
 fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let ab = b - a;
@@ -1407,8 +1434,8 @@ impl ApplicationHandler for Editor {
         // Seed the project folder structure + default assets, then load the scene,
         // project settings, materials and asset tree from `project_root`.
         self.seed_project_dirs();
-        let doc = self.load_active_scene_doc();
-        self.scene_name = doc.name.clone();
+        let (scene_file, doc) = self.load_active_scene();
+        self.scene_name = Self::scene_name_of(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.asset_tree = build_assets(&self.project_root);
@@ -1728,10 +1755,36 @@ impl Editor {
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
         };
 
+        // A model being dragged from Assets shows a live ghost at the cursor's
+        // ground point, so you see it follow the cursor and land where you drop.
+        let drag_ghost: Option<(String, DVec3)> =
+            egui::DragAndDrop::payload::<AssetPayload>(&egui.ctx).filter(|p| is_model(&p.path)).map(
+                |p| {
+                    let pos = cursor_ground(
+                        cam.world_position,
+                        cam.rotation,
+                        view_proj.inverse(),
+                        gpu.config.width as f32,
+                        gpu.config.height.max(1) as f32,
+                        self.cursor,
+                    );
+                    (p.path.clone(), pos)
+                },
+            );
+
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32)> = Vec::new();
+        if let Some((path, pos)) = &drag_ghost {
+            if let Some(asset) = self.mesh_registry.get(path) {
+                let ghost = Transform { translation: *pos, ..Transform::default() };
+                let model = ghost.render_matrix(cam.world_position);
+                for &mid in &asset.parts {
+                    instances.push((mid, instance_of(model, [0.7, 0.85, 1.0])));
+                }
+            }
+        }
         for (e, matter) in &ents {
             let Some(t) = self.world.get::<Transform>(*e) else { continue };
             match matter {
@@ -2274,6 +2327,16 @@ impl Editor {
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
         }
+        // Pre-warm a model being dragged so its live ghost can render next frame
+        // (the gather can't import — gpu/raster are borrowed there).
+        if let Some(p) =
+            self.egui.as_ref().and_then(|e| egui::DragAndDrop::payload::<AssetPayload>(&e.ctx))
+        {
+            if is_model(&p.path) && !self.mesh_registry.contains_key(&p.path) {
+                let path = p.path.clone();
+                self.import_model(&path);
+            }
+        }
     }
 
     /// Switch the active tool and cancel any in-progress gizmo drag.
@@ -2577,24 +2640,12 @@ impl Editor {
     /// place a dropped asset where the cursor is.
     fn cursor_world(&self) -> DVec3 {
         let cam = self.camera.render_camera();
-        let fallback = cam.world_position + (cam.rotation * Vec3::NEG_Z * 6.0).as_dvec3();
-        let (Some(gpu), Some(cursor)) = (self.gpu.as_ref(), self.cursor) else { return fallback };
+        let Some(gpu) = self.gpu.as_ref() else {
+            return cam.world_position + (cam.rotation * Vec3::NEG_Z * 6.0).as_dvec3();
+        };
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let inv = cam.view_proj(w / h).inverse();
-        let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
-        let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
-        let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
-        let ro = near.truncate() / near.w; // camera-relative
-        let rd = (far.truncate() / far.w - ro).normalize();
-        // world y = cam_y + ro.y + t*rd.y = 0
-        let cam_y = cam.world_position.y as f32;
-        if rd.y.abs() > 1e-4 {
-            let t = -(cam_y + ro.y) / rd.y;
-            if (0.1..1000.0).contains(&t) {
-                return cam.world_position + (ro + rd * t).as_dvec3();
-            }
-        }
-        fallback
+        cursor_ground(cam.world_position, cam.rotation, inv, w, h, self.cursor)
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px).
@@ -2824,12 +2875,14 @@ impl Editor {
             .collect()
     }
 
-    /// Load the project's active scene: `scenes/first.ron` if present, else the
-    /// first `.ron` in `scenes/`, else a tiny built-in default.
-    fn load_active_scene_doc(&self) -> floptle_scene::SceneDoc {
+    /// Load the project's active scene + the file it came from: `scenes/first.ron`
+    /// if present, else the first `.ron` in `scenes/`, else a tiny built-in default.
+    /// The returned path's stem becomes `scene_name`, so edits save back to the same
+    /// file even if the scene's internal name differs.
+    fn load_active_scene(&self) -> (PathBuf, floptle_scene::SceneDoc) {
         let first = self.project_root.join("scenes/first.ron");
         if let Ok(doc) = floptle_scene::load(&first) {
-            return doc;
+            return (first, doc);
         }
         let scenes = self.project_root.join("scenes");
         let mut rons: Vec<PathBuf> = std::fs::read_dir(&scenes)
@@ -2840,15 +2893,25 @@ impl Editor {
             .filter(|p| p.extension().is_some_and(|x| x == "ron"))
             .collect();
         rons.sort();
-        rons.iter().find_map(|p| floptle_scene::load(p).ok()).unwrap_or_else(default_scene)
+        for p in &rons {
+            if let Ok(doc) = floptle_scene::load(p) {
+                return (p.clone(), doc);
+            }
+        }
+        (first, default_scene())
+    }
+
+    /// The scene-file stem (the name edits save under).
+    fn scene_name_of(path: &std::path::Path) -> String {
+        path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into())
     }
 
     /// Switch the editor to the project rooted at `root`, reloading everything.
     fn open_project(&mut self, root: PathBuf) {
         self.project_root = root;
         self.seed_project_dirs();
-        let doc = self.load_active_scene_doc();
-        self.scene_name = doc.name.clone();
+        let (path, doc) = self.load_active_scene();
+        self.scene_name = Self::scene_name_of(&path);
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.project = floptle_scene::load_project(&self.project_cfg_path());
@@ -2860,6 +2923,9 @@ impl Editor {
         self.history = History::default();
         self.playing = false;
         self.paused = false;
+        // A different project's models live behind the same path strings, so drop the
+        // old GPU-mesh cache before re-importing (else import_model early-returns).
+        self.mesh_registry.clear();
         // Re-register any meshes the new scene references.
         let mesh_paths: Vec<String> = self
             .world
@@ -2906,6 +2972,7 @@ impl Editor {
         self.history = History::default();
         self.playing = false;
         self.paused = false;
+        self.mesh_registry.clear();
     }
 
     fn save_scene(&self) {
