@@ -105,6 +105,7 @@ pub enum MatterDoc {
     Blob { scale: f32 },
     Mesh { asset_path: String },
     Empty,
+    Terrain,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -122,6 +123,7 @@ impl From<&Matter> for MatterDoc {
             Matter::Blob { scale } => MatterDoc::Blob { scale: *scale },
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
+            Matter::Terrain => MatterDoc::Terrain,
         }
     }
 }
@@ -135,6 +137,7 @@ impl MatterDoc {
             MatterDoc::Blob { scale } => Matter::Blob { scale: *scale },
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
+            MatterDoc::Terrain => Matter::Terrain,
         }
     }
 }

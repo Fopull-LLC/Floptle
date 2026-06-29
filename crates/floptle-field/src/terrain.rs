@@ -64,6 +64,64 @@ impl Terrain {
         t
     }
 
+    /// Serialize the field to a compact binary blob (saved alongside the scene).
+    /// Layout: magic, dims[3]u32, center[3]f32, half[3]f32, distance(f32…), color(u8…).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let b = &self.baked;
+        let n = b.distance.len();
+        let mut out = Vec::with_capacity(40 + n * 8);
+        out.extend_from_slice(b"FTRN");
+        for v in b.dims {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in b.center.iter().chain(&b.half_extent) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for &d in &b.distance {
+            out.extend_from_slice(&d.to_le_bytes());
+        }
+        for c in &b.color {
+            out.extend_from_slice(c);
+        }
+        out
+    }
+
+    /// Parse a field written by [`to_bytes`](Self::to_bytes). `None` if malformed.
+    pub fn from_bytes(data: &[u8]) -> Option<Terrain> {
+        if data.len() < 40 || &data[0..4] != b"FTRN" {
+            return None;
+        }
+        let mut o = 4;
+        let u32_at = |o: &mut usize| {
+            let v = u32::from_le_bytes(data[*o..*o + 4].try_into().ok()?);
+            *o += 4;
+            Some(v)
+        };
+        let dims = [u32_at(&mut o)?, u32_at(&mut o)?, u32_at(&mut o)?];
+        let f32_at = |o: &mut usize| {
+            let v = f32::from_le_bytes(data[*o..*o + 4].try_into().ok()?);
+            *o += 4;
+            Some(v)
+        };
+        let center = [f32_at(&mut o)?, f32_at(&mut o)?, f32_at(&mut o)?];
+        let half_extent = [f32_at(&mut o)?, f32_at(&mut o)?, f32_at(&mut o)?];
+        let n = (dims[0] * dims[1] * dims[2]) as usize;
+        if data.len() < o + n * 8 {
+            return None;
+        }
+        let mut distance = Vec::with_capacity(n);
+        for _ in 0..n {
+            distance.push(f32::from_le_bytes(data[o..o + 4].try_into().ok()?));
+            o += 4;
+        }
+        let mut color = Vec::with_capacity(n);
+        for _ in 0..n {
+            color.push([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+            o += 4;
+        }
+        Some(Terrain { baked: BakedSdf { dims, center, half_extent, distance, color } })
+    }
+
     #[inline]
     fn idx(&self, x: u32, y: u32, z: u32) -> usize {
         let [w, h, _] = self.baked.dims;
@@ -340,6 +398,20 @@ mod tests {
         // a downward ray from above hits near y=0
         let hit = t.raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0]).expect("ray hits ground");
         assert!(hit[1].abs() < 0.3, "hit y={}", hit[1]);
+    }
+
+    #[test]
+    fn bytes_round_trip() {
+        let mut t = Terrain::flat([20, 16, 20], [1.0, 0.0, -2.0], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
+        t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 2.0, 1.0);
+        t.paint_texture([0.0, 0.5, 0.0], 2.0, 2);
+        let bytes = t.to_bytes();
+        let back = Terrain::from_bytes(&bytes).expect("parses");
+        assert_eq!(t.baked.dims, back.baked.dims);
+        assert_eq!(t.baked.center, back.baked.center);
+        assert_eq!(t.baked.distance, back.baked.distance);
+        assert_eq!(t.baked.color, back.baked.color);
+        assert!(Terrain::from_bytes(b"nope").is_none());
     }
 
     #[test]
