@@ -10,5 +10,3 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
-rayon = "1"                  # parallel mesh→SDF bake
-bytemuck = { workspace = true } # POD layout for GPU BVH buffers
