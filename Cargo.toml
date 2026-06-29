@@ -49,13 +49,13 @@ bytemuck = { version = "1.25.0", features = ["derive"] } # POD casting for GPU b
 pollster = "0.4.0"                                       # block_on for device bootstrap
 log = "0.4.33"                                            # logging facade
 env_logger = "0.11.11"                                    # logger backend (binaries only)
+gltf = "1.4.1"                                            # Blender -> engine import — Phase 2, ADR-0006
 
 # Promoted in later phases:
 # naga        = "29"   # shader IR + WGSL transpile — Phase 3, ADR-0007
 # egui        = "*"    # editor UI — Phase 6, ADR-0004
 # egui_dock   = "*"    # dockable editor panels — Phase 6
 # mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003
-# gltf        = "*"    # Blender -> engine import — Phase 2, ADR-0006
 # parry3d     = "*"    # triangle-mesh BVH for imported meshes — Phase 6, ADR-0012
 # rapier3d    = "*"    # OPTIONAL rigid-body dynamics only — later, ADR-0012
 # serde + ron = "*"    # scene / prefab / material serialization — Phase 2/5

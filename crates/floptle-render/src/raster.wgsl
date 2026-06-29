@@ -1,22 +1,21 @@
-// Forward raster: instanced, depth-tested meshes with directional diffuse light.
+// Forward raster: instanced, depth-tested meshes with directional diffuse light
+// and a per-material base-color texture.
 //
-// Per-vertex stream (buffer 0): pos/normal/uv. Per-instance stream (buffer 1): the
-// camera-relative model matrix (locations 3..6), its inverse-transpose normal
-// matrix as three columns (7..9), and a tint color (10). `g.view_proj` and the
-// directional light come from the frame-global uniform. Lighting is in render
-// space, which shares world orientation (only translation is stripped), so a
-// constant world-space light direction is correct and large-world-safe (ADR-0015).
+// Group 0 (shared, set once per frame): the camera/light globals + the sampler.
+// Group 1 (per mesh): the base-color texture. Per-vertex stream (buffer 0):
+// pos/normal/uv. Per-instance stream (buffer 1): camera-relative model matrix
+// (locations 3..6), inverse-transpose normal matrix columns (7..9), tint (10).
 
 struct Globals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,    // xyz = normalized world-space direction TO the light
-    light_color: vec4<f32>,  // rgb
-    ambient: vec4<f32>,      // rgb
+    light_color: vec4<f32>,
+    ambient: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
-@group(0) @binding(1) var tex: texture_2d<f32>;
-@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(1) var samp: sampler;
+@group(1) @binding(0) var tex: texture_2d<f32>;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -55,7 +54,7 @@ fn vs(in: VsIn) -> VsOut {
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let ndl = max(dot(n, normalize(g.light_dir.xyz)), 0.0);
-    let detail = textureSample(tex, samp, in.uv).rgb;
+    let albedo = textureSample(tex, samp, in.uv).rgb * in.color.rgb;
     let lit = g.ambient.rgb + g.light_color.rgb * ndl;
-    return vec4<f32>(detail * in.color.rgb * lit, 1.0);
+    return vec4<f32>(albedo * lit, 1.0);
 }

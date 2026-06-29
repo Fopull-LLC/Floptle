@@ -1,6 +1,11 @@
 {
   "rust-analyzer.cargo.allFeatures": false,
   "rust-analyzer.check.command": "clippy",
+  // Give rust-analyzer its OWN target dir so its background check/clippy never
+  // locks the main `target/` that `cargo build`/`cargo run` use. Without this,
+  // RA's continuous checks block manual builds (the "waiting for file lock"
+  // error), especially right after a new dependency is added.
+  "rust-analyzer.cargo.targetDir": true,
   "files.associations": {
     "*.ron": "ruby",
     "*.flsl": "wgsl"

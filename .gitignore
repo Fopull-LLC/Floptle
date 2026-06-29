@@ -10,6 +10,11 @@
 Thumbs.db
 .idea/
 
+# Machine-specific cargo config: this repo lives on an NTFS (ntfs3) disk whose
+# truncate path deadlocks under concurrent Rust-build I/O, so target-dir is
+# redirected to a native-fs path that differs per machine. Keep it out of git.
+.cargo/config.toml
+
 # Throwaway dev screenshots / capture shares (not engine content).
 /Screenshots/
 
@@ -21,6 +26,11 @@ Thumbs.db
 # any public release. See docs/decisions/0010-temporary-assets.md.
 assets/textures/_oot_temp/
 assets/**/_oot_temp/
+
+# Third-party / sample test models (e.g. Khronos glTF samples) used to exercise
+# the importer during development — kept out of history like the OoT textures.
+# Your own models live elsewhere under assets/models/ and ARE committed.
+assets/models/_test/
 
 # Large / generated binary assets (imported glTF caches, baked data, etc.)
 assets/.cache/

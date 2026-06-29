@@ -8,9 +8,11 @@
 //! the title bar**. Each object uploads a camera-relative model matrix
 //! (`Transform::render_matrix`, ADR-0015) into the instanced forward pass.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::Entity;
 use floptle_render::{cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster};
@@ -42,6 +44,9 @@ struct Runner {
     raster: Option<Raster>,
     /// Registered mesh handles, indexed by `Shape::index()`.
     mesh_ids: Vec<MeshId>,
+    /// Imported glTF models drawn alongside the procedural primitives — every
+    /// `.glb`/`.gltf` found under `assets/models/`.
+    imported: Vec<Imported>,
     clock: Option<Clock>,
 }
 
@@ -49,6 +54,40 @@ struct Clock {
     last: Instant,
     fps_since: Instant,
     fps_frames: u32,
+}
+
+/// An imported glTF model placed in the scene (managed by the runner until the
+/// asset/scene system makes imported meshes first-class world entities).
+struct Imported {
+    mesh: MeshId,
+    position: DVec3,
+    /// Uniform scale that fits the (origin-centered) model to a target size.
+    scale: f32,
+    color: [f32; 3],
+    /// Spin rate about Y (rad/s), so you see it lit from every side.
+    spin: f32,
+}
+
+/// Find every `.glb`/`.gltf` under `dir` (recursive, sorted by path for a stable
+/// layout). Drop any model into `assets/models/` and it gets imported on launch.
+fn all_models(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| {
+                x.eq_ignore_ascii_case("glb") || x.eq_ignore_ascii_case("gltf")
+            }) {
+                found.push(p);
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 impl ApplicationHandler for Runner {
@@ -62,10 +101,112 @@ impl ApplicationHandler for Runner {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window.clone());
         let mut raster = Raster::new(&gpu);
-        // Registration order defines the Shape→MeshId mapping (Shape::index).
-        let cube_id = raster.register(&gpu, &cube(0.7));
-        let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36));
+        // Registration order defines the Shape→MeshId mapping (Shape::index). The
+        // procedural primitives have no texture (a white default shows their tint).
+        let cube_id = raster.register(&gpu, &cube(0.7), None);
+        let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36), None);
         self.mesh_ids = vec![cube_id, sphere_id];
+
+        // Import every model under assets/models/. A large model (a map/level) is
+        // rendered FULL-SCALE as a walkable environment — floor dropped onto the
+        // ground plane, the camera pulled back and its speed scaled so you can fly
+        // through it. Small models become props you can fly up to. Each model's
+        // per-material parts register separately so their textures bind correctly.
+        let paths = all_models(Path::new("assets/models"));
+        let mut env_size: Option<f32> = None;
+        let mut prop_models: Vec<(Vec<(MeshId, [f32; 3])>, f32)> = Vec::new();
+        for path in &paths {
+            match floptle_assets::gltf_import::import(path) {
+                Ok(model) => {
+                    println!(
+                        "  imported '{}' — {} parts, {} textures, size {:.2}",
+                        model.name,
+                        model.parts.len(),
+                        model.textures.len(),
+                        model.size
+                    );
+                    // Upload each material part with its base-color texture.
+                    let part_ids: Vec<(MeshId, [f32; 3])> = model
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let tex = part.texture.map(|i| &model.textures[i]);
+                            (raster.register(&gpu, &part.mesh, tex), part.base_color)
+                        })
+                        .collect();
+
+                    if model.size > 20.0 && env_size.is_none() {
+                        // environment: native scale, static, floor set to y = 0
+                        let floor = -model.min[1] as f64;
+                        for (mesh, color) in &part_ids {
+                            self.imported.push(Imported {
+                                mesh: *mesh,
+                                position: DVec3::new(0.0, floor, 0.0),
+                                scale: 1.0,
+                                color: *color,
+                                spin: 0.0,
+                            });
+                        }
+                        env_size = Some(model.size);
+                    } else {
+                        prop_models.push((part_ids, model.size));
+                    }
+                }
+                Err(e) => eprintln!("  could not import {}: {e}", path.display()),
+            }
+        }
+
+        if let Some(s) = env_size {
+            // Start with a 3/4 aerial overview of the whole level (looking down at
+            // the floor center), with camera speed scaled so it's traversable —
+            // fly down into it to explore.
+            let s = s as f64;
+            self.camera.position = DVec3::new(0.0, s * 0.5, s * 0.65);
+            self.camera.pitch = -0.66; // ≈ looks at the floor center from here
+            self.camera.speed = (s / 9.0).max(4.0);
+            // Sit the procedural primitives on the floor near the level center as
+            // small reference props.
+            let ents: Vec<Entity> = self.app.world.query::<Renderable>().map(|(e, _)| e).collect();
+            let m = ents.len();
+            for (k, e) in ents.into_iter().enumerate() {
+                if let Some(t) = self.app.world.get_mut::<Transform>(e) {
+                    let x = (k as f64 - (m as f64 - 1.0) * 0.5) * 2.4;
+                    t.translation = DVec3::new(x, 0.8, s * 0.30);
+                }
+            }
+            // Small imported models (e.g. the Duck) as props on the floor too.
+            let n = prop_models.len();
+            for (i, (part_ids, size)) in prop_models.into_iter().enumerate() {
+                let x = (i as f64 - (n as f64 - 1.0) * 0.5) * 3.0;
+                let scale = 2.0 / size;
+                for (mesh, color) in part_ids {
+                    self.imported.push(Imported {
+                        mesh,
+                        position: DVec3::new(x, 1.3, s * 0.30 - 4.0),
+                        scale,
+                        color,
+                        spin: 0.3,
+                    });
+                }
+            }
+        } else {
+            // No environment: showcase every imported model in a spinning row.
+            let n = prop_models.len();
+            for (i, (part_ids, size)) in prop_models.into_iter().enumerate() {
+                let x = (i as f64 - (n as f64 - 1.0) * 0.5) * 3.6;
+                let scale = 2.6 / size;
+                for (mesh, color) in part_ids {
+                    self.imported.push(Imported {
+                        mesh,
+                        position: DVec3::new(x, 2.8, 0.0),
+                        scale,
+                        color,
+                        spin: 0.3,
+                    });
+                }
+            }
+        }
+
         self.raster = Some(raster);
         self.gpu = Some(gpu);
         let now = Instant::now();
@@ -188,6 +329,16 @@ impl Runner {
                 let model = t.render_matrix(cam.world_position);
                 instances.push((mesh, instance_of(model, color)));
             }
+        }
+        // imported glTF models, fit-scaled and slowly spinning above the row
+        for imp in &self.imported {
+            let spun = Transform {
+                translation: imp.position,
+                rotation: Quat::from_rotation_y(self.app.time.elapsed as f32 * imp.spin),
+                scale: Vec3::splat(imp.scale),
+            };
+            let model = spun.render_matrix(cam.world_position);
+            instances.push((imp.mesh, instance_of(model, imp.color)));
         }
 
         // a quiet, dark indigo backdrop (kept below the objects' shadowed faces so
