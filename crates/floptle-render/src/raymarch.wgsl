@@ -147,7 +147,9 @@ fn map(p: vec3<f32>) -> Matter {
 }
 
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
-    let e = vec2<f32>(0.0028, 0.0);
+    // A larger epsilon averages out f16/trilinear grid noise in the sampled volume
+    // (which showed up as grain on the terrain) at the cost of slightly softer edges.
+    let e = vec2<f32>(0.02, 0.0);
     return normalize(vec3<f32>(
         map(p + e.xyy).d - map(p - e.xyy).d,
         map(p + e.yxy).d - map(p - e.yxy).d,
