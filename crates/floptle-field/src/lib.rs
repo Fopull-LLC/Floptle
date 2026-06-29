@@ -26,8 +26,10 @@
 //!                (ADR-0014).
 
 pub mod mesh2sdf;
+pub mod terrain;
 
 pub use mesh2sdf::{bake, BakedSdf, TexRef};
+pub use terrain::{Brush, Terrain};
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
 /// union). The core "geometry blends together cleanly" operator.
