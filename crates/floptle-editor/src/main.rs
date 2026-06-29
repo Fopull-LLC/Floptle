@@ -484,6 +484,71 @@ fn material_params(m: Material) -> MaterialParams {
     }
 }
 
+/// EmmyLua type annotations for the engine API, so an external Lua language server
+/// (e.g. VSCode's Lua extension) gives hover docs + completion for `node`, `params`,
+/// `time`, `dt`, the lifecycle hooks, etc. Written to `.floptle/library/`.
+const LUA_ANNOTATIONS: &str = "\
+---@meta
+--- Floptle engine scripting API (ADR-0003). Generated — do not edit.
+
+---@class Node The node's transform, synced to/from the engine each frame.
+---@field x number World X position.
+---@field y number World Y position.
+---@field z number World Z position.
+---@field scale number Uniform scale (shortcut; sets all axes).
+---@field scale_x number Scale along X.
+---@field scale_y number Scale along Y.
+---@field scale_z number Scale along Z.
+---@field yaw number Heading about Y, in radians.
+---@field pitch number Pitch about X, in radians.
+---@field roll number Roll about Z, in radians.
+
+---This instance's tunables, seeded from the script's `defaults` table.
+---@type table<string, number>
+params = {}
+
+---Seconds since play started.
+---@type number
+time = 0.0
+
+---Seconds since the last frame (also passed to update).
+---@type number
+dt = 0.0
+
+---The tunables this script declares (shown in the Inspector).
+---@type table<string, number>
+defaults = {}
+
+---Print a message to the engine console.
+---@param msg string
+function log(msg) end
+
+---Runs once when play begins (optional).
+---@param node Node
+function start(node) end
+
+---Runs every frame while playing.
+---@param node Node
+---@param dt number Seconds since the last frame.
+function update(node, dt) end
+";
+
+/// `.luarc.json` pointing the Lua language server at the annotation library and
+/// declaring the engine globals (so they aren't flagged undefined).
+const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\"]\n}\n";
+
+/// Write the Lua language-server support files into a project (annotations always
+/// refreshed; `.luarc.json` only if absent, so a user's own config is preserved).
+fn write_lua_support(project_root: &Path) {
+    let lib = project_root.join(".floptle").join("library");
+    let _ = std::fs::create_dir_all(&lib);
+    let _ = std::fs::write(lib.join("floptle.lua"), LUA_ANNOTATIONS);
+    let luarc = project_root.join(".luarc.json");
+    if !luarc.exists() {
+        let _ = std::fs::write(luarc, LUARC_JSON);
+    }
+}
+
 /// Write the default scripts into `scripts_dir` (each only if absent).
 fn seed_default_scripts(scripts_dir: &Path) {
     let _ = std::fs::create_dir_all(scripts_dir);
@@ -941,10 +1006,10 @@ playing. A script defines plain functions:
     -- spin.lua
     defaults = { speed = 45 }          -- tunables (shown in the Inspector)
 
-    function on_start(node)            -- once, when play begins (optional)
+    function start(node)               -- once, when play begins (optional)
     end
 
-    function on_update(node, dt)       -- every frame while playing
+    function update(node, dt)          -- every frame while playing
       node.yaw = node.yaw + math.rad(params.speed) * dt
     end
 
@@ -961,12 +1026,12 @@ Globals
 -------
   • params   this instance's values (a table; seeded from `defaults`)
   • time     seconds since play started
-  • dt       seconds since last frame (also passed to on_update)
+  • dt       seconds since last frame (also passed to update)
   • the full Lua standard library (math, string, table, …)
   • log(\"...\")  prints to the engine console
 
 Each attached script keeps its own state across frames (set a variable in
-on_start, read it in on_update), and hot-reloads the moment you save the file.
+start, read it in update), and hot-reloads the moment you save the file.
 
 Attaching & running
 --------------------
@@ -1715,6 +1780,12 @@ impl EditorTabViewer<'_> {
                     job.wrap.max_width = wrap;
                     ui.fonts_mut(|f| f.layout_job(job))
                 };
+                // Tab accepts the top completion: if the popup was open last frame,
+                // eat Tab *before* the editor runs so it doesn't shift focus instead.
+                let ac_id = egui::Id::new(("ide_ac_open", editor_id));
+                let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
+                let tab_accept =
+                    ac_was_open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
                 let output = egui::ScrollArea::vertical()
                     .id_salt("ide_scroll")
                     .show(ui, |ui| {
@@ -1730,7 +1801,7 @@ impl EditorTabViewer<'_> {
                 if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
                 }
-                self.ide_autocomplete(
+                let ac_open = self.ide_autocomplete(
                     ui,
                     i,
                     editor_id,
@@ -1738,7 +1809,23 @@ impl EditorTabViewer<'_> {
                     output.cursor_range,
                     &output.galley,
                     output.galley_pos,
+                    tab_accept,
                 );
+                ui.ctx().data_mut(|d| d.insert_temp(ac_id, ac_open));
+
+                // Hover doc: hovering an API identifier in the code shows its tooltip.
+                if let Some(p) = output.response.response.hover_pos() {
+                    let rel = p - output.galley_pos;
+                    let cc = output.galley.cursor_from_pos(rel);
+                    let word = word_at(&self.ide.open[i].text, cc.index.0);
+                    if let Some(api) = LUA_API.iter().find(|a| a.label == word) {
+                        output.response.response.clone().on_hover_ui_at_pointer(|ui| {
+                            ui.set_max_width(360.0);
+                            ui.monospace(egui::RichText::new(api.label).color(egui::Color32::from_rgb(78, 201, 176)));
+                            ui.label(api.doc);
+                        });
+                    }
+                }
             }
             _ => {
                 self.ide.active = None;
@@ -1746,8 +1833,9 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// An autocomplete popup at the caret offering the engine API (click to insert
-    /// the half-typed token; hover for a one-line doc).
+    /// An autocomplete popup at the caret offering the engine API. Click a row or
+    /// press Tab (`tab_accept`) to insert; hover a row for its doc. Returns whether
+    /// the popup is showing (so the caller can route Tab to it next frame).
     #[allow(clippy::too_many_arguments)]
     fn ide_autocomplete(
         &mut self,
@@ -1758,19 +1846,20 @@ impl EditorTabViewer<'_> {
         cursor_range: Option<egui::text::CCursorRange>,
         galley: &egui::text::Galley,
         galley_pos: egui::Pos2,
-    ) {
+        tab_accept: bool,
+    ) -> bool {
         if !has_focus {
-            return;
+            return false;
         }
-        let Some(range) = cursor_range else { return };
+        let Some(range) = cursor_range else { return false };
         if !range.is_empty() {
-            return; // a selection, not a caret
+            return false; // a selection, not a caret
         }
         let cursor = range.primary.index.0;
         let (start, token) = current_token(&self.ide.open[i].text, cursor);
         // Pop only on a real prefix: ≥2 chars for a plain word, or any member access.
         if token.len() < 2 && !token.contains('.') {
-            return;
+            return false;
         }
         let lower = token.to_ascii_lowercase();
         let matches: Vec<&ApiEntry> = LUA_API
@@ -1782,24 +1871,27 @@ impl EditorTabViewer<'_> {
             .take(8)
             .collect();
         if matches.is_empty() {
-            return;
+            return false;
         }
 
         let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
         let pos = galley_pos + caret.left_bottom().to_vec2();
-        let mut chosen: Option<&'static str> = None;
+        // Tab inserts the top match; otherwise a click does.
+        let mut chosen: Option<&'static str> = if tab_accept { Some(matches[0].insert) } else { None };
         egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(340.0);
-                    for e in &matches {
-                        if ui
-                            .selectable_label(false, egui::RichText::new(e.label).monospace())
-                            .on_hover_text(e.doc)
-                            .clicked()
-                        {
+                    ui.small("↹ Tab to accept");
+                    for (n, e) in matches.iter().enumerate() {
+                        let label = if n == 0 {
+                            egui::RichText::new(e.label).monospace().strong()
+                        } else {
+                            egui::RichText::new(e.label).monospace()
+                        };
+                        if ui.selectable_label(false, label).on_hover_text(e.doc).clicked() {
                             chosen = Some(e.insert);
                         }
                     }
@@ -1817,7 +1909,9 @@ impl EditorTabViewer<'_> {
                 state.store(ui.ctx(), editor_id);
             }
             ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+            return false; // inserted — popup closes
         }
+        true
     }
 }
 
@@ -1833,11 +1927,11 @@ fn script_template(name: &str) -> String {
          \n\
          defaults = {{ speed = 1.0 }}\n\
          \n\
-         function on_start(node)\n\
+         function start(node)\n\
          \x20 -- runs once when play begins\n\
          end\n\
          \n\
-         function on_update(node, dt)\n\
+         function update(node, dt)\n\
          \x20 node.yaw = node.yaw + params.speed * dt\n\
          end\n"
     )
@@ -1846,20 +1940,20 @@ fn script_template(name: &str) -> String {
 /// Insert-menu snippets for the in-engine IDE: (label, Lua to append).
 const LUA_SNIPPETS: &[(&str, &str)] = &[
     (
-        "on_update",
-        "\nfunction on_update(node, dt)\n  \nend\n",
+        "update",
+        "\nfunction update(node, dt)\n  \nend\n",
     ),
     (
-        "on_start",
-        "\nfunction on_start(node)\n  \nend\n",
+        "start",
+        "\nfunction start(node)\n  \nend\n",
     ),
     (
         "spin (yaw)",
-        "\ndefaults = { speed = 45 }\nfunction on_update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+        "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
     ),
     (
         "pulse (scale)",
-        "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction on_update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
+        "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
     ),
 ];
 
@@ -1894,7 +1988,7 @@ const LUA_KEYWORDS: &[&str] = &[
 
 /// Identifiers highlighted as engine/builtin API (teal).
 const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "defaults", "log", "on_start", "on_update", "math", "string",
+    "node", "params", "time", "dt", "defaults", "log", "start", "update", "math", "string",
     "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
 ];
 
@@ -1908,8 +2002,8 @@ struct ApiEntry {
 /// The engine scripting API, surfaced as autocomplete + hover docs (and the Docs
 /// page's reference). Lua stdlib highlights are included so completion is useful.
 const LUA_API: &[ApiEntry] = &[
-    ApiEntry { label: "on_update", insert: "on_update", doc: "function on_update(node, dt) — runs every frame while playing." },
-    ApiEntry { label: "on_start", insert: "on_start", doc: "function on_start(node) — runs once when play begins." },
+    ApiEntry { label: "update", insert: "update", doc: "function update(node, dt) — runs every frame while playing." },
+    ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
     ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },
     ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
@@ -2034,6 +2128,29 @@ fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
     (start, chars[start..cur].iter().collect())
 }
 
+/// The full identifier (run of `[A-Za-z0-9_.]`) containing char index `idx`, or
+/// empty if that char isn't part of one. Used for hover docs.
+fn word_at(text: &str, idx: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let i = idx.min(chars.len() - 1);
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+    if !is_word(chars[i]) {
+        return String::new();
+    }
+    let mut s = i;
+    while s > 0 && is_word(chars[s - 1]) {
+        s -= 1;
+    }
+    let mut e = i;
+    while e + 1 < chars.len() && is_word(chars[e + 1]) {
+        e += 1;
+    }
+    chars[s..=e].iter().collect()
+}
+
 /// Replace the characters in `[start, end)` (char indices) of `s` with `ins`.
 fn replace_chars(s: &mut String, start: usize, end: usize, ins: &str) {
     let byte = |n: usize| s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len());
@@ -2155,6 +2272,10 @@ struct Editor {
     script_errors: Vec<String>,
     /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
     external_editor: String,
+    /// Smoothed frames-per-second + a throttle so the window title isn't rewritten
+    /// every frame.
+    fps: f32,
+    fps_timer: f32,
     /// Active camera focus glide (F), or `None`.
     focus_anim: Option<FocusAnim>,
     /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.
@@ -2335,7 +2456,7 @@ impl ApplicationHandler for Editor {
                                 KeyCode::KeyV => self.paste(),
                                 KeyCode::KeyD => self.duplicate_selected(),
                                 KeyCode::KeyA => self.select_all(),
-                                KeyCode::KeyS => self.save_scene(),
+                                KeyCode::KeyS => self.save_all(),
                                 _ => {}
                             }
                         } else {
@@ -2498,6 +2619,17 @@ impl Editor {
         self.last = Some(now);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.camera.update(&self.input, dt);
+
+        // FPS in the window title (smoothed, refreshed a few times a second).
+        if dt > 0.0 {
+            let inst = 1.0 / dt;
+            self.fps = if self.fps > 0.0 { self.fps * 0.9 + inst * 0.1 } else { inst };
+            self.fps_timer += dt;
+            if self.fps_timer >= 0.4 {
+                self.fps_timer = 0.0;
+                window.set_title(&format!("Floptle Editor — {:.0} fps", self.fps));
+            }
+        }
 
         // Glide an in-progress focus (F). Any WASD/Space/C input hands control back
         // to the user immediately. Only the camera position eases; the view angle is
@@ -3933,6 +4065,7 @@ impl Editor {
             }
         }
         seed_default_scripts(&self.scripts_dir());
+        write_lua_support(&self.project_root);
     }
 
     fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
@@ -4041,6 +4174,25 @@ impl Editor {
         match floptle_scene::save(&doc, &path) {
             Ok(()) => println!("  saved {}", path.display()),
             Err(e) => eprintln!("  save failed: {e}"),
+        }
+    }
+
+    /// Ctrl+S: save everything — the project config, the open scene, and every
+    /// dirty script open in the IDE (so "the script you're editing" is saved too).
+    fn save_all(&mut self) {
+        self.save_scene();
+        if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
+            eprintln!("  save project failed: {e}");
+        }
+        let mut saved_scripts = 0;
+        for f in &mut self.ide.open {
+            if f.dirty && std::fs::write(&f.path, &f.text).is_ok() {
+                f.dirty = false;
+                saved_scripts += 1;
+            }
+        }
+        if saved_scripts > 0 {
+            println!("  saved {saved_scripts} script(s)");
         }
     }
 }

@@ -10,9 +10,9 @@
 //! ```lua
 //! defaults = { speed = 45 }              -- tunables shown in the Inspector
 //!
-//! function on_start(node) end            -- once, when play begins (optional)
+//! function start(node) end               -- once, when play begins (optional)
 //!
-//! function on_update(node, dt)           -- every frame while playing
+//! function update(node, dt)              -- every frame while playing
 //!   node.yaw = node.yaw + math.rad(params.speed) * dt
 //! end
 //! ```
@@ -239,13 +239,14 @@ impl ScriptHost {
 
         let node = node_table(&self.lua, tr)?;
         let pre = node_pre(tr);
+        // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
+        // still work for older scripts.
         if first {
-            if let Value::Function(f) = env.get::<Value>("on_start")? {
+            if let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
                 f.call::<()>(node.clone())?;
             }
         }
-        if let Value::Function(f) = env.get::<Value>("on_update")? {
-            let f: Function = f;
+        if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
             f.call::<()>((node.clone(), dt as f64))?;
         }
         apply_node(&node, tr, &pre)
@@ -280,7 +281,7 @@ impl ScriptHost {
 /// Build a fresh sandbox environment for a script: a table whose metatable falls
 /// through to the real globals (so `math`, `string`, `log`, … are in scope) while
 /// the script's own assignments stay local. Running the chunk defines its
-/// functions (`on_start`, `on_update`) in that table.
+/// functions (`start`, `update`) in that table.
 fn build_env(lua: &Lua, src: &str, name: &str) -> mlua::Result<Table> {
     let env = lua.create_table()?;
     let mt = lua.create_table()?;
@@ -288,6 +289,16 @@ fn build_env(lua: &Lua, src: &str, name: &str) -> mlua::Result<Table> {
     env.set_metatable(Some(mt));
     lua.load(src).set_name(name).set_environment(env.clone()).exec()?;
     Ok(env)
+}
+
+/// The first of `names` that's a function in `env` (lets a hook have aliases).
+fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<Function>> {
+    for n in names {
+        if let Value::Function(f) = env.get::<Value>(*n)? {
+            return Ok(Some(f));
+        }
+    }
+    Ok(None)
 }
 
 fn params_table(lua: &Lua, params: &[(String, f32)]) -> mlua::Result<Table> {
@@ -380,7 +391,7 @@ mod tests {
         write_script(
             &dir,
             "rotate",
-            "defaults = { speed = 90 }\nfunction on_update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+            "defaults = { speed = 90 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
         );
 
         let mut world = World::default();

@@ -5,7 +5,7 @@
 
 defaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }
 
-function on_update(node, dt)
+function update(node, dt)
   local f = params.base * (1.0 + params.amplitude * math.sin(params.speed * time))
   node.scale = math.max(f, 0.01)
 end
