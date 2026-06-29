@@ -16,7 +16,8 @@ use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::Entity;
 use floptle_render::{
-    cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster, Retro,
+    cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster, Raymarch,
+    RaymarchGlobals, Retro,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -50,6 +51,12 @@ struct Runner {
     retro_on: bool,
     /// Retro internal resolution (rows); width derives from the window aspect.
     retro_height: u32,
+    /// Raymarched SDF-matter pass (the unified mesh+field thesis), its toggle, and
+    /// the matter's world placement + scale.
+    raymarch: Option<Raymarch>,
+    raymarch_on: bool,
+    matter_center: DVec3,
+    matter_scale: f32,
     /// Registered mesh handles, indexed by `Shape::index()`.
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models drawn alongside the procedural primitives — every
@@ -172,6 +179,9 @@ impl ApplicationHandler for Runner {
             self.camera.position = DVec3::new(0.0, s * 0.5, s * 0.65);
             self.camera.pitch = -0.66; // ≈ looks at the floor center from here
             self.camera.speed = (s / 9.0).max(4.0);
+            // SDF matter: a big blob floating above the level center
+            self.matter_center = DVec3::new(0.0, s * 0.28, 0.0);
+            self.matter_scale = (s * 0.10) as f32;
             // Sit the procedural primitives on the floor near the level center as
             // small reference props.
             let ents: Vec<Entity> = self.app.world.query::<Renderable>().map(|(e, _)| e).collect();
@@ -198,6 +208,9 @@ impl ApplicationHandler for Runner {
                 }
             }
         } else {
+            // SDF matter: a tangible blob beside the primitives.
+            self.matter_center = DVec3::new(3.5, 1.5, 0.0);
+            self.matter_scale = 1.6;
             // No environment: showcase every imported model in a spinning row.
             let n = prop_models.len();
             for (i, (part_ids, size)) in prop_models.into_iter().enumerate() {
@@ -220,6 +233,10 @@ impl ApplicationHandler for Runner {
         self.retro_height = 240;
         self.retro_on = true;
         self.retro = Some(Retro::new(&gpu, self.retro_height));
+
+        // SDF matter pass on by default — toggle with F.
+        self.raymarch_on = true;
+        self.raymarch = Some(Raymarch::new(&gpu));
 
         self.raster = Some(raster);
         self.gpu = Some(gpu);
@@ -252,6 +269,7 @@ impl ApplicationHandler for Runner {
                         KeyCode::ControlLeft => self.input.down = pressed,
                         KeyCode::ShiftLeft => self.input.boost = pressed,
                         KeyCode::KeyP if pressed => self.retro_on = !self.retro_on,
+                        KeyCode::KeyF if pressed => self.raymarch_on = !self.raymarch_on,
                         KeyCode::BracketLeft if pressed => {
                             self.set_retro_height(self.retro_height.saturating_sub(40))
                         }
@@ -301,10 +319,11 @@ impl ApplicationHandler for Runner {
 
 impl Runner {
     fn render(&mut self) {
-        let (Some(gpu), Some(raster), Some(retro), Some(window), Some(clock)) = (
+        let (Some(gpu), Some(raster), Some(retro), Some(raymarch), Some(window), Some(clock)) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
             self.retro.as_ref(),
+            self.raymarch.as_ref(),
             self.window.as_ref(),
             self.clock.as_mut(),
         ) else {
@@ -323,14 +342,15 @@ impl Runner {
         let since = now.duration_since(clock.fps_since).as_secs_f32();
         if since >= 0.5 {
             let fps = clock.fps_frames as f32 / since;
-            let mode = if self.retro_on {
+            let retro_mode = if self.retro_on {
                 let (w, h) = retro.resolution();
                 format!("retro {w}×{h}")
             } else {
                 "retro off".to_string()
             };
+            let matter = if self.raymarch_on { "matter on" } else { "matter off" };
             window.set_title(&format!(
-                "Floptle — Phase 2   |   {fps:.0} fps   |   {mode}   |   P: retro · [ ]: pixel size · RMB+WASD"
+                "Floptle   |   {fps:.0} fps   |   {retro_mode} · {matter}   |   P: retro · F: matter · [ ]: pixels · RMB+WASD"
             ));
             clock.fps_frames = 0;
             clock.fps_since = now;
@@ -381,21 +401,41 @@ impl Runner {
         };
         let clear = [pulse(0.0, 0.005, 0.014), pulse(2.0, 0.004, 0.010), pulse(4.0, 0.014, 0.030), 1.0];
 
+        // SDF-matter globals: matter center in camera-relative space, the shared
+        // view_proj (for depth) + its inverse (to reconstruct rays that line up
+        // with the meshes).
+        let center_cam = (self.matter_center - cam.world_position).as_vec3();
+        let rm_globals = RaymarchGlobals {
+            view_proj: view_proj.to_cols_array_2d(),
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
+            center: [center_cam.x, center_cam.y, center_cam.z, self.matter_scale],
+            params: [self.app.time.elapsed as f32, 0.0, 0.0, 0.0],
+        };
+
         match gpu.acquire() {
             Some(frame) => {
-                if self.retro_on {
-                    // render the scene into the low-res target, then upscale it
-                    raster.draw_scene(
-                        gpu,
-                        retro.color_view(),
-                        retro.depth_view(),
-                        globals,
-                        &instances,
-                        clear,
-                    );
-                    retro.blit(gpu, &frame);
+                // targets: the low-res retro buffer, or the swapchain directly
+                let (color, depth) = if self.retro_on {
+                    (retro.color_view(), retro.depth_view())
                 } else {
-                    raster.draw_scene(gpu, &frame.view, gpu.depth_view(), globals, &instances, clear);
+                    (&frame.view, gpu.depth_view())
+                };
+
+                // SDF matter first (clears + writes depth); the meshes then LOAD
+                // those targets and share the one depth buffer, so matter and
+                // Blender geometry occlude/intersect correctly.
+                let raster_clear = if self.raymarch_on {
+                    raymarch.draw_into(gpu, color, depth, rm_globals);
+                    None
+                } else {
+                    Some(clear)
+                };
+                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
+
+                if self.retro_on {
+                    retro.blit(gpu, &frame);
                 }
                 frame.present();
             }
