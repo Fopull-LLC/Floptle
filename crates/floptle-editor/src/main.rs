@@ -59,6 +59,8 @@ enum Tool {
     Move,
     Rotate,
     Scale,
+    /// Terrain sculpt/paint brush (LMB-drag edits the terrain field).
+    Sculpt,
 }
 
 impl Tool {
@@ -68,7 +70,8 @@ impl Tool {
             2 => Some(Tool::Move),
             3 => Some(Tool::Rotate),
             4 => Some(Tool::Scale),
-            _ => None, // 5-9 reserved for future tools
+            5 => Some(Tool::Sculpt),
+            _ => None, // 6-9 reserved for future tools
         }
     }
 
@@ -78,6 +81,7 @@ impl Tool {
             Tool::Move => "move",
             Tool::Rotate => "rotate",
             Tool::Scale => "scale",
+            Tool::Sculpt => "sculpt",
         }
     }
 }
@@ -181,6 +185,10 @@ struct EditorCmd {
     reparent: Option<(Entity, Option<Entity>)>,
     /// Add a new node as a child of an entity (matter, parent).
     add_parented: Option<(MatterDoc, Entity)>,
+    /// Create a fresh flat terrain.
+    create_terrain: bool,
+    /// Remove the terrain.
+    clear_terrain: bool,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
@@ -786,7 +794,7 @@ fn build_gizmo(
     w: f32,
     h: f32,
 ) -> Option<GizmoFrame> {
-    if tool == Tool::Select {
+    if tool == Tool::Select || tool == Tool::Sculpt {
         return None;
     }
     let e = selection?;
@@ -870,7 +878,7 @@ fn hit_test(
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
         }
-        Tool::Select => {}
+        Tool::Select | Tool::Sculpt => {}
     }
     cands
         .into_iter()
@@ -967,7 +975,7 @@ fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Opt
             }
             painter.circle_filled(center, 3.0, Color32::from_gray(200));
         }
-        Tool::Select => {}
+        Tool::Select | Tool::Sculpt => {}
     }
 }
 
@@ -1796,7 +1804,7 @@ impl EditorTabViewer<'_> {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
+                        for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Sculpt] {
                             if ui.selectable_label(self.tool == t, t.label()).clicked() {
                                 self.cmd.set_tool = Some(t);
                             }
@@ -2348,6 +2356,21 @@ fn main() {
     event_loop.run_app(&mut editor).expect("run editor");
 }
 
+/// Terrain sculpt/paint brush settings.
+#[derive(Clone, Copy)]
+struct TerrainBrush {
+    mode: floptle_field::Brush,
+    radius: f32,
+    strength: f32,
+    color: [f32; 3],
+}
+
+impl Default for TerrainBrush {
+    fn default() -> Self {
+        Self { mode: floptle_field::Brush::Raise, radius: 2.5, strength: 0.5, color: [0.45, 0.32, 0.2] }
+    }
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -2381,6 +2404,16 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Material textures registered on the GPU, keyed by image path → handle.
     texture_registry: HashMap<String, TexId>,
+    /// The editable terrain SDF field (None until "Create terrain").
+    terrain: Option<floptle_field::Terrain>,
+    /// The terrain volume needs re-uploading to the GPU.
+    terrain_dirty: bool,
+    /// LMB held with the Sculpt tool — keep brushing on mouse motion.
+    sculpting: bool,
+    /// Terrain brush settings.
+    terrain_brush: TerrainBrush,
+    /// Whether the Terrain window is open.
+    show_terrain: bool,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -2603,6 +2636,10 @@ impl ApplicationHandler for Editor {
             // over-UI gate stay correct; device_event only gives deltas.
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
+                // Keep painting/sculpting the terrain while the LMB is held.
+                if self.sculpting {
+                    self.apply_terrain_brush();
+                }
             }
             // Modifier state, tracked separately so Ctrl/Shift combos work even while
             // a field is focused (this event isn't gated by `consumed`).
@@ -2668,7 +2705,14 @@ impl ApplicationHandler for Editor {
                 if pressed {
                     let over_scene = self.cursor_over_scene();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-                    if over_scene {
+                    if over_scene && self.tool == Tool::Sculpt {
+                        // Sculpt tool: start a brush stroke on the terrain.
+                        self.context_menu = None;
+                        if self.terrain.is_some() {
+                            self.sculpting = true;
+                            self.apply_terrain_brush();
+                        }
+                    } else if over_scene {
                         // Clicking the viewport dismisses an open context menu (but
                         // clicking a panel/menu, which isn't over_scene, keeps it).
                         self.context_menu = None;
@@ -2701,6 +2745,7 @@ impl ApplicationHandler for Editor {
                     self.grabbed = None;
                     self.drag = None;
                     self.editing = false;
+                    self.sculpting = false;
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
@@ -2778,6 +2823,17 @@ impl ApplicationHandler for Editor {
 
 impl Editor {
     fn render(&mut self) {
+        // Re-upload the terrain volume to the GPU after an edit (needs &mut Raymarch,
+        // before the read-only destructure below).
+        if self.terrain_dirty {
+            if let (Some(gpu), Some(raymarch), Some(terrain)) =
+                (self.gpu.as_ref(), self.raymarch.as_mut(), self.terrain.as_ref())
+            {
+                raymarch.set_volume(gpu, &terrain.baked);
+            }
+            self.terrain_dirty = false;
+        }
+
         let (
             Some(gpu),
             Some(raster),
@@ -3021,7 +3077,22 @@ impl Editor {
             }
         }
 
-        let rm = if blobs.is_empty() { None } else { Some(make_rm(&blobs)) };
+        // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
+        // and/or the editable terrain volume. Build its globals if either is present.
+        let show_blobs = self.project.matter && !blobs.is_empty();
+        let rm = if show_blobs || self.terrain.is_some() {
+            let mut g = make_rm(if show_blobs { &blobs } else { &[] });
+            if let Some(t) = &self.terrain {
+                let c = t.baked.center;
+                let cr = DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64) - cam.world_position;
+                let hf = t.baked.half_extent;
+                g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0]; // present
+                g.vol_half = [hf[0], hf[1], hf[2], 0.1];
+            }
+            Some(g)
+        } else {
+            None
+        };
 
         // ---- build the egui UI (mutating the World) ----
         let raw_input = egui.state.take_egui_input(&window);
@@ -3042,6 +3113,9 @@ impl Editor {
         let show_grid_settings = &mut self.show_grid_settings;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
+        let show_terrain = &mut self.show_terrain;
+        let terrain_brush = &mut self.terrain_brush;
+        let terrain_present = self.terrain.is_some();
         let external_editor = &mut self.external_editor;
         let asset_tree = &self.asset_tree;
         let project_root = self.project_root.as_path();
@@ -3122,6 +3196,7 @@ impl Editor {
                         }
                         ui.separator();
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
+                        ui.checkbox(&mut *show_terrain, "Terrain");
                     });
                     ui.menu_button("Project", |ui| {
                         if ui.button("Settings…").clicked() {
@@ -3389,6 +3464,55 @@ impl Editor {
                     *new_scene_buf = None;
                 }
             }
+
+            // ---- terrain window ----
+            egui::Window::new("⛰ Terrain")
+                .open(show_terrain)
+                .resizable(false)
+                .default_width(260.0)
+                .show(ui.ctx(), |ui| {
+                    use floptle_field::Brush;
+                    if !terrain_present {
+                        ui.label("No terrain yet.");
+                        if ui.button("➕ Create flat terrain").clicked() {
+                            cmd.create_terrain = true;
+                        }
+                        ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
+                        return;
+                    }
+                    ui.label("Sculpt tool (key 5) — LMB-drag to brush.");
+                    ui.separator();
+                    ui.label("Brush");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⬆ Raise");
+                        ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⬇ Lower");
+                        ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "～ Smooth");
+                        ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "🎨 Paint");
+                    });
+                    ui.add(egui::Slider::new(&mut terrain_brush.radius, 0.5..=8.0).text("radius"));
+                    ui.add(egui::Slider::new(&mut terrain_brush.strength, 0.05..=1.0).text("strength"));
+                    if terrain_brush.mode == Brush::Paint {
+                        ui.horizontal(|ui| {
+                            ui.label("paint color");
+                            ui.color_edit_button_rgb(&mut terrain_brush.color);
+                            if !materials.is_empty() {
+                                ui.menu_button("from material", |ui| {
+                                    for (name, doc) in materials {
+                                        if ui.button(name).clicked() {
+                                            terrain_brush.color = doc.color;
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        ui.small("Make a grass/dirt/stone material, then paint its color across the terrain.");
+                    }
+                    ui.separator();
+                    if ui.button("🗑 Clear terrain").clicked() {
+                        cmd.clear_terrain = true;
+                    }
+                });
             // (the gizmo now paints inside the Scene tab, clipped to its rect)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
@@ -3404,7 +3528,8 @@ impl Editor {
                 } else {
                     (&frame.view, gpu.depth_view())
                 };
-                let raster_clear = if let (Some(rm), true) = (rm, self.project.matter) {
+                // `rm` already accounts for the matter toggle + terrain presence.
+                let raster_clear = if let Some(rm) = rm {
                     raymarch.draw_into(gpu, color, depth, rm);
                     None
                 } else {
@@ -3618,6 +3743,13 @@ impl Editor {
         }
         if let Some((matter, parent)) = cmd.add_parented {
             self.add_parented(matter, parent);
+        }
+        if cmd.create_terrain {
+            self.create_terrain();
+            self.show_terrain = true;
+        }
+        if cmd.clear_terrain {
+            self.terrain = None;
         }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
@@ -4224,7 +4356,7 @@ impl Editor {
                     self.set_world_transform(e, Transform { scale: sc, ..start });
                 }
             }
-            Tool::Select => {}
+            Tool::Select | Tool::Sculpt => {}
         }
     }
 
@@ -4244,6 +4376,46 @@ impl Editor {
         if let Some(t) = self.world.get_mut::<Transform>(e) {
             *t = local;
         }
+    }
+
+    // ---- terrain sculpting --------------------------------------------------
+    /// Apply the current terrain brush where the cursor's ray meets the terrain.
+    fn apply_terrain_brush(&mut self) {
+        let (Some(cursor), Some(gpu)) = (self.cursor, self.gpu.as_ref()) else { return };
+        let cam = self.camera.render_camera();
+        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let inv = cam.view_proj(w / h).inverse();
+        let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
+        let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+        let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+        let ro_rel = near.truncate() / near.w; // camera-relative
+        let rd = (far.truncate() / far.w - ro_rel).normalize();
+        let ro_world = cam.world_position + ro_rel.as_dvec3();
+        let brush = self.terrain_brush;
+        let Some(terrain) = self.terrain.as_mut() else { return };
+        let ro = [ro_world.x as f32, ro_world.y as f32, ro_world.z as f32];
+        let rd = [rd.x, rd.y, rd.z];
+        if let Some(hit) = terrain.raycast(ro, rd) {
+            match brush.mode {
+                floptle_field::Brush::Paint => {
+                    terrain.paint(hit, brush.radius, brush.strength, brush.color)
+                }
+                m => terrain.sculpt(m, hit, brush.radius, brush.strength),
+            }
+            self.terrain_dirty = true;
+        }
+    }
+
+    /// Create a fresh flat terrain centered in front of the camera.
+    fn create_terrain(&mut self) {
+        self.terrain = Some(floptle_field::Terrain::flat(
+            [112, 48, 112],
+            [0.0, 0.0, 0.0],
+            [16.0, 6.0, 16.0],
+            0.0,
+            [0.35, 0.6, 0.28],
+        ));
+        self.terrain_dirty = true;
     }
 
     // ---- scene-graph (parenting) -------------------------------------------
