@@ -1,13 +1,17 @@
 //! A raymarched SDF-matter pass, composited with the raster meshes.
 //!
-//! It folds two kinds of matter into one field with smin: an analytic morphing
-//! blob and a **baked mesh volume** — a 3D signed-distance texture + a co-located
-//! color texture produced by `floptle_field::mesh2sdf`, so an imported mesh becomes
-//! textured SDF matter that blends (distance *and* color) with everything else.
-//! Rays are camera-relative (from inverse(view_proj)) and the fragment writes
-//! frag_depth, so it shares one depth buffer with the raster meshes.
+//! Folds analytic matter (the morphing blob) and a converted mesh into one field
+//! with smin — distance AND color blend by the same weight, so textures crossfade
+//! across merge seams. The mesh distance comes from one of two backends, selected
+//! by `vol_center.w`:
+//! - `1.0` — a baked **voxel** volume (dist + color 3D textures): cheap, but rounds.
+//! - `2.0` — an exact **triangle BVH** (storage buffers + a color atlas): sharp as
+//!   the source mesh, traversed per-step in the shader.
+//!
+//! Rays are camera-relative (from inverse(view_proj)); the fragment writes
+//! frag_depth so this shares one depth buffer with the raster meshes.
 
-use floptle_field::BakedSdf;
+use floptle_field::{BakedBvh, BakedSdf};
 
 use crate::device::Gpu;
 
@@ -21,9 +25,9 @@ pub struct RaymarchGlobals {
     pub bg: [f32; 4],
     /// Analytic blob: xyz camera-relative center, w = scale.
     pub center: [f32; 4],
-    /// x = time.
+    /// x = time, y = voxel size, z = BVH shell thickness.
     pub params: [f32; 4],
-    /// Baked volume: xyz camera-relative box center, w = present (1.0/0.0).
+    /// Baked mesh: xyz camera-relative box center, w = backend (0 none / 1 voxel / 2 bvh).
     pub vol_center: [f32; 4],
     /// xyz half-extent, w = blend radius k.
     pub vol_half: [f32; 4],
@@ -35,8 +39,14 @@ pub struct Raymarch {
     bind_layout: wgpu::BindGroupLayout,
     sampler_lin: wgpu::Sampler,
     sampler_pt: wgpu::Sampler,
-    _dist_tex: wgpu::Texture,
-    _color_tex: wgpu::Texture,
+    // voxel backend
+    dist_tex: wgpu::Texture,
+    color_tex: wgpu::Texture,
+    // bvh backend
+    bvh_nodes: wgpu::Buffer,
+    bvh_tris: wgpu::Buffer,
+    bvh_data: wgpu::Buffer,
+    atlas_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
 }
 
@@ -66,6 +76,11 @@ impl Raymarch {
                 vol_tex_entry(2),
                 sampler_entry(3),
                 sampler_entry(4),
+                storage_entry(5),
+                storage_entry(6),
+                storage_entry(7),
+                tex2d_entry(8),
+                sampler_entry(9),
             ],
         });
 
@@ -114,7 +129,6 @@ impl Raymarch {
             mapped_at_creation: false,
         });
 
-        // Distance: trilinear (smooth surfaces). Color: nearest (crisp pixel-art).
         let sampler_lin = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raymarch-lin"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -128,7 +142,7 @@ impl Raymarch {
             ..Default::default()
         });
 
-        // A 1³ "empty" volume so the bindings are valid before a mesh is baked.
+        // Seed valid-but-empty resources for both backends.
         let empty = BakedSdf {
             dims: [1, 1, 1],
             center: [0.0; 3],
@@ -137,8 +151,22 @@ impl Raymarch {
             color: vec![[255, 255, 255, 255]],
         };
         let (dist_tex, color_tex) = upload_volume(gpu, &empty);
-        let bind =
-            make_bind(device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler_lin, &sampler_pt);
+        let (bvh_nodes, bvh_tris, bvh_data) = empty_bvh_buffers(device);
+        let atlas_tex = upload_atlas(gpu, &[255, 255, 255, 255], 1, 1);
+
+        let bind = make_bind(
+            device,
+            &bind_layout,
+            &globals_buf,
+            &dist_tex,
+            &color_tex,
+            &sampler_lin,
+            &sampler_pt,
+            &bvh_nodes,
+            &bvh_tris,
+            &bvh_data,
+            &atlas_tex,
+        );
 
         Self {
             pipeline,
@@ -146,27 +174,47 @@ impl Raymarch {
             bind_layout,
             sampler_lin,
             sampler_pt,
-            _dist_tex: dist_tex,
-            _color_tex: color_tex,
+            dist_tex,
+            color_tex,
+            bvh_nodes,
+            bvh_tris,
+            bvh_data,
+            atlas_tex,
             bind,
         }
     }
 
-    /// Upload a baked mesh as the volume matter (replaces any previous one). The
-    /// runtime still drives `vol_center`/`vol_half`/present via `RaymarchGlobals`.
-    pub fn set_volume(&mut self, gpu: &Gpu, baked: &BakedSdf) {
-        let (dist_tex, color_tex) = upload_volume(gpu, baked);
+    fn rebuild_bind(&mut self, device: &wgpu::Device) {
         self.bind = make_bind(
-            &gpu.device,
+            device,
             &self.bind_layout,
             &self.globals_buf,
-            &dist_tex,
-            &color_tex,
+            &self.dist_tex,
+            &self.color_tex,
             &self.sampler_lin,
             &self.sampler_pt,
+            &self.bvh_nodes,
+            &self.bvh_tris,
+            &self.bvh_data,
+            &self.atlas_tex,
         );
-        self._dist_tex = dist_tex;
-        self._color_tex = color_tex;
+    }
+
+    /// Upload a baked **voxel** volume as the mesh matter (backend 1).
+    pub fn set_volume(&mut self, gpu: &Gpu, baked: &BakedSdf) {
+        let (dist_tex, color_tex) = upload_volume(gpu, baked);
+        self.dist_tex = dist_tex;
+        self.color_tex = color_tex;
+        self.rebuild_bind(&gpu.device);
+    }
+
+    /// Upload a baked **triangle BVH** as the mesh matter (backend 2 — sharp).
+    pub fn set_volume_bvh(&mut self, gpu: &Gpu, baked: &BakedBvh) {
+        self.bvh_nodes = storage_buffer(&gpu.device, &gpu.queue, "bvh-nodes", bytemuck::cast_slice(&baked.nodes));
+        self.bvh_tris = storage_buffer(&gpu.device, &gpu.queue, "bvh-tris", bytemuck::cast_slice(&baked.tris));
+        self.bvh_data = storage_buffer(&gpu.device, &gpu.queue, "bvh-data", bytemuck::cast_slice(&baked.tri_data));
+        self.atlas_tex = upload_atlas(gpu, &baked.atlas_pixels, baked.atlas_w, baked.atlas_h);
+        self.rebuild_bind(&gpu.device);
     }
 
     /// Clear `color`/`depth` and draw the SDF matter into them (with true depth).
@@ -227,6 +275,19 @@ fn vol_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn tex2d_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -236,6 +297,45 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn storage_buffer(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, bytes: &[u8]) -> wgpu::Buffer {
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len().max(16) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if !bytes.is_empty() {
+        queue.write_buffer(&buf, 0, bytes);
+    }
+    buf
+}
+
+fn empty_bvh_buffers(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
+    let mk = |label| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    };
+    (mk("bvh-nodes"), mk("bvh-tris"), mk("bvh-data"))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn make_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -244,9 +344,14 @@ fn make_bind(
     color: &wgpu::Texture,
     samp_lin: &wgpu::Sampler,
     samp_pt: &wgpu::Sampler,
+    bvh_nodes: &wgpu::Buffer,
+    bvh_tris: &wgpu::Buffer,
+    bvh_data: &wgpu::Buffer,
+    atlas: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
         layout,
@@ -256,8 +361,39 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(samp_lin) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(samp_pt) },
+            wgpu::BindGroupEntry { binding: 5, resource: bvh_nodes.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: bvh_tris.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: bvh_data.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(samp_pt) },
         ],
     })
+}
+
+fn upload_atlas(gpu: &Gpu, pixels: &[u8], w: u32, h: u32) -> wgpu::Texture {
+    let (w, h) = (w.max(1), h.max(1));
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bvh-atlas"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        pixels,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    texture
 }
 
 /// Create the distance (R16Float) + color (Rgba8Unorm) 3D textures from a bake.
@@ -313,8 +449,8 @@ fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) 
     (dist, color)
 }
 
-/// Minimal `f32` → IEEE-754 half (`f16` bits). Flushes denormals to ±0 and clamps
-/// overflow to ±inf — fine for distance volumes (small magnitudes).
+/// Minimal `f32` → IEEE-754 half (`f16` bits). Flushes denormals to ±0, clamps
+/// overflow to ±inf — fine for distance volumes.
 fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;

@@ -57,11 +57,13 @@ struct Runner {
     raymarch_on: bool,
     matter_center: DVec3,
     matter_scale: f32,
-    /// Placement of the baked mesh-volume matter (the map, or a cube).
+    /// Placement of the baked mesh matter (the map, or a cube).
     volume_world: DVec3,
     volume_half: [f32; 3],
     volume_voxel: f32,
-    volume_present: bool,
+    volume_thickness: f32,
+    /// Mesh-matter backend: 0 = none, 1 = voxel volume, 2 = exact BVH (sharp).
+    volume_backend: f32,
     /// Registered mesh handles, indexed by `Shape::index()`.
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models drawn alongside the procedural primitives — every
@@ -165,69 +167,31 @@ impl ApplicationHandler for Runner {
                         model.textures.len(),
                         model.size
                     );
+                    // Render every model as RASTER (fast, sharp, retro). The env map
+                    // is placed full-scale; smaller models are props. Each mesh's SDF
+                    // (the BVH matter-model) is baked on demand when blending /
+                    // deformation needs it — not raymarched for the whole world.
+                    let part_ids: Vec<(MeshId, [f32; 3])> = model
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let tex = part.texture.map(|i| &model.textures[i]);
+                            (raster.register(&gpu, &part.mesh, tex), part.base_color)
+                        })
+                        .collect();
                     if model.size > 20.0 && env_size.is_none() {
-                        // The environment becomes SDF matter: bake all material
-                        // parts (geometry + texture) into one distance + color volume.
-                        let res = 192u32;
-                        // Thin shell (~1.2 voxels) so surfaces aren't inflated — the
-                        // model's shape is retained, not bloated into blobs.
-                        let thickness = (model.size / res as f32) * 1.2;
-                        println!("  baking '{}' → SDF matter ({res}³, shell) …", model.name);
-                        let t0 = Instant::now();
-                        let part_pos: Vec<Vec<[f32; 3]>> = model
-                            .parts
-                            .iter()
-                            .map(|p| p.mesh.vertices.iter().map(|v| v.pos).collect())
-                            .collect();
-                        let part_uv: Vec<Vec<[f32; 2]>> = model
-                            .parts
-                            .iter()
-                            .map(|p| p.mesh.vertices.iter().map(|v| v.uv).collect())
-                            .collect();
-                        let bake_parts: Vec<floptle_field::BakePart> = model
-                            .parts
-                            .iter()
-                            .enumerate()
-                            .map(|(i, p)| floptle_field::BakePart {
-                                positions: &part_pos[i],
-                                indices: &p.mesh.indices,
-                                uvs: &part_uv[i],
-                                texture: p.texture.map(|ti| {
-                                    let t = &model.textures[ti];
-                                    floptle_field::TexRef {
-                                        pixels: &t.pixels,
-                                        width: t.width,
-                                        height: t.height,
-                                    }
-                                }),
-                                tint: p.base_color,
-                            })
-                            .collect();
-                        let baked = floptle_field::bake_model(
-                            &bake_parts,
-                            res,
-                            2.0,
-                            floptle_field::BakeMode::Shell { thickness },
-                        );
-                        println!("    baked in {:.1}s", t0.elapsed().as_secs_f32());
-                        raymarch.set_volume(&gpu, &baked);
-                        let max_half = baked.half_extent.iter().cloned().fold(0.0f32, f32::max);
-                        self.volume_half = baked.half_extent;
-                        self.volume_voxel = 2.0 * max_half / res as f32;
-                        self.volume_present = true;
                         env_floor = -model.min[1] as f64; // map floor to world y = 0
-                        self.volume_world = DVec3::new(0.0, env_floor, 0.0);
+                        for (mesh, color) in &part_ids {
+                            self.imported.push(Imported {
+                                mesh: *mesh,
+                                position: DVec3::new(0.0, env_floor, 0.0),
+                                scale: 1.0,
+                                color: *color,
+                                spin: 0.0,
+                            });
+                        }
                         env_size = Some(model.size);
                     } else {
-                        // prop: render as raster (textured)
-                        let part_ids: Vec<(MeshId, [f32; 3])> = model
-                            .parts
-                            .iter()
-                            .map(|part| {
-                                let tex = part.texture.map(|i| &model.textures[i]);
-                                (raster.register(&gpu, &part.mesh, tex), part.base_color)
-                            })
-                            .collect();
                         prop_models.push((part_ids, model.size));
                     }
                 }
@@ -304,7 +268,7 @@ impl ApplicationHandler for Runner {
             let max_half = baked.half_extent.iter().cloned().fold(0.0f32, f32::max);
             self.volume_half = baked.half_extent;
             self.volume_voxel = 2.0 * max_half / 48.0;
-            self.volume_present = true;
+            self.volume_backend = 1.0;
             let fwd = self.camera.rotation() * Vec3::NEG_Z;
             self.matter_center = self.camera.position + fwd.as_dvec3() * 6.0;
             self.matter_scale = 1.3;
@@ -486,15 +450,14 @@ impl Runner {
         // with the meshes).
         let center_cam = (self.matter_center - cam.world_position).as_vec3();
         let vol_cam = (self.volume_world - cam.world_position).as_vec3();
-        let present = if self.volume_present { 1.0 } else { 0.0 };
         let rm_globals = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
             bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
             center: [center_cam.x, center_cam.y, center_cam.z, self.matter_scale],
-            params: [self.app.time.elapsed as f32, self.volume_voxel, 0.0, 0.0],
-            vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, present],
+            params: [self.app.time.elapsed as f32, self.volume_voxel, self.volume_thickness, 0.0],
+            vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, self.volume_backend],
             vol_half: [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7],
         };
 

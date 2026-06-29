@@ -26,8 +26,10 @@
 //!                (ADR-0014).
 
 pub mod mesh2sdf;
+pub mod mesh_bvh;
 
 pub use mesh2sdf::{bake, bake_model, BakeMode, BakePart, BakedSdf, TexRef};
+pub use mesh_bvh::{bake_bvh, BakedBvh, BvhNodeGpu, BvhTriDataGpu, BvhTriGpu};
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
 /// union). The core "geometry blends together cleanly" operator.
