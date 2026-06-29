@@ -34,7 +34,7 @@ pub mod transform;
 
 pub use ecs::{Entity, World};
 pub use matter::{Light, Matter, Name, Shape, Spin};
-pub use script::{run_scripts, ScriptInst, Scripts, SCRIPT_KINDS};
+pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};
 pub use transform::Transform;
