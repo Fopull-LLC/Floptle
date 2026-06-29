@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
+floptle-field = { path = "../floptle-field" }
 floptle-shader = { path = "../floptle-shader" }
 floptle-vfx = { path = "../floptle-vfx" }
 floptle-anim = { path = "../floptle-anim" }

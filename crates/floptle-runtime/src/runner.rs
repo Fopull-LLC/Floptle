@@ -57,6 +57,11 @@ struct Runner {
     raymarch_on: bool,
     matter_center: DVec3,
     matter_scale: f32,
+    /// Placement of the baked mesh-volume matter (the map, or a cube).
+    volume_world: DVec3,
+    volume_half: [f32; 3],
+    volume_voxel: f32,
+    volume_present: bool,
     /// Registered mesh handles, indexed by `Shape::index()`.
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models drawn alongside the procedural primitives — every
@@ -105,6 +110,25 @@ fn all_models(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// A vivid 16×16 magenta/cyan checker (RGBA8) — the cube's texture, so the bake's
+/// nearest-surface color carry and the smin texture-fade are clearly visible.
+fn vivid_checker() -> (Vec<u8>, u32, u32) {
+    let n: usize = 16;
+    let mut px = vec![0u8; n * n * 4];
+    for y in 0..n {
+        for x in 0..n {
+            let c = (x / 2 + y / 2) & 1;
+            let col = if c == 0 { [230u8, 40, 200] } else { [40, 220, 230] };
+            let i = (y * n + x) * 4;
+            px[i] = col[0];
+            px[i + 1] = col[1];
+            px[i + 2] = col[2];
+            px[i + 3] = 255;
+        }
+    }
+    (px, n as u32, n as u32)
+}
+
 impl ApplicationHandler for Runner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -116,19 +140,20 @@ impl ApplicationHandler for Runner {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let gpu = Gpu::new(window.clone());
         let mut raster = Raster::new(&gpu);
-        // Registration order defines the Shape→MeshId mapping (Shape::index). The
-        // procedural primitives have no texture (a white default shows their tint).
+        // Procedural primitives have no texture (a white default shows their tint).
         let cube_id = raster.register(&gpu, &cube(0.7), None);
         let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36), None);
         self.mesh_ids = vec![cube_id, sphere_id];
 
+        let mut raymarch = Raymarch::new(&gpu);
+
         // Import every model under assets/models/. A large model (a map/level) is
-        // rendered FULL-SCALE as a walkable environment — floor dropped onto the
-        // ground plane, the camera pulled back and its speed scaled so you can fly
-        // through it. Small models become props you can fly up to. Each model's
-        // per-material parts register separately so their textures bind correctly.
+        // BAKED INTO SDF MATTER — shell mode (surfaces thickened, no inside/outside
+        // test, so an open/non-watertight mesh converts cleanly) — and raymarched,
+        // so other matter can smin-blend into it. Small models render as raster props.
         let paths = all_models(Path::new("assets/models"));
         let mut env_size: Option<f32> = None;
+        let mut env_floor = 0.0f64;
         let mut prop_models: Vec<(Vec<(MeshId, [f32; 3])>, f32)> = Vec::new();
         for path in &paths {
             match floptle_assets::gltf_import::import(path) {
@@ -140,30 +165,69 @@ impl ApplicationHandler for Runner {
                         model.textures.len(),
                         model.size
                     );
-                    // Upload each material part with its base-color texture.
-                    let part_ids: Vec<(MeshId, [f32; 3])> = model
-                        .parts
-                        .iter()
-                        .map(|part| {
-                            let tex = part.texture.map(|i| &model.textures[i]);
-                            (raster.register(&gpu, &part.mesh, tex), part.base_color)
-                        })
-                        .collect();
-
                     if model.size > 20.0 && env_size.is_none() {
-                        // environment: native scale, static, floor set to y = 0
-                        let floor = -model.min[1] as f64;
-                        for (mesh, color) in &part_ids {
-                            self.imported.push(Imported {
-                                mesh: *mesh,
-                                position: DVec3::new(0.0, floor, 0.0),
-                                scale: 1.0,
-                                color: *color,
-                                spin: 0.0,
-                            });
-                        }
+                        // The environment becomes SDF matter: bake all material
+                        // parts (geometry + texture) into one distance + color volume.
+                        let res = 192u32;
+                        // Thin shell (~1.2 voxels) so surfaces aren't inflated — the
+                        // model's shape is retained, not bloated into blobs.
+                        let thickness = (model.size / res as f32) * 1.2;
+                        println!("  baking '{}' → SDF matter ({res}³, shell) …", model.name);
+                        let t0 = Instant::now();
+                        let part_pos: Vec<Vec<[f32; 3]>> = model
+                            .parts
+                            .iter()
+                            .map(|p| p.mesh.vertices.iter().map(|v| v.pos).collect())
+                            .collect();
+                        let part_uv: Vec<Vec<[f32; 2]>> = model
+                            .parts
+                            .iter()
+                            .map(|p| p.mesh.vertices.iter().map(|v| v.uv).collect())
+                            .collect();
+                        let bake_parts: Vec<floptle_field::BakePart> = model
+                            .parts
+                            .iter()
+                            .enumerate()
+                            .map(|(i, p)| floptle_field::BakePart {
+                                positions: &part_pos[i],
+                                indices: &p.mesh.indices,
+                                uvs: &part_uv[i],
+                                texture: p.texture.map(|ti| {
+                                    let t = &model.textures[ti];
+                                    floptle_field::TexRef {
+                                        pixels: &t.pixels,
+                                        width: t.width,
+                                        height: t.height,
+                                    }
+                                }),
+                                tint: p.base_color,
+                            })
+                            .collect();
+                        let baked = floptle_field::bake_model(
+                            &bake_parts,
+                            res,
+                            2.0,
+                            floptle_field::BakeMode::Shell { thickness },
+                        );
+                        println!("    baked in {:.1}s", t0.elapsed().as_secs_f32());
+                        raymarch.set_volume(&gpu, &baked);
+                        let max_half = baked.half_extent.iter().cloned().fold(0.0f32, f32::max);
+                        self.volume_half = baked.half_extent;
+                        self.volume_voxel = 2.0 * max_half / res as f32;
+                        self.volume_present = true;
+                        env_floor = -model.min[1] as f64; // map floor to world y = 0
+                        self.volume_world = DVec3::new(0.0, env_floor, 0.0);
                         env_size = Some(model.size);
                     } else {
+                        // prop: render as raster (textured)
+                        let part_ids: Vec<(MeshId, [f32; 3])> = model
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                let tex = part.texture.map(|i| &model.textures[i]);
+                                (raster.register(&gpu, &part.mesh, tex), part.base_color)
+                            })
+                            .collect();
                         prop_models.push((part_ids, model.size));
                     }
                 }
@@ -172,27 +236,22 @@ impl ApplicationHandler for Runner {
         }
 
         if let Some(s) = env_size {
-            // Start with a 3/4 aerial overview of the whole level (looking down at
-            // the floor center), with camera speed scaled so it's traversable —
-            // fly down into it to explore.
+            // Aerial overview of the whole level (now SDF matter); camera speed
+            // scaled so it's traversable — fly down into it.
             let s = s as f64;
             self.camera.position = DVec3::new(0.0, s * 0.5, s * 0.65);
-            self.camera.pitch = -0.66; // ≈ looks at the floor center from here
+            self.camera.pitch = -0.66;
             self.camera.speed = (s / 9.0).max(4.0);
-            // SDF matter: a big blob floating above the level center
-            self.matter_center = DVec3::new(0.0, s * 0.28, 0.0);
-            self.matter_scale = (s * 0.10) as f32;
-            // Sit the procedural primitives on the floor near the level center as
-            // small reference props.
+            // Procedural primitives on the floor as small reference props.
             let ents: Vec<Entity> = self.app.world.query::<Renderable>().map(|(e, _)| e).collect();
             let m = ents.len();
             for (k, e) in ents.into_iter().enumerate() {
                 if let Some(t) = self.app.world.get_mut::<Transform>(e) {
                     let x = (k as f64 - (m as f64 - 1.0) * 0.5) * 2.4;
-                    t.translation = DVec3::new(x, 0.8, s * 0.30);
+                    t.translation = DVec3::new(x, env_floor + 0.8, s * 0.30);
                 }
             }
-            // Small imported models (e.g. the Duck) as props on the floor too.
+            // Small imported models (the Duck) as props on the floor.
             let n = prop_models.len();
             for (i, (part_ids, size)) in prop_models.into_iter().enumerate() {
                 let x = (i as f64 - (n as f64 - 1.0) * 0.5) * 3.0;
@@ -200,18 +259,20 @@ impl ApplicationHandler for Runner {
                 for (mesh, color) in part_ids {
                     self.imported.push(Imported {
                         mesh,
-                        position: DVec3::new(x, 1.3, s * 0.30 - 4.0),
+                        position: DVec3::new(x, env_floor + 1.3, s * 0.30 - 4.0),
                         scale,
                         color,
                         spin: 0.3,
                     });
                 }
             }
+            // The analytic blob, placed to FUSE into the map matter near the floor
+            // center — fly down to see SDF matter blending into your map.
+            self.matter_center = DVec3::new(0.0, env_floor + 2.5, 0.0);
+            self.matter_scale = 3.0;
         } else {
-            // SDF matter: a tangible blob beside the primitives.
-            self.matter_center = DVec3::new(3.5, 1.5, 0.0);
-            self.matter_scale = 1.6;
-            // No environment: showcase every imported model in a spinning row.
+            // No environment: showcase imported models in a spinning row, and bake a
+            // textured cube as standalone matter fused with the blob.
             let n = prop_models.len();
             for (i, (part_ids, size)) in prop_models.into_iter().enumerate() {
                 let x = (i as f64 - (n as f64 - 1.0) * 0.5) * 3.6;
@@ -226,17 +287,36 @@ impl ApplicationHandler for Runner {
                     });
                 }
             }
+            let cube_data = cube(0.9);
+            let positions: Vec<[f32; 3]> = cube_data.vertices.iter().map(|v| v.pos).collect();
+            let uvs: Vec<[f32; 2]> = cube_data.vertices.iter().map(|v| v.uv).collect();
+            let (tex_px, tw, th) = vivid_checker();
+            let baked = floptle_field::bake(
+                &positions,
+                &cube_data.indices,
+                &uvs,
+                Some(floptle_field::TexRef { pixels: &tex_px, width: tw, height: th }),
+                [1.0, 1.0, 1.0],
+                48,
+                3.0,
+            );
+            raymarch.set_volume(&gpu, &baked);
+            let max_half = baked.half_extent.iter().cloned().fold(0.0f32, f32::max);
+            self.volume_half = baked.half_extent;
+            self.volume_voxel = 2.0 * max_half / 48.0;
+            self.volume_present = true;
+            let fwd = self.camera.rotation() * Vec3::NEG_Z;
+            self.matter_center = self.camera.position + fwd.as_dvec3() * 6.0;
+            self.matter_scale = 1.3;
+            self.volume_world = self.matter_center + DVec3::new(1.6, 0.0, 0.0);
         }
 
-        // Retro / PS1 look on by default: render the scene at a low internal
-        // resolution and upscale nearest-neighbor. Toggle with P; [ / ] adjust it.
+        // Retro / PS1 look on by default (P toggles; [ / ] adjust pixel size).
         self.retro_height = 240;
         self.retro_on = true;
         self.retro = Some(Retro::new(&gpu, self.retro_height));
-
-        // SDF matter pass on by default — toggle with F.
         self.raymarch_on = true;
-        self.raymarch = Some(Raymarch::new(&gpu));
+        self.raymarch = Some(raymarch);
 
         self.raster = Some(raster);
         self.gpu = Some(gpu);
@@ -405,13 +485,17 @@ impl Runner {
         // view_proj (for depth) + its inverse (to reconstruct rays that line up
         // with the meshes).
         let center_cam = (self.matter_center - cam.world_position).as_vec3();
+        let vol_cam = (self.volume_world - cam.world_position).as_vec3();
+        let present = if self.volume_present { 1.0 } else { 0.0 };
         let rm_globals = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
             bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
             center: [center_cam.x, center_cam.y, center_cam.z, self.matter_scale],
-            params: [self.app.time.elapsed as f32, 0.0, 0.0, 0.0],
+            params: [self.app.time.elapsed as f32, self.volume_voxel, 0.0, 0.0],
+            vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, present],
+            vol_half: [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7],
         };
 
         match gpu.acquire() {
