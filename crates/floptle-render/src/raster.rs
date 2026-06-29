@@ -266,9 +266,19 @@ impl Raster {
         depth: &wgpu::TextureView,
         globals: Globals,
         instances: &[(MeshId, InstanceRaw)],
-        clear: [f64; 4],
+        clear: Option<[f64; 4]>,
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        // Clear when we own the frame; Load when a prior pass (raymarch) already
+        // filled the color + depth targets, so the two compose in one depth buffer.
+        let (color_load, depth_load) = match clear {
+            Some(c) => (
+                wgpu::LoadOp::Clear(wgpu::Color { r: c[0], g: c[1], b: c[2], a: c[3] }),
+                wgpu::LoadOp::Clear(1.0),
+            ),
+            None => (wgpu::LoadOp::Load, wgpu::LoadOp::Load),
+        };
 
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let mut buckets: Vec<(usize, u32, u32)> = Vec::new(); // (mesh idx, start, count)
@@ -300,22 +310,11 @@ impl Raster {
                     view: color,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear[0],
-                            g: clear[1],
-                            b: clear[2],
-                            a: clear[3],
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: color_load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
+                    depth_ops: Some(wgpu::Operations { load: depth_load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
