@@ -37,7 +37,7 @@ pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
 pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use outline::Outline;
-pub use raster::{instance_of, Globals, InstanceRaw, Raster};
+pub use raster::{instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster};
 pub use raymarch::{Raymarch, RaymarchGlobals};
 pub use retro::Retro;
 

@@ -25,6 +25,7 @@
 // `pool`, and `serde_ron` arrive in their roadmap phases; these are live.
 pub mod ecs;
 pub mod event;
+pub mod material;
 pub mod math;
 pub mod matter;
 pub mod origin;
@@ -33,6 +34,7 @@ pub mod time;
 pub mod transform;
 
 pub use ecs::{Entity, World};
+pub use material::Material;
 pub use matter::{Light, Matter, Name, Shape, Spin};
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
