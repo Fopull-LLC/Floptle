@@ -856,12 +856,13 @@ impl EditorTabViewer<'_> {
         // An asset selected in the browser shows its info here.
         if let Some(path) = self.selected_asset.clone() {
             ui.strong("Asset");
-            ui.small(&path);
+            let name_resp = ui.selectable_label(false, &path);
             if is_model(&path) {
                 ui.label("glTF model — drag onto the scene to place it.");
             } else if is_script(&path) {
-                ui.label("script — drag onto a node, or:");
-                if ui.button("✎  Open in Scripting").clicked() {
+                ui.label("script — drag onto a node, double-click, or:");
+                let open = ui.button("✎  Open in Scripting").clicked() || name_resp.double_clicked();
+                if open {
                     self.cmd.open_script = Some(path.clone());
                     self.cmd.focus_scripting = true;
                 }
@@ -1092,13 +1093,15 @@ impl EditorTabViewer<'_> {
                     } else {
                         format!("    {name}")
                     };
+                    // Use the INNER label's response: a drag source's own response
+                    // only senses drag, so it never reports click / double-click.
                     let resp = if model || script {
                         ui.dnd_drag_source(
                             egui::Id::new(("asset", path)),
                             AssetPayload { path: path.clone() },
                             |ui| ui.selectable_label(selected, text),
                         )
-                        .response
+                        .inner
                     } else {
                         ui.selectable_label(selected, text)
                     };
@@ -1556,6 +1559,7 @@ impl ApplicationHandler for Editor {
                             match code {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+                                KeyCode::KeyF => self.focus_selected(),
                                 KeyCode::F1 => self.toggle_play(),
                                 KeyCode::F2 => self.toggle_pause(),
                                 _ => {
@@ -2627,12 +2631,18 @@ impl Editor {
     /// can't separate them from the viewport; the Scene-tab rect is what does.
     fn cursor_over_scene(&self) -> bool {
         let Some(eg) = self.egui.as_ref() else { return false };
-        if eg.ctx.is_pointer_over_egui() {
-            return false; // under a foreground menu / popup / tooltip
-        }
         let (Some(cursor), Some(rect)) = (self.cursor, self.scene_rect) else { return false };
         let ppp = eg.ctx.pixels_per_point();
-        rect.contains(egui::pos2(cursor.x / ppp, cursor.y / ppp))
+        let p = egui::pos2(cursor.x / ppp, cursor.y / ppp);
+        if !rect.contains(p) {
+            return false;
+        }
+        // egui_dock draws the whole editor in the background layer, so
+        // `is_pointer_over_egui` reads "over egui" across the entire dock and can't
+        // separate the viewport from the panels. Instead: the bare viewport has no
+        // egui Area on top of it, whereas the floating toolbar, combo popups and the
+        // context menu each register an interactable Area — so layer_id_at is Some.
+        eg.ctx.layer_id_at(p).is_none()
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
@@ -2646,6 +2656,25 @@ impl Editor {
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let inv = cam.view_proj(w / h).inverse();
         cursor_ground(cam.world_position, cam.rotation, inv, w, h, self.cursor)
+    }
+
+    /// Frame the selected object in the viewport (the F key): keep the view angle,
+    /// move the camera so the object is centered at a size-appropriate distance.
+    fn focus_selected(&mut self) {
+        let Some(e) = self.selection.last().copied() else { return };
+        let Some(t) = self.world.get::<Transform>(e) else { return };
+        let target = t.translation;
+        let scale = t.scale.abs().max_element() as f64;
+        let base = match self.world.get::<Matter>(e) {
+            Some(Matter::Mesh { asset_path }) => {
+                self.mesh_registry.get(asset_path).map(|a| a.size as f64).unwrap_or(1.0)
+            }
+            Some(Matter::Blob { scale: s }) => *s as f64,
+            _ => 1.0,
+        };
+        let radius = (base * scale).max(0.3);
+        let distance = (radius * 3.0 + 2.0).clamp(2.5, 80.0);
+        self.camera.focus(target, distance);
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px).
