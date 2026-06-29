@@ -922,6 +922,7 @@ dependencies = [
  "floptle-rules",
  "glam",
  "log",
+ "png",
  "pollster",
  "wgpu",
  "winit",

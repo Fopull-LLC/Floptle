@@ -10,13 +10,16 @@
 use std::sync::Arc;
 use winit::window::Window;
 
-/// Owns the GPU connection and the window surface.
+/// Owns the GPU connection and (when windowed) the surface. `surface` is `None`
+/// for a headless GPU — one created without a window for offscreen rendering
+/// (tests, bakes, thumbnails). The passes only ever touch device/queue/config, so
+/// they work identically either way.
 pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
+    pub surface: Option<wgpu::Surface<'static>>,
     pub config: wgpu::SurfaceConfiguration,
     depth_view: wgpu::TextureView,
 }
@@ -90,7 +93,49 @@ impl Gpu {
 
         let (_, depth_view) = Self::make_depth(&device, config.width, config.height);
 
-        Self { instance, adapter, device, queue, surface, config, depth_view }
+        Self { instance, adapter, device, queue, surface: Some(surface), config, depth_view }
+    }
+
+    /// Create a headless GPU (no window/surface) for offscreen rendering at
+    /// `width`×`height`. `config` carries the same sRGB format the windowed path
+    /// uses, so pipelines built against `surface_format()` render identically; the
+    /// caller supplies its own color target (a texture with `COPY_SRC`) to read
+    /// back. Used by render tests and tools.
+    pub fn headless(width: u32, height: u32) -> Self {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: Default::default(),
+            backend_options: Default::default(),
+            display: None,
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .expect("no GPU adapter (headless)");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("floptle-device-headless"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .expect("no GPU device (headless)");
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        let (_, depth_view) = Self::make_depth(&device, config.width, config.height);
+        Self { instance, adapter, device, queue, surface: None, config, depth_view }
     }
 
     /// The depth format the renderer uses everywhere (always available as a depth
@@ -131,7 +176,9 @@ impl Gpu {
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&self.device, &self.config);
+        }
         let (_, depth_view) = Self::make_depth(&self.device, self.config.width, self.config.height);
         self.depth_view = depth_view;
     }
@@ -141,10 +188,11 @@ impl Gpu {
     /// which case the caller simply skips the frame.
     pub fn acquire(&mut self) -> Option<Frame> {
         use wgpu::CurrentSurfaceTexture as C;
-        let surface = match self.surface.get_current_texture() {
+        let surface = self.surface.as_ref()?;
+        let surface = match surface.get_current_texture() {
             C::Success(t) | C::Suboptimal(t) => t,
             C::Outdated | C::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                surface.configure(&self.device, &self.config);
                 return None;
             }
             _ => return None,
