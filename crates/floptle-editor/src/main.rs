@@ -192,8 +192,8 @@ struct EditorCmd {
     clear_terrain: bool,
     /// The terrain texture palette changed — re-upload it.
     terrain_palette_changed: bool,
-    /// Open the Terrain window.
-    show_terrain: bool,
+    /// Focus (or open) the Terrain dock tab.
+    focus_terrain: bool,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
@@ -1085,6 +1085,7 @@ fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Opt
 enum EditorTab {
     Hierarchy,
     Inspector,
+    Terrain,
     Assets,
     Console,
     Scene,
@@ -1096,6 +1097,7 @@ impl EditorTab {
         match self {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
+            EditorTab::Terrain => "⛰ Terrain",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
             EditorTab::Scene => "Scene",
@@ -1111,7 +1113,9 @@ fn default_dock() -> egui_dock::DockState<EditorTab> {
     let mut dock = DockState::new(vec![EditorTab::Scene, EditorTab::Scripting]);
     let surface = dock.main_surface_mut();
     let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
-    let [central, _] = surface.split_right(central, 0.78, vec![EditorTab::Inspector]);
+    // Inspector + Terrain tabs share the right dock (Inspector shown first).
+    let [central, _] =
+        surface.split_right(central, 0.78, vec![EditorTab::Inspector, EditorTab::Terrain]);
     // Console sits as a tab beside Assets in the bottom dock (Assets shown first).
     let [_, _] = surface.split_below(central, 0.72, vec![EditorTab::Assets, EditorTab::Console]);
     dock
@@ -1122,6 +1126,16 @@ fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     let surface = dock.main_surface_mut();
     if let Some((node, tab)) = surface.find_tab(&EditorTab::Scripting) {
         let _ = surface.set_active_tab(node, tab);
+    }
+}
+
+/// Focus the Terrain dock tab — re-adding it if the user closed it. Used when the
+/// Sculpt tool is selected or "Open Terrain tools" is clicked.
+fn focus_terrain_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Terrain) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Terrain);
     }
 }
 
@@ -1330,6 +1344,12 @@ struct EditorTabViewer<'a> {
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
+    /// Terrain dock-tab state.
+    terrain_brush: &'a mut TerrainBrush,
+    terrain_detail: &'a mut u32,
+    terrain_textures: &'a mut Vec<String>,
+    terrain_present: bool,
+    terrain_voxels: Option<(u32, u32, u32)>,
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,
@@ -1385,6 +1405,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
         match tab {
             EditorTab::Hierarchy => self.hierarchy_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
+            EditorTab::Terrain => self.terrain_ui(ui),
             EditorTab::Assets => self.assets_ui(ui),
             EditorTab::Console => self.console_ui(ui),
             EditorTab::Scene => self.scene_ui(ui),
@@ -1697,7 +1718,7 @@ impl<'a> EditorTabViewer<'a> {
                             ui.label("editable terrain");
                             ui.small("a sculptable SDF field — move it with the transform below");
                             if ui.button("⛰ Open Terrain tools").clicked() {
-                                cmd.show_terrain = true;
+                                cmd.focus_terrain = true;
                             }
                         }
                     }
@@ -1892,6 +1913,132 @@ impl<'a> EditorTabViewer<'a> {
             if !open {
                 *self.show_material_editor = false;
             }
+        }
+    }
+
+    /// The Terrain dock tab: detail, sculpt brush, and texture palette controls.
+    /// (Rebinds fields to locals so each egui closure captures disjoint state.)
+    fn terrain_ui(&mut self, ui: &mut egui::Ui) {
+        use floptle_field::Brush;
+        let cmd = &mut *self.cmd;
+        let terrain_brush = &mut *self.terrain_brush;
+        let terrain_detail = &mut *self.terrain_detail;
+        let terrain_textures = &mut *self.terrain_textures;
+        let materials = self.materials;
+        let asset_tree = self.asset_tree;
+        let terrain_present = self.terrain_present;
+        let terrain_voxels = self.terrain_voxels;
+
+        // Detail (resolution) — higher = finer terrain, but heavier.
+        ui.horizontal(|ui| {
+            ui.label("detail");
+            egui::ComboBox::from_id_salt("terrain_detail")
+                .selected_text(match *terrain_detail {
+                    d if d <= 48 => "Low",
+                    d if d <= 80 => "Medium",
+                    d if d <= 112 => "High",
+                    _ => "Ultra",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut *terrain_detail, 40, "Low");
+                    ui.selectable_value(&mut *terrain_detail, 64, "Medium");
+                    ui.selectable_value(&mut *terrain_detail, 96, "High");
+                    ui.selectable_value(&mut *terrain_detail, 144, "Ultra");
+                });
+        });
+        if let Some((a, b, c)) = terrain_voxels {
+            ui.small(format!("current: {a}×{b}×{c} voxels"));
+        }
+        if !terrain_present {
+            if ui.button("➕ Create flat terrain").clicked() {
+                cmd.create_terrain = true;
+            }
+            ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
+            return;
+        }
+        if ui.button("↻ Recreate at this detail").on_hover_text("clears the current terrain").clicked() {
+            cmd.create_terrain = true;
+        }
+        ui.separator();
+        ui.label("Sculpt tool (key 5) — LMB-drag to brush. Sculpt past an edge to");
+        ui.label("grow the terrain (infinite bounds). Ctrl+Z/Y undo strokes.");
+        ui.label("Brush");
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⬆ Raise");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⬇ Lower");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Flatten, "▱ Flatten");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "～ Smooth");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "🎨 Paint");
+        });
+        ui.add(egui::Slider::new(&mut terrain_brush.radius, 0.5..=8.0).text("radius"));
+        ui.add(egui::Slider::new(&mut terrain_brush.strength, 0.05..=1.0).text("strength"));
+        if terrain_brush.mode == Brush::Paint {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("paint:");
+                ui.selectable_value(&mut terrain_brush.tex_slot, -1, "Color");
+            });
+            if terrain_brush.tex_slot < 0 {
+                ui.horizontal(|ui| {
+                    ui.label("color");
+                    ui.color_edit_button_rgb(&mut terrain_brush.color);
+                    if !materials.is_empty() {
+                        ui.menu_button("from material", |ui| {
+                            for (name, doc) in materials {
+                                if ui.button(name).clicked() {
+                                    terrain_brush.color = doc.color;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                });
+            }
+            // Texture palette: assign an image per slot, then click a slot to paint
+            // that texture (triplanar) onto the terrain.
+            ui.label("Texture palette");
+            let mut tex_list = Vec::new();
+            collect_texture_paths(asset_tree, &mut tex_list);
+            for slot in 0..terrain_textures.len() {
+                ui.horizontal(|ui| {
+                    let sel = terrain_brush.tex_slot == slot as i32;
+                    let label = if terrain_textures[slot].is_empty() {
+                        format!("slot {}", slot + 1)
+                    } else {
+                        Path::new(&terrain_textures[slot])
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    };
+                    if ui.selectable_label(sel, format!("🖌 {label}")).clicked() {
+                        terrain_brush.tex_slot = slot as i32;
+                    }
+                    egui::ComboBox::from_id_salt(("tslot", slot))
+                        .selected_text("set…")
+                        .width(70.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(false, "(none)").clicked() {
+                                terrain_textures[slot].clear();
+                                cmd.terrain_palette_changed = true;
+                            }
+                            for p in &tex_list {
+                                let n = Path::new(p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_default();
+                                if ui.selectable_label(terrain_textures[slot] == *p, n).clicked() {
+                                    terrain_textures[slot] = p.clone();
+                                    cmd.terrain_palette_changed = true;
+                                }
+                            }
+                        });
+                });
+            }
+            ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
+        }
+        ui.separator();
+        if ui.button("🗑 Clear terrain").clicked() {
+            cmd.clear_terrain = true;
         }
     }
 
@@ -3175,8 +3322,6 @@ struct Editor {
     terrain_textures_dirty: bool,
     /// The brush telegraph for this frame (projected ring + normal).
     terrain_viz: Option<TerrainViz>,
-    /// Whether the Terrain window is open.
-    show_terrain: bool,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -4007,7 +4152,6 @@ impl Editor {
         let show_grid_settings = &mut self.show_grid_settings;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
-        let show_terrain = &mut self.show_terrain;
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
         let terrain_textures = &mut self.terrain_textures;
@@ -4101,7 +4245,10 @@ impl Editor {
                         }
                         ui.separator();
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
-                        ui.checkbox(&mut *show_terrain, "Terrain");
+                        if ui.button("⛰ Terrain tools").clicked() {
+                            cmd.focus_terrain = true;
+                            ui.close();
+                        }
                     });
                     ui.menu_button("Project", |ui| {
                         if ui.button("Settings…").clicked() {
@@ -4148,6 +4295,11 @@ impl Editor {
                 mat_name_buf,
                 show_material_editor,
                 asset_tree,
+                terrain_brush,
+                terrain_detail,
+                terrain_textures,
+                terrain_present,
+                terrain_voxels,
                 assets_grid,
                 assets_grid_dir,
                 project_root,
@@ -4388,125 +4540,8 @@ impl Editor {
                 }
             }
 
-            // ---- terrain window ----
-            egui::Window::new("⛰ Terrain")
-                .open(show_terrain)
-                .resizable(false)
-                .default_width(260.0)
-                .show(ui.ctx(), |ui| {
-                    use floptle_field::Brush;
-                    // Detail (resolution) — higher = finer terrain, but heavier.
-                    ui.horizontal(|ui| {
-                        ui.label("detail");
-                        egui::ComboBox::from_id_salt("terrain_detail")
-                            .selected_text(match *terrain_detail {
-                                d if d <= 48 => "Low",
-                                d if d <= 80 => "Medium",
-                                d if d <= 112 => "High",
-                                _ => "Ultra",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut *terrain_detail, 40, "Low");
-                                ui.selectable_value(&mut *terrain_detail, 64, "Medium");
-                                ui.selectable_value(&mut *terrain_detail, 96, "High");
-                                ui.selectable_value(&mut *terrain_detail, 144, "Ultra");
-                            });
-                    });
-                    if let Some((a, b, c)) = terrain_voxels {
-                        ui.small(format!("current: {a}×{b}×{c} voxels"));
-                    }
-                    if !terrain_present {
-                        if ui.button("➕ Create flat terrain").clicked() {
-                            cmd.create_terrain = true;
-                        }
-                        ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
-                        return;
-                    }
-                    if ui.button("↻ Recreate at this detail").on_hover_text("clears the current terrain").clicked() {
-                        cmd.create_terrain = true;
-                    }
-                    ui.separator();
-                    ui.label("Sculpt tool (key 5) — LMB-drag to brush.");
-                    ui.label("Brush");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⬆ Raise");
-                        ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⬇ Lower");
-                        ui.selectable_value(&mut terrain_brush.mode, Brush::Flatten, "▱ Flatten");
-                        ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "～ Smooth");
-                        ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "🎨 Paint");
-                    });
-                    ui.add(egui::Slider::new(&mut terrain_brush.radius, 0.5..=8.0).text("radius"));
-                    ui.add(egui::Slider::new(&mut terrain_brush.strength, 0.05..=1.0).text("strength"));
-                    if terrain_brush.mode == Brush::Paint {
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.label("paint:");
-                            ui.selectable_value(&mut terrain_brush.tex_slot, -1, "Color");
-                        });
-                        if terrain_brush.tex_slot < 0 {
-                            ui.horizontal(|ui| {
-                                ui.label("color");
-                                ui.color_edit_button_rgb(&mut terrain_brush.color);
-                                if !materials.is_empty() {
-                                    ui.menu_button("from material", |ui| {
-                                        for (name, doc) in materials {
-                                            if ui.button(name).clicked() {
-                                                terrain_brush.color = doc.color;
-                                                ui.close();
-                                            }
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                        // Texture palette: assign an image per slot, then click a slot
-                        // to paint that texture (triplanar) onto the terrain.
-                        ui.label("Texture palette");
-                        let mut tex_list = Vec::new();
-                        collect_texture_paths(asset_tree, &mut tex_list);
-                        for slot in 0..terrain_textures.len() {
-                            ui.horizontal(|ui| {
-                                let sel = terrain_brush.tex_slot == slot as i32;
-                                let label = if terrain_textures[slot].is_empty() {
-                                    format!("slot {}", slot + 1)
-                                } else {
-                                    Path::new(&terrain_textures[slot])
-                                        .file_name()
-                                        .map(|s| s.to_string_lossy().to_string())
-                                        .unwrap_or_default()
-                                };
-                                if ui.selectable_label(sel, format!("🖌 {label}")).clicked() {
-                                    terrain_brush.tex_slot = slot as i32;
-                                }
-                                egui::ComboBox::from_id_salt(("tslot", slot))
-                                    .selected_text("set…")
-                                    .width(70.0)
-                                    .show_ui(ui, |ui| {
-                                        if ui.selectable_label(false, "(none)").clicked() {
-                                            terrain_textures[slot].clear();
-                                            cmd.terrain_palette_changed = true;
-                                        }
-                                        for p in &tex_list {
-                                            let n = Path::new(p)
-                                                .file_name()
-                                                .map(|s| s.to_string_lossy().to_string())
-                                                .unwrap_or_default();
-                                            if ui.selectable_label(terrain_textures[slot] == *p, n).clicked() {
-                                                terrain_textures[slot] = p.clone();
-                                                cmd.terrain_palette_changed = true;
-                                            }
-                                        }
-                                    });
-                            });
-                        }
-                        ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
-                    }
-                    ui.separator();
-                    if ui.button("🗑 Clear terrain").clicked() {
-                        cmd.clear_terrain = true;
-                    }
-                });
-            // (the gizmo now paints inside the Scene tab, clipped to its rect)
+            // (Terrain tools live in the dockable Terrain tab now; the gizmo paints
+            // inside the Scene tab, clipped to its rect.)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
         if self.project.retro_height != old_retro_h {
@@ -4750,7 +4785,7 @@ impl Editor {
         }
         if cmd.create_terrain {
             self.create_terrain();
-            self.show_terrain = true;
+            self.focus_terrain();
         }
         if cmd.clear_terrain {
             self.terrain = None;
@@ -4761,8 +4796,8 @@ impl Editor {
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
         }
-        if cmd.show_terrain {
-            self.show_terrain = true;
+        if cmd.focus_terrain {
+            self.focus_terrain();
         }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
@@ -4896,9 +4931,16 @@ impl Editor {
         self.tool = tool;
         self.grabbed = None;
         self.drag = None;
-        // Selecting Sculpt pops the Terrain tools so the brush controls are at hand.
+        // Selecting Sculpt focuses the Terrain tools so the brush controls are at hand.
         if tool == Tool::Sculpt {
-            self.show_terrain = true;
+            self.focus_terrain();
+        }
+    }
+
+    /// Focus (re-adding if closed) the Terrain dock tab.
+    fn focus_terrain(&mut self) {
+        if let Some(dock) = self.dock_state.as_mut() {
+            focus_terrain_tab(dock);
         }
     }
 
