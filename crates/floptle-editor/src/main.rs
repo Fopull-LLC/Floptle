@@ -13,8 +13,8 @@ use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Light, Matter, Name, Shape, World};
 use floptle_render::{
-    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Outline,
-    Raster, Raymarch, RaymarchGlobals, Retro,
+    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input, InstanceRaw, MeshId,
+    Outline, Raster, Raymarch, RaymarchGlobals, Retro,
 };
 use floptle_scene::{MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ShapeDoc, TransformDoc};
 use winit::application::ApplicationHandler;
@@ -159,6 +159,26 @@ struct EditorCmd {
     close_menu: bool,
 }
 
+/// Editor reference-grid display + snapping settings.
+#[derive(Clone, Copy)]
+struct GridConfig {
+    show: bool,
+    /// Spacing between grid lines (world units) — also the snap increment.
+    size: f32,
+    /// Cells out from the center the grid extends.
+    extent: i32,
+    color: [f32; 3],
+    alpha: f32,
+    /// Snap moved/created objects to the grid.
+    snap: bool,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self { show: true, size: 1.0, extent: 24, color: [0.45, 0.45, 0.58], alpha: 0.32, snap: false }
+    }
+}
+
 fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
 }
@@ -200,6 +220,14 @@ fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     let len2 = ab.length_squared();
     let t = if len2 < 1e-6 { 0.0 } else { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) };
     (p - (a + ab * t)).length()
+}
+
+/// Snap each component of a world position to a grid `step` (no-op if step ≤ 0).
+fn snap_dvec3(v: DVec3, step: f64) -> DVec3 {
+    if step <= 1e-6 {
+        return v;
+    }
+    DVec3::new((v.x / step).round() * step, (v.y / step).round() * step, (v.z / step).round() * step)
 }
 
 /// Nearest positive ray–sphere hit distance (`rd` must be unit), else `None`.
@@ -445,6 +473,8 @@ struct Editor {
     retro: Option<Retro>,
     /// Selection-outline post-process (silhouette mask + edge detect).
     outline: Option<Outline>,
+    /// Editor reference-grid renderer.
+    grid_render: Option<Grid>,
     egui: Option<Egui>,
     camera: FlyCamera,
     input: Input,
@@ -485,6 +515,9 @@ struct Editor {
     rmb_moved: f32,
     /// A pending viewport context menu at (screen-point, entity-under-cursor).
     context_menu: Option<(egui::Pos2, Option<Entity>)>,
+    /// Reference grid + snap settings.
+    grid: GridConfig,
+    show_grid_settings: bool,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -539,6 +572,7 @@ impl ApplicationHandler for Editor {
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.outline = Some(Outline::new(&gpu));
+        self.grid_render = Some(Grid::new(&gpu));
 
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(
@@ -769,6 +803,7 @@ impl Editor {
             Some(raymarch),
             Some(retro),
             Some(outline),
+            Some(grid_render),
             Some(egui),
             Some(window),
         ) = (
@@ -777,6 +812,7 @@ impl Editor {
             self.raymarch.as_ref(),
             self.retro.as_mut(),
             self.outline.as_ref(),
+            self.grid_render.as_mut(),
             self.egui.as_mut(),
             self.window.as_ref(),
         ) else {
@@ -890,6 +926,8 @@ impl Editor {
         let selection = &mut self.selection;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
+        let grid = &mut self.grid;
+        let show_grid_settings = &mut self.show_grid_settings;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
@@ -936,6 +974,14 @@ impl Editor {
                         if ui.button("Sphere").clicked() { cmd.add = Some(new_sphere()); ui.close(); }
                         if ui.button("Blob").clicked() {
                             cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("View", |ui| {
+                        ui.checkbox(&mut grid.show, "Grid");
+                        ui.checkbox(&mut grid.snap, "Snap to grid");
+                        if ui.button("Grid Settings…").clicked() {
+                            *show_grid_settings = true;
                             ui.close();
                         }
                     });
@@ -1131,6 +1177,23 @@ impl Editor {
                     ui.small("saved to assets/project.ron");
                 });
 
+            // ---- grid settings window ----
+            egui::Window::new("Grid Settings")
+                .open(show_grid_settings)
+                .resizable(false)
+                .default_width(240.0)
+                .show(ui.ctx(), |ui| {
+                    ui.checkbox(&mut grid.show, "show grid");
+                    ui.checkbox(&mut grid.snap, "snap objects to grid");
+                    ui.add(egui::Slider::new(&mut grid.size, 0.1..=10.0).text("cell size"));
+                    ui.add(egui::Slider::new(&mut grid.extent, 4..=120).text("extent (cells)"));
+                    ui.add(egui::Slider::new(&mut grid.alpha, 0.0..=1.0).text("opacity"));
+                    ui.horizontal(|ui| {
+                        ui.label("color");
+                        ui.color_edit_button_rgb(&mut grid.color);
+                    });
+                });
+
             // ---- viewport context menu (RMB click on an object / empty space) ----
             if let Some((pos, hit)) = context_menu {
                 egui::Area::new(egui::Id::new("ctx_menu"))
@@ -1211,6 +1274,19 @@ impl Editor {
                     Some(clear.map(|c| c as f64))
                 };
                 raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
+                if self.grid.show {
+                    let c = self.grid.color;
+                    grid_render.draw(
+                        gpu,
+                        color,
+                        depth,
+                        view_proj,
+                        cam.world_position,
+                        self.grid.size,
+                        self.grid.extent,
+                        [c[0], c[1], c[2], self.grid.alpha],
+                    );
+                }
                 if self.project.retro {
                     retro.blit(gpu, &frame);
                 }
@@ -1422,7 +1498,10 @@ impl Editor {
     fn add_node(&mut self, name: &str, matter: MatterDoc) {
         self.record();
         let cam = self.camera.render_camera();
-        let pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 5.0).as_dvec3();
+        let mut pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 5.0).as_dvec3();
+        if self.grid.snap {
+            pos = snap_dvec3(pos, self.grid.size as f64);
+        }
         let node = NodeDoc {
             name: name.into(),
             transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
@@ -1526,6 +1605,7 @@ impl Editor {
         let cam_world = cam.world_position;
         let start = drag.start_xf;
         let cursor_delta = cursor - drag.cursor_start;
+        let (snap, step) = (self.grid.snap, self.grid.size as f64);
 
         match self.tool {
             Tool::Move => {
@@ -1546,7 +1626,11 @@ impl Editor {
                     }
                     let units = cursor_delta.dot(sdir) / len2;
                     if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        t.translation = start.translation + (dir * units).as_dvec3();
+                        let mut p = start.translation + (dir * units).as_dvec3();
+                        if snap {
+                            p = snap_dvec3(p, step);
+                        }
+                        t.translation = p;
                     }
                 } else {
                     // Center handle: free move in the camera plane.
@@ -1557,7 +1641,11 @@ impl Editor {
                     let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
                     let mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
                     if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        t.translation = start.translation + mv.as_dvec3();
+                        let mut p = start.translation + mv.as_dvec3();
+                        if snap {
+                            p = snap_dvec3(p, step);
+                        }
+                        t.translation = p;
                     }
                 }
             }
