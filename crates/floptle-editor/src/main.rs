@@ -272,32 +272,39 @@ fn snap_dvec3(v: DVec3, step: f64) -> DVec3 {
     DVec3::new((v.x / step).round() * step, (v.y / step).round() * step, (v.z / step).round() * step)
 }
 
-/// Nearest positive ray–sphere hit distance (`rd` must be unit), else `None`.
+/// Nearest positive ray–sphere hit `t` (general — `rd` need not be unit), else None.
+/// `t` is in the ray's own parameter space, so it stays comparable across objects
+/// even when the ray was transformed into a non-uniformly-scaled local frame.
 fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, radius: f32) -> Option<f32> {
     let oc = ro - center;
-    let b = oc.dot(rd);
+    let a = rd.dot(rd);
+    let b = 2.0 * oc.dot(rd);
     let c = oc.length_squared() - radius * radius;
-    let disc = b * b - c;
+    let disc = b * b - 4.0 * a * c;
     if disc < 0.0 {
         return None;
     }
     let s = disc.sqrt();
-    let t0 = -b - s;
+    let t0 = (-b - s) / (2.0 * a);
     if t0 > 1e-3 {
         return Some(t0);
     }
-    let t1 = -b + s; // origin inside the sphere
+    let t1 = (-b + s) / (2.0 * a); // origin inside the sphere
     (t1 > 1e-3).then_some(t1)
 }
 
-/// A picking bounding-sphere radius for an entity's matter (world units, scaled).
-fn bounding_radius(m: &Matter, t: &Transform) -> f32 {
-    let s = t.scale.max_element();
-    match m {
-        // cube(0.7) half-diagonal ≈ 0.7·√3
-        Matter::Primitive { shape: Shape::Cube, .. } => 0.7 * 1.732 * s,
-        Matter::Primitive { shape: Shape::Sphere, .. } => 0.85 * s,
-        Matter::Blob { scale } => 0.85 * scale * t.scale.x,
+/// Nearest positive ray–AABB hit `t` for a box centered at the origin with the given
+/// `half` extent (slab method; `rd` need not be unit).
+fn ray_aabb(ro: Vec3, rd: Vec3, half: f32) -> Option<f32> {
+    let inv = Vec3::ONE / rd; // 0 components → ±inf, handled by the min/max
+    let t1 = (Vec3::splat(-half) - ro) * inv;
+    let t2 = (Vec3::splat(half) - ro) * inv;
+    let near = t1.min(t2).max_element();
+    let far = t1.max(t2).min_element();
+    if near <= far && far > 1e-3 {
+        Some(near.max(1e-3))
+    } else {
+        None
     }
 }
 
@@ -1638,8 +1645,10 @@ impl Editor {
         self.spawn_offset(nodes);
     }
 
-    /// Pick the nearest selectable entity under a viewport cursor (physical px) by
-    /// casting a ray against each object's bounding sphere. `None` = empty space.
+    /// Pick the nearest selectable entity under a viewport cursor (physical px).
+    /// Casts a ray and tests each object's EXACT primitive in its own local space
+    /// (box for a cube, sphere for a sphere/blob), so picking stays accurate however
+    /// the object is rotated or non-uniformly scaled. `None` = empty space.
     fn pick(&self, cursor: Vec2) -> Option<Entity> {
         let gpu = self.gpu.as_ref()?;
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
@@ -1655,10 +1664,29 @@ impl Editor {
         let mut best: Option<(Entity, f32)> = None;
         for (e, m) in self.world.query::<Matter>() {
             let Some(t) = self.world.get::<Transform>(e) else { continue };
-            let center_rel = (t.translation - cam.world_position).as_vec3();
-            if let Some(hit) = ray_sphere(ro, rd, center_rel, bounding_radius(m, t)) {
-                if best.is_none_or(|(_, bt)| hit < bt) {
-                    best = Some((e, hit));
+            let hit = match m {
+                Matter::Primitive { shape, .. } => {
+                    // Transform the ray into the object's local frame (the same `t`
+                    // parameter is valid in both spaces, so hits stay comparable).
+                    let m_inv = t.render_matrix(cam.world_position).inverse();
+                    if !m_inv.is_finite() {
+                        continue;
+                    }
+                    let ro_l = (m_inv * ro.extend(1.0)).truncate();
+                    let rd_l = (m_inv * rd.extend(0.0)).truncate();
+                    match shape {
+                        Shape::Cube => ray_aabb(ro_l, rd_l, 0.7),
+                        Shape::Sphere => ray_sphere(ro_l, rd_l, Vec3::ZERO, 0.85),
+                    }
+                }
+                Matter::Blob { scale } => {
+                    let center = (t.translation - cam.world_position).as_vec3();
+                    ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x)
+                }
+            };
+            if let Some(th) = hit {
+                if best.is_none_or(|(_, bt)| th < bt) {
+                    best = Some((e, th));
                 }
             }
         }
