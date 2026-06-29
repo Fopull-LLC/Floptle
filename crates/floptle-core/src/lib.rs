@@ -26,11 +26,13 @@
 pub mod ecs;
 pub mod event;
 pub mod math;
+pub mod matter;
 pub mod origin;
 pub mod time;
 pub mod transform;
 
 pub use ecs::{Entity, World};
+pub use matter::{Matter, Name, Shape, Spin};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};
 pub use transform::Transform;

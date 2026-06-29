@@ -24,6 +24,7 @@ members = [
     "crates/floptle-assets",   # glTF import (Blender), textures, asset database
     "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
     "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
+    "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
     "crates/floptle-editor",   # egui + egui_dock authoring application (bin)
     "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)
     "crates/floptle-proof",    # Beat 1: standalone raymarch proof slice (bin)
@@ -50,15 +51,18 @@ pollster = "0.4.0"                                       # block_on for device b
 log = "0.4.33"                                            # logging facade
 env_logger = "0.11.11"                                    # logger backend (binaries only)
 gltf = "1.4.1"                                            # Blender -> engine import — Phase 2, ADR-0006
+serde = { version = "1", features = ["derive"] }         # scene/project serialization — ADR-0005
+ron = "0.8"                                              # human-editable scene/material format
+egui = "0.35.0"                                          # editor UI — ADR-0004 (egui-wgpu pins wgpu 29.0.3)
+egui-wgpu = "0.35.0"                                     # egui ↔ wgpu render backend
+egui-winit = "0.35.0"                                    # egui ↔ winit input/window
+egui_dock = "0.20.1"                                     # dockable editor panels
 
 # Promoted in later phases:
 # naga        = "29"   # shader IR + WGSL transpile — Phase 3, ADR-0007
-# egui        = "*"    # editor UI — Phase 6, ADR-0004
-# egui_dock   = "*"    # dockable editor panels — Phase 6
 # mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003
 # parry3d     = "*"    # triangle-mesh BVH for imported meshes — Phase 6, ADR-0012
 # rapier3d    = "*"    # OPTIONAL rigid-body dynamics only — later, ADR-0012
-# serde + ron = "*"    # scene / prefab / material serialization — Phase 2/5
 # image       = "*"    # texture decoding — Phase 2
 # parking_lot = "*"    # faster locks
 # rustc-hash  = "*"    # fast hashmaps for hot paths
