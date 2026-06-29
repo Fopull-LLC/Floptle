@@ -6,6 +6,7 @@
 //! the first "open and interact with it" slice. Hierarchy/Inspector are stock egui
 //! today; the dock shell, gizmos, import, and sculpt tools layer on next.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -161,6 +162,10 @@ struct EditorCmd {
     close_menu: bool,
     /// Toggle play mode (run scripts).
     toggle_play: bool,
+    /// An asset was dropped (path) — spawn a model or attach a script.
+    drop_asset: Option<String>,
+    /// A script file dropped onto a specific hierarchy node (path, entity).
+    drop_script_on: Option<(String, Entity)>,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -186,7 +191,22 @@ impl Default for GridConfig {
 /// A node in the project asset tree (the bottom file browser).
 enum AssetEntry {
     Dir(String, Vec<AssetEntry>),
-    File(String),
+    File { name: String, path: String },
+}
+
+/// What a dragged asset carries — its path. The drop target reads the extension to
+/// decide what to do (a model spawns; a script attaches).
+#[derive(Clone)]
+struct AssetPayload {
+    path: String,
+}
+
+fn is_model(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".glb") || p.ends_with(".gltf")
+}
+fn is_script(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".ron") && path.replace('\\', "/").contains("/scripts/")
 }
 
 /// Read the project tree under `dir` (folders first, then files, alphabetically).
@@ -203,13 +223,14 @@ fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
         if e.path().is_dir() {
             out.push(AssetEntry::Dir(name, build_assets(&e.path())));
         } else {
-            out.push(AssetEntry::File(name));
+            out.push(AssetEntry::File { name, path: e.path().to_string_lossy().to_string() });
         }
     }
     out
 }
 
-/// Render the asset tree (browse-only for now; import lands next).
+/// Render the asset tree. Files are drag sources: drag a model onto the viewport to
+/// import + spawn it, or a script onto a hierarchy node to attach it.
 fn render_assets(ui: &mut egui::Ui, entries: &[AssetEntry]) {
     for entry in entries {
         match entry {
@@ -218,8 +239,16 @@ fn render_assets(ui: &mut egui::Ui, entries: &[AssetEntry]) {
                     render_assets(ui, children);
                 });
             }
-            AssetEntry::File(name) => {
-                ui.label(format!("    {name}"));
+            AssetEntry::File { name, path } => {
+                let id = egui::Id::new(("asset", path));
+                let draggable = is_model(path) || is_script(path);
+                if draggable {
+                    ui.dnd_drag_source(id, AssetPayload { path: path.clone() }, |ui| {
+                        ui.label(format!("⠿  {name}"));
+                    });
+                } else {
+                    ui.label(format!("    {name}"));
+                }
             }
         }
     }
@@ -534,6 +563,8 @@ struct Editor {
     world: World,
     /// Mesh handles indexed by `Shape as usize` (Cube=0, Sphere=1).
     mesh_ids: Vec<MeshId>,
+    /// Imported glTF models, keyed by asset path → registered mesh parts.
+    mesh_registry: HashMap<String, MeshAsset>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// Whether the Project Settings window is open.
@@ -602,6 +633,12 @@ struct Egui {
     renderer: egui_wgpu::Renderer,
 }
 
+/// An imported model's registered GPU mesh parts + its rough world size.
+struct MeshAsset {
+    parts: Vec<MeshId>,
+    size: f32,
+}
+
 impl ApplicationHandler for Editor {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -663,6 +700,18 @@ impl ApplicationHandler for Editor {
 
         self.gpu = Some(gpu);
         self.raster = Some(raster);
+        // Register any imported meshes the loaded scene references.
+        let mesh_paths: Vec<String> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(_, m)| match m {
+                Matter::Mesh { asset_path } => Some(asset_path.clone()),
+                _ => None,
+            })
+            .collect();
+        for p in mesh_paths {
+            self.import_model(&p);
+        }
         let now = Instant::now();
         self.last = Some(now);
         self.started = Some(now);
@@ -946,6 +995,14 @@ impl Editor {
                 Matter::Blob { scale } => {
                     blobs.push((t.translation, scale * t.scale.x));
                 }
+                Matter::Mesh { asset_path } => {
+                    if let Some(asset) = self.mesh_registry.get(asset_path) {
+                        let model = t.render_matrix(cam.world_position);
+                        for &mid in &asset.parts {
+                            instances.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                        }
+                    }
+                }
             }
         }
 
@@ -988,6 +1045,14 @@ impl Editor {
                         if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                             let model = t.render_matrix(cam.world_position);
                             mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                        }
+                    }
+                    Matter::Mesh { asset_path } => {
+                        if let Some(asset) = self.mesh_registry.get(asset_path) {
+                            let model = t.render_matrix(cam.world_position);
+                            for &mid in &asset.parts {
+                                mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                            }
                         }
                     }
                     Matter::Blob { scale } => {
@@ -1136,6 +1201,12 @@ impl Editor {
                         if ui.button("Copy").clicked() { cmd.copy = true; ui.close(); }
                         if ui.button("Delete").clicked() { cmd.delete = true; ui.close(); }
                     });
+                    // Drop a script from the asset browser onto a node to attach it.
+                    if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
+                        if is_script(&p.path) {
+                            cmd.drop_script_on = Some((p.path.clone(), *e));
+                        }
+                    }
                 }
                 ui.separator();
 
@@ -1189,6 +1260,10 @@ impl Editor {
                                     cmd.inspector_changed |= ui
                                         .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
                                         .changed();
+                                }
+                                Matter::Mesh { asset_path } => {
+                                    ui.label("imported mesh");
+                                    ui.small(asset_path.as_str());
                                 }
                             }
                         }
@@ -1299,13 +1374,24 @@ impl Editor {
                         want_refresh_assets = true;
                     }
                     ui.separator();
-                    ui.small("project files — texture/model/material/audio import lands next");
+                    ui.small("drag a .glb model onto the scene · drag a script onto a node");
                 });
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     render_assets(ui, asset_tree);
                 });
             });
+
+            // Viewport drop target — only active while an asset is being dragged, so
+            // it never eats normal viewport clicks. Dropping a model here spawns it.
+            if egui::DragAndDrop::has_any_payload(ui.ctx()) {
+                let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(egui::Frame::NONE, |ui| {
+                    ui.allocate_space(ui.available_size());
+                });
+                if let Some(p) = dropped {
+                    cmd.drop_asset = Some(p.path.clone());
+                }
+            }
 
             // ---- project settings window (project-wide rendering) ----
             egui::Window::new("Project Settings")
@@ -1546,6 +1632,7 @@ impl Editor {
                 MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
                 MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
                 MatterDoc::Blob { .. } => "Blob",
+                MatterDoc::Mesh { .. } => "Mesh",
             };
             self.add_node(name, m);
         }
@@ -1554,6 +1641,12 @@ impl Editor {
         }
         if cmd.toggle_play {
             self.toggle_play();
+        }
+        if let Some(path) = cmd.drop_asset {
+            self.drop_asset(&path);
+        }
+        if let Some((path, e)) = cmd.drop_script_on {
+            self.attach_script_file(&path, Some(e));
         }
         if want_refresh_assets {
             self.asset_tree = build_assets(std::path::Path::new("assets"));
@@ -1711,6 +1804,80 @@ impl Editor {
         let e = self.spawn_node(&node);
         self.select_single(e);
     }
+    /// Import + register a glTF model (cached by path). Returns true on success.
+    fn import_model(&mut self, path: &str) -> bool {
+        if self.mesh_registry.contains_key(path) {
+            return true;
+        }
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+            return false;
+        };
+        match floptle_assets::gltf_import::import(std::path::Path::new(path)) {
+            Ok(model) => {
+                let parts = model
+                    .parts
+                    .iter()
+                    .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                    .collect();
+                self.mesh_registry
+                    .insert(path.to_string(), MeshAsset { parts, size: model.size });
+                println!("  imported {path}");
+                true
+            }
+            Err(e) => {
+                eprintln!("  import {path} failed: {e}");
+                false
+            }
+        }
+    }
+    /// Drop of an asset from the browser: spawn a model, or attach a script to the
+    /// selection (a model dropped on the viewport, a script anywhere).
+    fn drop_asset(&mut self, path: &str) {
+        if is_model(path) {
+            if !self.import_model(path) {
+                return;
+            }
+            self.record();
+            let cam = self.camera.render_camera();
+            let pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 6.0).as_dvec3();
+            let name = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "mesh".into());
+            let node = NodeDoc {
+                name,
+                transform: TransformDoc {
+                    translation: [pos.x, pos.y, pos.z],
+                    ..Default::default()
+                },
+                matter: MatterDoc::Mesh { asset_path: path.to_string() },
+                scripts: Vec::new(),
+            };
+            let e = self.spawn_node(&node);
+            self.select_single(e);
+        } else if is_script(path) {
+            self.attach_script_file(path, self.primary());
+        }
+    }
+    /// Attach the script defined in `path` (a ScriptDoc RON file) to `target`.
+    fn attach_script_file(&mut self, path: &str, target: Option<Entity>) {
+        let Some(e) = target else { return };
+        if self.world.get::<Transform>(e).is_none() {
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(doc) = ron::from_str::<ScriptDoc>(&text) else {
+            eprintln!("  bad script {path}");
+            return;
+        };
+        self.record();
+        let inst = ScriptInst { kind: doc.kind, enabled: doc.enabled, params: doc.params };
+        if let Some(scr) = self.world.get_mut::<Scripts>(e) {
+            scr.0.push(inst);
+        } else {
+            self.world.insert(e, Scripts(vec![inst]));
+        }
+    }
     fn delete_selected(&mut self) {
         let targets = self.selected_matter();
         if targets.is_empty() {
@@ -1792,6 +1959,11 @@ impl Editor {
                 Matter::Blob { scale } => {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x)
+                }
+                Matter::Mesh { asset_path } => {
+                    let r = self.mesh_registry.get(asset_path).map(|a| a.size * 0.5).unwrap_or(1.0);
+                    let center = (t.translation - cam.world_position).as_vec3();
+                    ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
             };
             if let Some(th) = hit {

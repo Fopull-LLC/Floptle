@@ -96,6 +96,7 @@ impl TransformDoc {
 pub enum MatterDoc {
     Primitive { shape: ShapeDoc, color: [f32; 3] },
     Blob { scale: f32 },
+    Mesh { asset_path: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -111,6 +112,7 @@ impl From<&Matter> for MatterDoc {
                 MatterDoc::Primitive { shape: (*shape).into(), color: *color }
             }
             Matter::Blob { scale } => MatterDoc::Blob { scale: *scale },
+            Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
         }
     }
 }
@@ -122,6 +124,7 @@ impl MatterDoc {
                 Matter::Primitive { shape: (*shape).into(), color: *color }
             }
             MatterDoc::Blob { scale } => Matter::Blob { scale: *scale },
+            MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
         }
     }
 }
