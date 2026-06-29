@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_core::math::{DVec3, Vec3};
+use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Matter, Name, World};
 use floptle_render::{
@@ -25,6 +25,317 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 const SCENE_PATH: &str = "assets/scenes/first.ron";
+
+// ---- the overlay transform gizmo ----------------------------------------------
+//
+// A screen-space gizmo drawn over the selected object with egui's painter. The
+// geometry (axis tips, rotation rings) is projected from the object's Transform
+// once per frame into PHYSICAL pixels and cached in `GizmoFrame`, so window/device
+// events can hit-test the cursor against it cheaply. Dragging a handle applies an
+// absolute transform from a start-of-drag snapshot (no per-event accumulation, so
+// no drift). The gizmo only PAINTS — it never registers an egui widget — so it
+// never steals input from the panel or the RMB fly-camera; ownership is decided by
+// our own pixel hit-test plus the existing `is_pointer_over_egui` gate.
+
+/// Handle length on screen, in physical pixels (kept roughly constant with depth).
+const GIZMO_PX: f32 = 90.0;
+/// Cursor-to-handle pick radius, physical pixels.
+const HANDLE_PX: f32 = 12.0;
+/// Axis-scale drag sensitivity (scale factor per pixel along the axis).
+const SCALE_SENS: f32 = 0.01;
+
+/// The active editing tool. Bound to number keys 1-4 (5-9 reserved).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Tool {
+    #[default]
+    Select,
+    Move,
+    Rotate,
+    Scale,
+}
+
+impl Tool {
+    fn from_digit(n: u32) -> Option<Tool> {
+        match n {
+            1 => Some(Tool::Select),
+            2 => Some(Tool::Move),
+            3 => Some(Tool::Rotate),
+            4 => Some(Tool::Scale),
+            _ => None, // 5-9 reserved for future tools
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "select",
+            Tool::Move => "move",
+            Tool::Rotate => "rotate",
+            Tool::Scale => "scale",
+        }
+    }
+}
+
+/// Which part of the gizmo the cursor is over / grabbed. An axis handle's meaning
+/// depends on the active `Tool` (move along / rotate about / scale along it).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    AxisX,
+    AxisY,
+    AxisZ,
+    Center,
+}
+
+impl Handle {
+    /// Index into the world basis (X=0, Y=1, Z=2), or `None` for the center.
+    fn axis_index(self) -> Option<usize> {
+        match self {
+            Handle::AxisX => Some(0),
+            Handle::AxisY => Some(1),
+            Handle::AxisZ => Some(2),
+            Handle::Center => None,
+        }
+    }
+}
+
+/// Cached, projected gizmo geometry for the current frame (all in physical pixels).
+struct GizmoFrame {
+    center: Vec2,
+    /// Axis arrow tips; `None` for an axis that projects behind the camera.
+    tips: [Option<Vec2>; 3],
+    /// Rotation-ring polylines (only filled for the Rotate tool).
+    ring_pts: [Vec<Vec2>; 3],
+    /// Which handle the cursor is hovering this frame, if any.
+    hovered: Option<Handle>,
+}
+
+/// A start-of-drag snapshot, so drags apply an absolute transform (no drift).
+#[derive(Clone, Copy)]
+struct DragState {
+    handle: Handle,
+    /// The entity this snapshot belongs to — guards against the selection
+    /// changing mid-drag and applying the wrong object's start transform.
+    entity: Entity,
+    start_xf: Transform,
+    cursor_start: Vec2,
+}
+
+/// World basis vector for axis `i` (X=0, Y=1, Z=2).
+fn axis_world(i: usize) -> Vec3 {
+    [Vec3::X, Vec3::Y, Vec3::Z][i]
+}
+
+fn handle_for_axis(i: usize) -> Handle {
+    [Handle::AxisX, Handle::AxisY, Handle::AxisZ][i]
+}
+
+/// Map a top-row number key to its digit (1-9), else `None`.
+fn digit_of(code: KeyCode) -> Option<u32> {
+    match code {
+        KeyCode::Digit1 => Some(1),
+        KeyCode::Digit2 => Some(2),
+        KeyCode::Digit3 => Some(3),
+        KeyCode::Digit4 => Some(4),
+        KeyCode::Digit5 => Some(5),
+        KeyCode::Digit6 => Some(6),
+        KeyCode::Digit7 => Some(7),
+        KeyCode::Digit8 => Some(8),
+        KeyCode::Digit9 => Some(9),
+        _ => None,
+    }
+}
+
+/// Project an absolute world point to physical-pixel screen space (camera-relative,
+/// ADR-0015). Returns `None` when the point is behind the camera.
+fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
+    let rel = (world - cam_world).as_vec3();
+    let clip = vp * rel.extend(1.0);
+    if clip.w <= 1e-4 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(Vec2::new((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
+}
+
+/// Distance from point `p` to segment `a`–`b` (pixel space).
+fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 < 1e-6 { 0.0 } else { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) };
+    (p - (a + ab * t)).length()
+}
+
+/// Build the gizmo geometry for the selected entity and hit-test the cursor.
+fn build_gizmo(
+    tool: Tool,
+    selection: Option<Entity>,
+    world: &World,
+    cursor: Option<Vec2>,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Option<GizmoFrame> {
+    if tool == Tool::Select {
+        return None;
+    }
+    let e = selection?;
+    let t = world.get::<Transform>(e)?;
+    let center = project(t.translation, cam_world, vp, w, h)?;
+
+    // Pixel-constant handle length: world units that subtend ~GIZMO_PX at this depth
+    // (60° vertical fov). Clamp the near distance so a close object doesn't explode.
+    let dist = (t.translation - cam_world).length().max(0.4) as f32;
+    let axis_len = GIZMO_PX * 2.0 * dist * (30f32.to_radians()).tan() / h;
+
+    let mut tips = [None; 3];
+    for i in 0..3 {
+        let tip_world = t.translation + (axis_world(i) * axis_len).as_dvec3();
+        tips[i] = project(tip_world, cam_world, vp, w, h);
+    }
+
+    let mut ring_pts: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    if tool == Tool::Rotate {
+        const N: usize = 48;
+        for i in 0..3 {
+            let u = axis_world((i + 1) % 3);
+            let v = axis_world((i + 2) % 3);
+            let mut pts = Vec::with_capacity(N + 1);
+            for k in 0..=N {
+                let a = (k as f32) / (N as f32) * std::f32::consts::TAU;
+                let p = t.translation + ((u * a.cos() + v * a.sin()) * axis_len).as_dvec3();
+                if let Some(s) = project(p, cam_world, vp, w, h) {
+                    pts.push(s);
+                }
+            }
+            ring_pts[i] = pts;
+        }
+    }
+
+    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts));
+    Some(GizmoFrame { center, tips, ring_pts, hovered })
+}
+
+/// Nearest gizmo handle to the cursor within `HANDLE_PX`, if any.
+fn hit_test(
+    tool: Tool,
+    cursor: Vec2,
+    center: Vec2,
+    tips: &[Option<Vec2>; 3],
+    rings: &[Vec<Vec2>; 3],
+) -> Option<Handle> {
+    let mut cands: Vec<(Handle, f32)> = Vec::new();
+    match tool {
+        Tool::Move | Tool::Scale => {
+            for i in 0..3 {
+                if let Some(tip) = tips[i] {
+                    cands.push((handle_for_axis(i), seg_dist(cursor, center, tip)));
+                }
+            }
+            cands.push((Handle::Center, (cursor - center).length()));
+        }
+        Tool::Rotate => {
+            for i in 0..3 {
+                let mut dmin = f32::INFINITY;
+                for win in rings[i].windows(2) {
+                    dmin = dmin.min(seg_dist(cursor, win[0], win[1]));
+                }
+                cands.push((handle_for_axis(i), dmin));
+            }
+        }
+        Tool::Select => {}
+    }
+    cands
+        .into_iter()
+        .filter(|(_, d)| *d <= HANDLE_PX)
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(h, _)| h)
+}
+
+/// Brighten a handle color toward white when it is hovered or grabbed.
+fn brighten(c: egui::Color32, on: bool) -> egui::Color32 {
+    if !on {
+        return c;
+    }
+    let mix = |x: u8| ((x as u16 + 255) / 2) as u8;
+    egui::Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
+}
+
+/// A small filled arrowhead at `to`, pointing away from `from`.
+fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, col: egui::Color32) {
+    let dir = to - from;
+    let len = dir.length();
+    if len < 1.0 {
+        return;
+    }
+    let d = dir / len;
+    let n = egui::vec2(-d.y, d.x);
+    let s = 8.0;
+    let p2 = to - d * s + n * (s * 0.5);
+    let p3 = to - d * s - n * (s * 0.5);
+    painter.add(egui::Shape::convex_polygon(vec![to, p2, p3], col, egui::Stroke::NONE));
+}
+
+/// Paint the cached gizmo with the egui painter. Geometry is physical pixels; the
+/// painter works in logical points, so divide by `ppp`.
+fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Option<Handle>, ppp: f32) {
+    use egui::{Color32, Pos2, Stroke};
+    let pt = |v: Vec2| Pos2::new(v.x / ppp, v.y / ppp);
+    let axis_col = [
+        Color32::from_rgb(220, 70, 70),
+        Color32::from_rgb(80, 200, 90),
+        Color32::from_rgb(80, 130, 235),
+    ];
+    let active = |h: Handle| grabbed == Some(h) || g.hovered == Some(h);
+    let center = pt(g.center);
+    match tool {
+        Tool::Move => {
+            for i in 0..3 {
+                if let Some(tip) = g.tips[i] {
+                    let on = active(handle_for_axis(i));
+                    let col = brighten(axis_col[i], on);
+                    let tp = pt(tip);
+                    painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
+                    arrow_head(painter, center, tp, col);
+                }
+            }
+            let on = active(Handle::Center);
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::vec2(9.0, 9.0)),
+                0.0,
+                brighten(Color32::from_gray(210), on),
+            );
+        }
+        Tool::Scale => {
+            for i in 0..3 {
+                if let Some(tip) = g.tips[i] {
+                    let on = active(handle_for_axis(i));
+                    let col = brighten(axis_col[i], on);
+                    let tp = pt(tip);
+                    painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
+                    painter.rect_filled(egui::Rect::from_center_size(tp, egui::vec2(8.0, 8.0)), 0.0, col);
+                }
+            }
+            let on = active(Handle::Center);
+            painter.rect_filled(
+                egui::Rect::from_center_size(center, egui::vec2(10.0, 10.0)),
+                0.0,
+                brighten(Color32::from_gray(210), on),
+            );
+        }
+        Tool::Rotate => {
+            for i in 0..3 {
+                let on = active(handle_for_axis(i));
+                let col = brighten(axis_col[i], on);
+                let pts: Vec<Pos2> = g.ring_pts[i].iter().map(|v| pt(*v)).collect();
+                if pts.len() >= 2 {
+                    painter.line(pts, Stroke::new(if on { 3.5 } else { 2.0 }, col));
+                }
+            }
+            painter.circle_filled(center, 3.0, Color32::from_gray(200));
+        }
+        Tool::Select => {}
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -52,6 +363,16 @@ struct Editor {
     render: RenderConfigDoc,
     scene_name: String,
     selection: Option<Entity>,
+    /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
+    tool: Tool,
+    /// Cursor position in physical pixels (cached from `CursorMoved`).
+    cursor: Option<Vec2>,
+    /// Gizmo geometry + hover state, rebuilt every frame.
+    gizmo: Option<GizmoFrame>,
+    /// The gizmo handle currently being dragged, if any.
+    grabbed: Option<Handle>,
+    /// Start-of-drag snapshot for the grabbed handle.
+    drag: Option<DragState>,
     /// Left mouse held in the viewport — drag-moves the selected object.
     left_down: bool,
     last: Option<Instant>,
@@ -141,9 +462,16 @@ impl ApplicationHandler for Editor {
                 }
             }
             WindowEvent::RedrawRequested => self.render(),
+            // Always cache the cursor (even over the panel) so hit-testing and the
+            // over-UI gate stay correct; device_event only gives deltas.
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
+            }
             _ if consumed => {}
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // Don't switch tools while typing into a numeric field.
+                let typing = self.egui.as_ref().is_some_and(|e| e.ctx.egui_wants_keyboard_input());
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match code {
                         KeyCode::Escape if pressed => event_loop.exit(),
@@ -154,17 +482,48 @@ impl ApplicationHandler for Editor {
                         KeyCode::Space => self.input.up = pressed,
                         KeyCode::ControlLeft => self.input.down = pressed,
                         KeyCode::ShiftLeft => self.input.boost = pressed,
+                        // Number keys 1-9 pick the active tool (5-9 reserved → no-op).
+                        _ if pressed && !typing && digit_of(code).is_some() => {
+                            if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
+                                self.set_tool(t);
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                // not consumed → the click is in the viewport: grab to drag-move
-                self.left_down = state == ElementState::Pressed;
+                // not consumed → the click is in the viewport.
+                let pressed = state == ElementState::Pressed;
+                self.left_down = pressed;
+                if pressed {
+                    let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
+                    let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
+                    if let (false, Some(h), Some(e)) = (over_ui, hovered, self.selection) {
+                        // Grab the hovered handle and snapshot the start transform.
+                        if let Some(t) = self.world.get::<Transform>(e) {
+                            self.grabbed = Some(h);
+                            self.drag = Some(DragState {
+                                handle: h,
+                                entity: e,
+                                start_xf: *t,
+                                cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                            });
+                        }
+                    }
+                } else {
+                    self.grabbed = None;
+                    self.drag = None;
+                }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let looking = state == ElementState::Pressed;
                 self.input.looking = looking;
+                if looking {
+                    // The cursor is hidden/confined during look and stops reporting;
+                    // drop the cached position so the gizmo hover doesn't freeze on.
+                    self.cursor = None;
+                }
                 if let Some(window) = self.window.as_ref() {
                     if looking {
                         let _ = window
@@ -183,8 +542,11 @@ impl ApplicationHandler for Editor {
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
+            // Priority: RMB-look > grabbed gizmo handle > free camera-plane drag.
             if self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
+            } else if self.grabbed.is_some() {
+                self.gizmo_drag();
             } else if self.left_down {
                 // grab-and-drag the selected object (unless the cursor is over a UI widget)
                 let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
@@ -226,6 +588,19 @@ impl Editor {
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let cam = self.camera.render_camera();
         let view_proj = cam.view_proj(aspect);
+
+        // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
+        self.gizmo = build_gizmo(
+            self.tool,
+            self.selection,
+            &self.world,
+            self.cursor,
+            cam.world_position,
+            view_proj,
+            gpu.config.width as f32,
+            gpu.config.height.max(1) as f32,
+        );
+
         let light = Vec3::from(self.render.light_dir).normalize_or_zero();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
@@ -287,11 +662,30 @@ impl Editor {
         let selection = &mut self.selection;
         let render = &mut self.render;
         let scene_name = self.scene_name.clone();
+        let gizmo = self.gizmo.as_ref();
+        let grabbed = self.grabbed;
+        let tool = &mut self.tool;
         let mut want_save = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
             egui::Panel::left("inspector").default_size(280.0).show(ui, |ui| {
                 ui.heading("Floptle Editor");
                 ui.label(format!("scene: {scene_name}"));
+                ui.separator();
+
+                ui.label("Tools");
+                ui.horizontal(|ui| {
+                    for (t, key) in [
+                        (Tool::Select, "1"),
+                        (Tool::Move, "2"),
+                        (Tool::Rotate, "3"),
+                        (Tool::Scale, "4"),
+                    ] {
+                        let txt = format!("{} {}", key, t.label());
+                        if ui.selectable_label(*tool == t, txt).clicked() {
+                            *tool = t;
+                        }
+                    }
+                });
                 ui.separator();
 
                 ui.label("Hierarchy");
@@ -348,8 +742,21 @@ impl Editor {
                     want_save = true;
                 }
                 ui.add_space(8.0);
+                ui.small("1 select · 2 move · 3 rotate · 4 scale");
                 ui.small("RMB-drag: look · WASD: move · Space/Ctrl: up/down");
             });
+
+            // The gizmo paints over the viewport on a top layer (above the scene,
+            // below tooltips), clipped to the area right of the panel so handles
+            // never draw over the inspector. It only draws — interaction is handled
+            // in the window/device events against the cached hit-test.
+            if let Some(g) = gizmo {
+                let painter = ui
+                    .ctx()
+                    .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
+                    .with_clip_rect(ui.available_rect_before_wrap());
+                paint_gizmo(&painter, g, *tool, grabbed, ui.ctx().pixels_per_point());
+            }
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
         if self.render.retro_height != old_retro_h {
@@ -445,6 +852,126 @@ impl Editor {
         }
     }
 
+    /// Switch the active tool and cancel any in-progress gizmo drag.
+    fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.grabbed = None;
+        self.drag = None;
+    }
+
+    /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
+    /// start-of-drag snapshot (no per-event accumulation → no drift).
+    fn gizmo_drag(&mut self) {
+        let (Some(drag), Some(cursor), Some(e)) = (self.drag, self.cursor, self.selection) else {
+            return;
+        };
+        // The snapshot must belong to the still-selected entity (guards against the
+        // selection changing mid-drag and applying the wrong object's transform).
+        if drag.entity != e {
+            self.grabbed = None;
+            self.drag = None;
+            return;
+        }
+        let handle = drag.handle;
+        let (w, h) = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.config.width as f32, g.config.height.max(1) as f32))
+            .unwrap_or((1280.0, 720.0));
+        let cam = self.camera.render_camera();
+        let vp = cam.view_proj(w / h);
+        let cam_world = cam.world_position;
+        let start = drag.start_xf;
+        let cursor_delta = cursor - drag.cursor_start;
+
+        match self.tool {
+            Tool::Move => {
+                if let Some(i) = handle.axis_index() {
+                    let dir = axis_world(i);
+                    // Project the axis (a 1-unit step) to screen; the move distance is
+                    // the cursor delta projected onto that screen direction.
+                    let (Some(s0), Some(s1)) = (
+                        project(start.translation, cam_world, vp, w, h),
+                        project(start.translation + dir.as_dvec3(), cam_world, vp, w, h),
+                    ) else {
+                        return;
+                    };
+                    let sdir = s1 - s0;
+                    let len2 = sdir.length_squared();
+                    if len2 < 1e-6 {
+                        return; // axis points (almost) straight at the camera
+                    }
+                    let units = cursor_delta.dot(sdir) / len2;
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        t.translation = start.translation + (dir * units).as_dvec3();
+                    }
+                } else {
+                    // Center handle: free move in the camera plane.
+                    let rot = cam.rotation;
+                    let right = rot * Vec3::X;
+                    let up = rot * Vec3::Y;
+                    let dist = (start.translation - cam_world).length().max(0.1) as f32;
+                    let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
+                    let mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        t.translation = start.translation + mv.as_dvec3();
+                    }
+                }
+            }
+            Tool::Rotate => {
+                let Some(i) = handle.axis_index() else { return };
+                let dir = axis_world(i);
+                let Some(center) = project(start.translation, cam_world, vp, w, h) else {
+                    return;
+                };
+                let v1 = drag.cursor_start - center;
+                let v2 = cursor - center;
+                if v1.length_squared() < 1.0 || v2.length_squared() < 1.0 {
+                    return;
+                }
+                let mut angle = (v1.x * v2.y - v1.y * v2.x).atan2(v1.x * v2.x + v1.y * v2.y);
+                // Screen-y points down; flip when the axis faces away from the camera
+                // so a drag always spins the visible way.
+                if dir.dot((start.translation - cam_world).as_vec3()) > 0.0 {
+                    angle = -angle;
+                }
+                if let Some(t) = self.world.get_mut::<Transform>(e) {
+                    t.rotation = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
+                }
+            }
+            Tool::Scale => {
+                if let Some(i) = handle.axis_index() {
+                    let dir = axis_world(i);
+                    let (Some(s0), Some(s1)) = (
+                        project(start.translation, cam_world, vp, w, h),
+                        project(start.translation + dir.as_dvec3(), cam_world, vp, w, h),
+                    ) else {
+                        return;
+                    };
+                    let n = (s1 - s0).normalize_or_zero();
+                    let factor = 1.0 + cursor_delta.dot(n) * SCALE_SENS;
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        let mut sc = start.scale;
+                        sc[i] = (start.scale[i] * factor).max(0.01);
+                        t.scale = sc;
+                    }
+                } else {
+                    // Center handle: uniform scale by the cursor's distance ratio.
+                    let Some(center) = project(start.translation, cam_world, vp, w, h) else {
+                        return;
+                    };
+                    let d0 = (drag.cursor_start - center).length().max(1.0);
+                    let d1 = (cursor - center).length();
+                    let factor = (d1 / d0).max(0.01);
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        t.scale = (start.scale * factor).max(Vec3::splat(0.01));
+                    }
+                }
+            }
+            Tool::Select => {}
+        }
+    }
+
     fn save_scene(&self) {
         let doc = floptle_scene::to_doc(self.scene_name.clone(), self.render, &self.world);
         match floptle_scene::save(&doc, std::path::Path::new(SCENE_PATH)) {
@@ -474,7 +1001,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
             NodeDoc {
                 name: "blob".into(),
                 transform: TransformDoc { translation: [0.0, 1.6, 0.0], ..Default::default() },
-                matter: MatterDoc::Blob { scale: 1.3 },
+                matter: MatterDoc::Blob { scale: 1.0 },
             },
         ],
     }

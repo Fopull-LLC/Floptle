@@ -60,16 +60,21 @@ fn smin_matter(a: Matter, b: Matter, k: f32) -> Matter {
     return Matter(d, col);
 }
 
-// The analytic blob: smin-blended morphing spheres, iridescent.
+// The analytic blob: a STATIC smooth metaball (fixed-offset smin-blended spheres,
+// no time morph) so it is a predictable, placeable shape whose size comes only
+// from the transform — `center.w` is the scale, and the blob's radius is ≈ 0.85 *
+// scale (comparable to the unit sphere). A low-frequency iridescent tint (its
+// spatial period spans the whole blob, so it never aliases) gives the otherworldly
+// look; the close-up "ring" artifacts came from the specular highlight (see `fs`),
+// not from this color. Animation, if wanted, belongs to scripts, not the shape.
 fn analytic(p: vec3<f32>) -> Matter {
     let s = G.center.w;
     let q = (p - G.center.xyz) / s;
-    let t = G.params.x;
-    var d = sd_sphere(q - vec3<f32>(sin(t * 0.7) * 0.5, cos(t * 0.5) * 0.4, 0.0), 0.6);
-    d = smin(d, sd_sphere(q - vec3<f32>(cos(t * 0.6) * 0.5, sin(t * 0.8) * 0.5, sin(t * 0.4) * 0.4), 0.55), 0.35);
-    d = smin(d, sd_sphere(q - vec3<f32>(-sin(t * 0.5) * 0.5, 0.3, cos(t * 0.7) * 0.5), 0.5), 0.35);
-    d = smin(d, sd_sphere(q - vec3<f32>(0.0, -sin(t * 0.6) * 0.5, -0.4), 0.5), 0.35);
-    let iri = 0.5 + 0.5 * cos(6.2831 * (q.y * 0.5 + vec3<f32>(0.0, 0.33, 0.67)) + t * 0.2);
+    var d = sd_sphere(q - vec3<f32>(0.26, 0.10, 0.0), 0.55);
+    d = smin(d, sd_sphere(q - vec3<f32>(-0.24, 0.16, 0.12), 0.50), 0.30);
+    d = smin(d, sd_sphere(q - vec3<f32>(0.06, -0.22, -0.14), 0.50), 0.30);
+    d = smin(d, sd_sphere(q - vec3<f32>(-0.10, -0.06, 0.24), 0.48), 0.30);
+    let iri = 0.5 + 0.5 * cos(6.2831 * (q.y * 0.5 + vec3<f32>(0.0, 0.33, 0.67)));
     let col = mix(vec3<f32>(0.35, 0.16, 0.55), iri, 0.55);
     return Matter(d * s, col);
 }
@@ -153,10 +158,13 @@ fn fs(in: VOut) -> FsOut {
             let n = calc_normal(p);
             let l = normalize(G.light_dir.xyz);
             let diff = max(dot(n, l), 0.0);
-            let fres = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
             let albedo = m.col;
-            var col = albedo * (0.18 + 0.82 * diff) + vec3<f32>(0.5, 0.7, 1.0) * fres * 0.4;
-            col = col + pow(max(dot(reflect(rd, n), l), 0.0), 40.0) * vec3<f32>(0.6);
+            // Clean matte shading: ambient + diffuse + a subtle low-frequency rim.
+            // No high-power specular / sharp fresnel — those alias into concentric
+            // rings on a smooth SDF surface (especially at low retro resolution).
+            var col = albedo * (0.25 + 0.75 * diff);
+            let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
+            col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
             out.depth = ndc_z;
             drawn = true;
