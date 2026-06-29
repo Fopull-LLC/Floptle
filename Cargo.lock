@@ -635,6 +635,7 @@ dependencies = [
 name = "floptle-field"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "floptle-core",
  "rayon",
 ]

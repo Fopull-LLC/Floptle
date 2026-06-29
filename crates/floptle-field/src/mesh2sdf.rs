@@ -222,7 +222,7 @@ pub fn bake_model(parts: &[BakePart], res: u32, padding_voxels: f32, mode: BakeM
 
 /// Closest point on triangle `abc` to `p`, plus barycentric `(u,v,w)`. Ericson,
 /// *Real-Time Collision Detection*.
-fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (Vec3, f32, f32, f32) {
+pub(crate) fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (Vec3, f32, f32, f32) {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
