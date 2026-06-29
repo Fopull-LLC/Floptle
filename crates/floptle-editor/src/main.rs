@@ -1218,6 +1218,8 @@ impl IdeState {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
+    /// Folders collapsed in the Hierarchy (hide their children).
+    collapsed: &'a mut std::collections::HashSet<Entity>,
     entity_names: &'a [(Entity, String)],
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
@@ -1355,12 +1357,32 @@ impl EditorTabViewer<'_> {
         let name = names.get(&e).cloned().unwrap_or_default();
         let is_folder = matches!(self.world.get::<Matter>(e), Some(Matter::Empty));
         let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
-        let icon = if is_folder { "🗀" } else if has_kids { "▾" } else { "•" };
+        let collapsed = self.collapsed.contains(&e);
+        let icon = if is_folder {
+            if collapsed { "🗀" } else { "🗁" }
+        } else if has_kids {
+            "▾"
+        } else {
+            "•"
+        };
         let selected = self.selection.contains(&e);
 
+        // A folder with children gets a clickable disclosure triangle.
+        let mut toggle = false;
         let resp = ui
             .horizontal(|ui| {
                 ui.add_space(depth as f32 * 14.0);
+                if is_folder && has_kids {
+                    let tri = if collapsed { "▸" } else { "▾" };
+                    let t = ui.add(
+                        egui::Label::new(tri).selectable(false).sense(egui::Sense::click()),
+                    );
+                    if t.clicked() {
+                        toggle = true;
+                    }
+                } else {
+                    ui.add_space(12.0);
+                }
                 let text = if selected {
                     egui::RichText::new(format!("{icon} {name}")).strong().color(ui.visuals().selection.stroke.color)
                 } else {
@@ -1369,6 +1391,13 @@ impl EditorTabViewer<'_> {
                 ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag()))
             })
             .inner;
+        if toggle {
+            if collapsed {
+                self.collapsed.remove(&e);
+            } else {
+                self.collapsed.insert(e);
+            }
+        }
         resp.dnd_set_drag_payload(NodePayload(e));
 
         // Highlight when a node/script is dragged over this row.
@@ -1449,9 +1478,12 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        if let Some(kids) = children.get(&e) {
-            for &c in kids {
-                self.hierarchy_node(ui, c, children, names, depth + 1);
+        // Recurse into children unless this folder is collapsed.
+        if !self.collapsed.contains(&e) {
+            if let Some(kids) = children.get(&e) {
+                for &c in kids {
+                    self.hierarchy_node(ui, c, children, names, depth + 1);
+                }
             }
         }
     }
@@ -2620,6 +2652,9 @@ struct Editor {
     scene_name: String,
     /// Selected entities (multi-select); the gizmo/inspector act on the last one.
     selection: Vec<Entity>,
+    /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
+    /// with the triangle or Enter on a selected folder.
+    collapsed: std::collections::HashSet<Entity>,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
     tool: Tool,
     /// Cursor position in physical pixels (cached from `CursorMoved`).
@@ -2886,6 +2921,7 @@ impl ApplicationHandler for Editor {
                                 KeyCode::KeyQ => self.selection.clear(), // unselect
                                 KeyCode::ArrowUp => self.step_selection(-1),
                                 KeyCode::ArrowDown => self.step_selection(1),
+                                KeyCode::Enter | KeyCode::NumpadEnter => self.toggle_folder_selected(),
                                 KeyCode::F1 => self.toggle_play(),
                                 KeyCode::F2 => self.toggle_pause(),
                                 _ => {
@@ -3360,6 +3396,7 @@ impl Editor {
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
         let world = &mut self.world;
         let selection = &mut self.selection;
+        let collapsed = &mut self.collapsed;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
         let show_project_mgr = &mut self.show_project_mgr;
@@ -3495,6 +3532,7 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                collapsed,
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
@@ -4576,6 +4614,16 @@ impl Editor {
             None => order.len() - 1,
         };
         self.select_single(order[next]);
+    }
+
+    /// Toggle the selected folder's open/closed state in the Hierarchy (Enter key).
+    fn toggle_folder_selected(&mut self) {
+        let Some(e) = self.selection.last().copied() else { return };
+        if matches!(self.world.get::<Matter>(e), Some(Matter::Empty)) {
+            if !self.collapsed.remove(&e) {
+                self.collapsed.insert(e);
+            }
+        }
     }
 
     /// Frame the selected object in the viewport (the F key): keep the view angle,
