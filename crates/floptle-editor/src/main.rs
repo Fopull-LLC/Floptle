@@ -9,14 +9,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
+use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Light, Matter, Name, Shape, World};
 use floptle_render::{
     cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Outline,
     Raster, Raymarch, RaymarchGlobals, Retro,
 };
-use floptle_scene::ProjectConfigDoc;
+use floptle_scene::{MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ShapeDoc, TransformDoc};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -140,6 +140,30 @@ fn local_axis(rot: Quat, i: usize) -> Vec3 {
 
 fn handle_for_axis(i: usize) -> Handle {
     [Handle::AxisX, Handle::AxisY, Handle::AxisZ][i]
+}
+
+/// Deferred editor commands raised by the UI inside `run_ui`, applied after the
+/// frame (so they can call `&mut self` methods the UI closure can't reach).
+#[derive(Default)]
+struct EditorCmd {
+    add: Option<MatterDoc>,
+    delete: bool,
+    duplicate: bool,
+    copy: bool,
+    paste: bool,
+    undo: bool,
+    redo: bool,
+    /// An inspector widget changed this frame (opens a coalesced undo step).
+    inspector_changed: bool,
+    /// Dismiss the viewport context menu.
+    close_menu: bool,
+}
+
+fn new_cube() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
+}
+fn new_sphere() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.6, 0.9] }
 }
 
 /// Map a top-row number key to its digit (1-9), else `None`.
@@ -432,7 +456,8 @@ struct Editor {
     /// Whether the Project Settings window is open.
     show_project_settings: bool,
     scene_name: String,
-    selection: Option<Entity>,
+    /// Selected entities (multi-select); the gizmo/inspector act on the last one.
+    selection: Vec<Entity>,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
     tool: Tool,
     /// Cursor position in physical pixels (cached from `CursorMoved`).
@@ -443,11 +468,40 @@ struct Editor {
     grabbed: Option<Handle>,
     /// Start-of-drag snapshot for the grabbed handle.
     drag: Option<DragState>,
-    /// Left mouse held in the viewport — drag-moves the selected object.
-    left_down: bool,
+    /// Modifier key state (tracked from key events).
+    ctrl: bool,
+    shift: bool,
+    /// Undo/redo history of whole-scene snapshots.
+    history: History,
+    /// Copied nodes (Ctrl+C), re-spawned by Ctrl+V.
+    clipboard: Vec<floptle_scene::NodeDoc>,
+    /// An inspector/gizmo edit session is open — coalesces a drag into one undo step.
+    editing: bool,
+    /// The pre-edit scene snapshot captured at the start of this frame.
+    frame_snapshot: Option<floptle_scene::SceneDoc>,
+    /// RMB press position + accumulated motion — distinguishes a look-drag from a
+    /// context-menu click.
+    rmb_press: Option<Vec2>,
+    rmb_moved: f32,
+    /// A pending viewport context menu at (screen-point, entity-under-cursor).
+    context_menu: Option<(egui::Pos2, Option<Entity>)>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
+}
+
+/// Undo/redo stack of whole-scene snapshots (simple + robust for small scenes).
+struct History {
+    undo: Vec<floptle_scene::SceneDoc>,
+    redo: Vec<floptle_scene::SceneDoc>,
+    /// Max retained undo steps (a user preference later).
+    max: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self { undo: Vec::new(), redo: Vec::new(), max: 32 }
+    }
 }
 
 struct Egui {
@@ -543,82 +597,143 @@ impl ApplicationHandler for Editor {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
             }
+            // Modifier state, tracked separately so Ctrl/Shift combos work even while
+            // a field is focused (this event isn't gated by `consumed`).
+            WindowEvent::ModifiersChanged(mods) => {
+                self.ctrl = mods.state().control_key();
+                self.shift = mods.state().shift_key();
+                self.input.boost = self.shift;
+            }
             _ if consumed => {}
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
-                // Don't switch tools while typing into a numeric field.
+                // Don't trigger shortcuts/tools while typing into a field.
                 let typing = self.egui.as_ref().is_some_and(|e| e.ctx.egui_wants_keyboard_input());
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // Held movement keys (suppressed while Ctrl is down so Ctrl+key
+                    // combos don't also fly the camera). C moves DOWN (rebound from
+                    // Ctrl, which is now the shortcut modifier).
                     match code {
-                        KeyCode::Escape if pressed => event_loop.exit(),
-                        KeyCode::KeyW => self.input.forward = pressed,
-                        KeyCode::KeyS => self.input.back = pressed,
-                        KeyCode::KeyA => self.input.left = pressed,
-                        KeyCode::KeyD => self.input.right = pressed,
+                        KeyCode::KeyW if !self.ctrl => self.input.forward = pressed,
+                        KeyCode::KeyS if !self.ctrl => self.input.back = pressed,
+                        KeyCode::KeyA if !self.ctrl => self.input.left = pressed,
+                        KeyCode::KeyD if !self.ctrl => self.input.right = pressed,
                         KeyCode::Space => self.input.up = pressed,
-                        KeyCode::ControlLeft => self.input.down = pressed,
-                        KeyCode::ShiftLeft => self.input.boost = pressed,
-                        // Number keys 1-9 pick the active tool (5-9 reserved → no-op).
-                        _ if pressed && !typing && digit_of(code).is_some() => {
-                            if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
-                                self.set_tool(t);
+                        KeyCode::KeyC if !self.ctrl => self.input.down = pressed,
+                        _ => {}
+                    }
+                    // Discrete commands fire on press only.
+                    if pressed && !typing {
+                        if self.ctrl {
+                            match code {
+                                KeyCode::KeyZ => self.undo(),
+                                KeyCode::KeyY => self.redo(),
+                                KeyCode::KeyC => self.copy_selected(),
+                                KeyCode::KeyV => self.paste(),
+                                KeyCode::KeyD => self.duplicate_selected(),
+                                KeyCode::KeyA => self.select_all(),
+                                KeyCode::KeyS => self.save_scene(),
+                                _ => {}
+                            }
+                        } else {
+                            match code {
+                                KeyCode::Escape => event_loop.exit(),
+                                KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+                                _ => {
+                                    if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
+                                        self.set_tool(t);
+                                    }
+                                }
                             }
                         }
-                        _ => {}
                     }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 // not consumed → the click is in the viewport.
                 let pressed = state == ElementState::Pressed;
-                self.left_down = pressed;
                 if pressed {
                     let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
                     if !over_ui {
-                        match (hovered, self.selection) {
-                            // On a gizmo handle → grab it and snapshot the transform.
-                            (Some(h), Some(e)) => {
-                                if let Some(t) = self.world.get::<Transform>(e) {
-                                    self.grabbed = Some(h);
-                                    self.drag = Some(DragState {
-                                        handle: h,
-                                        entity: e,
-                                        start_xf: *t,
-                                        cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
-                                    });
-                                }
+                        // Clicking the viewport dismisses an open context menu (but
+                        // clicking the menu itself, which is over_ui, keeps it).
+                        self.context_menu = None;
+                        if let (Some(h), Some(e)) = (hovered, self.primary()) {
+                            // On a gizmo handle → start an undoable edit and grab it.
+                            if let Some(t) = self.world.get::<Transform>(e) {
+                                let start_xf = *t;
+                                self.begin_edit();
+                                self.grabbed = Some(h);
+                                self.drag = Some(DragState {
+                                    handle: h,
+                                    entity: e,
+                                    start_xf,
+                                    cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                                });
                             }
-                            // Empty viewport → pick the object under the cursor.
-                            _ => {
-                                if let Some(cursor) = self.cursor {
-                                    self.selection = self.pick(cursor);
-                                }
+                        } else if let Some(cursor) = self.cursor {
+                            // Empty viewport → pick: single-select, or Shift to add.
+                            match self.pick(cursor) {
+                                Some(e) if self.shift => self.select_toggle(e),
+                                Some(e) => self.select_single(e),
+                                None if !self.shift => self.selection.clear(),
+                                None => {}
                             }
                         }
                     }
                 } else {
                     self.grabbed = None;
                     self.drag = None;
+                    self.editing = false;
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
-                let looking = state == ElementState::Pressed;
-                self.input.looking = looking;
-                if looking {
-                    // The cursor is hidden/confined during look and stops reporting;
-                    // drop the cached position so the gizmo hover doesn't freeze on.
-                    self.cursor = None;
-                }
-                if let Some(window) = self.window.as_ref() {
-                    if looking {
-                        let _ = window
-                            .set_cursor_grab(CursorGrabMode::Confined)
-                            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
-                        window.set_cursor_visible(false);
-                    } else {
+                let pressed = state == ElementState::Pressed;
+                let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
+                if pressed {
+                    // Begin a possible look; if the cursor barely moves before release
+                    // it's a click → open a context menu instead.
+                    self.rmb_press = self.cursor;
+                    self.rmb_moved = 0.0;
+                    self.context_menu = None;
+                    if !over_ui {
+                        self.input.looking = true;
+                        if let Some(window) = self.window.as_ref() {
+                            let _ = window
+                                .set_cursor_grab(CursorGrabMode::Confined)
+                                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
+                            window.set_cursor_visible(false);
+                        }
+                        self.cursor = None;
+                    }
+                } else {
+                    let was_looking = self.input.looking;
+                    self.input.looking = false;
+                    if let Some(window) = self.window.as_ref() {
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                         window.set_cursor_visible(true);
+                    }
+                    // A click (negligible motion) over the viewport → context menu.
+                    if was_looking && self.rmb_moved < 6.0 {
+                        if let Some(p) = self.rmb_press {
+                            self.cursor = Some(p);
+                            let ppp = self
+                                .egui
+                                .as_ref()
+                                .map(|e| e.ctx.pixels_per_point())
+                                .unwrap_or(1.0);
+                            let hit = self.pick(p);
+                            if let Some(e) = hit {
+                                if self.shift {
+                                    self.select_toggle(e);
+                                } else if !self.selection.contains(&e) {
+                                    self.select_single(e);
+                                }
+                            }
+                            self.context_menu =
+                                Some((egui::Pos2::new(p.x / ppp, p.y / ppp), hit));
+                        }
                     }
                 }
             }
@@ -628,17 +743,13 @@ impl ApplicationHandler for Editor {
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            // Priority: RMB-look > grabbed gizmo handle > free camera-plane drag.
+            // Priority: RMB-look > grabbed gizmo handle. (Free dragging an object now
+            // requires the Move tool's center handle — no more accidental moves.)
             if self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
+                self.rmb_moved += (delta.0.abs() + delta.1.abs()) as f32;
             } else if self.grabbed.is_some() {
                 self.gizmo_drag();
-            } else if self.left_down {
-                // grab-and-drag the selected object (unless the cursor is over a UI widget)
-                let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
-                if !over_ui {
-                    self.drag_selected(delta.0 as f32, delta.1 as f32);
-                }
             }
         }
     }
@@ -679,6 +790,11 @@ impl Editor {
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.camera.update(&self.input, dt);
 
+        // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
+        // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
+        // so it only touches disjoint fields while gpu/egui are borrowed.
+        self.frame_snapshot = Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
+
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let cam = self.camera.render_camera();
@@ -687,7 +803,7 @@ impl Editor {
         // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
         self.gizmo = build_gizmo(
             self.tool,
-            self.selection,
+            self.selection.last().copied(),
             &self.world,
             self.cursor,
             cam.world_position,
@@ -730,7 +846,7 @@ impl Editor {
         // edge-detects it. `mask_mesh` non-empty → mesh; `mask_blob` → the SDF blob.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut mask_blob = false;
-        if let Some(e) = self.selection {
+        if let Some(e) = self.selection.last().copied() {
             if let (Some(m), Some(t)) =
                 (self.world.get::<Matter>(e), self.world.get::<Transform>(e))
             {
@@ -778,9 +894,12 @@ impl Editor {
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
         let tool = &mut self.tool;
+        let context_menu = self.context_menu;
+        let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
+            let primary = selection.last().copied();
             // ---- top menu bar ----
             egui::Panel::top("menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -799,8 +918,24 @@ impl Editor {
                         }
                     });
                     ui.menu_button("Edit", |ui| {
+                        if ui.button("Undo  (Ctrl+Z)").clicked() { cmd.undo = true; ui.close(); }
+                        if ui.button("Redo  (Ctrl+Y)").clicked() { cmd.redo = true; ui.close(); }
+                        ui.separator();
+                        if ui.button("Copy  (Ctrl+C)").clicked() { cmd.copy = true; ui.close(); }
+                        if ui.button("Paste  (Ctrl+V)").clicked() { cmd.paste = true; ui.close(); }
+                        if ui.button("Duplicate  (Ctrl+D)").clicked() { cmd.duplicate = true; ui.close(); }
+                        if ui.button("Delete  (Del)").clicked() { cmd.delete = true; ui.close(); }
+                        ui.separator();
                         if ui.button("Project Settings…").clicked() {
                             *show_project_settings = true;
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Add", |ui| {
+                        if ui.button("Cube").clicked() { cmd.add = Some(new_cube()); ui.close(); }
+                        if ui.button("Sphere").clicked() { cmd.add = Some(new_sphere()); ui.close(); }
+                        if ui.button("Blob").clicked() {
+                            cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
                             ui.close();
                         }
                     });
@@ -814,7 +949,7 @@ impl Editor {
             });
 
             // ---- left inspector panel ----
-            egui::Panel::left("inspector").default_size(280.0).show(ui, |ui| {
+            egui::Panel::left("inspector").default_size(290.0).show(ui, |ui| {
                 ui.heading("Floptle Editor");
                 ui.label(format!("scene: {scene_name}"));
                 ui.separator();
@@ -835,45 +970,123 @@ impl Editor {
                 });
                 ui.separator();
 
-                ui.label("Hierarchy");
+                ui.horizontal(|ui| {
+                    ui.label("Hierarchy");
+                    if ui.small_button("+ Cube").clicked() { cmd.add = Some(new_cube()); }
+                    if ui.small_button("+ Sphere").clicked() { cmd.add = Some(new_sphere()); }
+                    if ui.small_button("+ Blob").clicked() { cmd.add = Some(MatterDoc::Blob { scale: 1.0 }); }
+                });
                 for (e, name) in &entity_names {
-                    if ui.selectable_label(*selection == Some(*e), name).clicked() {
-                        *selection = Some(*e);
+                    let resp = ui.selectable_label(selection.contains(e), name);
+                    if resp.clicked() {
+                        if ui.input(|i| i.modifiers.shift) {
+                            if let Some(pos) = selection.iter().position(|x| x == e) {
+                                selection.remove(pos);
+                            } else {
+                                selection.push(*e);
+                            }
+                        } else {
+                            selection.clear();
+                            selection.push(*e);
+                        }
                     }
+                    if resp.secondary_clicked() && !selection.contains(e) {
+                        selection.clear();
+                        selection.push(*e);
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("Duplicate").clicked() { cmd.duplicate = true; ui.close(); }
+                        if ui.button("Copy").clicked() { cmd.copy = true; ui.close(); }
+                        if ui.button("Delete").clicked() { cmd.delete = true; ui.close(); }
+                    });
                 }
                 ui.separator();
 
                 ui.label("Inspector");
-                match *selection {
+                if selection.len() > 1 {
+                    ui.small(format!("{} selected", selection.len()));
+                }
+                match primary {
                     Some(e) if world.get::<Light>(e).is_some() => {
                         if let Some(l) = world.get_mut::<Light>(e) {
                             ui.label("Lighting node");
                             ui.label("direction");
                             ui.horizontal(|ui| {
-                                ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x "));
-                                ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y "));
-                                ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z "));
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
                             });
                             ui.horizontal(|ui| {
                                 ui.label("light");
-                                ui.color_edit_button_rgb(&mut l.color);
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
                                 ui.label("ambient");
-                                ui.color_edit_button_rgb(&mut l.ambient);
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
                             });
                         }
                     }
                     Some(e) if world.get::<Transform>(e).is_some() => {
+                        // name
+                        if let Some(n) = world.get_mut::<Name>(e) {
+                            ui.horizontal(|ui| {
+                                ui.label("name");
+                                cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
+                            });
+                        }
+                        // matter-specific (shape + color, or blob scale)
+                        if let Some(m) = world.get_mut::<Matter>(e) {
+                            match m {
+                                Matter::Primitive { shape, color } => {
+                                    ui.horizontal(|ui| {
+                                        ui.label("shape");
+                                        egui::ComboBox::from_id_salt("shape")
+                                            .selected_text(format!("{shape:?}"))
+                                            .show_ui(ui, |ui| {
+                                                cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
+                                                cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                            });
+                                        ui.label("color");
+                                        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                    });
+                                }
+                                Matter::Blob { scale } => {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
+                                        .changed();
+                                }
+                            }
+                        }
+                        // transform
                         if let Some(t) = world.get_mut::<Transform>(e) {
                             ui.label("translation");
                             ui.horizontal(|ui| {
-                                ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x "));
-                                ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y "));
-                                ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z "));
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
                             });
-                            let mut s = t.scale.x;
-                            if ui.add(egui::DragValue::new(&mut s).speed(0.02).prefix("scale ")).changed() {
-                                t.scale = Vec3::splat(s.max(0.01));
+                            ui.label("rotation (deg)");
+                            let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                            let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                            let mut rot_changed = false;
+                            ui.horizontal(|ui| {
+                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                                rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                            });
+                            if rot_changed {
+                                t.rotation = Quat::from_euler(
+                                    EulerRot::YXZ,
+                                    deg[0].to_radians(),
+                                    deg[1].to_radians(),
+                                    deg[2].to_radians(),
+                                );
+                                cmd.inspector_changed = true;
                             }
+                            ui.label("scale");
+                            ui.horizontal(|ui| {
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                                cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                            });
                         }
                     }
                     Some(_) => {
@@ -890,7 +1103,8 @@ impl Editor {
                 }
                 ui.add_space(8.0);
                 ui.small("1 select · 2 move · 3 rotate · 4 scale");
-                ui.small("LMB: select / drag · RMB-drag: look · WASD: move");
+                ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
+                ui.small("WASD move · Space/C up/down · Ctrl+Z/Y/C/V/D · Del");
             });
 
             // ---- project settings window (project-wide rendering) ----
@@ -916,6 +1130,54 @@ impl Editor {
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
                 });
+
+            // ---- viewport context menu (RMB click on an object / empty space) ----
+            if let Some((pos, hit)) = context_menu {
+                egui::Area::new(egui::Id::new("ctx_menu"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(pos)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_max_width(150.0);
+                            if hit.is_some() {
+                                if ui.button("Duplicate").clicked() {
+                                    cmd.duplicate = true;
+                                    cmd.close_menu = true;
+                                }
+                                if ui.button("Copy").clicked() {
+                                    cmd.copy = true;
+                                    cmd.close_menu = true;
+                                }
+                                if ui.button("Delete").clicked() {
+                                    cmd.delete = true;
+                                    cmd.close_menu = true;
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("Paste").clicked() {
+                                cmd.paste = true;
+                                cmd.close_menu = true;
+                            }
+                            ui.menu_button("Add", |ui| {
+                                if ui.button("Cube").clicked() {
+                                    cmd.add = Some(new_cube());
+                                    cmd.close_menu = true;
+                                    ui.close();
+                                }
+                                if ui.button("Sphere").clicked() {
+                                    cmd.add = Some(new_sphere());
+                                    cmd.close_menu = true;
+                                    ui.close();
+                                }
+                                if ui.button("Blob").clicked() {
+                                    cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
+                                    cmd.close_menu = true;
+                                    ui.close();
+                                }
+                            });
+                        });
+                    });
+            }
 
             // The gizmo paints over the viewport on a top layer (above the scene,
             // below tooltips), clipped to the area right of the panel so handles
@@ -1026,23 +1288,39 @@ impl Editor {
                 eprintln!("  save project failed: {e}");
             }
         }
-    }
 
-    /// Move the selected entity in the camera plane by a screen-pixel delta — the
-    /// "grab and drag in the viewport" gizmo (the object follows the cursor).
-    fn drag_selected(&mut self, dx: f32, dy: f32) {
-        let Some(e) = self.selection else { return };
-        let cam_pos = self.camera.position;
-        let rot = self.camera.rotation();
-        let right = rot * Vec3::X;
-        let up = rot * Vec3::Y;
-        let h = self.gpu.as_ref().map(|g| g.config.height.max(1) as f32).unwrap_or(720.0);
-        if let Some(t) = self.world.get_mut::<Transform>(e) {
-            let dist = (t.translation - cam_pos).length().max(0.1) as f32;
-            // world units per screen pixel at the object's depth (60° vertical fov)
-            let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
-            let d = right * (dx * wpp) - up * (dy * wpp);
-            t.translation += d.as_dvec3();
+        // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
+        if cmd.close_menu {
+            self.context_menu = None;
+        }
+        if cmd.undo {
+            self.undo();
+        }
+        if cmd.redo {
+            self.redo();
+        }
+        if cmd.copy {
+            self.copy_selected();
+        }
+        if cmd.paste {
+            self.paste();
+        }
+        if cmd.duplicate {
+            self.duplicate_selected();
+        }
+        if cmd.delete {
+            self.delete_selected();
+        }
+        if let Some(m) = cmd.add {
+            let name = match &m {
+                MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
+                MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
+                MatterDoc::Blob { .. } => "Blob",
+            };
+            self.add_node(name, m);
+        }
+        if cmd.inspector_changed {
+            self.begin_edit();
         }
     }
 
@@ -1051,6 +1329,150 @@ impl Editor {
         self.tool = tool;
         self.grabbed = None;
         self.drag = None;
+    }
+
+    // ---- selection ----------------------------------------------------------
+    /// The entity the gizmo + inspector act on (the most recently selected).
+    fn primary(&self) -> Option<Entity> {
+        self.selection.last().copied()
+    }
+    fn select_single(&mut self, e: Entity) {
+        self.selection.clear();
+        self.selection.push(e);
+    }
+    fn select_toggle(&mut self, e: Entity) {
+        if let Some(i) = self.selection.iter().position(|&x| x == e) {
+            self.selection.remove(i);
+        } else {
+            self.selection.push(e);
+        }
+    }
+    fn select_all(&mut self) {
+        self.selection = self.world.query::<Matter>().map(|(e, _)| e).collect();
+    }
+    /// Selected entities that are real Matter nodes (excludes the Lighting node).
+    fn selected_matter(&self) -> Vec<Entity> {
+        self.selection.iter().copied().filter(|&e| self.world.get::<Matter>(e).is_some()).collect()
+    }
+
+    // ---- undo / redo (whole-scene snapshots) --------------------------------
+    fn snapshot(&self) -> SceneDoc {
+        floptle_scene::to_doc(self.scene_name.clone(), &self.world)
+    }
+    fn push_history(&mut self, snap: SceneDoc) {
+        self.history.redo.clear();
+        self.history.undo.push(snap);
+        while self.history.undo.len() > self.history.max {
+            self.history.undo.remove(0);
+        }
+    }
+    /// Record the current scene as an undo point (call BEFORE a discrete edit).
+    fn record(&mut self) {
+        let s = self.snapshot();
+        self.push_history(s);
+    }
+    /// Open an edit session for undo coalescing (gizmo/inspector drag = one step),
+    /// using this frame's pre-edit snapshot.
+    fn begin_edit(&mut self) {
+        if !self.editing {
+            if let Some(snap) = self.frame_snapshot.take() {
+                self.push_history(snap);
+            }
+            self.editing = true;
+        }
+    }
+    fn restore(&mut self, doc: SceneDoc) {
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.selection.clear();
+        self.grabbed = None;
+        self.drag = None;
+    }
+    fn undo(&mut self) {
+        if let Some(prev) = self.history.undo.pop() {
+            let cur = self.snapshot();
+            self.history.redo.push(cur);
+            self.restore(prev);
+        }
+    }
+    fn redo(&mut self) {
+        if let Some(next) = self.history.redo.pop() {
+            let cur = self.snapshot();
+            self.history.undo.push(cur);
+            self.restore(next);
+        }
+    }
+
+    // ---- node create / delete / clipboard -----------------------------------
+    fn node_of(&self, e: Entity) -> Option<NodeDoc> {
+        let matter = self.world.get::<Matter>(e)?;
+        let transform =
+            self.world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default();
+        let name = self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_else(|| "node".into());
+        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter) })
+    }
+    fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
+        let e = self.world.spawn();
+        self.world.insert(e, node.transform.to_transform());
+        self.world.insert(e, Name(node.name.clone()));
+        self.world.insert(e, node.matter.to_matter());
+        e
+    }
+    /// Spawn a new node ~5 units in front of the camera, and select it.
+    fn add_node(&mut self, name: &str, matter: MatterDoc) {
+        self.record();
+        let cam = self.camera.render_camera();
+        let pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 5.0).as_dvec3();
+        let node = NodeDoc {
+            name: name.into(),
+            transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
+            matter,
+        };
+        let e = self.spawn_node(&node);
+        self.select_single(e);
+    }
+    fn delete_selected(&mut self) {
+        let targets = self.selected_matter();
+        if targets.is_empty() {
+            return;
+        }
+        self.record();
+        for e in targets {
+            self.world.despawn(e);
+        }
+        self.selection.clear();
+        self.grabbed = None;
+        self.drag = None;
+    }
+    fn copy_selected(&mut self) {
+        let nodes: Vec<NodeDoc> =
+            self.selected_matter().iter().filter_map(|&e| self.node_of(e)).collect();
+        if !nodes.is_empty() {
+            self.clipboard = nodes;
+        }
+    }
+    /// Spawn the given nodes (offset slightly) and select them — used by paste/dup.
+    fn spawn_offset(&mut self, nodes: Vec<NodeDoc>) {
+        if nodes.is_empty() {
+            return;
+        }
+        self.record();
+        self.selection.clear();
+        for mut node in nodes {
+            node.transform.translation[0] += 0.5;
+            node.transform.translation[2] += 0.5;
+            let e = self.spawn_node(&node);
+            self.selection.push(e);
+        }
+    }
+    fn paste(&mut self) {
+        let nodes = self.clipboard.clone();
+        self.spawn_offset(nodes);
+    }
+    fn duplicate_selected(&mut self) {
+        let nodes: Vec<NodeDoc> =
+            self.selected_matter().iter().filter_map(|&e| self.node_of(e)).collect();
+        self.spawn_offset(nodes);
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px) by
@@ -1083,7 +1505,7 @@ impl Editor {
     /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
     /// start-of-drag snapshot (no per-event accumulation → no drift).
     fn gizmo_drag(&mut self) {
-        let (Some(drag), Some(cursor), Some(e)) = (self.drag, self.cursor, self.selection) else {
+        let (Some(drag), Some(cursor), Some(e)) = (self.drag, self.cursor, self.primary()) else {
             return;
         };
         // The snapshot must belong to the still-selected entity (guards against the
