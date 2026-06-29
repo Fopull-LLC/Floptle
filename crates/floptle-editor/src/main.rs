@@ -207,6 +207,8 @@ struct EditorCmd {
     open_script: Option<String>,
     /// Open a script in the user's PREFERRED editor (in-engine or external).
     open_script_pref: Option<String>,
+    /// Jump to a Console line's source: (script name, 1-based line).
+    open_log_source: Option<(String, u32)>,
     /// Focus the Scripting tab (e.g. after a double-click-to-open).
     focus_scripting: bool,
     /// A File-menu project action (New / Open / Close).
@@ -1049,6 +1051,7 @@ enum EditorTab {
     Hierarchy,
     Inspector,
     Assets,
+    Console,
     Scene,
     Scripting,
 }
@@ -1059,6 +1062,7 @@ impl EditorTab {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
             EditorTab::Assets => "Assets",
+            EditorTab::Console => "Console",
             EditorTab::Scene => "Scene",
             EditorTab::Scripting => "Scripting",
         }
@@ -1073,7 +1077,8 @@ fn default_dock() -> egui_dock::DockState<EditorTab> {
     let surface = dock.main_surface_mut();
     let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
     let [central, _] = surface.split_right(central, 0.78, vec![EditorTab::Inspector]);
-    let [_, _] = surface.split_below(central, 0.72, vec![EditorTab::Assets]);
+    // Console sits as a tab beside Assets in the bottom dock (Assets shown first).
+    let [_, _] = surface.split_below(central, 0.72, vec![EditorTab::Assets, EditorTab::Console]);
     dock
 }
 
@@ -1182,16 +1187,71 @@ struct OpenScript {
     dirty: bool,
 }
 
+/// One line in the engine Console. Consecutive identical lines are merged at ingest
+/// (`count`), and `source` (script name + line) drives double-click-to-source.
+struct ConsoleEntry {
+    level: floptle_script::LogLevel,
+    msg: String,
+    source: Option<(String, u32)>,
+    count: u32,
+}
+
+/// Console view state: which severities show, the search filter, and whether to
+/// merge non-adjacent duplicates into one counted row.
+struct ConsoleState {
+    entries: Vec<ConsoleEntry>,
+    show_debug: bool,
+    show_warn: bool,
+    show_error: bool,
+    search: String,
+    collapse: bool,
+}
+
+impl Default for ConsoleState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            show_debug: true,
+            show_warn: true,
+            show_error: true,
+            search: String::new(),
+            collapse: true,
+        }
+    }
+}
+
+impl ConsoleState {
+    /// Append a line, merging it into the previous row if identical (so a per-frame
+    /// repeat becomes a count, not a flood). Caps retained history.
+    fn push(&mut self, level: floptle_script::LogLevel, msg: String, source: Option<(String, u32)>) {
+        if let Some(last) = self.entries.last_mut() {
+            if last.level == level && last.msg == msg {
+                last.count += 1;
+                return;
+            }
+        }
+        self.entries.push(ConsoleEntry { level, msg, source, count: 1 });
+        const MAX: usize = 2000;
+        if self.entries.len() > MAX {
+            let drop = self.entries.len() - MAX;
+            self.entries.drain(0..drop);
+        }
+    }
+}
+
 /// State of the Scripting-tab IDE: the open files and which one is shown
 /// (`None` = the built-in Docs page).
 struct IdeState {
     open: Vec<OpenScript>,
     active: Option<usize>,
+    /// A pending "scroll to this 1-based line" request (Console jump-to-source),
+    /// consumed by `scripting_ui` on the next frame it draws the editor.
+    goto: Option<usize>,
 }
 
 impl Default for IdeState {
     fn default() -> Self {
-        Self { open: Vec::new(), active: None }
+        Self { open: Vec::new(), active: None, goto: None }
     }
 }
 
@@ -1220,6 +1280,8 @@ struct EditorTabViewer<'a> {
     selection: &'a mut Vec<Entity>,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
+    /// The engine Console (script logs / warnings / errors).
+    console: &'a mut ConsoleState,
     entity_names: &'a [(Entity, String)],
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
@@ -1279,6 +1341,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Hierarchy => self.hierarchy_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
             EditorTab::Assets => self.assets_ui(ui),
+            EditorTab::Console => self.console_ui(ui),
             EditorTab::Scene => self.scene_ui(ui),
             EditorTab::Scripting => self.scripting_ui(ui),
         }
@@ -1993,6 +2056,179 @@ impl EditorTabViewer<'_> {
         }
     }
 
+    /// The engine Console: a filterable, searchable feed of script `print`/`log`
+    /// output, warnings and errors. Double-click a line to open its source.
+    fn console_ui(&mut self, ui: &mut egui::Ui) {
+        use floptle_script::LogLevel;
+        let c = &mut *self.console;
+
+        // Tally per-severity counts (summing merged duplicates).
+        let (mut nd, mut nw, mut ne) = (0u32, 0u32, 0u32);
+        for e in &c.entries {
+            match e.level {
+                LogLevel::Debug => nd += e.count,
+                LogLevel::Warn => nw += e.count,
+                LogLevel::Error => ne += e.count,
+            }
+        }
+
+        // ---- toolbar: severity toggles, collapse, search, copy, clear ----
+        let mut do_copy = false;
+        let mut do_clear = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.toggle_value(&mut c.show_debug, format!("🗨 {nd}")).on_hover_text("messages");
+            ui.toggle_value(&mut c.show_warn, format!("⚠ {nw}")).on_hover_text("warnings");
+            ui.toggle_value(&mut c.show_error, format!("⛔ {ne}")).on_hover_text("errors");
+            ui.separator();
+            ui.toggle_value(&mut c.collapse, "⊟").on_hover_text("collapse duplicate lines");
+            ui.separator();
+            ui.label("🔍");
+            ui.add(
+                egui::TextEdit::singleline(&mut c.search)
+                    .hint_text("search")
+                    .desired_width(150.0),
+            );
+            if !c.search.is_empty() && ui.small_button("✕").clicked() {
+                c.search.clear();
+            }
+            ui.separator();
+            if ui.button("⎘ Copy").on_hover_text("copy the visible lines").clicked() {
+                do_copy = true;
+            }
+            if ui.button("🗑 Clear").clicked() {
+                do_clear = true;
+            }
+        });
+        ui.separator();
+
+        // ---- build the visible row set: filter, then optionally fully collapse ----
+        let needle = c.search.to_ascii_lowercase();
+        let passes = |e: &ConsoleEntry| {
+            let on = match e.level {
+                LogLevel::Debug => c.show_debug,
+                LogLevel::Warn => c.show_warn,
+                LogLevel::Error => c.show_error,
+            };
+            if !on {
+                return false;
+            }
+            if needle.is_empty() {
+                return true;
+            }
+            e.msg.to_ascii_lowercase().contains(&needle)
+                || e.source.as_ref().is_some_and(|(n, _)| n.to_ascii_lowercase().contains(&needle))
+        };
+        // (level, msg, source, count)
+        let mut rows: Vec<(LogLevel, &str, Option<&(String, u32)>, u32)> = Vec::new();
+        if c.collapse {
+            // Merge identical messages across the whole feed into one counted row.
+            let mut idx: std::collections::HashMap<(u8, &str), usize> = std::collections::HashMap::new();
+            for e in c.entries.iter().filter(|e| passes(e)) {
+                let key = (e.level as u8, e.msg.as_str());
+                if let Some(&r) = idx.get(&key) {
+                    rows[r].3 += e.count;
+                } else {
+                    idx.insert(key, rows.len());
+                    rows.push((e.level, &e.msg, e.source.as_ref(), e.count));
+                }
+            }
+        } else {
+            for e in c.entries.iter().filter(|e| passes(e)) {
+                rows.push((e.level, &e.msg, e.source.as_ref(), e.count));
+            }
+        }
+
+        if do_copy {
+            let mut text = String::new();
+            for (lvl, msg, src, n) in &rows {
+                let tag = match lvl {
+                    LogLevel::Debug => "log",
+                    LogLevel::Warn => "warn",
+                    LogLevel::Error => "error",
+                };
+                if let Some((name, line)) = src {
+                    text.push_str(&format!("[{tag}] {name}:{line}: {msg}"));
+                } else {
+                    text.push_str(&format!("[{tag}] {msg}"));
+                }
+                if *n > 1 {
+                    text.push_str(&format!("  (x{n})"));
+                }
+                text.push('\n');
+            }
+            ui.ctx().copy_text(text);
+        }
+
+        // ---- the log list ----
+        let mut jump: Option<(String, u32)> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if rows.is_empty() {
+                    ui.weak("No console output. Press F1 to play — script print/log and errors appear here.");
+                }
+                for (lvl, msg, src, n) in &rows {
+                    let color = match lvl {
+                        LogLevel::Debug => egui::Color32::from_gray(205),
+                        LogLevel::Warn => egui::Color32::from_rgb(240, 200, 90),
+                        LogLevel::Error => egui::Color32::from_rgb(235, 95, 95),
+                    };
+                    let icon = match lvl {
+                        LogLevel::Debug => "🗨",
+                        LogLevel::Warn => "⚠",
+                        LogLevel::Error => "⛔",
+                    };
+                    let resp = ui
+                        .horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            if let Some((name, line)) = src {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("{name}:{line}"))
+                                            .monospace()
+                                            .weak(),
+                                    )
+                                    .selectable(false),
+                                );
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(format!("{icon} {msg}")).color(color).monospace(),
+                                )
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                            )
+                        })
+                        .inner;
+                    if *n > 1 {
+                        // count badge sits at the row's right edge.
+                        let badge = format!("×{n}");
+                        ui.painter().text(
+                            egui::pos2(resp.rect.right() + 26.0, resp.rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            badge,
+                            egui::FontId::monospace(11.0),
+                            egui::Color32::from_gray(140),
+                        );
+                    }
+                    if resp.double_clicked() {
+                        if let Some((name, line)) = src {
+                            jump = Some(((*name).clone(), *line));
+                        }
+                    }
+                    resp.on_hover_text("double-click to open the source");
+                }
+            });
+
+        if do_clear {
+            c.entries.clear();
+        }
+        if let Some(j) = jump {
+            self.cmd.open_log_source = Some(j);
+        }
+    }
+
     fn scripting_ui(&mut self, ui: &mut egui::Ui) {
         // Live script errors (from the last play frame) surface here in red.
         if !self.script_errors.is_empty() {
@@ -2139,6 +2375,18 @@ impl EditorTabViewer<'_> {
                     .inner;
                 if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
+                }
+                // A pending Console jump scrolls the requested line into view.
+                if let Some(line) = self.ide.goto.take() {
+                    let row = line.saturating_sub(1).min(output.galley.rows.len().saturating_sub(1));
+                    if let Some(r) = output.galley.rows.get(row) {
+                        let rr = r.rect();
+                        let target = egui::Rect::from_min_max(
+                            output.galley_pos + rr.left_top().to_vec2(),
+                            output.galley_pos + rr.right_bottom().to_vec2(),
+                        );
+                        ui.scroll_to_rect(target, Some(egui::Align::Center));
+                    }
                 }
                 // Red squiggle on the line of a Lua syntax error.
                 if let Some((line, _)) = self.ide_diag {
@@ -2655,6 +2903,8 @@ struct Editor {
     /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
     /// with the triangle or Enter on a selected folder.
     collapsed: std::collections::HashSet<Entity>,
+    /// The engine Console: captured script logs/warnings/errors + its view filters.
+    console: ConsoleState,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
     tool: Tool,
     /// Cursor position in physical pixels (cached from `CursorMoved`).
@@ -3205,6 +3455,10 @@ impl Editor {
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }
+        // Drain any script logs/errors into the Console (consecutive dups merge).
+        for l in self.script_host.drain_logs() {
+            self.console.push(l.level, l.msg, l.source);
+        }
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
@@ -3397,6 +3651,7 @@ impl Editor {
         let world = &mut self.world;
         let selection = &mut self.selection;
         let collapsed = &mut self.collapsed;
+        let console = &mut self.console;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
         let show_project_mgr = &mut self.show_project_mgr;
@@ -3533,6 +3788,7 @@ impl Editor {
                 world,
                 selection,
                 collapsed,
+                console,
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
@@ -4030,6 +4286,9 @@ impl Editor {
         if let Some(path) = cmd.open_script_pref {
             self.open_script_preferred(&path);
         }
+        if let Some((name, line)) = cmd.open_log_source {
+            self.open_source_at(&name, line);
+        }
         if cmd.focus_scripting {
             if let Some(dock) = self.dock_state.as_mut() {
                 focus_scripting_tab(dock);
@@ -4235,6 +4494,29 @@ impl Editor {
             open_external_editor(&self.external_editor, &self.project_root, path, 1);
         } else {
             self.ide.open_file(path);
+            if let Some(dock) = self.dock_state.as_mut() {
+                focus_scripting_tab(dock);
+            }
+        }
+    }
+
+    /// Open a script by its chunk `name` (as captured in a Console line) at `line`,
+    /// in the preferred editor — the Console's double-click-to-source.
+    fn open_source_at(&mut self, name: &str, line: u32) {
+        let line = line.max(1) as usize;
+        let path = if name.ends_with(".lua") {
+            let p = self.project_root.join(name);
+            if p.exists() { p } else { self.scripts_dir().join(name) }
+        } else {
+            self.scripts_dir().join(format!("{name}.lua"))
+        };
+        let path_str = path.to_string_lossy().to_string();
+        if self.prefer_external_editor {
+            open_external_editor(&self.external_editor, &self.project_root, &path_str, line);
+        } else {
+            if self.ide.open_file(&path_str) {
+                self.ide.goto = Some(line);
+            }
             if let Some(dock) = self.dock_state.as_mut() {
                 focus_scripting_tab(dock);
             }

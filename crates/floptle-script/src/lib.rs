@@ -26,14 +26,39 @@
 //! persists across frames, and the host **hot-reloads** a script when its file
 //! changes on disk (re-running it in a fresh environment).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Scripts, World};
-use mlua::{Function, Lua, RegistryKey, Table, Value};
+use mlua::{Function, Lua, RegistryKey, Table, Value, Variadic};
+
+/// Severity of a captured script log line (the engine Console colors by this).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    Warn,
+    Error,
+}
+
+/// One line emitted by a running script — a `print`/`log` call or a raised error.
+/// `source` is the originating `(script name, 1-based line)` when known, so the
+/// editor's Console can jump to it.
+#[derive(Clone, Debug)]
+pub struct ScriptLog {
+    pub level: LogLevel,
+    pub msg: String,
+    pub source: Option<(String, u32)>,
+}
+
+/// Parse the 1-based line out of an mlua error string (formatted `name:LINE: msg`).
+fn error_line(msg: &str) -> u32 {
+    msg.split(':').find_map(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
+}
 
 /// A script source file's reload state: a generation that bumps whenever the file
 /// changes, plus the last error seen for the current generation (so a broken
@@ -74,6 +99,9 @@ pub struct ScriptHost {
     sources: HashMap<String, Source>,
     instances: HashMap<(u32, String), Instance>,
     errors: Vec<String>,
+    /// Captured `print`/`log` output (and errors) since the last drain — the editor
+    /// Console reads these. Shared with the Lua `print`/`log` closures.
+    logs: Rc<RefCell<Vec<ScriptLog>>>,
 }
 
 impl Default for ScriptHost {
@@ -85,19 +113,70 @@ impl Default for ScriptHost {
 impl ScriptHost {
     pub fn new() -> Self {
         let lua = Lua::new();
-        // Engine-branded logger (the Lua stdlib `print` also works).
-        if let Ok(log) = lua.create_function(|_, msg: String| {
-            eprintln!("[lua] {msg}");
-            Ok(())
-        }) {
-            let _ = lua.globals().set("log", log);
+        let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
+        // The current script's `(name, line)` taken from the Lua call stack, so a
+        // Console line can jump to where it was logged.
+        let caller = |lua: &Lua| -> Option<(String, u32)> {
+            let d = lua.inspect_stack(1)?;
+            let src = d.source();
+            let name = src.source.as_ref().map(|c| c.trim_start_matches(['@', '=']).to_string())?;
+            Some((name, d.curr_line().max(0) as u32))
+        };
+        // `log("...")` and Lua's stdlib `print(...)` both feed the engine Console.
+        {
+            let sink = logs.clone();
+            if let Ok(log) = lua.create_function(move |lua, msg: String| {
+                eprintln!("[lua] {msg}");
+                sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+                Ok(())
+            }) {
+                let _ = lua.globals().set("log", log);
+            }
         }
-        Self { lua, sources: HashMap::new(), instances: HashMap::new(), errors: Vec::new() }
+        {
+            let sink = logs.clone();
+            if let Ok(print) = lua.create_function(move |lua, args: Variadic<Value>| {
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) => s.to_string_lossy().to_string(),
+                        Value::Integer(n) => n.to_string(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Nil => "nil".to_string(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                let msg = parts.join("\t");
+                eprintln!("[lua] {msg}");
+                sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
+                Ok(())
+            }) {
+                let _ = lua.globals().set("print", print);
+            }
+        }
+        Self { lua, sources: HashMap::new(), instances: HashMap::new(), errors: Vec::new(), logs }
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
     pub fn errors(&self) -> &[String] {
         &self.errors
+    }
+
+    /// Take the script log lines captured since the last call (Console feed).
+    pub fn drain_logs(&self) -> Vec<ScriptLog> {
+        std::mem::take(&mut self.logs.borrow_mut())
+    }
+
+    /// Record a script error: into `errors` (the Scripting tab) and the Console feed
+    /// (tagged with the script's name + parsed line for jump-to-source).
+    fn record_error(&mut self, name: &str, msg: String) {
+        self.logs.borrow_mut().push(ScriptLog {
+            level: LogLevel::Error,
+            msg: msg.clone(),
+            source: Some((name.to_string(), error_line(&msg))),
+        });
+        self.errors.push(msg);
     }
 
     /// Syntax-check Lua source without running it. Returns `(line, message)` for the
@@ -185,7 +264,7 @@ impl ScriptHost {
     ) {
         let path = scripts_dir.join(format!("{name}.lua"));
         let Some(generation) = self.ensure_source(name, &path) else {
-            self.errors.push(format!("{name}: script not found ({})", path.display()));
+            self.record_error(name, format!("{name}: script not found ({})", path.display()));
             return;
         };
 
@@ -195,7 +274,7 @@ impl ScriptHost {
         if needs_build {
             // Don't recompile a known-broken generation every frame; re-emit it.
             if let Some(err) = self.sources.get(name).and_then(|s| s.error.clone()) {
-                self.errors.push(err);
+                self.record_error(name, err);
                 return;
             }
             let src = match std::fs::read_to_string(&path) {
@@ -293,7 +372,7 @@ impl ScriptHost {
         if let Some(src) = self.sources.get_mut(name) {
             src.error = Some(msg.clone());
         }
-        self.errors.push(msg);
+        self.record_error(name, msg);
     }
 }
 
@@ -439,5 +518,47 @@ mod tests {
         let d = host.script_defaults(&dir.join("pulsate.lua"));
         assert_eq!(d.len(), 3);
         assert!(d.iter().any(|(k, v)| k == "amplitude" && (*v - 0.3).abs() < 1e-6));
+    }
+
+    fn world_with_script(kind: &str) -> (World, Entity) {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+            kind: kind.into(),
+            enabled: true,
+            params: vec![],
+        }]));
+        (world, e)
+    }
+
+    #[test]
+    fn captures_print_and_log() {
+        let dir = std::env::temp_dir().join("floptle_script_test_logs");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "talky", "function update(node, dt)\n  log('tick')\n  print('p', 2, true)\nend\n");
+        let (mut world, _e) = world_with_script("talky");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let logs = host.drain_logs();
+        assert!(logs.iter().any(|l| l.msg == "tick" && l.level == LogLevel::Debug), "logs: {logs:?}");
+        assert!(logs.iter().any(|l| l.msg == "p\t2\ttrue"), "logs: {logs:?}");
+        // logs carry the originating script name for jump-to-source.
+        assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "talky")), "no source: {logs:?}");
+        assert!(host.drain_logs().is_empty(), "logs should be drained");
+    }
+
+    #[test]
+    fn captures_errors_in_console_feed() {
+        let dir = std::env::temp_dir().join("floptle_script_test_err");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "broken", "function update(node, dt)\n  this_is_not_defined()\nend\n");
+        let (mut world, _e) = world_with_script("broken");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(!host.errors().is_empty(), "should report an error");
+        let logs = host.drain_logs();
+        assert!(logs.iter().any(|l| l.level == LogLevel::Error), "expected an error log: {logs:?}");
+        assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "broken")), "error lacks source: {logs:?}");
     }
 }
