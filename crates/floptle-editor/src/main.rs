@@ -3327,15 +3327,20 @@ impl Editor {
         let show_blobs = self.project.matter && !blobs.is_empty();
         let rm = if show_blobs || self.terrain.is_some() {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
-            if let Some(hf) = self.terrain.as_ref().map(|t| t.baked.half_extent) {
+            if let Some((hf, bc)) =
+                self.terrain.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
+            {
                 // The terrain node's transform places the volume box. (Inlined direct
                 // field access — `terrain_origin()` would borrow all of `self` while
-                // gpu/egui are mutably borrowed here.)
+                // gpu/egui are mutably borrowed here.) The field's own `baked.center`
+                // shifts as the slab expands asymmetrically, so the box center is the
+                // node origin plus that local offset.
                 let origin = self
                     .terrain_entity
                     .map(|e| floptle_core::world_transform(&self.world, e).translation)
                     .unwrap_or(DVec3::ZERO);
-                let cr = origin - cam.world_position;
+                let cr = origin + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64)
+                    - cam.world_position;
                 g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0]; // present
                 g.vol_half = [hf[0], hf[1], hf[2], 0.1];
             }
@@ -4875,6 +4880,12 @@ impl Editor {
         if due {
             let brush = self.terrain_brush;
             let terrain = self.terrain.as_mut().unwrap();
+            // Infinite terrain: grow the field outward when the brush nears an edge,
+            // so the slab has no fixed bounds. (Skip for Paint — painting never
+            // extends the shape.) Growth keeps voxel size constant.
+            if !matches!(brush.mode, floptle_field::Brush::Paint) {
+                terrain.ensure_contains(hit, brush.radius * 1.5);
+            }
             match brush.mode {
                 floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
                     // Paint a texture palette slot (stored as slot+1; 0 = untextured).

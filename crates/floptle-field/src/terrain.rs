@@ -64,6 +64,96 @@ impl Terrain {
         t
     }
 
+    /// Grow the grid (keeping voxel size constant) so a brush at local `point`
+    /// with `margin` stays comfortably inside the field — the "infinite terrain"
+    /// behavior: sculpting near an edge extends the slab outward instead of
+    /// clamping at a wall. New cells replicate the nearest existing edge voxel, so
+    /// flat ground stays flat and a slope simply continues. All three axes can
+    /// grow (horizontal reach + vertical headroom for tall features). Returns true
+    /// if the grid actually changed — the caller must re-upload to the GPU.
+    pub fn ensure_contains(&mut self, point: [f32; 3], margin: f32) -> bool {
+        // A generous per-axis cell cap so an endless drag can't exhaust memory.
+        const MAX_DIM: u32 = 384;
+        let dims = self.baked.dims;
+        let c = self.baked.center;
+        let hf = self.baked.half_extent;
+        let mut add_lo = [0u32; 3];
+        let mut add_hi = [0u32; 3];
+        for i in 0..3 {
+            let vs = 2.0 * hf[i] / dims[i] as f32; // voxel size on this axis
+            let lo = c[i] - hf[i];
+            let hi = c[i] + hf[i];
+            // Grow in chunks so we don't reallocate on every dab near an edge.
+            let chunk = (margin * 2.0).max(vs * 8.0);
+            if point[i] - margin < lo {
+                add_lo[i] = ((lo - (point[i] - margin) + chunk) / vs).ceil() as u32;
+            }
+            if point[i] + margin > hi {
+                add_hi[i] = (((point[i] + margin) - hi + chunk) / vs).ceil() as u32;
+            }
+        }
+        // Clamp each axis to the cell cap (shave the high side first).
+        for i in 0..3 {
+            let room = MAX_DIM.saturating_sub(dims[i]);
+            let want = add_lo[i] + add_hi[i];
+            if want > room {
+                let mut excess = want - room;
+                let cut = excess.min(add_hi[i]);
+                add_hi[i] -= cut;
+                excess -= cut;
+                add_lo[i] -= excess.min(add_lo[i]);
+            }
+        }
+        if add_lo.iter().chain(&add_hi).all(|&a| a == 0) {
+            return false;
+        }
+        self.grow(add_lo, add_hi);
+        true
+    }
+
+    /// Reallocate the grid with `add_lo`/`add_hi` extra cells per axis, copying old
+    /// cells into place and edge-clamping the new border cells. Voxel size is held
+    /// constant, so `center`/`half_extent` are recomputed from the new cell counts.
+    fn grow(&mut self, add_lo: [u32; 3], add_hi: [u32; 3]) {
+        let old = self.baked.clone();
+        let [ow, oh, od] = old.dims;
+        let new_dims = [ow + add_lo[0] + add_hi[0], oh + add_lo[1] + add_hi[1], od + add_lo[2] + add_hi[2]];
+        let vs = [
+            2.0 * old.half_extent[0] / ow as f32,
+            2.0 * old.half_extent[1] / oh as f32,
+            2.0 * old.half_extent[2] / od as f32,
+        ];
+        let new_half = [
+            new_dims[0] as f32 * vs[0] * 0.5,
+            new_dims[1] as f32 * vs[1] * 0.5,
+            new_dims[2] as f32 * vs[2] * 0.5,
+        ];
+        // new_lo = old_lo - add_lo*vs ; new_center = new_lo + new_half
+        let new_center = [
+            (old.center[0] - old.half_extent[0]) - add_lo[0] as f32 * vs[0] + new_half[0],
+            (old.center[1] - old.half_extent[1]) - add_lo[1] as f32 * vs[1] + new_half[1],
+            (old.center[2] - old.half_extent[2]) - add_lo[2] as f32 * vs[2] + new_half[2],
+        ];
+        let n = (new_dims[0] * new_dims[1] * new_dims[2]) as usize;
+        let mut distance = vec![0.0f32; n];
+        let mut color = vec![[0u8; 4]; n];
+        let clamp = |v: i64, hi: u32| v.clamp(0, hi as i64 - 1) as u32;
+        for nz in 0..new_dims[2] {
+            let oz = clamp(nz as i64 - add_lo[2] as i64, od);
+            for ny in 0..new_dims[1] {
+                let oy = clamp(ny as i64 - add_lo[1] as i64, oh);
+                for nx in 0..new_dims[0] {
+                    let ox = clamp(nx as i64 - add_lo[0] as i64, ow);
+                    let ni = ((nz * new_dims[1] + ny) * new_dims[0] + nx) as usize;
+                    let oi = ((oz * oh + oy) * ow + ox) as usize;
+                    distance[ni] = old.distance[oi];
+                    color[ni] = old.color[oi];
+                }
+            }
+        }
+        self.baked = BakedSdf { dims: new_dims, center: new_center, half_extent: new_half, distance, color };
+    }
+
     /// Serialize the field to a compact binary blob (saved alongside the scene).
     /// Layout: magic, dims[3]u32, center[3]f32, half[3]f32, distance(f32…), color(u8…).
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -412,6 +502,29 @@ mod tests {
         assert_eq!(t.baked.distance, back.baked.distance);
         assert_eq!(t.baked.color, back.baked.color);
         assert!(Terrain::from_bytes(b"nope").is_none());
+    }
+
+    #[test]
+    fn ensure_contains_grows_and_preserves_surface() {
+        let mut t = Terrain::flat([32, 24, 32], [0.0, 0.0, 0.0], [16.0, 6.0, 16.0], 0.0, [0.4, 0.7, 0.3]);
+        // Voxel size before growth — must stay constant after.
+        let vs0 = 2.0 * t.baked.half_extent[0] / t.baked.dims[0] as f32;
+        let before = t.baked.dims;
+        // Brush well past the +X edge (box reaches +16) forces horizontal growth.
+        let grew = t.ensure_contains([40.0, 0.0, 0.0], 2.0);
+        assert!(grew, "should have expanded");
+        assert!(t.baked.dims[0] > before[0], "x grew");
+        assert_eq!(t.baked.dims[1], before[1], "y unchanged (brush at surface)");
+        let vs1 = 2.0 * t.baked.half_extent[0] / t.baked.dims[0] as f32;
+        assert!((vs0 - vs1).abs() < 1e-4, "voxel size held constant");
+        // The far edge is now reachable, and the ground is still flat there.
+        assert!(t.baked.center[0] + t.baked.half_extent[0] >= 40.0, "box reaches the brush");
+        assert!(t.sample([34.0, 2.0, 0.0]) > 0.0, "above ground still positive out there");
+        assert!(t.sample([34.0, -2.0, 0.0]) < 0.0, "below ground still negative out there");
+        // Idempotent: a brush back inside the (now larger) box doesn't grow it.
+        let dims = t.baked.dims;
+        assert!(!t.ensure_contains([0.0, 0.0, 0.0], 2.0));
+        assert_eq!(t.baked.dims, dims);
     }
 
     #[test]
