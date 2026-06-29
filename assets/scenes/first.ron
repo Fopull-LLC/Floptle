@@ -9,37 +9,94 @@
         (
             name: "cube",
             transform: (
-                translation: (-2.0, 0.0, 0.0),
+                translation: (-2.6077352166175842, -3.9733164310455322, 3.498071074485779),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.9, 0.45, 0.35),
+                color: (0.9, 0.44999987, 0.35),
             ),
+            scripts: [],
         ),
         (
             name: "sphere",
             transform: (
-                translation: (2.0, 0.0, 0.0),
+                translation: (2.0, -3.2408924102783203, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Primitive(
                 shape: Sphere,
-                color: (0.4, 0.7, 0.95),
+                color: (0.4, 0.6999998, 0.95),
             ),
+            scripts: [],
         ),
         (
             name: "blob",
             transform: (
-                translation: (0.0, 1.6, 0.0),
+                translation: (4.0, 0.0, 0.5),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Blob(
                 scale: 1.0,
             ),
+            scripts: [],
+        ),
+        (
+            name: "Duck",
+            transform: (
+                translation: (-0.5, -2.0, 0.5),
+                rotation: (0.0, -0.6594635, 0.0, 0.7517366),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Mesh(
+                asset_path: "assets/models/_test/Duck.glb",
+            ),
+            scripts: [
+                (
+                    kind: "rotate",
+                    enabled: true,
+                    params: [
+                        ("speed", 70.6),
+                    ],
+                ),
+            ],
+        ),
+        (
+            name: "RetroMap",
+            transform: (
+                translation: (-0.7815980581879485, -0.6658739191880572, -6.407521494283345),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.4, 0.4, 0.4),
+            ),
+            matter: Mesh(
+                asset_path: "assets/models/_test/RetroMap.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Blob",
+            transform: (
+                translation: (-0.0, -0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Blob(
+                scale: 1.0,
+            ),
+            scripts: [
+                (
+                    kind: "pulsate",
+                    enabled: true,
+                    params: [
+                        ("amplitude", 0.35),
+                        ("speed", 2.5),
+                        ("base", 1.0),
+                    ],
+                ),
+            ],
         ),
     ],
 )

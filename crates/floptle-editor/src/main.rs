@@ -162,6 +162,8 @@ struct EditorCmd {
     close_menu: bool,
     /// Toggle play mode (run scripts).
     toggle_play: bool,
+    /// Toggle pause (freeze the script clock while playing).
+    toggle_pause: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
@@ -612,8 +614,11 @@ struct Editor {
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
+    /// Paused (in play mode): the script clock freezes.
+    paused: bool,
+    /// Accumulated play-mode seconds (advances only while playing and not paused).
+    play_t: f32,
     play_snapshot: Option<SceneDoc>,
-    play_started: Option<Instant>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -810,6 +815,8 @@ impl ApplicationHandler for Editor {
                             match code {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+                                KeyCode::F1 => self.toggle_play(),
+                                KeyCode::F2 => self.toggle_pause(),
                                 _ => {
                                     if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
                                         self.set_tool(t);
@@ -972,10 +979,12 @@ impl Editor {
                 Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
         }
 
-        // Play mode: run attached scripts (they mutate transforms, e.g. pulsate).
+        // Play mode: advance the (pausable) script clock and run attached scripts.
         if self.playing {
-            let pt = self.play_started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
-            floptle_core::run_scripts(&mut self.world, pt);
+            if !self.paused {
+                self.play_t += dt;
+            }
+            floptle_core::run_scripts(&mut self.world, self.play_t);
         }
 
         // ---- gather the scene from the World ----
@@ -1106,6 +1115,7 @@ impl Editor {
         let asset_tree = &self.asset_tree;
         let mut want_refresh_assets = false;
         let playing = self.playing;
+        let paused = self.paused;
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
         let scene_name = self.scene_name.clone();
@@ -1172,9 +1182,15 @@ impl Editor {
                         }
                     });
                     ui.separator();
-                    let play_label = if playing { "⏹ Stop" } else { "▶ Play" };
+                    let play_label = if playing { "⏹ Stop  (F1)" } else { "▶ Play  (F1)" };
                     if ui.button(play_label).clicked() {
                         cmd.toggle_play = true;
+                    }
+                    if playing {
+                        let pause_label = if paused { "▶ Resume  (F2)" } else { "⏸ Pause  (F2)" };
+                        if ui.button(pause_label).clicked() {
+                            cmd.toggle_pause = true;
+                        }
                     }
                 });
             });
@@ -1435,13 +1451,14 @@ impl Editor {
                 });
             });
 
-            // Viewport drop target — only active while an asset is being dragged, so
-            // it never eats normal viewport clicks. Dropping a model here spawns it.
-            if egui::DragAndDrop::has_any_payload(ui.ctx()) {
-                let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(egui::Frame::NONE, |ui| {
-                    ui.allocate_space(ui.available_size());
-                });
-                if let Some(p) = dropped {
+            // Viewport drop: detect a release over the scene (not over a panel)
+            // WITHOUT allocating an opaque interactive region — so the viewport never
+            // greys out mid-drag. Panel drops (script-on-node) are consumed first.
+            if egui::DragAndDrop::has_payload_of_type::<AssetPayload>(ui.ctx())
+                && ui.input(|i| i.pointer.any_released())
+                && !ui.ctx().is_pointer_over_egui()
+            {
+                if let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
                     cmd.drop_asset = Some(p.path.clone());
                 }
             }
@@ -1695,6 +1712,9 @@ impl Editor {
         if cmd.toggle_play {
             self.toggle_play();
         }
+        if cmd.toggle_pause {
+            self.toggle_pause();
+        }
         if let Some(path) = cmd.drop_asset {
             self.drop_asset(&path);
         }
@@ -1804,13 +1824,21 @@ impl Editor {
     fn toggle_play(&mut self) {
         if self.playing {
             self.playing = false;
+            self.paused = false;
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
         } else {
             self.play_snapshot = Some(self.snapshot());
-            self.play_started = Some(Instant::now());
+            self.play_t = 0.0;
+            self.paused = false;
             self.playing = true;
+        }
+    }
+    /// Freeze/unfreeze the script clock while playing.
+    fn toggle_pause(&mut self) {
+        if self.playing {
+            self.paused = !self.paused;
         }
     }
 
@@ -1905,8 +1933,7 @@ impl Editor {
                 return;
             }
             self.record();
-            let cam = self.camera.render_camera();
-            let pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 6.0).as_dvec3();
+            let pos = self.cursor_world();
             let name = std::path::Path::new(path)
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -1987,6 +2014,31 @@ impl Editor {
         let nodes: Vec<NodeDoc> =
             self.selected_matter().iter().filter_map(|&e| self.node_of(e)).collect();
         self.spawn_offset(nodes);
+    }
+
+    /// The world point under the cursor — its ray's hit on the ground plane (y=0),
+    /// or ~6 units in front of the camera if the ray doesn't meet the ground. Used to
+    /// place a dropped asset where the cursor is.
+    fn cursor_world(&self) -> DVec3 {
+        let cam = self.camera.render_camera();
+        let fallback = cam.world_position + (cam.rotation * Vec3::NEG_Z * 6.0).as_dvec3();
+        let (Some(gpu), Some(cursor)) = (self.gpu.as_ref(), self.cursor) else { return fallback };
+        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let inv = cam.view_proj(w / h).inverse();
+        let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
+        let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+        let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+        let ro = near.truncate() / near.w; // camera-relative
+        let rd = (far.truncate() / far.w - ro).normalize();
+        // world y = cam_y + ro.y + t*rd.y = 0
+        let cam_y = cam.world_position.y as f32;
+        if rd.y.abs() > 1e-4 {
+            let t = -(cam_y + ro.y) / rd.y;
+            if (0.1..1000.0).contains(&t) {
+                return cam.world_position + (ro + rd * t).as_dvec3();
+            }
+        }
+        fallback
     }
 
     /// Pick the nearest selectable entity under a viewport cursor (physical px).
