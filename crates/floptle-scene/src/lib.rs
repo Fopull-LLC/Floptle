@@ -11,15 +11,16 @@ use std::path::Path;
 
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Matter, Name, Shape, World};
+use floptle_core::{Light, Matter, Name, Shape, World};
 use serde::{Deserialize, Serialize};
 
-/// A whole scene: a name, render settings, and the nodes in it.
+/// A whole scene: a name, its lighting (the mandatory Lighting node), and the
+/// nodes in it. Project-wide render settings live separately in [`ProjectConfigDoc`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SceneDoc {
     pub name: String,
     #[serde(default)]
-    pub render: RenderConfigDoc,
+    pub lighting: LightDoc,
     pub nodes: Vec<NodeDoc>,
 }
 
@@ -117,34 +118,52 @@ impl From<ShapeDoc> for Shape {
     }
 }
 
-/// Render settings carried in the scene — the PS1/PS2-style knobs.
+/// Serializable lighting for the scene's mandatory Lighting node, mirroring
+/// [`floptle_core::Light`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
-pub struct RenderConfigDoc {
-    pub retro: bool,
-    pub retro_height: u32,
-    pub matter: bool,
-    pub light_dir: [f32; 3],
-    pub light_color: [f32; 3],
+pub struct LightDoc {
+    pub direction: [f32; 3],
+    pub color: [f32; 3],
     pub ambient: [f32; 3],
 }
 
-impl Default for RenderConfigDoc {
+impl Default for LightDoc {
+    fn default() -> Self {
+        Self::from(&Light::default())
+    }
+}
+
+impl From<&Light> for LightDoc {
+    fn from(l: &Light) -> Self {
+        Self { direction: l.direction, color: l.color, ambient: l.ambient }
+    }
+}
+
+impl LightDoc {
+    pub fn to_light(self) -> Light {
+        Light { direction: self.direction, color: self.color, ambient: self.ambient }
+    }
+}
+
+/// Project-wide render settings — the PS1/PS2-style knobs that apply to every
+/// scene. Saved to `project.ron`, edited in the editor's Project Settings.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ProjectConfigDoc {
+    pub retro: bool,
+    pub retro_height: u32,
+    pub matter: bool,
+}
+
+impl Default for ProjectConfigDoc {
     fn default() -> Self {
         Self::ps1()
     }
 }
 
-impl RenderConfigDoc {
+impl ProjectConfigDoc {
     /// The default PS1 look: 240p retro upscale, matter on.
     pub fn ps1() -> Self {
-        Self {
-            retro: true,
-            retro_height: 240,
-            matter: true,
-            light_dir: [0.4, 0.9, 0.45],
-            light_color: [1.0, 0.98, 0.92],
-            ambient: [0.12, 0.12, 0.16],
-        }
+        Self { retro: true, retro_height: 240, matter: true }
     }
 
     /// A higher-resolution PS2-ish look.
@@ -194,7 +213,23 @@ pub fn to_ron(doc: &SceneDoc) -> Result<String, SceneError> {
     ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default()).map_err(SceneError::Serialize)
 }
 
-/// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`.
+/// Load the project-wide render config, or the default if the file is missing.
+pub fn load_project(path: &Path) -> ProjectConfigDoc {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| ron::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Save the project-wide render config to a pretty RON file.
+pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneError> {
+    let text = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default())
+        .map_err(SceneError::Serialize)?;
+    std::fs::write(path, text).map_err(SceneError::Io)
+}
+
+/// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,
+/// then spawn the one mandatory Lighting node (`Name` + [`Light`]).
 pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     for node in &doc.nodes {
         let e = world.spawn();
@@ -202,10 +237,13 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         world.insert(e, Name(node.name.clone()));
         world.insert(e, node.matter.to_matter());
     }
+    let light = world.spawn();
+    world.insert(light, Name("Lighting".into()));
+    world.insert(light, doc.lighting.to_light());
 }
 
-/// Snapshot every `Matter` entity in `world` back into a `SceneDoc`.
-pub fn to_doc(name: impl Into<String>, render: RenderConfigDoc, world: &World) -> SceneDoc {
+/// Snapshot every `Matter` entity (and the `Light` node) in `world` into a `SceneDoc`.
+pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
     let entities: Vec<_> = world.query::<Matter>().map(|(e, _)| e).collect();
     let mut nodes = Vec::with_capacity(entities.len());
     for e in entities {
@@ -215,7 +253,9 @@ pub fn to_doc(name: impl Into<String>, render: RenderConfigDoc, world: &World) -
         let name = world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
         nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter) });
     }
-    SceneDoc { name: name.into(), render, nodes }
+    let lighting =
+        world.query::<Light>().next().map(|(_, l)| LightDoc::from(l)).unwrap_or_default();
+    SceneDoc { name: name.into(), lighting, nodes }
 }
 
 #[cfg(test)]
@@ -225,7 +265,7 @@ mod tests {
     fn demo() -> SceneDoc {
         SceneDoc {
             name: "demo".into(),
-            render: RenderConfigDoc::ps1(),
+            lighting: LightDoc::default(),
             nodes: vec![
                 NodeDoc {
                     name: "cube".into(),
@@ -254,9 +294,11 @@ mod tests {
         let doc = demo();
         let mut world = World::new();
         spawn_into(&doc, &mut world);
-        assert_eq!(world.len(), 2);
-        let snap = to_doc("demo", RenderConfigDoc::ps1(), &world);
+        // 2 matter nodes + the mandatory Lighting node
+        assert_eq!(world.len(), 3);
+        let snap = to_doc("demo", &world);
         assert_eq!(snap.nodes.len(), 2);
+        assert_eq!(snap.lighting, LightDoc::default());
         // the cube's authored translation survives the World round-trip
         let cube = snap.nodes.iter().find(|n| n.name == "cube").unwrap();
         assert_eq!(cube.transform.translation, [1.0, 2.0, 3.0]);

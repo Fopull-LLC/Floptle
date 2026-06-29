@@ -32,7 +32,7 @@ pub mod time;
 pub mod transform;
 
 pub use ecs::{Entity, World};
-pub use matter::{Matter, Name, Shape, Spin};
+pub use matter::{Light, Matter, Name, Shape, Spin};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};
 pub use transform::Transform;

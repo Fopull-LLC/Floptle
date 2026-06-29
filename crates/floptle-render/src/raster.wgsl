@@ -58,3 +58,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let lit = g.ambient.rgb + g.light_color.rgb * ndl;
     return vec4<f32>(albedo * lit, 1.0);
 }
+
+// Flat, unlit color for the selection outline. Drawn as an inverted hull (an
+// enlarged shell with front-face culling) behind the object, so only a rim of this
+// color shows around the silhouette. The tint carries the outline color.
+@fragment
+fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color.rgb, 1.0);
+}

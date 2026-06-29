@@ -89,7 +89,7 @@ fn main() {
     // Same draw order as the editor: blob first (clears + writes depth), then the
     // meshes compose into the shared depth buffer.
     raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, None);
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, &[], None);
 
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out}  (cam_dist={cam_dist}, blob_scale={blob_scale})");
