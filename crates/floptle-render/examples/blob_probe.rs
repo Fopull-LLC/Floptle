@@ -79,6 +79,8 @@ fn main() {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
         light_dir: [light.x, light.y, light.z, 0.0],
+        light_color: [1.0, 0.98, 0.92, 0.0],
+        ambient: [0.12, 0.12, 0.16, 0.0],
         bg: [0.02, 0.02, 0.05, 1.0],
         center: [c.x, c.y, c.z, blob_scale.max(0.05)],
         params: [0.0, 0.0, 0.0, 0.0],
@@ -89,7 +91,7 @@ fn main() {
     // Same draw order as the editor: blob first (clears + writes depth), then the
     // meshes compose into the shared depth buffer.
     raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, &[], None);
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, None);
 
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out}  (cam_dist={cam_dist}, blob_scale={blob_scale})");

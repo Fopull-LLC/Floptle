@@ -59,10 +59,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(albedo * lit, 1.0);
 }
 
-// Flat, unlit color for the selection outline. Drawn as an inverted hull (an
-// enlarged shell with front-face culling) behind the object, so only a rim of this
-// color shows around the silhouette. The tint carries the outline color.
+// Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a
+// single-channel target; a post-pass edge-detects this into a selection outline
+// that hugs the true silhouette (works for any shape).
 @fragment
-fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color.rgb, 1.0);
+fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }

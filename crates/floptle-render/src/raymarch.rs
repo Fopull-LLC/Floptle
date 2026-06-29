@@ -18,6 +18,8 @@ pub struct RaymarchGlobals {
     pub view_proj: [[f32; 4]; 4],
     pub inv_view_proj: [[f32; 4]; 4],
     pub light_dir: [f32; 4],
+    pub light_color: [f32; 4],
+    pub ambient: [f32; 4],
     pub bg: [f32; 4],
     /// Analytic blob: xyz camera-relative center, w = scale.
     pub center: [f32; 4],
@@ -31,6 +33,8 @@ pub struct RaymarchGlobals {
 
 pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,
+    /// Silhouette-mask pipeline (writes 1.0 where the blob is hit, no depth).
+    mask_pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -110,6 +114,34 @@ impl Raymarch {
             cache: None,
         });
 
+        // Silhouette-mask pipeline: same march, but writes 1.0 (no depth) into a
+        // single-channel mask for the selection-outline post-pass.
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch-mask"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_mask"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::outline::MASK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-globals"),
             size: std::mem::size_of::<RaymarchGlobals>() as u64,
@@ -138,6 +170,7 @@ impl Raymarch {
 
         Self {
             pipeline,
+            mask_pipeline,
             globals_buf,
             bind_layout,
             sampler,
@@ -195,6 +228,38 @@ impl Raymarch {
                 multiview_mask: None,
             });
             rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Render the SDF matter's silhouette as 1.0 into a single-channel mask (clearing
+    /// it first) — the selection-outline source for the blob.
+    pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, globals: RaymarchGlobals) {
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch-mask") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raymarch-mask"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: mask,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.mask_pipeline);
             rp.set_bind_group(0, &self.bind, &[]);
             rp.draw(0..3, 0..1);
         }

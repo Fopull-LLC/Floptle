@@ -13,8 +13,8 @@ use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Light, Matter, Name, Shape, World};
 use floptle_render::{
-    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Raster,
-    Raymarch, RaymarchGlobals, Retro,
+    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Outline,
+    Raster, Raymarch, RaymarchGlobals, Retro,
 };
 use floptle_scene::ProjectConfigDoc;
 use winit::application::ApplicationHandler;
@@ -419,6 +419,8 @@ struct Editor {
     raster: Option<Raster>,
     raymarch: Option<Raymarch>,
     retro: Option<Retro>,
+    /// Selection-outline post-process (silhouette mask + edge detect).
+    outline: Option<Outline>,
     egui: Option<Egui>,
     camera: FlyCamera,
     input: Input,
@@ -482,6 +484,7 @@ impl ApplicationHandler for Editor {
         self.project = floptle_scene::load_project(std::path::Path::new(PROJECT_PATH));
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
+        self.outline = Some(Outline::new(&gpu));
 
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(
@@ -528,6 +531,9 @@ impl ApplicationHandler for Editor {
                     gpu.resize(size.width, size.height);
                     if let Some(retro) = self.retro.as_mut() {
                         retro.resize(gpu, self.project.retro_height.max(80));
+                    }
+                    if let Some(outline) = self.outline.as_mut() {
+                        outline.resize(gpu, size.width, size.height);
                     }
                 }
             }
@@ -646,11 +652,20 @@ impl ApplicationHandler for Editor {
 
 impl Editor {
     fn render(&mut self) {
-        let (Some(gpu), Some(raster), Some(raymarch), Some(retro), Some(egui), Some(window)) = (
+        let (
+            Some(gpu),
+            Some(raster),
+            Some(raymarch),
+            Some(retro),
+            Some(outline),
+            Some(egui),
+            Some(window),
+        ) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
             self.raymarch.as_ref(),
             self.retro.as_mut(),
+            self.outline.as_ref(),
             self.egui.as_mut(),
             self.window.as_ref(),
         ) else {
@@ -710,10 +725,11 @@ impl Editor {
             }
         }
 
-        // Selection outline: an enlarged white shell for a selected mesh (drawn as an
-        // inverted hull by the raster), or a screen-space ring for a selected blob.
-        let mut outline: Vec<(MeshId, InstanceRaw)> = Vec::new();
-        let mut sel_ring: Option<(Vec2, f32)> = None;
+        // Selection outline source: render the selected object's silhouette into the
+        // outline mask (a mesh instance, or the blob via raymarch), then a post-pass
+        // edge-detects it. `mask_mesh` non-empty → mesh; `mask_blob` → the SDF blob.
+        let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
+        let mut mask_blob = false;
         if let Some(e) = self.selection {
             if let (Some(m), Some(t)) =
                 (self.world.get::<Matter>(e), self.world.get::<Transform>(e))
@@ -721,24 +737,11 @@ impl Editor {
                 match m {
                     Matter::Primitive { shape, .. } => {
                         if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
-                            let mut shell = *t;
-                            shell.scale *= 1.06;
-                            let model = shell.render_matrix(cam.world_position);
-                            outline.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                            let model = t.render_matrix(cam.world_position);
+                            mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
                         }
                     }
-                    Matter::Blob { scale } => {
-                        let (vw, vh) =
-                            (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-                        let r_world = 0.85 * scale * t.scale.x;
-                        let edge = t.translation + (cam.rotation * Vec3::X * r_world).as_dvec3();
-                        if let (Some(c), Some(es)) = (
-                            project(t.translation, cam.world_position, view_proj, vw, vh),
-                            project(edge, cam.world_position, view_proj, vw, vh),
-                        ) {
-                            sel_ring = Some((c, (es - c).length()));
-                        }
-                    }
+                    Matter::Blob { .. } => mask_blob = true,
                 }
             }
         }
@@ -750,6 +753,8 @@ impl Editor {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
                 light_dir: [light.x, light.y, light.z, 0.0],
+                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [c.x, c.y, c.z, scale.max(0.05)],
                 params: [elapsed, 0.0, 0.0, 0.0], // time → the blob morphs
@@ -773,7 +778,6 @@ impl Editor {
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
         let tool = &mut self.tool;
-        let sel_ring = sel_ring;
         let mut want_save = false;
         let mut want_save_project = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
@@ -917,21 +921,12 @@ impl Editor {
             // below tooltips), clipped to the area right of the panel so handles
             // never draw over the inspector. It only draws — interaction is handled
             // in the window/device events against the cached hit-test.
-            let ppp = ui.ctx().pixels_per_point();
-            let painter = ui
-                .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
-                .with_clip_rect(ui.available_rect_before_wrap());
-            // A white selection ring for the blob (the mesh outline is drawn in 3D).
-            if let Some((c, r)) = sel_ring {
-                painter.circle_stroke(
-                    egui::Pos2::new(c.x / ppp, c.y / ppp),
-                    (r / ppp).max(4.0),
-                    egui::Stroke::new(1.5, egui::Color32::WHITE),
-                );
-            }
             if let Some(g) = gizmo {
-                paint_gizmo(&painter, g, *tool, grabbed, ppp);
+                let painter = ui
+                    .ctx()
+                    .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
+                    .with_clip_rect(ui.available_rect_before_wrap());
+                paint_gizmo(&painter, g, *tool, grabbed, ui.ctx().pixels_per_point());
             }
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
@@ -953,9 +948,25 @@ impl Editor {
                 } else {
                     Some(clear.map(|c| c as f64))
                 };
-                raster.draw_scene(gpu, color, depth, globals, &instances, &outline, raster_clear);
+                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
                 if self.project.retro {
                     retro.blit(gpu, &frame);
+                }
+
+                // Selection outline: mask the selected object's silhouette (full
+                // frame res, so it stays crisp over the retro scene) then edge-detect
+                // it onto the frame. Works for meshes and the SDF blob alike.
+                let masked = if !mask_mesh.is_empty() {
+                    raster.draw_mask(gpu, outline.mask_view(), globals, &mask_mesh);
+                    true
+                } else if let (true, Some(rm)) = (mask_blob, rm) {
+                    raymarch.draw_mask(gpu, outline.mask_view(), rm);
+                    true
+                } else {
+                    false
+                };
+                if masked {
+                    outline.composite(gpu, &frame.view, [1.0, 1.0, 1.0, 1.0], 1.3);
                 }
 
                 // egui composited over the final frame

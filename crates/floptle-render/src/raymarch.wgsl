@@ -11,6 +11,8 @@ struct Globals {
     view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,
+    light_color: vec4<f32>,
+    ambient: vec4<f32>,
     bg: vec4<f32>,
     center: vec4<f32>,      // analytic blob: xyz camera-relative center, w = scale
     params: vec4<f32>,      // x = time
@@ -167,10 +169,11 @@ fn fs(in: VOut) -> FsOut {
             let l = normalize(G.light_dir.xyz);
             let diff = max(dot(n, l), 0.0);
             let albedo = m.col;
-            // Clean matte shading: ambient + diffuse + a subtle low-frequency rim.
-            // No high-power specular / sharp fresnel — those alias into concentric
-            // rings on a smooth SDF surface (especially at low retro resolution).
-            var col = albedo * (0.25 + 0.75 * diff);
+            // Matte shading consistent with the raster meshes: ambient + colored
+            // diffuse, plus a subtle low-frequency rim. No high-power specular /
+            // sharp fresnel — those alias into concentric rings on a smooth SDF
+            // surface (especially at low retro resolution).
+            var col = albedo * (G.ambient.rgb + G.light_color.rgb * diff);
             let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
             col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
@@ -183,4 +186,40 @@ fn fs(in: VOut) -> FsOut {
         out.depth = 1.0;
     }
     return out;
+}
+
+// Silhouette mask: 1.0 where the matter field is hit and in front of the camera,
+// discarded elsewhere. A post-pass edge-detects this into a selection outline that
+// hugs the true SDF silhouette (not a bounding circle).
+@fragment
+fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
+    let near = G.inv_view_proj * vec4<f32>(in.ndc, 0.0, 1.0);
+    let far = G.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    let ro = near.xyz / near.w;
+    let rd = normalize(far.xyz / far.w - ro);
+
+    let reach = max(G.center.w, length(G.vol_half.xyz));
+    let max_t = reach * 60.0 + length(G.center.xyz) + length(G.vol_center.xyz) + 100.0;
+    var t = 0.0;
+    var masked = 0.0;
+    for (var i = 0; i < 160; i = i + 1) {
+        let p = ro + rd * t;
+        let d = map(p).d;
+        if (d < 0.0015 * t + 0.0025) {
+            let clip = G.view_proj * vec4<f32>(p, 1.0);
+            let ndc_z = clip.z / clip.w;
+            if (clip.w > 0.0 && ndc_z >= 0.0 && ndc_z <= 1.0) {
+                masked = 1.0;
+            }
+            break;
+        }
+        t = t + max(d, 0.003) * 0.8;
+        if (t > max_t) {
+            break;
+        }
+    }
+    if (masked < 0.5) {
+        discard;
+    }
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }
