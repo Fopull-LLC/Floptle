@@ -100,6 +100,14 @@ fn volume(p: vec3<f32>) -> Matter {
 // The whole field: every piece of matter folded together with smin.
 fn map(p: vec3<f32>) -> Matter {
     let a = analytic(p);
+    // No baked volume bound → return the blob directly. Blending against the
+    // "absent" sentinel (1e9) is not just wasteful: f32 `mix(1e9, d, 1.0)` is
+    // evaluated as `1e9 + 1.0*(d - 1e9)`, and `d - 1e9` loses `d` entirely, so the
+    // field would collapse to ~0 everywhere — a surface at the camera, every ray a
+    // false hit. (This was the "glitchy giant sphere".)
+    if (G.vol_center.w < 0.5) {
+        return a;
+    }
     let v = volume(p);
     return smin_matter(a, v, max(G.vol_half.w, 0.0001));
 }

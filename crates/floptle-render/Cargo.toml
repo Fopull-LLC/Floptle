@@ -19,3 +19,7 @@ winit = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+# Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
+png = "0.18"
