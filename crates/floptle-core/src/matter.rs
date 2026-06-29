@@ -64,6 +64,9 @@ pub enum Matter {
     /// A group / "empty" — renders nothing, but has a transform and can parent other
     /// nodes (a folder for organizing the scene, or a rig root like a player).
     Empty,
+    /// Editable SDF terrain — like a blob, but a sculptable/paintable voxel field.
+    /// The transform places its volume; the field data lives alongside the scene.
+    Terrain,
 }
 
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under

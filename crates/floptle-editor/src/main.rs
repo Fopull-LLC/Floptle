@@ -191,6 +191,8 @@ struct EditorCmd {
     clear_terrain: bool,
     /// The terrain texture palette changed — re-upload it.
     terrain_palette_changed: bool,
+    /// Open the Terrain window.
+    show_terrain: bool,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
@@ -651,6 +653,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Blob { .. } => "Blob",
         MatterDoc::Mesh { .. } => "Mesh",
         MatterDoc::Empty => "Group",
+        MatterDoc::Terrain => "Terrain",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1480,6 +1483,13 @@ impl EditorTabViewer<'_> {
                         Matter::Empty => {
                             ui.label("group / empty");
                             ui.small("a folder — organizes child nodes; has a transform but no geometry");
+                        }
+                        Matter::Terrain => {
+                            ui.label("editable terrain");
+                            ui.small("a sculptable SDF field — move it with the transform below");
+                            if ui.button("⛰ Open Terrain tools").clicked() {
+                                cmd.show_terrain = true;
+                            }
                         }
                     }
                 }
@@ -2449,6 +2459,8 @@ struct Editor {
     texture_registry: HashMap<String, TexId>,
     /// The editable terrain SDF field (None until "Create terrain").
     terrain: Option<floptle_field::Terrain>,
+    /// The scene node that *is* the terrain (its transform places the volume).
+    terrain_entity: Option<Entity>,
     /// The terrain volume needs re-uploading to the GPU.
     terrain_dirty: bool,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
@@ -2612,6 +2624,7 @@ impl ApplicationHandler for Editor {
         let (scene_file, doc) = self.load_active_scene();
         self.scene_name = Self::scene_name_of(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.adopt_terrain();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
@@ -3099,7 +3112,7 @@ impl Editor {
                         }
                     }
                 }
-                Matter::Empty => {} // a group/folder — renders nothing
+                Matter::Empty | Matter::Terrain => {} // group / terrain render via other passes
             }
         }
 
@@ -3154,7 +3167,7 @@ impl Editor {
                     Matter::Blob { scale } => {
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
                     }
-                    Matter::Empty => {}
+                    Matter::Empty | Matter::Terrain => {}
                 }
             }
         }
@@ -3164,10 +3177,15 @@ impl Editor {
         let show_blobs = self.project.matter && !blobs.is_empty();
         let rm = if show_blobs || self.terrain.is_some() {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
-            if let Some(t) = &self.terrain {
-                let c = t.baked.center;
-                let cr = DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64) - cam.world_position;
-                let hf = t.baked.half_extent;
+            if let Some(hf) = self.terrain.as_ref().map(|t| t.baked.half_extent) {
+                // The terrain node's transform places the volume box. (Inlined direct
+                // field access — `terrain_origin()` would borrow all of `self` while
+                // gpu/egui are mutably borrowed here.)
+                let origin = self
+                    .terrain_entity
+                    .map(|e| floptle_core::world_transform(&self.world, e).translation)
+                    .unwrap_or(DVec3::ZERO);
+                let cr = origin - cam.world_position;
                 g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0]; // present
                 g.vol_half = [hf[0], hf[1], hf[2], 0.1];
             }
@@ -3839,6 +3857,7 @@ impl Editor {
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
+                MatterDoc::Terrain => "Terrain",
             };
             self.add_node(name, m);
         }
@@ -3910,9 +3929,15 @@ impl Editor {
         }
         if cmd.clear_terrain {
             self.terrain = None;
+            if let Some(e) = self.terrain_entity.take() {
+                self.world.despawn(e);
+            }
         }
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
+        }
+        if cmd.show_terrain {
+            self.show_terrain = true;
         }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
@@ -4065,6 +4090,7 @@ impl Editor {
     fn restore(&mut self, doc: SceneDoc) {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.adopt_terrain();
         self.selection.clear();
         self.grabbed = None;
         self.drag = None;
@@ -4260,6 +4286,10 @@ impl Editor {
         }
         self.record();
         for e in targets {
+            if self.terrain_entity == Some(e) {
+                self.terrain = None;
+                self.terrain_entity = None;
+            }
             self.world.despawn(e);
         }
         self.selection.clear();
@@ -4386,7 +4416,7 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
-                Matter::Empty => None, // no geometry — select folders via the hierarchy
+                Matter::Empty | Matter::Terrain => None, // no mesh — select via the hierarchy
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
@@ -4562,8 +4592,10 @@ impl Editor {
         let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
         let ro_rel = near.truncate() / near.w;
         let rd = (far.truncate() / far.w - ro_rel).normalize();
-        let ro_world = cam.world_position + ro_rel.as_dvec3();
-        let ro = [ro_world.x as f32, ro_world.y as f32, ro_world.z as f32];
+        // The field lives in the terrain node's local space, so cast in that space.
+        let origin = self.terrain_origin();
+        let ro_local = cam.world_position + ro_rel.as_dvec3() - origin;
+        let ro = [ro_local.x as f32, ro_local.y as f32, ro_local.z as f32];
         let rd_a = [rd.x, rd.y, rd.z];
 
         let terrain = self.terrain.as_ref().unwrap();
@@ -4575,7 +4607,7 @@ impl Editor {
         let radius = self.terrain_brush.radius;
 
         // Telegraph: a ring of `radius` around the hit in the surface tangent plane.
-        let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64);
+        let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64) + origin;
         let n = Vec3::new(nrm[0], nrm[1], nrm[2]);
         let t1 = n.cross(if n.y.abs() > 0.9 { Vec3::X } else { Vec3::Y }).normalize_or_zero();
         let t2 = n.cross(t1);
@@ -4621,7 +4653,8 @@ impl Editor {
         [d, (d * 3 / 8).max(8), d]
     }
 
-    /// Create a fresh flat terrain at the current detail.
+    /// Create a fresh flat terrain at the current detail, as a scene node. Its
+    /// transform places the volume; the field is centered in the node's local space.
     fn create_terrain(&mut self) {
         self.terrain = Some(floptle_field::Terrain::flat(
             self.terrain_dims(),
@@ -4631,6 +4664,56 @@ impl Editor {
             [0.35, 0.6, 0.28],
         ));
         self.terrain_dirty = true;
+        // Reuse the existing terrain node, or spawn one.
+        if self.terrain_entity.and_then(|e| self.world.get::<Matter>(e)).is_none() {
+            self.record();
+            let e = self.world.spawn();
+            self.world.insert(e, Transform::IDENTITY);
+            self.world.insert(e, Name("Terrain".into()));
+            self.world.insert(e, Matter::Terrain);
+            self.terrain_entity = Some(e);
+            self.select_single(e);
+        }
+    }
+
+    /// Where a scene's terrain field is stored (one file per scene).
+    fn terrain_field_path(&self) -> PathBuf {
+        self.project_root.join("terrain").join(format!("{}.tfield", self.scene_name))
+    }
+
+    /// After loading a scene, adopt its terrain node (if any) and load its field
+    /// from disk; otherwise clear any terrain. Call once `scene_name` is set.
+    fn adopt_terrain(&mut self) {
+        let e = self
+            .world
+            .query::<Matter>()
+            .find(|(_, m)| matches!(m, Matter::Terrain))
+            .map(|(e, _)| e);
+        self.terrain_entity = e;
+        self.terrain = None;
+        if e.is_some() {
+            self.terrain = std::fs::read(self.terrain_field_path())
+                .ok()
+                .and_then(|b| floptle_field::Terrain::from_bytes(&b));
+            // A terrain node with no/garbled field → start it flat.
+            if self.terrain.is_none() {
+                self.terrain = Some(floptle_field::Terrain::flat(
+                    self.terrain_dims(),
+                    [0.0, 0.0, 0.0],
+                    [16.0, 6.0, 16.0],
+                    0.0,
+                    [0.35, 0.6, 0.28],
+                ));
+            }
+            self.terrain_dirty = true;
+        }
+    }
+
+    /// The world position of the terrain volume's box center (the node's placement).
+    fn terrain_origin(&self) -> DVec3 {
+        self.terrain_entity
+            .map(|e| floptle_core::world_transform(&self.world, e).translation)
+            .unwrap_or(DVec3::ZERO)
     }
 
     // ---- scene-graph (parenting) -------------------------------------------
@@ -4700,6 +4783,7 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.scene_name = name;
+        self.adopt_terrain();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -4878,6 +4962,7 @@ impl Editor {
         self.scene_name = Self::scene_name_of(&path);
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.adopt_terrain();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.materials = self.load_materials();
         self.asset_tree = build_assets(&self.project_root);
@@ -4925,6 +5010,8 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
         self.scene_name = "untitled".into();
+        self.terrain = None;
+        self.terrain_entity = None;
         self.selection.clear();
         self.selected_asset = None;
         self.ide = IdeState::default();
@@ -4941,6 +5028,14 @@ impl Editor {
         match floptle_scene::save(&doc, &path) {
             Ok(()) => println!("  saved {}", path.display()),
             Err(e) => eprintln!("  save failed: {e}"),
+        }
+        // The terrain field is large, so it lives beside the scene (not inline).
+        if let Some(t) = &self.terrain {
+            let tp = self.terrain_field_path();
+            let _ = std::fs::create_dir_all(tp.parent().unwrap_or(Path::new(".")));
+            if let Err(e) = std::fs::write(&tp, t.to_bytes()) {
+                eprintln!("  save terrain failed: {e}");
+            }
         }
     }
 
