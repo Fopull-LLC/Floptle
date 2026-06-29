@@ -11,13 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
+use floptle_core::math::{DVec3, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Light, Material, Matter, Name, ScriptInst, Scripts, Shape, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
     cube, instance_of, instance_of_mat, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input,
-    InstanceRaw, MaterialParams, MeshId, Outline, Raster, Raymarch, RaymarchGlobals, Retro, TexId,
+    InstanceRaw, MaterialParams, MeshId, Outline, Projection, Raster, Raymarch, RaymarchGlobals,
+    RenderCamera, Retro, TexId,
 };
 use floptle_scene::{
     MaterialDoc, MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ScriptDoc, ShapeDoc, TransformDoc,
@@ -292,6 +293,12 @@ fn is_texture(path: &str) -> bool {
 fn is_markdown(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.ends_with(".md") || p.ends_with(".markdown")
+}
+/// A saved material preset (`materials/<name>.ron`) — distinguished from a scene
+/// `.ron` by living under a `materials` directory.
+fn is_material(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".ron") && p.replace('\\', "/").contains("materials/")
 }
 
 /// Open the OS file manager at `path` (revealing the file where supported).
@@ -1282,6 +1289,13 @@ struct EditorTabViewer<'a> {
     collapsed: &'a mut std::collections::HashSet<Entity>,
     /// The engine Console (script logs / warnings / errors).
     console: &'a mut ConsoleState,
+    /// The Inspector asset preview to draw (model/material render or texture image).
+    preview: Option<PreviewView>,
+    preview_zoom: &'a mut f32,
+    preview_spin: &'a mut f32,
+    preview_spinning: &'a mut bool,
+    /// The material being previewed/edited when a material asset is selected.
+    preview_material: &'a mut Option<(String, Material)>,
     entity_names: &'a [(Entity, String)],
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
@@ -1559,6 +1573,13 @@ impl EditorTabViewer<'_> {
             let name_resp = ui.selectable_label(false, &path);
             if is_model(&path) {
                 ui.label("glTF model — drag onto the scene to place it.");
+                self.asset_preview_ui(ui);
+            } else if is_material(&path) {
+                ui.label("material preset");
+                self.asset_preview_ui(ui);
+                self.material_asset_ui(ui, &path);
+            } else if is_texture(&path) {
+                self.asset_preview_ui(ui);
             } else if is_script(&path) {
                 ui.label("script — drag onto a node, double-click, or:");
                 if ui.button("✎  Open in Scripting").clicked() {
@@ -2052,6 +2073,73 @@ impl EditorTabViewer<'_> {
                     [pt(a), pt(b)],
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 200, 255)),
                 );
+            }
+        }
+    }
+
+    /// Draw the selected asset's preview: a spinning model/material render (drag to
+    /// orbit, scroll to zoom, with spin + zoom controls) or a texture image.
+    fn asset_preview_ui(&mut self, ui: &mut egui::Ui) {
+        match self.preview.clone() {
+            Some(PreviewView::Rendered(id)) => {
+                let size = egui::vec2(240.0, 240.0);
+                let resp = ui.add(
+                    egui::Image::new((id, size))
+                        .sense(egui::Sense::click_and_drag())
+                        .corner_radius(4.0),
+                );
+                // Drag to orbit (pauses auto-spin); scroll over the image to zoom.
+                if resp.dragged() {
+                    *self.preview_spinning = false;
+                    *self.preview_spin += resp.drag_delta().x * 0.01;
+                }
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if resp.hovered() && scroll != 0.0 {
+                    *self.preview_zoom = (*self.preview_zoom * (1.0 - scroll * 0.002)).clamp(0.4, 4.0);
+                }
+                ui.horizontal(|ui| {
+                    ui.toggle_value(self.preview_spinning, "⟲ spin");
+                    ui.add(egui::Slider::new(self.preview_zoom, 0.4..=4.0).text("zoom"));
+                });
+            }
+            Some(PreviewView::Image(handle, dims)) => {
+                let max = 256.0;
+                let (w, h) = (dims[0].max(1) as f32, dims[1].max(1) as f32);
+                let s = (max / w.max(h)).min(1.0);
+                ui.add(
+                    egui::Image::new(&handle)
+                        .fit_to_exact_size(egui::vec2(w * s, h * s))
+                        .corner_radius(4.0),
+                );
+                ui.small(format!("{}×{} px", dims[0], dims[1]));
+            }
+            None => {
+                ui.weak("(building preview…)");
+            }
+        }
+    }
+
+    /// Editable properties for a selected material preset, with a Save back to its
+    /// `.ron`. Edits mutate the live preview material, so the sphere updates as you go.
+    fn material_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        let Some((mpath, mat)) = self.preview_material.as_mut() else { return };
+        if mpath != path {
+            return;
+        }
+        ui.separator();
+        let r = material_props_ui(ui, mat, self.materials, &[], self.mat_name_buf);
+        if let Some(name) = r.save_as {
+            if !name.is_empty() {
+                self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));
+            }
+        }
+        if ui.button("💾 Save to this preset").clicked() {
+            let stem = Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !stem.is_empty() {
+                self.cmd.save_material = Some((stem, MaterialDoc::from_material(mat)));
             }
         }
     }
@@ -2905,6 +2993,18 @@ struct Editor {
     collapsed: std::collections::HashSet<Entity>,
     /// The engine Console: captured script logs/warnings/errors + its view filters.
     console: ConsoleState,
+    /// Offscreen target for the Inspector's spinning model / material preview.
+    preview: Option<PreviewTarget>,
+    /// Preview orbit angle (radians), whether it auto-spins, and the zoom (camera
+    /// distance multiplier — smaller = closer).
+    preview_spin: f32,
+    preview_spinning: bool,
+    preview_zoom: f32,
+    /// Cached image for a selected texture asset: (path, egui handle, dims).
+    preview_image: Option<(String, egui::TextureHandle, [usize; 2])>,
+    /// The material being previewed/edited when a material asset is selected:
+    /// (path, editable Material).
+    preview_material: Option<(String, Material)>,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
     tool: Tool,
     /// Cursor position in physical pixels (cached from `CursorMoved`).
@@ -3009,6 +3109,23 @@ struct MeshAsset {
     size: f32,
 }
 
+/// An offscreen target the Inspector renders an asset preview into (a spinning
+/// model or a material sphere), exposed to egui as a texture id.
+struct PreviewTarget {
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    tex_id: egui::TextureId,
+}
+
+/// What the Inspector preview shows this frame (built from the selected asset).
+#[derive(Clone)]
+enum PreviewView {
+    /// A GPU-rendered spinning subject (model or material sphere).
+    Rendered(egui::TextureId),
+    /// A loaded image + its pixel dimensions (texture asset).
+    Image(egui::TextureHandle, [usize; 2]),
+}
+
 impl ApplicationHandler for Editor {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -3023,6 +3140,8 @@ impl ApplicationHandler for Editor {
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
         self.prefer_external_editor = load_prefer_external();
+        self.preview_spinning = true;
+        self.preview_zoom = 1.0;
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -3323,6 +3442,13 @@ impl Editor {
         // Terrain brush telegraph + throttled stroke (before the destructure, so it
         // can freely borrow `self`).
         self.terrain_frame_update();
+
+        // Inspector asset preview: render the spinning model/material (or load the
+        // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
+        // cheap peek at the frame delta — only the turntable angle uses it.
+        let preview_dt = self.last.map(|l| l.elapsed().as_secs_f32()).unwrap_or(0.0).min(0.1);
+        self.update_asset_preview(preview_dt);
+        let preview_view = self.preview_view();
 
         // Live Lua syntax check for the active IDE file (drives red squiggles).
         self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
@@ -3652,6 +3778,10 @@ impl Editor {
         let selection = &mut self.selection;
         let collapsed = &mut self.collapsed;
         let console = &mut self.console;
+        let preview_zoom = &mut self.preview_zoom;
+        let preview_spin = &mut self.preview_spin;
+        let preview_spinning = &mut self.preview_spinning;
+        let preview_material = &mut self.preview_material;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
         let show_project_mgr = &mut self.show_project_mgr;
@@ -3789,6 +3919,11 @@ impl Editor {
                 selection,
                 collapsed,
                 console,
+                preview: preview_view.clone(),
+                preview_zoom,
+                preview_spin,
+                preview_spinning,
+                preview_material,
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
@@ -4762,6 +4897,174 @@ impl Editor {
             }
         }
     }
+
+    // ---- asset preview (Inspector) ------------------------------------------
+    /// Lazily create the 320² offscreen target the asset preview renders into, and
+    /// register its color view with egui so the Inspector can draw it as an image.
+    fn ensure_preview_target(&mut self) {
+        if self.preview.is_some() {
+            return;
+        }
+        let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
+        let size = 320u32;
+        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = make(
+            gpu.surface_format(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "preview-color",
+        );
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "preview-depth");
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let tex_id =
+            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
+        self.preview = Some(PreviewTarget { color_view, depth_view, tex_id });
+    }
+
+    /// (Re)load a selected texture asset into an egui texture handle for preview.
+    fn ensure_preview_image(&mut self, path: &str) {
+        if self.preview_image.as_ref().is_some_and(|(p, _, _)| p == path) {
+            return;
+        }
+        let Some(egui) = self.egui.as_ref() else { return };
+        if let Some(img) = floptle_assets::load_texture(Path::new(path)) {
+            let dims = [img.width as usize, img.height as usize];
+            let color = egui::ColorImage::from_rgba_unmultiplied(dims, &img.pixels);
+            let handle = egui.ctx.load_texture(
+                format!("preview:{path}"),
+                color,
+                egui::TextureOptions::LINEAR,
+            );
+            self.preview_image = Some((path.to_string(), handle, dims));
+        }
+    }
+
+    /// Each frame: build the Inspector preview for the selected asset. Models and
+    /// material presets render as a turntable-spinning subject into the offscreen
+    /// target; textures load as an egui image.
+    fn update_asset_preview(&mut self, dt: f32) {
+        let Some(path) = self.selected_asset.clone() else {
+            self.preview_material = None;
+            return;
+        };
+        if is_texture(&path) {
+            self.ensure_preview_image(&path);
+            return;
+        }
+        if !is_model(&path) && !is_material(&path) {
+            return;
+        }
+        if self.preview_spinning {
+            self.preview_spin += dt * 0.8;
+        }
+
+        // Resolve the subject into drawable parts + a bounding radius.
+        let mut parts: Vec<(MeshId, Option<TexId>)> = Vec::new();
+        let mut radius = 1.0f32;
+        let mut mat = MaterialParams::flat([0.8, 0.8, 0.82]);
+        let is_mat = is_material(&path);
+        if is_model(&path) {
+            if !self.import_model(&path) {
+                return;
+            }
+            if let Some(a) = self.mesh_registry.get(&path) {
+                radius = (a.size * 0.5).max(0.2);
+                parts = a.parts.iter().map(|m| (*m, None)).collect();
+            }
+        } else {
+            // Material preset: (re)load it from the loaded presets by file stem.
+            if self.preview_material.as_ref().is_none_or(|(p, _)| p != &path) {
+                let stem = Path::new(&path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Some((_, doc)) = self.materials.iter().find(|(n, _)| *n == stem) {
+                    self.preview_material = Some((path.clone(), doc.to_material()));
+                }
+            }
+            if let Some((_, material)) = self.preview_material.clone() {
+                let tex = material.texture.as_ref().and_then(|t| self.ensure_texture(t));
+                mat = material_params(&material);
+                radius = 0.85;
+                if let Some(s) = self.mesh_ids.get(1).copied() {
+                    parts.push((s, tex));
+                }
+            }
+        }
+        if parts.is_empty() {
+            return;
+        }
+
+        // Turntable camera: orbit the subject, looking at the origin (the subject is
+        // drawn camera-relative since the view matrix carries no translation).
+        let dist = (radius * 3.0 * self.preview_zoom).max(0.4);
+        let a = self.preview_spin;
+        let eye = Vec3::new(a.cos() * dist, radius * 0.55, a.sin() * dist);
+        let fwd = (Vec3::ZERO - eye).normalize();
+        let right = fwd.cross(Vec3::Y).normalize();
+        let up = right.cross(fwd);
+        let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
+        let cam = RenderCamera::new(
+            eye.as_dvec3(),
+            rot,
+            Projection::Perspective { fov_y: 0.7, near: 0.02, far: 1000.0 },
+        );
+        let vp = cam.view_proj(1.0);
+        let model = Mat4::from_translation(-eye); // obj at origin, camera-relative
+        let raw = if is_mat {
+            instance_of_mat(model, &mat)
+        } else {
+            instance_of(model, [1.0, 1.0, 1.0])
+        };
+        let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
+            parts.iter().map(|(m, t)| (*m, *t, raw)).collect();
+        let l = Vec3::new(0.5, 0.8, 0.6).normalize();
+        let globals = Globals {
+            view_proj: vp.to_cols_array_2d(),
+            light_dir: [l.x, l.y, l.z, 0.0],
+            light_color: [1.0, 0.98, 0.93, 0.0],
+            ambient: [0.30, 0.32, 0.38, 0.0],
+        };
+
+        self.ensure_preview_target();
+        if let (Some(gpu), Some(raster), Some(preview)) =
+            (self.gpu.as_ref(), self.raster.as_mut(), self.preview.as_ref())
+        {
+            raster.draw_scene(
+                gpu,
+                &preview.color_view,
+                &preview.depth_view,
+                globals,
+                &instances,
+                Some([0.07, 0.08, 0.10, 1.0]),
+            );
+        }
+    }
+
+    /// What the Inspector should draw for the current selection's preview.
+    fn preview_view(&self) -> Option<PreviewView> {
+        let path = self.selected_asset.as_ref()?;
+        if is_texture(path) {
+            let (_, handle, dims) = self.preview_image.as_ref()?;
+            Some(PreviewView::Image(handle.clone(), *dims))
+        } else if is_model(path) || is_material(path) {
+            Some(PreviewView::Rendered(self.preview.as_ref()?.tex_id))
+        } else {
+            None
+        }
+    }
+
     /// Drop of an asset from the browser: spawn a model, or attach a script to the
     /// selection (a model dropped on the viewport, a script anywhere).
     fn drop_asset(&mut self, path: &str) {
