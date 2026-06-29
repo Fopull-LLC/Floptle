@@ -2579,6 +2579,12 @@ struct Editor {
     /// strokes (so the brush behaves like a real paint tool, not 200 dabs/sec).
     last_dab_pos: Option<DVec3>,
     last_dab_time: Option<Instant>,
+    /// Pre-stroke field bytes captured on mouse-down — pushed to the undo timeline
+    /// on mouse-up if the stroke actually deformed the terrain. `None` between
+    /// strokes. The whole stroke collapses to a single undo step.
+    stroke_snapshot: Option<Vec<u8>>,
+    /// At least one dab landed during the current stroke (so it's worth undoing).
+    stroke_dabbed: bool,
     /// Terrain brush settings.
     terrain_brush: TerrainBrush,
     /// New-terrain resolution along the long axis (user-controllable detail).
@@ -2684,10 +2690,18 @@ struct Editor {
     gpu: Option<Gpu>,
 }
 
-/// Undo/redo stack of whole-scene snapshots (simple + robust for small scenes).
+/// One reversible step on the unified timeline. Scene edits store a whole-scene
+/// doc; terrain strokes store the field's serialized bytes. Keeping both kinds on
+/// one stack means Ctrl+Z walks back through scene + terrain edits in true order.
+enum Snapshot {
+    Scene(floptle_scene::SceneDoc),
+    Terrain(Vec<u8>),
+}
+
+/// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
 struct History {
-    undo: Vec<floptle_scene::SceneDoc>,
-    redo: Vec<floptle_scene::SceneDoc>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     /// Max retained undo steps (a user preference later).
     max: usize,
 }
@@ -2895,10 +2909,13 @@ impl ApplicationHandler for Editor {
                         // Sculpt tool: start a brush stroke on the terrain (applied
                         // next frame in terrain_frame_update).
                         self.context_menu = None;
-                        if self.terrain.is_some() {
+                        if let Some(t) = self.terrain.as_ref() {
                             self.sculpting = true;
                             self.last_dab_pos = None; // first dab fires immediately
                             self.last_dab_time = None;
+                            // Snapshot the field so the whole stroke is one undo step.
+                            self.stroke_snapshot = Some(t.to_bytes());
+                            self.stroke_dabbed = false;
                         }
                     } else if over_scene {
                         // Clicking the viewport dismisses an open context menu (but
@@ -2934,6 +2951,12 @@ impl ApplicationHandler for Editor {
                     self.drag = None;
                     self.editing = false;
                     self.sculpting = false;
+                    // End of a sculpt stroke: bank one undo step if it changed anything.
+                    if let Some(snap) = self.stroke_snapshot.take() {
+                        if self.stroke_dabbed {
+                            self.push_history(Snapshot::Terrain(snap));
+                        }
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
@@ -4226,7 +4249,7 @@ impl Editor {
     fn snapshot(&self) -> SceneDoc {
         floptle_scene::to_doc(self.scene_name.clone(), &self.world)
     }
-    fn push_history(&mut self, snap: SceneDoc) {
+    fn push_history(&mut self, snap: Snapshot) {
         self.history.redo.clear();
         self.history.undo.push(snap);
         while self.history.undo.len() > self.history.max {
@@ -4236,14 +4259,14 @@ impl Editor {
     /// Record the current scene as an undo point (call BEFORE a discrete edit).
     fn record(&mut self) {
         let s = self.snapshot();
-        self.push_history(s);
+        self.push_history(Snapshot::Scene(s));
     }
     /// Open an edit session for undo coalescing (gizmo/inspector drag = one step),
     /// using this frame's pre-edit snapshot.
     fn begin_edit(&mut self) {
         if !self.editing {
             if let Some(snap) = self.frame_snapshot.take() {
-                self.push_history(snap);
+                self.push_history(Snapshot::Scene(snap));
             }
             self.editing = true;
         }
@@ -4256,24 +4279,49 @@ impl Editor {
         self.grabbed = None;
         self.drag = None;
     }
+    /// Swap the live terrain field for serialized `bytes`, queuing a GPU re-upload.
+    fn apply_terrain_bytes(&mut self, bytes: &[u8]) {
+        if let Some(t) = floptle_field::Terrain::from_bytes(bytes) {
+            self.terrain = Some(t);
+            self.terrain_dirty = true;
+        }
+    }
     fn undo(&mut self) {
         if self.playing {
             return; // stop play before editing history
         }
-        if let Some(prev) = self.history.undo.pop() {
-            let cur = self.snapshot();
-            self.history.redo.push(cur);
-            self.restore(prev);
+        match self.history.undo.pop() {
+            Some(Snapshot::Scene(prev)) => {
+                let cur = self.snapshot();
+                self.history.redo.push(Snapshot::Scene(cur));
+                self.restore(prev);
+            }
+            Some(Snapshot::Terrain(prev)) => {
+                if let Some(cur) = self.terrain.as_ref().map(|t| t.to_bytes()) {
+                    self.history.redo.push(Snapshot::Terrain(cur));
+                }
+                self.apply_terrain_bytes(&prev);
+            }
+            None => {}
         }
     }
     fn redo(&mut self) {
         if self.playing {
             return;
         }
-        if let Some(next) = self.history.redo.pop() {
-            let cur = self.snapshot();
-            self.history.undo.push(cur);
-            self.restore(next);
+        match self.history.redo.pop() {
+            Some(Snapshot::Scene(next)) => {
+                let cur = self.snapshot();
+                self.history.undo.push(Snapshot::Scene(cur));
+                self.restore(next);
+            }
+            Some(Snapshot::Terrain(next)) => {
+                if let Some(cur) = self.terrain.as_ref().map(|t| t.to_bytes()) {
+                    self.history.undo.push(Snapshot::Terrain(cur));
+                }
+                self.apply_terrain_bytes(&next);
+            }
+            None => {}
         }
     }
 
@@ -4838,6 +4886,7 @@ impl Editor {
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
             }
             self.terrain_dirty = true;
+            self.stroke_dabbed = true; // mark this stroke as worth an undo step
         }
     }
 
