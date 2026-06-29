@@ -41,6 +41,16 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
+/// CPU image data for a material's base-color texture: tightly-packed `RGBA8`,
+/// row-major, `width * height * 4` bytes. The importer decodes glTF images into
+/// this; the renderer uploads it.
+#[derive(Clone, Debug)]
+pub struct TextureData {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// A mesh resident on the GPU: an interleaved vertex buffer + a `u32` index buffer.
 pub struct GpuMesh {
     pub(crate) vbuf: wgpu::Buffer,

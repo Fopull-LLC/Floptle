@@ -1,26 +1,24 @@
 //! The forward raster pass — the seed of the mesh/material path (Phase 2).
 //!
-//! It draws a registry of `GpuMesh`es, each instanced any number of times, in a
-//! single depth-tested render pass with simple directional diffuse lighting. Per
-//! object data — the **camera-relative** model matrix (`Transform::render_matrix`,
-//! ADR-0015), its inverse-transpose normal matrix, and a tint color — rides a
-//! per-instance vertex buffer rewritten once per frame, so adding the Nth object
-//! costs one struct push and no extra draw call. A shared neutral detail texture
-//! is sampled by uv; per-object color provides the hue.
+//! Draws a registry of meshes, each instanced any number of times, in a single
+//! depth-tested render pass with simple directional diffuse lighting. Per-object
+//! data — the **camera-relative** model matrix (`Transform::render_matrix`,
+//! ADR-0015), its inverse-transpose normal matrix, and a tint — rides a
+//! per-instance vertex buffer rewritten once per frame.
 //!
-//! Single self-contained pass (owns its encoder + clear) until the render-graph
-//! executor lands (Phase 4); per-material shaders/textures land with the asset
-//! system. No depth pre-pass, no culling, no shadows yet.
+//! Each registered mesh carries its own **base-color texture** (group 1), so an
+//! imported model's per-material textures render correctly; meshes registered
+//! without one get a 1×1 white default (so the tint shows through). The shared
+//! sampler is **nearest-neighbor + REPEAT** — crisp, tiling pixel-art, which is
+//! what low-res game textures want. Per-material shaders, transparency, and the
+//! render-graph integration are later work.
 
 use glam::Mat4;
 
 use crate::device::{Frame, Gpu};
-use crate::mesh::{GpuMesh, MeshData, MeshId, Vertex};
+use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
 
-/// Frame-global uniform: the camera view·projection and the single directional
-/// light. `light_dir.xyz` is the normalized world-space direction *toward* the
-/// light; a constant world-space direction is translation-invariant, so lighting
-/// stays correct under floating-origin shifts with no adjustment (ADR-0015).
+/// Frame-global uniform: camera view·projection and the directional light.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Globals {
@@ -30,9 +28,8 @@ pub struct Globals {
     pub ambient: [f32; 4],
 }
 
-/// Per-instance GPU data. `normal_mat` is the inverse-transpose of the model's
-/// upper-3×3, stored as three 16-byte-aligned columns (the 4th lane is padding so
-/// each column is a `vec4` in the vertex layout).
+/// Per-instance GPU data: model matrix, inverse-transpose normal matrix (3 padded
+/// columns), and a tint color.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
@@ -41,8 +38,6 @@ pub struct InstanceRaw {
     pub color: [f32; 4],
 }
 
-/// Per-instance attributes (vertex buffer 1): model cols @3..6, normal cols @7..9,
-/// color @10 — all `Float32x4`, stride 128.
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
@@ -60,17 +55,23 @@ const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLay
     attributes: &INSTANCE_ATTRS,
 };
 
-const TEX_SIZE: u32 = 256;
+/// A mesh resident on the GPU plus the bind group holding its base-color texture.
+struct RegisteredMesh {
+    gpu_mesh: GpuMesh,
+    tex_bind: wgpu::BindGroup,
+    _texture: Option<wgpu::Texture>, // kept alive for the bind group (None = default)
+}
 
 pub struct Raster {
     pipeline: wgpu::RenderPipeline,
-    bind: wgpu::BindGroup,
+    globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
+    tex_layout: wgpu::BindGroupLayout,
+    _sampler: wgpu::Sampler, // owned by globals_bind; kept for lifetime clarity
+    default_tex: wgpu::Texture,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
-    meshes: Vec<GpuMesh>,
-    _texture: wgpu::Texture,
-    _sampler: wgpu::Sampler,
+    meshes: Vec<RegisteredMesh>,
 }
 
 impl Raster {
@@ -82,8 +83,9 @@ impl Raster {
             source: wgpu::ShaderSource::Wgsl(include_str!("raster.wgsl").into()),
         });
 
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("raster"),
+        // Group 0: frame globals (uniform) + the shared sampler.
+        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-globals"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -98,25 +100,29 @@ impl Raster {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
         });
+        // Group 1: the per-material base-color texture.
+        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-texture"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
             immediate_size: 0,
         });
 
@@ -159,6 +165,36 @@ impl Raster {
             mapped_at_creation: false,
         });
 
+        // Nearest + REPEAT: crisp, tiling pixel-art textures.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raster-samp"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-globals"),
+            layout: &globals_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        // 1×1 white default for meshes registered without a texture (the tint then
+        // shows through unchanged).
+        let default_tex = upload_texture(
+            gpu,
+            &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
+        );
+
         let instance_cap = 16;
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster-instances"),
@@ -167,79 +203,43 @@ impl Raster {
             mapped_at_creation: false,
         });
 
-        // A neutral grayscale detail texture: a soft checker so the per-object tint
-        // drives the color while the texture reads as surface detail. Stored linear
-        // (Rgba8Unorm) so its byte values act as straight brightness multipliers.
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("raster-detail"),
-            size: wgpu::Extent3d { width: TEX_SIZE, height: TEX_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &detail_texels(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * TEX_SIZE),
-                rows_per_image: Some(TEX_SIZE),
-            },
-            wgpu::Extent3d { width: TEX_SIZE, height: TEX_SIZE, depth_or_array_layers: 1 },
-        );
-        let tex_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raster-samp"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&tex_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
         Self {
             pipeline,
-            bind,
+            globals_bind,
             globals_buf,
+            tex_layout,
+            _sampler: sampler,
+            default_tex,
             instance_buf,
             instance_cap,
             meshes: Vec::new(),
-            _texture: texture,
-            _sampler: sampler,
         }
     }
 
-    /// Upload a mesh and return its handle (index into the registry).
-    pub fn register(&mut self, gpu: &Gpu, data: &MeshData) -> MeshId {
+    /// Upload a mesh and its base-color texture (or `None` for a white default),
+    /// returning its handle.
+    pub fn register(&mut self, gpu: &Gpu, data: &MeshData, texture: Option<&TextureData>) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
-        self.meshes.push(GpuMesh::upload(gpu, data));
+        let gpu_mesh = GpuMesh::upload(gpu, data);
+
+        let owned = texture.map(|t| upload_texture(gpu, t));
+        let view = owned
+            .as_ref()
+            .unwrap_or(&self.default_tex)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-mesh-tex"),
+            layout: &self.tex_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        });
+
+        self.meshes.push(RegisteredMesh { gpu_mesh, tex_bind, _texture: owned });
         id
     }
 
-    /// Grow the instance buffer if `count` instances won't fit.
     fn ensure_instances(&mut self, gpu: &Gpu, count: u32) {
         if count <= self.instance_cap {
             return;
@@ -254,10 +254,8 @@ impl Raster {
         self.instance_cap = cap;
     }
 
-    /// Clear `frame` (color + depth) and draw every instance. Instances are bucketed
-    /// by mesh so each mesh issues one instanced `draw_indexed`. `view_proj` +
-    /// `light` come in via `globals`; each instance carries its own camera-relative
-    /// model/normal/color.
+    /// Clear `frame` (color + depth) and draw every instance, bucketed by mesh so
+    /// each mesh issues one instanced `draw_indexed` with its own texture bound.
     pub fn draw_scene(
         &mut self,
         gpu: &Gpu,
@@ -268,8 +266,6 @@ impl Raster {
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
-        // Bucket instances by mesh into one contiguous run per mesh; record the
-        // instance range each mesh draws from.
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let mut buckets: Vec<(usize, u32, u32)> = Vec::new(); // (mesh idx, start, count)
         for mesh_idx in 0..self.meshes.len() {
@@ -323,45 +319,56 @@ impl Raster {
                 multiview_mask: None,
             });
             rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, &self.bind, &[]);
+            rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             for (mesh_idx, start, count) in buckets {
                 let mesh = &self.meshes[mesh_idx];
-                rp.set_vertex_buffer(0, mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.index_count, 0, start..(start + count));
+                rp.set_bind_group(1, &mesh.tex_bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
             }
         }
         gpu.queue.submit([encoder.finish()]);
     }
 }
 
-/// A soft grayscale checker (light/dark cells over a faint vertical gradient) — a
-/// neutral linear detail map so per-object tint provides the hue.
-fn detail_texels() -> Vec<u8> {
-    let n = TEX_SIZE as usize;
-    let mut data = vec![0u8; n * n * 4];
-    for y in 0..n {
-        let v = y as f32 / (n - 1) as f32;
-        for x in 0..n {
-            let checker = ((x * 8 / n) + (y * 8 / n)) & 1;
-            // light vs slightly darker cells, plus a gentle top→bottom fade.
-            let base = if checker == 0 { 1.0 } else { 0.72 };
-            let lum = (base - 0.10 * v).clamp(0.0, 1.0);
-            let i = (y * n + x) * 4;
-            let b = (lum * 255.0) as u8;
-            data[i] = b;
-            data[i + 1] = b;
-            data[i + 2] = b;
-            data[i + 3] = 255;
-        }
-    }
-    data
+/// Upload an RGBA8 image as an sRGB texture (base-color data is sRGB-encoded).
+fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("raster-basecolor"),
+        size: wgpu::Extent3d {
+            width: t.width.max(1),
+            height: t.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &t.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * t.width.max(1)),
+            rows_per_image: Some(t.height.max(1)),
+        },
+        wgpu::Extent3d { width: t.width.max(1), height: t.height.max(1), depth_or_array_layers: 1 },
+    );
+    texture
 }
 
-/// Helper: pack a `glam::Mat4` model matrix into an `InstanceRaw`, computing the
-/// inverse-transpose normal matrix from its upper-3×3 (correct under rotation and
-/// non-uniform scale; translation lives only in the 4th column and drops out).
+/// Pack a `glam::Mat4` model matrix into an `InstanceRaw`, computing the
+/// inverse-transpose normal matrix from its upper-3×3.
 pub fn instance_of(model: Mat4, color: [f32; 3]) -> InstanceRaw {
     // The inverse-transpose is correct under rotation + non-uniform scale; guard a
     // degenerate (zero/singular) scale, whose non-invertible 3×3 would otherwise

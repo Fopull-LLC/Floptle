@@ -28,7 +28,7 @@ pub mod raster;
 
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
-pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, Vertex};
+pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use raster::{instance_of, Globals, InstanceRaw, Raster};
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.

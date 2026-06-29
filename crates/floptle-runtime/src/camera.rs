@@ -92,7 +92,7 @@ impl FlyCamera {
         RenderCamera::new(
             self.position,
             self.rotation(),
-            Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.05, far: 1000.0 },
+            Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
         )
     }
 }
