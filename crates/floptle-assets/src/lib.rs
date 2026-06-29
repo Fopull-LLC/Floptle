@@ -16,4 +16,4 @@ pub mod gltf_import;
 pub mod texture;
 
 pub use gltf_import::{import, ImportError, ImportedModel};
-pub use texture::{load_texture, save_texture_png};
+pub use texture::{load_texture, load_texture_sized, save_texture_png};

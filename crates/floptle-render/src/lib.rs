@@ -38,7 +38,7 @@ pub use grid::Grid;
 pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use outline::Outline;
 pub use raster::{instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexId};
-pub use raymarch::{Raymarch, RaymarchGlobals};
+pub use raymarch::{Raymarch, RaymarchGlobals, TERRAIN_SLOTS};
 pub use retro::Retro;
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.

@@ -189,6 +189,8 @@ struct EditorCmd {
     create_terrain: bool,
     /// Remove the terrain.
     clear_terrain: bool,
+    /// The terrain texture palette changed — re-upload it.
+    terrain_palette_changed: bool,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
@@ -2387,11 +2389,19 @@ struct TerrainBrush {
     radius: f32,
     strength: f32,
     color: [f32; 3],
+    /// Paint target: -1 = flat color, else a terrain texture palette slot.
+    tex_slot: i32,
 }
 
 impl Default for TerrainBrush {
     fn default() -> Self {
-        Self { mode: floptle_field::Brush::Raise, radius: 2.5, strength: 0.5, color: [0.45, 0.32, 0.2] }
+        Self {
+            mode: floptle_field::Brush::Raise,
+            radius: 2.5,
+            strength: 0.5,
+            color: [0.45, 0.32, 0.2],
+            tex_slot: -1,
+        }
     }
 }
 
@@ -2449,6 +2459,10 @@ struct Editor {
     terrain_brush: TerrainBrush,
     /// New-terrain resolution along the long axis (user-controllable detail).
     terrain_detail: u32,
+    /// Terrain texture palette — image paths per slot (empty = unused).
+    terrain_textures: Vec<String>,
+    /// The terrain palette needs re-uploading to the GPU.
+    terrain_textures_dirty: bool,
     /// The brush telegraph for this frame (projected ring + normal).
     terrain_viz: Option<TerrainViz>,
     /// Whether the Terrain window is open.
@@ -2579,6 +2593,7 @@ impl ApplicationHandler for Editor {
         self.dock_state = Some(default_dock());
         self.viewport_zoom = 0.9;
         self.terrain_detail = 64;
+        self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
@@ -2879,6 +2894,26 @@ impl Editor {
             }
             self.terrain_dirty = false;
         }
+        // Re-upload the terrain texture palette when it changes. Each slot resolves
+        // to a 256² layer (empty / unreadable slots become white so indices align).
+        if self.terrain_textures_dirty {
+            let layers: Vec<floptle_render::TextureData> = self
+                .terrain_textures
+                .iter()
+                .map(|p| {
+                    if !p.is_empty() {
+                        if let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
+                            return t;
+                        }
+                    }
+                    floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
+                })
+                .collect();
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                raymarch.set_terrain_textures(gpu, &layers);
+            }
+            self.terrain_textures_dirty = false;
+        }
 
         let (
             Some(gpu),
@@ -3163,6 +3198,7 @@ impl Editor {
         let show_terrain = &mut self.show_terrain;
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
+        let terrain_textures = &mut self.terrain_textures;
         let terrain_present = self.terrain.is_some();
         let terrain_voxels = self.terrain.as_ref().map(|t| {
             let [a, b, c] = t.baked.dims;
@@ -3569,21 +3605,68 @@ impl Editor {
                     ui.add(egui::Slider::new(&mut terrain_brush.radius, 0.5..=8.0).text("radius"));
                     ui.add(egui::Slider::new(&mut terrain_brush.strength, 0.05..=1.0).text("strength"));
                     if terrain_brush.mode == Brush::Paint {
+                        ui.separator();
                         ui.horizontal(|ui| {
-                            ui.label("paint color");
-                            ui.color_edit_button_rgb(&mut terrain_brush.color);
-                            if !materials.is_empty() {
-                                ui.menu_button("from material", |ui| {
-                                    for (name, doc) in materials {
-                                        if ui.button(name).clicked() {
-                                            terrain_brush.color = doc.color;
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                            }
+                            ui.label("paint:");
+                            ui.selectable_value(&mut terrain_brush.tex_slot, -1, "Color");
                         });
-                        ui.small("Make a grass/dirt/stone material, then paint its color across the terrain.");
+                        if terrain_brush.tex_slot < 0 {
+                            ui.horizontal(|ui| {
+                                ui.label("color");
+                                ui.color_edit_button_rgb(&mut terrain_brush.color);
+                                if !materials.is_empty() {
+                                    ui.menu_button("from material", |ui| {
+                                        for (name, doc) in materials {
+                                            if ui.button(name).clicked() {
+                                                terrain_brush.color = doc.color;
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        // Texture palette: assign an image per slot, then click a slot
+                        // to paint that texture (triplanar) onto the terrain.
+                        ui.label("Texture palette");
+                        let mut tex_list = Vec::new();
+                        collect_texture_paths(asset_tree, &mut tex_list);
+                        for slot in 0..terrain_textures.len() {
+                            ui.horizontal(|ui| {
+                                let sel = terrain_brush.tex_slot == slot as i32;
+                                let label = if terrain_textures[slot].is_empty() {
+                                    format!("slot {}", slot + 1)
+                                } else {
+                                    Path::new(&terrain_textures[slot])
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default()
+                                };
+                                if ui.selectable_label(sel, format!("🖌 {label}")).clicked() {
+                                    terrain_brush.tex_slot = slot as i32;
+                                }
+                                egui::ComboBox::from_id_salt(("tslot", slot))
+                                    .selected_text("set…")
+                                    .width(70.0)
+                                    .show_ui(ui, |ui| {
+                                        if ui.selectable_label(false, "(none)").clicked() {
+                                            terrain_textures[slot].clear();
+                                            cmd.terrain_palette_changed = true;
+                                        }
+                                        for p in &tex_list {
+                                            let n = Path::new(p)
+                                                .file_name()
+                                                .map(|s| s.to_string_lossy().to_string())
+                                                .unwrap_or_default();
+                                            if ui.selectable_label(terrain_textures[slot] == *p, n).clicked() {
+                                                terrain_textures[slot] = p.clone();
+                                                cmd.terrain_palette_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                        }
+                        ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
                     }
                     ui.separator();
                     if ui.button("🗑 Clear terrain").clicked() {
@@ -3827,6 +3910,9 @@ impl Editor {
         }
         if cmd.clear_terrain {
             self.terrain = None;
+        }
+        if cmd.terrain_palette_changed {
+            self.terrain_textures_dirty = true;
         }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
@@ -4515,6 +4601,10 @@ impl Editor {
             let brush = self.terrain_brush;
             let terrain = self.terrain.as_mut().unwrap();
             match brush.mode {
+                floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
+                    // Paint a texture palette slot (stored as slot+1; 0 = untextured).
+                    terrain.paint_texture(hit, brush.radius, brush.tex_slot as u8 + 1);
+                }
                 floptle_field::Brush::Paint => {
                     terrain.paint(hit, brush.radius, brush.strength, brush.color)
                 }

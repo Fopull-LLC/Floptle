@@ -24,6 +24,9 @@ struct Globals {
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
 @group(0) @binding(2) var color_tex: texture_3d<f32>;
 @group(0) @binding(3) var vol_samp: sampler;
+// Terrain texture palette (triplanar-mapped). The volume color's alpha selects a
+// slot: 0 = untextured (flat tint), n = palette layer n-1.
+@group(0) @binding(4) var terrain_tex: texture_2d_array<f32>;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -146,6 +149,37 @@ fn map(p: vec3<f32>) -> Matter {
     return smin_matter(a, v, max(G.vol_half.w, 0.0001));
 }
 
+// Triplanar-sample a terrain palette layer at a box-relative position (world-stable,
+// since `rel` cancels the camera offset), blended by the surface normal.
+fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let scale = 0.22; // ~4.5 world units per tile
+    let an = abs(n) + vec3<f32>(0.0001);
+    let w = an / (an.x + an.y + an.z);
+    let cx = textureSampleLevel(terrain_tex, vol_samp, rel.zy * scale, slot, 0.0).rgb;
+    let cy = textureSampleLevel(terrain_tex, vol_samp, rel.xz * scale, slot, 0.0).rgb;
+    let cz = textureSampleLevel(terrain_tex, vol_samp, rel.xy * scale, slot, 0.0).rgb;
+    return cx * w.x + cy * w.y + cz * w.z;
+}
+
+// The terrain texture (if any) at a hit point `p`, multiplied into the tint. Reads
+// the painted slot from the volume color's alpha; slot 0 = untextured.
+fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+    if (G.vol_center.w < 0.5) {
+        return tint;
+    }
+    let rel = p - G.vol_center.xyz;
+    let q = abs(rel) - G.vol_half.xyz;
+    if (max(q.x, max(q.y, q.z)) > 0.0) {
+        return tint; // not inside the terrain box
+    }
+    let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    let slot = i32(round(textureSampleLevel(color_tex, vol_samp, local, 0.0).a * 255.0)) - 1;
+    if (slot < 0) {
+        return tint;
+    }
+    return triplanar(slot, rel, n) * tint * 1.6; // texture modulates the painted tint
+}
+
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
     // A larger epsilon averages out f16/trilinear grid noise in the sampled volume
     // (which showed up as grain on the terrain) at the cost of slightly softer edges.
@@ -201,7 +235,8 @@ fn fs(in: VOut) -> FsOut {
             let n = calc_normal(p);
             let l = normalize(G.light_dir.xyz);
             let diff = max(dot(n, l), 0.0);
-            let albedo = m.col;
+            // The terrain palette texture (if painted) modulates the per-voxel tint.
+            let albedo = terrain_albedo(p, n, m.col);
             // Matte shading consistent with the raster meshes: ambient + colored
             // diffuse, plus a subtle low-frequency rim. No high-power specular /
             // sharp fresnel — those alias into concentric rings on a smooth SDF
