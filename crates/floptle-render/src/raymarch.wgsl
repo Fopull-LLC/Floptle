@@ -14,10 +14,11 @@ struct Globals {
     light_color: vec4<f32>,
     ambient: vec4<f32>,
     bg: vec4<f32>,
-    center: vec4<f32>,      // analytic blob: xyz camera-relative center, w = scale
-    params: vec4<f32>,      // x = time
+    center: vec4<f32>,      // (unused legacy field; blobs now live in `blobs`)
+    params: vec4<f32>,      // x = time, y = blob count
     vol_center: vec4<f32>,  // baked volume: xyz camera-relative box center, w = present
     vol_half: vec4<f32>,    // xyz half-extent, w = blend radius k
+    blobs: array<vec4<f32>, 16>, // each: xyz camera-relative center, w = scale
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
@@ -69,9 +70,8 @@ fn smin_matter(a: Matter, b: Matter, k: f32) -> Matter {
 // spatial period spans the whole blob, so it never aliases) gives the otherworldly
 // look; the close-up "ring" artifacts came from the specular highlight (see `fs`),
 // not from this color. Animation, if wanted, belongs to scripts, not the shape.
-fn analytic(p: vec3<f32>) -> Matter {
-    let s = G.center.w;
-    let q = (p - G.center.xyz) / s;
+fn blob_one(p: vec3<f32>, center: vec3<f32>, s: f32) -> Matter {
+    let q = (p - center) / s;
     var d = sd_sphere(q - vec3<f32>(0.26, 0.10, 0.0), 0.55);
     d = smin(d, sd_sphere(q - vec3<f32>(-0.24, 0.16, 0.12), 0.50), 0.30);
     d = smin(d, sd_sphere(q - vec3<f32>(0.06, -0.22, -0.14), 0.50), 0.30);
@@ -79,6 +79,34 @@ fn analytic(p: vec3<f32>) -> Matter {
     let iri = 0.5 + 0.5 * cos(6.2831 * (q.y * 0.5 + vec3<f32>(0.0, 0.33, 0.67)));
     let col = mix(vec3<f32>(0.35, 0.16, 0.55), iri, 0.55);
     return Matter(d * s, col);
+}
+
+// Every blob folded together with smin. Seeded with blob 0 (never blended against
+// the 1e9 sentinel — that f32 cancellation collapses the field). Blobs far apart
+// stay distinct (small smin k); close ones fuse.
+fn analytic(p: vec3<f32>) -> Matter {
+    let count = min(u32(G.params.y), 16u);
+    if (count == 0u) {
+        return Matter(1e9, vec3<f32>(0.0));
+    }
+    var m = blob_one(p, G.blobs[0].xyz, max(G.blobs[0].w, 0.02));
+    for (var i = 1u; i < count; i = i + 1u) {
+        let b = blob_one(p, G.blobs[i].xyz, max(G.blobs[i].w, 0.02));
+        m = smin_matter(m, b, 0.3 * max(G.blobs[i].w, 0.05));
+    }
+    return m;
+}
+
+// March bound from all blobs + the volume box (replaces the old single-blob reach).
+fn march_bound() -> f32 {
+    let count = min(u32(G.params.y), 16u);
+    var reach = length(G.vol_half.xyz);
+    var maxc = length(G.vol_center.xyz);
+    for (var i = 0u; i < count; i = i + 1u) {
+        reach = max(reach, G.blobs[i].w);
+        maxc = max(maxc, length(G.blobs[i].xyz));
+    }
+    return reach * 60.0 + maxc + 100.0;
 }
 
 // The baked mesh volume: a box SDF outside (to march toward), the sampled mesh
@@ -135,8 +163,7 @@ fn fs(in: VOut) -> FsOut {
     let ro = near.xyz / near.w;
     let rd = normalize(far.xyz / far.w - ro);
 
-    let reach = max(G.center.w, length(G.vol_half.xyz));
-    let max_t = reach * 60.0 + length(G.center.xyz) + length(G.vol_center.xyz) + 100.0;
+    let max_t = march_bound();
     var t = 0.0;
     var hit = false;
     var m: Matter;
@@ -198,8 +225,7 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     let ro = near.xyz / near.w;
     let rd = normalize(far.xyz / far.w - ro);
 
-    let reach = max(G.center.w, length(G.vol_half.xyz));
-    let max_t = reach * 60.0 + length(G.center.xyz) + length(G.vol_center.xyz) + 100.0;
+    let max_t = march_bound();
     var t = 0.0;
     var masked = 0.0;
     for (var i = 0; i < 160; i = i + 1) {
