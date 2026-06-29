@@ -35,3 +35,4 @@ assets/models/_test/
 # Large / generated binary assets (imported glTF caches, baked data, etc.)
 assets/.cache/
 *.blend1
+out.png

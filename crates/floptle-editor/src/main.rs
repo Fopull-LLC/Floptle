@@ -9,14 +9,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3};
+use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Matter, Name, World};
+use floptle_core::{Entity, Light, Matter, Name, Shape, World};
 use floptle_render::{
     cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Raster,
     Raymarch, RaymarchGlobals, Retro,
 };
-use floptle_scene::RenderConfigDoc;
+use floptle_scene::ProjectConfigDoc;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -25,6 +25,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 const SCENE_PATH: &str = "assets/scenes/first.ron";
+const PROJECT_PATH: &str = "assets/project.ron";
 
 // ---- the overlay transform gizmo ----------------------------------------------
 //
@@ -43,6 +44,10 @@ const GIZMO_PX: f32 = 90.0;
 const HANDLE_PX: f32 = 12.0;
 /// Axis-scale drag sensitivity (scale factor per pixel along the axis).
 const SCALE_SENS: f32 = 0.01;
+/// Screen radius (px) of the Rotate tool's center trackball ring.
+const CENTER_RING_PX: f32 = 52.0;
+/// Trackball free-rotate sensitivity (radians per pixel).
+const TRACKBALL_SENS: f32 = 0.01;
 
 /// The active editing tool. Bound to number keys 1-4 (5-9 reserved).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -100,10 +105,13 @@ impl Handle {
 /// Cached, projected gizmo geometry for the current frame (all in physical pixels).
 struct GizmoFrame {
     center: Vec2,
-    /// Axis arrow tips; `None` for an axis that projects behind the camera.
+    /// Local-axis arrow tips; `None` for an axis that projects behind the camera.
     tips: [Option<Vec2>; 3],
-    /// Rotation-ring polylines (only filled for the Rotate tool).
+    /// Rotation-ring polylines, one per local axis (only filled for the Rotate tool).
     ring_pts: [Vec<Vec2>; 3],
+    /// A flat screen-space ring around the center: the free/trackball handle for
+    /// Rotate, drawn so the center handle is grabbable (Move/Scale use a box).
+    center_ring: Vec<Vec2>,
     /// Which handle the cursor is hovering this frame, if any.
     hovered: Option<Handle>,
 }
@@ -122,6 +130,12 @@ struct DragState {
 /// World basis vector for axis `i` (X=0, Y=1, Z=2).
 fn axis_world(i: usize) -> Vec3 {
     [Vec3::X, Vec3::Y, Vec3::Z][i]
+}
+
+/// The object's LOCAL axis `i` expressed in world space (so the gizmo aligns with
+/// the object's current orientation, not the world frame).
+fn local_axis(rot: Quat, i: usize) -> Vec3 {
+    rot * axis_world(i)
 }
 
 fn handle_for_axis(i: usize) -> Handle {
@@ -164,6 +178,35 @@ fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     (p - (a + ab * t)).length()
 }
 
+/// Nearest positive ray–sphere hit distance (`rd` must be unit), else `None`.
+fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = ro - center;
+    let b = oc.dot(rd);
+    let c = oc.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t0 = -b - s;
+    if t0 > 1e-3 {
+        return Some(t0);
+    }
+    let t1 = -b + s; // origin inside the sphere
+    (t1 > 1e-3).then_some(t1)
+}
+
+/// A picking bounding-sphere radius for an entity's matter (world units, scaled).
+fn bounding_radius(m: &Matter, t: &Transform) -> f32 {
+    let s = t.scale.max_element();
+    match m {
+        // cube(0.7) half-diagonal ≈ 0.7·√3
+        Matter::Primitive { shape: Shape::Cube, .. } => 0.7 * 1.732 * s,
+        Matter::Primitive { shape: Shape::Sphere, .. } => 0.85 * s,
+        Matter::Blob { scale } => 0.85 * scale * t.scale.x,
+    }
+}
+
 /// Build the gizmo geometry for the selected entity and hit-test the cursor.
 fn build_gizmo(
     tool: Tool,
@@ -181,24 +224,28 @@ fn build_gizmo(
     let e = selection?;
     let t = world.get::<Transform>(e)?;
     let center = project(t.translation, cam_world, vp, w, h)?;
+    let rot = t.rotation;
 
     // Pixel-constant handle length: world units that subtend ~GIZMO_PX at this depth
     // (60° vertical fov). Clamp the near distance so a close object doesn't explode.
     let dist = (t.translation - cam_world).length().max(0.4) as f32;
     let axis_len = GIZMO_PX * 2.0 * dist * (30f32.to_radians()).tan() / h;
 
+    // Tips follow the object's LOCAL axes, so the gizmo aligns with its orientation.
     let mut tips = [None; 3];
     for i in 0..3 {
-        let tip_world = t.translation + (axis_world(i) * axis_len).as_dvec3();
+        let tip_world = t.translation + (local_axis(rot, i) * axis_len).as_dvec3();
         tips[i] = project(tip_world, cam_world, vp, w, h);
     }
 
+    // Rotation rings live in the planes spanned by the object's local axes.
     let mut ring_pts: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut center_ring: Vec<Vec2> = Vec::new();
     if tool == Tool::Rotate {
         const N: usize = 48;
         for i in 0..3 {
-            let u = axis_world((i + 1) % 3);
-            let v = axis_world((i + 2) % 3);
+            let u = local_axis(rot, (i + 1) % 3);
+            let v = local_axis(rot, (i + 2) % 3);
             let mut pts = Vec::with_capacity(N + 1);
             for k in 0..=N {
                 let a = (k as f32) / (N as f32) * std::f32::consts::TAU;
@@ -209,10 +256,16 @@ fn build_gizmo(
             }
             ring_pts[i] = pts;
         }
+        // A flat screen-space trackball ring around the center — the free-rotate handle.
+        const M: usize = 40;
+        for k in 0..=M {
+            let a = (k as f32) / (M as f32) * std::f32::consts::TAU;
+            center_ring.push(center + Vec2::new(a.cos(), a.sin()) * CENTER_RING_PX);
+        }
     }
 
-    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts));
-    Some(GizmoFrame { center, tips, ring_pts, hovered })
+    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts, &center_ring));
+    Some(GizmoFrame { center, tips, ring_pts, center_ring, hovered })
 }
 
 /// Nearest gizmo handle to the cursor within `HANDLE_PX`, if any.
@@ -222,8 +275,16 @@ fn hit_test(
     center: Vec2,
     tips: &[Option<Vec2>; 3],
     rings: &[Vec<Vec2>; 3],
+    center_ring: &[Vec2],
 ) -> Option<Handle> {
     let mut cands: Vec<(Handle, f32)> = Vec::new();
+    let ring_dist = |ring: &[Vec2]| {
+        let mut dmin = f32::INFINITY;
+        for win in ring.windows(2) {
+            dmin = dmin.min(seg_dist(cursor, win[0], win[1]));
+        }
+        dmin
+    };
     match tool {
         Tool::Move | Tool::Scale => {
             for i in 0..3 {
@@ -235,12 +296,10 @@ fn hit_test(
         }
         Tool::Rotate => {
             for i in 0..3 {
-                let mut dmin = f32::INFINITY;
-                for win in rings[i].windows(2) {
-                    dmin = dmin.min(seg_dist(cursor, win[0], win[1]));
-                }
-                cands.push((handle_for_axis(i), dmin));
+                cands.push((handle_for_axis(i), ring_dist(&rings[i])));
             }
+            // The trackball ring (free rotate) — only when not closer to an axis ring.
+            cands.push((Handle::Center, ring_dist(center_ring)));
         }
         Tool::Select => {}
     }
@@ -323,6 +382,12 @@ fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Opt
             );
         }
         Tool::Rotate => {
+            // The trackball (free-rotate) ring first, so axis rings draw on top.
+            let on_c = active(Handle::Center);
+            let cring: Vec<Pos2> = g.center_ring.iter().map(|v| pt(*v)).collect();
+            if cring.len() >= 2 {
+                painter.line(cring, Stroke::new(if on_c { 3.0 } else { 1.5 }, brighten(Color32::from_gray(170), on_c)));
+            }
             for i in 0..3 {
                 let on = active(handle_for_axis(i));
                 let col = brighten(axis_col[i], on);
@@ -360,7 +425,10 @@ struct Editor {
     world: World,
     /// Mesh handles indexed by `Shape as usize` (Cube=0, Sphere=1).
     mesh_ids: Vec<MeshId>,
-    render: RenderConfigDoc,
+    /// Project-wide render settings (retro / matter), edited in Project Settings.
+    project: ProjectConfigDoc,
+    /// Whether the Project Settings window is open.
+    show_project_settings: bool,
     scene_name: String,
     selection: Option<Entity>,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
@@ -408,10 +476,12 @@ impl ApplicationHandler for Editor {
             default_scene()
         });
         self.scene_name = doc.name.clone();
-        self.render = doc.render;
         floptle_scene::spawn_into(&doc, &mut self.world);
 
-        self.retro = Some(Retro::new(&gpu, self.render.retro_height.max(80)));
+        // Project-wide render settings live in their own file, shared across scenes.
+        self.project = floptle_scene::load_project(std::path::Path::new(PROJECT_PATH));
+
+        self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
 
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(
@@ -457,7 +527,7 @@ impl ApplicationHandler for Editor {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                     if let Some(retro) = self.retro.as_mut() {
-                        retro.resize(gpu, self.render.retro_height.max(80));
+                        retro.resize(gpu, self.project.retro_height.max(80));
                     }
                 }
             }
@@ -499,16 +569,26 @@ impl ApplicationHandler for Editor {
                 if pressed {
                     let over_ui = self.egui.as_ref().is_some_and(|e| e.ctx.is_pointer_over_egui());
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-                    if let (false, Some(h), Some(e)) = (over_ui, hovered, self.selection) {
-                        // Grab the hovered handle and snapshot the start transform.
-                        if let Some(t) = self.world.get::<Transform>(e) {
-                            self.grabbed = Some(h);
-                            self.drag = Some(DragState {
-                                handle: h,
-                                entity: e,
-                                start_xf: *t,
-                                cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
-                            });
+                    if !over_ui {
+                        match (hovered, self.selection) {
+                            // On a gizmo handle → grab it and snapshot the transform.
+                            (Some(h), Some(e)) => {
+                                if let Some(t) = self.world.get::<Transform>(e) {
+                                    self.grabbed = Some(h);
+                                    self.drag = Some(DragState {
+                                        handle: h,
+                                        entity: e,
+                                        start_xf: *t,
+                                        cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                                    });
+                                }
+                            }
+                            // Empty viewport → pick the object under the cursor.
+                            _ => {
+                                if let Some(cursor) = self.cursor {
+                                    self.selection = self.pick(cursor);
+                                }
+                            }
                         }
                     }
                 } else {
@@ -601,17 +681,14 @@ impl Editor {
             gpu.config.height.max(1) as f32,
         );
 
-        let light = Vec3::from(self.render.light_dir).normalize_or_zero();
+        // Lighting comes from the scene's mandatory Lighting node (a Light component).
+        let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+        let light = Vec3::from(light_node.direction).normalize_or_zero();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
-            light_color: [
-                self.render.light_color[0],
-                self.render.light_color[1],
-                self.render.light_color[2],
-                0.0,
-            ],
-            ambient: [self.render.ambient[0], self.render.ambient[1], self.render.ambient[2], 0.0],
+            light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+            ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
         };
 
         let ents: Vec<(Entity, Matter)> =
@@ -629,6 +706,39 @@ impl Editor {
                 }
                 Matter::Blob { scale } => {
                     blob = Some((t.translation, scale * t.scale.x));
+                }
+            }
+        }
+
+        // Selection outline: an enlarged white shell for a selected mesh (drawn as an
+        // inverted hull by the raster), or a screen-space ring for a selected blob.
+        let mut outline: Vec<(MeshId, InstanceRaw)> = Vec::new();
+        let mut sel_ring: Option<(Vec2, f32)> = None;
+        if let Some(e) = self.selection {
+            if let (Some(m), Some(t)) =
+                (self.world.get::<Matter>(e), self.world.get::<Transform>(e))
+            {
+                match m {
+                    Matter::Primitive { shape, .. } => {
+                        if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
+                            let mut shell = *t;
+                            shell.scale *= 1.06;
+                            let model = shell.render_matrix(cam.world_position);
+                            outline.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                        }
+                    }
+                    Matter::Blob { scale } => {
+                        let (vw, vh) =
+                            (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+                        let r_world = 0.85 * scale * t.scale.x;
+                        let edge = t.translation + (cam.rotation * Vec3::X * r_world).as_dvec3();
+                        if let (Some(c), Some(es)) = (
+                            project(t.translation, cam.world_position, view_proj, vw, vh),
+                            project(edge, cam.world_position, view_proj, vw, vh),
+                        ) {
+                            sel_ring = Some((c, (es - c).length()));
+                        }
+                    }
                 }
             }
         }
@@ -651,22 +761,55 @@ impl Editor {
         // ---- build the egui UI (mutating the World) ----
         let raw_input = egui.state.take_egui_input(&window);
         let ctx = egui.ctx.clone();
-        let entity_names: Vec<(Entity, String)> = ents
-            .iter()
-            .map(|(e, _)| {
-                (*e, self.world.get::<Name>(*e).map(|n| n.0.clone()).unwrap_or_else(|| "node".into()))
-            })
-            .collect();
-        let old_retro_h = self.render.retro_height;
+        // Every named entity, Matter nodes and the Lighting node alike.
+        let entity_names: Vec<(Entity, String)> =
+            self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
+        let old_retro_h = self.project.retro_height;
         let world = &mut self.world;
         let selection = &mut self.selection;
-        let render = &mut self.render;
+        let project = &mut self.project;
+        let show_project_settings = &mut self.show_project_settings;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
         let tool = &mut self.tool;
+        let sel_ring = sel_ring;
         let mut want_save = false;
+        let mut want_save_project = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
+            // ---- top menu bar ----
+            egui::Panel::top("menu_bar").show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    ui.menu_button("File", |ui| {
+                        if ui.button("Save Scene").clicked() {
+                            want_save = true;
+                            ui.close();
+                        }
+                        if ui.button("Save Project").clicked() {
+                            want_save_project = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Exit").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+                    ui.menu_button("Edit", |ui| {
+                        if ui.button("Project Settings…").clicked() {
+                            *show_project_settings = true;
+                            ui.close();
+                        }
+                    });
+                    ui.menu_button("Project", |ui| {
+                        if ui.button("Settings…").clicked() {
+                            *show_project_settings = true;
+                            ui.close();
+                        }
+                    });
+                });
+            });
+
+            // ---- left inspector panel ----
             egui::Panel::left("inspector").default_size(280.0).show(ui, |ui| {
                 ui.heading("Floptle Editor");
                 ui.label(format!("scene: {scene_name}"));
@@ -697,45 +840,45 @@ impl Editor {
                 ui.separator();
 
                 ui.label("Inspector");
-                if let Some(e) = *selection {
-                    if let Some(t) = world.get_mut::<Transform>(e) {
-                        ui.label("translation");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x "));
-                            ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y "));
-                            ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z "));
-                        });
-                        let mut s = t.scale.x;
-                        if ui.add(egui::DragValue::new(&mut s).speed(0.02).prefix("scale ")).changed() {
-                            t.scale = Vec3::splat(s.max(0.01));
+                match *selection {
+                    Some(e) if world.get::<Light>(e).is_some() => {
+                        if let Some(l) = world.get_mut::<Light>(e) {
+                            ui.label("Lighting node");
+                            ui.label("direction");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x "));
+                                ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y "));
+                                ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z "));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("light");
+                                ui.color_edit_button_rgb(&mut l.color);
+                                ui.label("ambient");
+                                ui.color_edit_button_rgb(&mut l.ambient);
+                            });
                         }
-                    } else {
-                        ui.label("(no transform)");
                     }
-                } else {
-                    ui.label("(nothing selected)");
+                    Some(e) if world.get::<Transform>(e).is_some() => {
+                        if let Some(t) = world.get_mut::<Transform>(e) {
+                            ui.label("translation");
+                            ui.horizontal(|ui| {
+                                ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x "));
+                                ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y "));
+                                ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z "));
+                            });
+                            let mut s = t.scale.x;
+                            if ui.add(egui::DragValue::new(&mut s).speed(0.02).prefix("scale ")).changed() {
+                                t.scale = Vec3::splat(s.max(0.01));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        ui.label("(no editable properties)");
+                    }
+                    None => {
+                        ui.label("(nothing selected)");
+                    }
                 }
-                ui.separator();
-
-                ui.collapsing("Rendering (scene)", |ui| {
-                    ui.checkbox(&mut render.retro, "retro pixelization");
-                    ui.add(egui::Slider::new(&mut render.retro_height, 80u32..=1080).text("pixel rows"));
-                    ui.checkbox(&mut render.matter, "SDF matter");
-                });
-                ui.collapsing("Lighting (scene)", |ui| {
-                    ui.label("direction");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut render.light_dir[0]).speed(0.02).prefix("x "));
-                        ui.add(egui::DragValue::new(&mut render.light_dir[1]).speed(0.02).prefix("y "));
-                        ui.add(egui::DragValue::new(&mut render.light_dir[2]).speed(0.02).prefix("z "));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("light");
-                        ui.color_edit_button_rgb(&mut render.light_color);
-                        ui.label("ambient");
-                        ui.color_edit_button_rgb(&mut render.ambient);
-                    });
-                });
                 ui.separator();
 
                 if ui.button("💾  Save scene").clicked() {
@@ -743,42 +886,75 @@ impl Editor {
                 }
                 ui.add_space(8.0);
                 ui.small("1 select · 2 move · 3 rotate · 4 scale");
-                ui.small("RMB-drag: look · WASD: move · Space/Ctrl: up/down");
+                ui.small("LMB: select / drag · RMB-drag: look · WASD: move");
             });
+
+            // ---- project settings window (project-wide rendering) ----
+            egui::Window::new("Project Settings")
+                .open(show_project_settings)
+                .resizable(false)
+                .default_width(280.0)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Rendering — applies to every scene");
+                    ui.separator();
+                    if ui.checkbox(&mut project.retro, "retro pixelization").changed() {
+                        want_save_project = true;
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut project.retro_height, 80u32..=1080).text("pixel rows"))
+                        .changed()
+                    {
+                        want_save_project = true;
+                    }
+                    if ui.checkbox(&mut project.matter, "SDF matter").changed() {
+                        want_save_project = true;
+                    }
+                    ui.add_space(6.0);
+                    ui.small("saved to assets/project.ron");
+                });
 
             // The gizmo paints over the viewport on a top layer (above the scene,
             // below tooltips), clipped to the area right of the panel so handles
             // never draw over the inspector. It only draws — interaction is handled
             // in the window/device events against the cached hit-test.
+            let ppp = ui.ctx().pixels_per_point();
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
+                .with_clip_rect(ui.available_rect_before_wrap());
+            // A white selection ring for the blob (the mesh outline is drawn in 3D).
+            if let Some((c, r)) = sel_ring {
+                painter.circle_stroke(
+                    egui::Pos2::new(c.x / ppp, c.y / ppp),
+                    (r / ppp).max(4.0),
+                    egui::Stroke::new(1.5, egui::Color32::WHITE),
+                );
+            }
             if let Some(g) = gizmo {
-                let painter = ui
-                    .ctx()
-                    .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
-                    .with_clip_rect(ui.available_rect_before_wrap());
-                paint_gizmo(&painter, g, *tool, grabbed, ui.ctx().pixels_per_point());
+                paint_gizmo(&painter, g, *tool, grabbed, ppp);
             }
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
-        if self.render.retro_height != old_retro_h {
-            retro.resize(gpu, self.render.retro_height.max(80));
+        if self.project.retro_height != old_retro_h {
+            retro.resize(gpu, self.project.retro_height.max(80));
         }
 
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
             Some(frame) => {
-                let (color, depth) = if self.render.retro {
+                let (color, depth) = if self.project.retro {
                     (retro.color_view(), retro.depth_view())
                 } else {
                     (&frame.view, gpu.depth_view())
                 };
-                let raster_clear = if let (Some(rm), true) = (rm, self.render.matter) {
+                let raster_clear = if let (Some(rm), true) = (rm, self.project.matter) {
                     raymarch.draw_into(gpu, color, depth, rm);
                     None
                 } else {
                     Some(clear.map(|c| c as f64))
                 };
-                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
-                if self.render.retro {
+                raster.draw_scene(gpu, color, depth, globals, &instances, &outline, raster_clear);
+                if self.project.retro {
                     retro.blit(gpu, &frame);
                 }
 
@@ -832,6 +1008,13 @@ impl Editor {
         if want_save {
             self.save_scene();
         }
+        if want_save_project {
+            if let Err(e) =
+                floptle_scene::save_project(&self.project, std::path::Path::new(PROJECT_PATH))
+            {
+                eprintln!("  save project failed: {e}");
+            }
+        }
     }
 
     /// Move the selected entity in the camera plane by a screen-pixel delta — the
@@ -857,6 +1040,33 @@ impl Editor {
         self.tool = tool;
         self.grabbed = None;
         self.drag = None;
+    }
+
+    /// Pick the nearest selectable entity under a viewport cursor (physical px) by
+    /// casting a ray against each object's bounding sphere. `None` = empty space.
+    fn pick(&self, cursor: Vec2) -> Option<Entity> {
+        let gpu = self.gpu.as_ref()?;
+        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let cam = self.camera.render_camera();
+        let inv = cam.view_proj(w / h).inverse();
+        // Camera-relative ray (the world is offset to the camera, ADR-0015).
+        let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
+        let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+        let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+        let ro = near.truncate() / near.w;
+        let rd = (far.truncate() / far.w - ro).normalize();
+
+        let mut best: Option<(Entity, f32)> = None;
+        for (e, m) in self.world.query::<Matter>() {
+            let Some(t) = self.world.get::<Transform>(e) else { continue };
+            let center_rel = (t.translation - cam.world_position).as_vec3();
+            if let Some(hit) = ray_sphere(ro, rd, center_rel, bounding_radius(m, t)) {
+                if best.is_none_or(|(_, bt)| hit < bt) {
+                    best = Some((e, hit));
+                }
+            }
+        }
+        best.map(|(e, _)| e)
     }
 
     /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
@@ -887,7 +1097,7 @@ impl Editor {
         match self.tool {
             Tool::Move => {
                 if let Some(i) = handle.axis_index() {
-                    let dir = axis_world(i);
+                    let dir = local_axis(start.rotation, i);
                     // Project the axis (a 1-unit step) to screen; the move distance is
                     // the cursor delta projected onto that screen direction.
                     let (Some(s0), Some(s1)) = (
@@ -919,29 +1129,42 @@ impl Editor {
                 }
             }
             Tool::Rotate => {
-                let Some(i) = handle.axis_index() else { return };
-                let dir = axis_world(i);
-                let Some(center) = project(start.translation, cam_world, vp, w, h) else {
-                    return;
-                };
-                let v1 = drag.cursor_start - center;
-                let v2 = cursor - center;
-                if v1.length_squared() < 1.0 || v2.length_squared() < 1.0 {
-                    return;
-                }
-                let mut angle = (v1.x * v2.y - v1.y * v2.x).atan2(v1.x * v2.x + v1.y * v2.y);
-                // Screen-y points down; flip when the axis faces away from the camera
-                // so a drag always spins the visible way.
-                if dir.dot((start.translation - cam_world).as_vec3()) > 0.0 {
-                    angle = -angle;
-                }
-                if let Some(t) = self.world.get_mut::<Transform>(e) {
-                    t.rotation = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
+                if let Some(i) = handle.axis_index() {
+                    // Rotate about the object's local axis (in world space).
+                    let dir = local_axis(start.rotation, i);
+                    let Some(center) = project(start.translation, cam_world, vp, w, h) else {
+                        return;
+                    };
+                    let v1 = drag.cursor_start - center;
+                    let v2 = cursor - center;
+                    if v1.length_squared() < 1.0 || v2.length_squared() < 1.0 {
+                        return;
+                    }
+                    let mut angle = (v1.x * v2.y - v1.y * v2.x).atan2(v1.x * v2.x + v1.y * v2.y);
+                    // Screen-y points down; flip when the axis faces away from the camera
+                    // so a drag always spins the visible way.
+                    if dir.dot((start.translation - cam_world).as_vec3()) > 0.0 {
+                        angle = -angle;
+                    }
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        t.rotation = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
+                    }
+                } else {
+                    // Center handle: free / trackball rotate about the camera axes —
+                    // drag horizontally to spin about camera-up, vertically about
+                    // camera-right.
+                    let cam_right = cam.rotation * Vec3::X;
+                    let cam_up = cam.rotation * Vec3::Y;
+                    let q = Quat::from_axis_angle(cam_up, cursor_delta.x * TRACKBALL_SENS)
+                        * Quat::from_axis_angle(cam_right, cursor_delta.y * TRACKBALL_SENS);
+                    if let Some(t) = self.world.get_mut::<Transform>(e) {
+                        t.rotation = (q * start.rotation).normalize();
+                    }
                 }
             }
             Tool::Scale => {
                 if let Some(i) = handle.axis_index() {
-                    let dir = axis_world(i);
+                    let dir = local_axis(start.rotation, i);
                     let (Some(s0), Some(s1)) = (
                         project(start.translation, cam_world, vp, w, h),
                         project(start.translation + dir.as_dvec3(), cam_world, vp, w, h),
@@ -973,7 +1196,7 @@ impl Editor {
     }
 
     fn save_scene(&self) {
-        let doc = floptle_scene::to_doc(self.scene_name.clone(), self.render, &self.world);
+        let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
         match floptle_scene::save(&doc, std::path::Path::new(SCENE_PATH)) {
             Ok(()) => println!("  saved {SCENE_PATH}"),
             Err(e) => eprintln!("  save failed: {e}"),
@@ -986,7 +1209,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
     use floptle_scene::*;
     SceneDoc {
         name: "first".into(),
-        render: RenderConfigDoc::ps1(),
+        lighting: LightDoc::default(),
         nodes: vec![
             NodeDoc {
                 name: "cube".into(),
