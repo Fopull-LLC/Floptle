@@ -2575,8 +2575,10 @@ struct Editor {
     terrain_dirty: bool,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
     sculpting: bool,
-    /// A brush stroke is queued for this frame (throttles editing to frame rate).
-    sculpt_pending: bool,
+    /// Where the last brush dab landed + when — for movement-spaced, rate-limited
+    /// strokes (so the brush behaves like a real paint tool, not 200 dabs/sec).
+    last_dab_pos: Option<DVec3>,
+    last_dab_time: Option<Instant>,
     /// Terrain brush settings.
     terrain_brush: TerrainBrush,
     /// New-terrain resolution along the long axis (user-controllable detail).
@@ -2819,11 +2821,8 @@ impl ApplicationHandler for Editor {
             // over-UI gate stay correct; device_event only gives deltas.
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(Vec2::new(position.x as f32, position.y as f32));
-                // Keep painting/sculpting the terrain while the LMB is held (the
-                // stroke is applied once per frame in `terrain_frame_update`).
-                if self.sculpting {
-                    self.sculpt_pending = true;
-                }
+                // Sculpting is driven each frame in `terrain_frame_update` (which
+                // spaces the dabs by cursor movement), so motion needs nothing here.
             }
             // Modifier state, tracked separately so Ctrl/Shift combos work even while
             // a field is focused (this event isn't gated by `consumed`).
@@ -2898,7 +2897,8 @@ impl ApplicationHandler for Editor {
                         self.context_menu = None;
                         if self.terrain.is_some() {
                             self.sculpting = true;
-                            self.sculpt_pending = true;
+                            self.last_dab_pos = None; // first dab fires immediately
+                            self.last_dab_time = None;
                         }
                     } else if over_scene {
                         // Clicking the viewport dismisses an open context menu (but
@@ -4192,6 +4192,10 @@ impl Editor {
         self.tool = tool;
         self.grabbed = None;
         self.drag = None;
+        // Selecting Sculpt pops the Terrain tools so the brush controls are at hand.
+        if tool == Tool::Sculpt {
+            self.show_terrain = true;
+        }
     }
 
     // ---- selection ----------------------------------------------------------
@@ -4751,7 +4755,6 @@ impl Editor {
     fn terrain_frame_update(&mut self) {
         self.terrain_viz = None;
         if self.tool != Tool::Sculpt || self.terrain.is_none() || !self.cursor_over_scene() {
-            self.sculpt_pending = false;
             return;
         }
         let (Some(cursor), Some(gpu)) = (self.cursor, self.gpu.as_ref()) else { return };
@@ -4772,7 +4775,6 @@ impl Editor {
 
         let terrain = self.terrain.as_ref().unwrap();
         let Some(hit) = terrain.raycast(ro, rd_a) else {
-            self.sculpt_pending = false;
             return;
         };
         let nrm = terrain.normal(hit);
@@ -4800,8 +4802,29 @@ impl Editor {
         };
         self.terrain_viz = Some(TerrainViz { ring, normal });
 
-        // Apply a queued stroke at the hit.
-        if self.sculpting && self.sculpt_pending {
+        // Apply a dab — but only when the cursor has moved ~a third of the brush
+        // along the surface since the last one, or after a short interval if held
+        // still. This spaces strokes like a real paint tool instead of dumping one
+        // every frame (which at high FPS made the brush impossible to control).
+        let due = if self.sculpting {
+            let now = Instant::now();
+            let moved = self
+                .last_dab_pos
+                .is_none_or(|p| (hitw - p).length() as f32 >= radius * 0.34);
+            let timed = self
+                .last_dab_time
+                .is_none_or(|t| (now - t).as_secs_f32() >= 0.10);
+            if moved || timed {
+                self.last_dab_pos = Some(hitw);
+                self.last_dab_time = Some(now);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if due {
             let brush = self.terrain_brush;
             let terrain = self.terrain.as_mut().unwrap();
             match brush.mode {
@@ -4815,7 +4838,6 @@ impl Editor {
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
             }
             self.terrain_dirty = true;
-            self.sculpt_pending = false;
         }
     }
 
