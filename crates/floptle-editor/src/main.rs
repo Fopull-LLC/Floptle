@@ -11,12 +11,14 @@ use std::time::Instant;
 
 use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Light, Matter, Name, Shape, World};
+use floptle_core::{Entity, Light, Matter, Name, ScriptInst, Scripts, Shape, World, SCRIPT_KINDS};
 use floptle_render::{
     cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input, InstanceRaw, MeshId,
     Outline, Raster, Raymarch, RaymarchGlobals, Retro,
 };
-use floptle_scene::{MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ShapeDoc, TransformDoc};
+use floptle_scene::{
+    MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ScriptDoc, ShapeDoc, TransformDoc,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -157,6 +159,8 @@ struct EditorCmd {
     inspector_changed: bool,
     /// Dismiss the viewport context menu.
     close_menu: bool,
+    /// Toggle play mode (run scripts).
+    toggle_play: bool,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -569,6 +573,10 @@ struct Editor {
     show_grid_settings: bool,
     /// Project asset tree shown in the bottom file browser.
     asset_tree: Vec<AssetEntry>,
+    /// Play mode: scripts run; the pre-play authored scene is restored on stop.
+    playing: bool,
+    play_snapshot: Option<SceneDoc>,
+    play_started: Option<Instant>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -623,7 +631,7 @@ impl ApplicationHandler for Editor {
 
         // Seed a sample project folder structure (no-op if it exists), then scan it
         // for the bottom asset browser.
-        for d in ["scenes", "textures", "models", "materials", "audio"] {
+        for d in ["scenes", "textures", "models", "materials", "audio", "scripts"] {
             let _ = std::fs::create_dir_all(format!("assets/{d}"));
         }
         self.asset_tree = build_assets(std::path::Path::new("assets"));
@@ -889,6 +897,12 @@ impl Editor {
         // so it only touches disjoint fields while gpu/egui are borrowed.
         self.frame_snapshot = Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
 
+        // Play mode: run attached scripts (they mutate transforms, e.g. pulsate).
+        if self.playing {
+            let pt = self.play_started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
+            floptle_core::run_scripts(&mut self.world, pt);
+        }
+
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
         let cam = self.camera.render_camera();
@@ -1000,6 +1014,7 @@ impl Editor {
         let show_grid_settings = &mut self.show_grid_settings;
         let asset_tree = &self.asset_tree;
         let mut want_refresh_assets = false;
+        let playing = self.playing;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
@@ -1063,6 +1078,11 @@ impl Editor {
                             ui.close();
                         }
                     });
+                    ui.separator();
+                    let play_label = if playing { "⏹ Stop" } else { "▶ Play" };
+                    if ui.button(play_label).clicked() {
+                        cmd.toggle_play = true;
+                    }
                 });
             });
 
@@ -1206,6 +1226,53 @@ impl Editor {
                                 cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
                             });
                         }
+                        // ---- Scripting ----
+                        ui.separator();
+                        egui::CollapsingHeader::new("Scripting")
+                            .default_open(world.get::<Scripts>(e).is_some())
+                            .show(ui, |ui| {
+                                let mut remove: Option<usize> = None;
+                                let mut add_kind: Option<&str> = None;
+                                if let Some(scr) = world.get_mut::<Scripts>(e) {
+                                    for (i, inst) in scr.0.iter_mut().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
+                                            ui.strong(&inst.kind);
+                                            if ui.small_button("✕").clicked() {
+                                                remove = Some(i);
+                                            }
+                                        });
+                                        for (k, v) in inst.params.iter_mut() {
+                                            cmd.inspector_changed |= ui
+                                                .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
+                                                .changed();
+                                        }
+                                        ui.add_space(4.0);
+                                    }
+                                    if let Some(i) = remove {
+                                        scr.0.remove(i);
+                                        cmd.inspector_changed = true;
+                                    }
+                                } else {
+                                    ui.small("(no scripts — add one or drag from Assets)");
+                                }
+                                ui.menu_button("+ Add Script", |ui| {
+                                    for k in SCRIPT_KINDS {
+                                        if ui.button(*k).clicked() {
+                                            add_kind = Some(*k);
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                if let Some(k) = add_kind {
+                                    if let Some(scr) = world.get_mut::<Scripts>(e) {
+                                        scr.0.push(ScriptInst::new(k));
+                                    } else {
+                                        world.insert(e, Scripts(vec![ScriptInst::new(k)]));
+                                    }
+                                    cmd.inspector_changed = true;
+                                }
+                            });
                     }
                     Some(_) => {
                         ui.label("(no editable properties)");
@@ -1486,6 +1553,9 @@ impl Editor {
         if cmd.inspector_changed {
             self.begin_edit();
         }
+        if cmd.toggle_play {
+            self.toggle_play();
+        }
         if want_refresh_assets {
             self.asset_tree = build_assets(std::path::Path::new("assets"));
         }
@@ -1570,19 +1640,59 @@ impl Editor {
         }
     }
 
+    /// Enter/leave play mode. Play snapshots the authored scene and runs scripts;
+    /// Stop restores the authored scene so script-driven changes aren't persisted.
+    fn toggle_play(&mut self) {
+        if self.playing {
+            self.playing = false;
+            if let Some(snap) = self.play_snapshot.take() {
+                self.restore(snap);
+            }
+        } else {
+            self.play_snapshot = Some(self.snapshot());
+            self.play_started = Some(Instant::now());
+            self.playing = true;
+        }
+    }
+
     // ---- node create / delete / clipboard -----------------------------------
     fn node_of(&self, e: Entity) -> Option<NodeDoc> {
         let matter = self.world.get::<Matter>(e)?;
         let transform =
             self.world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default();
         let name = self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_else(|| "node".into());
-        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter) })
+        let scripts = self
+            .world
+            .get::<Scripts>(e)
+            .map(|s| {
+                s.0.iter()
+                    .map(|i| ScriptDoc {
+                        kind: i.kind.clone(),
+                        enabled: i.enabled,
+                        params: i.params.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts })
     }
     fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
         let e = self.world.spawn();
         self.world.insert(e, node.transform.to_transform());
         self.world.insert(e, Name(node.name.clone()));
         self.world.insert(e, node.matter.to_matter());
+        if !node.scripts.is_empty() {
+            let insts = node
+                .scripts
+                .iter()
+                .map(|s| ScriptInst {
+                    kind: s.kind.clone(),
+                    enabled: s.enabled,
+                    params: s.params.clone(),
+                })
+                .collect();
+            self.world.insert(e, Scripts(insts));
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -1597,6 +1707,7 @@ impl Editor {
             name: name.into(),
             transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
             matter,
+            scripts: Vec::new(),
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -1848,16 +1959,19 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 name: "cube".into(),
                 transform: TransformDoc { translation: [-2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
+                scripts: Vec::new(),
             },
             NodeDoc {
                 name: "sphere".into(),
                 transform: TransformDoc { translation: [2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
+                scripts: Vec::new(),
             },
             NodeDoc {
                 name: "blob".into(),
                 transform: TransformDoc { translation: [0.0, 1.6, 0.0], ..Default::default() },
                 matter: MatterDoc::Blob { scale: 1.0 },
+                scripts: Vec::new(),
             },
         ],
     }

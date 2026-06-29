@@ -11,7 +11,7 @@ use std::path::Path;
 
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Light, Matter, Name, Shape, World};
+use floptle_core::{Light, Matter, Name, ScriptInst, Scripts, Shape, World};
 use serde::{Deserialize, Serialize};
 
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
@@ -30,6 +30,31 @@ pub struct NodeDoc {
     pub name: String,
     pub transform: TransformDoc,
     pub matter: MatterDoc,
+    #[serde(default)]
+    pub scripts: Vec<ScriptDoc>,
+}
+
+/// A serializable attached script, mirroring [`floptle_core::ScriptInst`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScriptDoc {
+    pub kind: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub params: Vec<(String, f32)>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl ScriptDoc {
+    fn to_inst(&self) -> ScriptInst {
+        ScriptInst { kind: self.kind.clone(), enabled: self.enabled, params: self.params.clone() }
+    }
+    fn from_inst(s: &ScriptInst) -> Self {
+        Self { kind: s.kind.clone(), enabled: s.enabled, params: s.params.clone() }
+    }
 }
 
 /// Serializable transform (translation `f64`, rotation `xyzw`, scale `f32`).
@@ -236,6 +261,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         world.insert(e, node.transform.to_transform());
         world.insert(e, Name(node.name.clone()));
         world.insert(e, node.matter.to_matter());
+        if !node.scripts.is_empty() {
+            world.insert(e, Scripts(node.scripts.iter().map(ScriptDoc::to_inst).collect()));
+        }
     }
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
@@ -251,7 +279,11 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let transform =
             world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default();
         let name = world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
-        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter) });
+        let scripts = world
+            .get::<Scripts>(e)
+            .map(|s| s.0.iter().map(ScriptDoc::from_inst).collect())
+            .unwrap_or_default();
+        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts });
     }
     let lighting =
         world.query::<Light>().next().map(|(_, l)| LightDoc::from(l)).unwrap_or_default();
@@ -271,11 +303,17 @@ mod tests {
                     name: "cube".into(),
                     transform: TransformDoc { translation: [1.0, 2.0, 3.0], ..Default::default() },
                     matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.4, 0.3] },
+                    scripts: vec![ScriptDoc {
+                        kind: "pulsate".into(),
+                        enabled: true,
+                        params: vec![("speed".into(), 2.0)],
+                    }],
                 },
                 NodeDoc {
                     name: "blob".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
+                    scripts: Vec::new(),
                 },
             ],
         }
