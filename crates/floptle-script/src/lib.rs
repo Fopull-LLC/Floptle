@@ -100,6 +100,25 @@ impl ScriptHost {
         &self.errors
     }
 
+    /// Syntax-check Lua source without running it. Returns `(line, message)` for the
+    /// first error (the line parsed from the `[string ...]:N:` prefix), or `None` if
+    /// it parses cleanly — the in-engine IDE uses this for red squiggles.
+    pub fn check_syntax(&self, src: &str) -> Option<(usize, String)> {
+        match self.lua.load(src).set_name("@chunk").into_function() {
+            Ok(_) => None,
+            Err(e) => {
+                let full = e.to_string();
+                // mlua formats syntax errors as `...:LINE: message`.
+                let line = full
+                    .split(':')
+                    .find_map(|s| s.trim().parse::<usize>().ok())
+                    .unwrap_or(1);
+                let msg = full.lines().next().unwrap_or(&full).to_string();
+                Some((line, msg))
+            }
+        }
+    }
+
     /// Run every enabled script attached to a node in `world`. `scripts_dir` is the
     /// project's `scripts/` folder (script names resolve to `<dir>/<name>.lua`);
     /// `dt` is the frame delta and `time` is seconds since play started.
