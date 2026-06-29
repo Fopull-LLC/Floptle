@@ -731,6 +731,12 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
         false
     }
 
+    // Keep every tab docked in the main surface: the 3D renders to the whole
+    // window behind the Scene tab, so a torn-off floating Scene couldn't follow it.
+    fn allowed_in_windows(&self, _tab: &mut EditorTab) -> bool {
+        false
+    }
+
     // The Scene tab is transparent so the 3D render shows through it.
     fn clear_background(&self, tab: &EditorTab) -> bool {
         !matches!(tab, EditorTab::Scene)
