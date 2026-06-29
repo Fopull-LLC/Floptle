@@ -11,7 +11,7 @@ use std::path::Path;
 
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Light, Matter, Name, ScriptInst, Scripts, Shape, World};
+use floptle_core::{Light, Material, Matter, Name, ScriptInst, Scripts, Shape, World};
 use serde::{Deserialize, Serialize};
 
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
@@ -32,6 +32,9 @@ pub struct NodeDoc {
     pub matter: MatterDoc,
     #[serde(default)]
     pub scripts: Vec<ScriptDoc>,
+    /// The node's material (surface look). `None` = the engine's default look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<MaterialDoc>,
 }
 
 /// A serializable attached script, mirroring [`floptle_core::ScriptInst`].
@@ -241,11 +244,78 @@ pub fn to_ron(doc: &SceneDoc) -> Result<String, SceneError> {
     ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default()).map_err(SceneError::Serialize)
 }
 
-/// A named material preset — a base color today, with room for textures and
-/// blended paint layers later. Stored one-per-file under `assets/materials/`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+/// A material — the artist-facing surface look, mirroring [`floptle_core::Material`]
+/// (color, emissive, specular, rim, unlit, ambient). Used both as a named preset
+/// (one-per-file under `assets/materials/`) and as a node's own material. Every
+/// field past `color` has a serde default, so old color-only files still load.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct MaterialDoc {
     pub color: [f32; 3],
+    #[serde(default)]
+    pub emissive: [f32; 3],
+    #[serde(default)]
+    pub emissive_strength: f32,
+    #[serde(default = "white3")]
+    pub specular: [f32; 3],
+    #[serde(default = "default_shininess")]
+    pub shininess: f32,
+    #[serde(default)]
+    pub specular_strength: f32,
+    #[serde(default)]
+    pub rim: [f32; 3],
+    #[serde(default)]
+    pub rim_strength: f32,
+    #[serde(default)]
+    pub unlit: bool,
+    #[serde(default = "one_f32")]
+    pub ambient: f32,
+}
+
+fn white3() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+fn one_f32() -> f32 {
+    1.0
+}
+fn default_shininess() -> f32 {
+    16.0
+}
+
+impl Default for MaterialDoc {
+    fn default() -> Self {
+        Self::from_material(&Material::default())
+    }
+}
+
+impl MaterialDoc {
+    pub fn to_material(&self) -> Material {
+        Material {
+            color: self.color,
+            emissive: self.emissive,
+            emissive_strength: self.emissive_strength,
+            specular: self.specular,
+            shininess: self.shininess,
+            specular_strength: self.specular_strength,
+            rim: self.rim,
+            rim_strength: self.rim_strength,
+            unlit: self.unlit,
+            ambient: self.ambient,
+        }
+    }
+    pub fn from_material(m: &Material) -> Self {
+        Self {
+            color: m.color,
+            emissive: m.emissive,
+            emissive_strength: m.emissive_strength,
+            specular: m.specular,
+            shininess: m.shininess,
+            specular_strength: m.specular_strength,
+            rim: m.rim,
+            rim_strength: m.rim_strength,
+            unlit: m.unlit,
+            ambient: m.ambient,
+        }
+    }
 }
 
 /// Scan `dir` for `*.ron` materials, returning (name, material) sorted by name.
@@ -302,6 +372,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if !node.scripts.is_empty() {
             world.insert(e, Scripts(node.scripts.iter().map(ScriptDoc::to_inst).collect()));
         }
+        if let Some(m) = &node.material {
+            world.insert(e, m.to_material());
+        }
     }
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
@@ -321,7 +394,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .get::<Scripts>(e)
             .map(|s| s.0.iter().map(ScriptDoc::from_inst).collect())
             .unwrap_or_default();
-        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts });
+        let material = world.get::<Material>(e).map(MaterialDoc::from_material);
+        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material });
     }
     let lighting =
         world.query::<Light>().next().map(|(_, l)| LightDoc::from(l)).unwrap_or_default();
@@ -346,12 +420,20 @@ mod tests {
                         enabled: true,
                         params: vec![("speed".into(), 2.0)],
                     }],
+                    material: Some(MaterialDoc {
+                        color: [0.8, 0.3, 0.2],
+                        emissive: [0.4, 0.0, 0.6],
+                        emissive_strength: 1.2,
+                        unlit: false,
+                        ..Default::default()
+                    }),
                 },
                 NodeDoc {
                     name: "blob".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
                     scripts: Vec::new(),
+                    material: None,
                 },
             ],
         }

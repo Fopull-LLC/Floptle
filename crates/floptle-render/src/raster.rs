@@ -35,10 +35,54 @@ pub struct Globals {
 pub struct InstanceRaw {
     pub model: [[f32; 4]; 4],
     pub normal_mat: [[f32; 4]; 3],
+    /// Base color tint (rgb) + unused a.
     pub color: [f32; 4],
+    /// Emissive color (rgb) + strength (a).
+    pub emissive: [f32; 4],
+    /// Specular color (rgb) + specular strength (a).
+    pub specular: [f32; 4],
+    /// x = shininess, y = rim strength, z = unlit (0/1), w = ambient multiplier.
+    pub params: [f32; 4],
+    /// Rim/fresnel color (rgb) + unused a.
+    pub rim: [f32; 4],
 }
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
+/// The look of a surface — the artist-facing material (retro-friendly: emissive,
+/// a Blinn-Phong specular, a rim/fresnel term and an unlit toggle). Packed into the
+/// per-instance stream by [`instance_of_mat`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialParams {
+    pub color: [f32; 3],
+    pub emissive: [f32; 3],
+    pub emissive_strength: f32,
+    pub specular: [f32; 3],
+    pub shininess: f32,
+    pub specular_strength: f32,
+    pub rim: [f32; 3],
+    pub rim_strength: f32,
+    pub unlit: bool,
+    pub ambient: f32,
+}
+
+impl MaterialParams {
+    /// A plain matte tint — no emissive/specular/rim (what `instance_of` builds).
+    pub fn flat(color: [f32; 3]) -> Self {
+        Self {
+            color,
+            emissive: [0.0; 3],
+            emissive_strength: 0.0,
+            specular: [1.0; 3],
+            shininess: 16.0,
+            specular_strength: 0.0,
+            rim: [0.0; 3],
+            rim_strength: 0.0,
+            unlit: false,
+            ambient: 1.0,
+        }
+    }
+}
+
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 12] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
@@ -47,6 +91,10 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 8 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 9 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 10 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 128, shader_location: 11 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 144, shader_location: 12 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 160, shader_location: 13 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 176, shader_location: 14 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -471,9 +519,14 @@ fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
     texture
 }
 
-/// Pack a `glam::Mat4` model matrix into an `InstanceRaw`, computing the
-/// inverse-transpose normal matrix from its upper-3×3.
+/// Pack a model matrix + a plain matte color into an `InstanceRaw`.
 pub fn instance_of(model: Mat4, color: [f32; 3]) -> InstanceRaw {
+    instance_of_mat(model, &MaterialParams::flat(color))
+}
+
+/// Pack a model matrix + a full [`MaterialParams`] into an `InstanceRaw`, computing
+/// the inverse-transpose normal matrix from its upper-3×3.
+pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     // The inverse-transpose is correct under rotation + non-uniform scale; guard a
     // degenerate (zero/singular) scale, whose non-invertible 3×3 would otherwise
     // emit NaN normals and blacken that object's lighting.
@@ -486,6 +539,10 @@ pub fn instance_of(model: Mat4, color: [f32; 3]) -> InstanceRaw {
             [nm.y_axis.x, nm.y_axis.y, nm.y_axis.z, 0.0],
             [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, 0.0],
         ],
-        color: [color[0], color[1], color[2], 1.0],
+        color: [m.color[0], m.color[1], m.color[2], 1.0],
+        emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],
+        specular: [m.specular[0], m.specular[1], m.specular[2], m.specular_strength],
+        params: [m.shininess, m.rim_strength, if m.unlit { 1.0 } else { 0.0 }, m.ambient],
+        rim: [m.rim[0], m.rim[1], m.rim[2], 0.0],
     }
 }

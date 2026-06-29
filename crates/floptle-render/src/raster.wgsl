@@ -29,6 +29,10 @@ struct VsIn {
     @location(8) n1: vec4<f32>,
     @location(9) n2: vec4<f32>,
     @location(10) color: vec4<f32>,
+    @location(11) emissive: vec4<f32>,  // rgb, a = strength
+    @location(12) specular: vec4<f32>,  // rgb, a = strength
+    @location(13) params: vec4<f32>,    // shininess, rim_strength, unlit, ambient_mul
+    @location(14) rim: vec4<f32>,       // rgb
 };
 
 struct VsOut {
@@ -36,6 +40,14 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    // The fragment's position relative to the camera (the model matrix is already
+    // camera-relative, ADR-0015), so the camera sits at the origin — view dir is
+    // just -normalize(view_pos). Used for specular + rim.
+    @location(3) view_pos: vec3<f32>,
+    @location(4) emissive: vec4<f32>,
+    @location(5) specular: vec4<f32>,
+    @location(6) params: vec4<f32>,
+    @location(7) rim: vec4<f32>,
 };
 
 @vertex
@@ -43,20 +55,47 @@ fn vs(in: VsIn) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nmat = mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz);
     var out: VsOut;
-    out.clip = g.view_proj * model * vec4<f32>(in.pos, 1.0);
+    let view_pos = model * vec4<f32>(in.pos, 1.0);
+    out.clip = g.view_proj * view_pos;
     out.uv = in.uv;
     out.normal = normalize(nmat * in.normal);
     out.color = in.color;
+    out.view_pos = view_pos.xyz;
+    out.emissive = in.emissive;
+    out.specular = in.specular;
+    out.params = in.params;
+    out.rim = in.rim;
     return out;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
-    let ndl = max(dot(n, normalize(g.light_dir.xyz)), 0.0);
+    let l = normalize(g.light_dir.xyz);
+    let v = normalize(-in.view_pos);
+    let ndl = max(dot(n, l), 0.0);
     let albedo = textureSample(tex, samp, in.uv).rgb * in.color.rgb;
-    let lit = g.ambient.rgb + g.light_color.rgb * ndl;
-    return vec4<f32>(albedo * lit, 1.0);
+    let emissive = in.emissive.rgb * in.emissive.a;
+
+    // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
+    if (in.params.z > 0.5) {
+        return vec4<f32>(albedo + emissive, 1.0);
+    }
+
+    let ambient = g.ambient.rgb * in.params.w;
+    var lit = albedo * (ambient + g.light_color.rgb * ndl);
+
+    // Blinn-Phong specular, gated to the lit hemisphere.
+    let h = normalize(l + v);
+    let shininess = max(in.params.x, 1.0);
+    let spec = pow(max(dot(n, h), 0.0), shininess) * in.specular.a * select(0.0, 1.0, ndl > 0.0);
+    lit += in.specular.rgb * spec * g.light_color.rgb;
+
+    // Rim / fresnel — a cheap stylized edge glow.
+    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
+    lit += in.rim.rgb * rim_f;
+
+    return vec4<f32>(lit + emissive, 1.0);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

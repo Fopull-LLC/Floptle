@@ -13,14 +13,14 @@ use std::time::Instant;
 
 use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Light, Matter, Name, ScriptInst, Scripts, Shape, World};
+use floptle_core::{Entity, Light, Material, Matter, Name, ScriptInst, Scripts, Shape, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
-    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input, InstanceRaw, MeshId,
-    Outline, Raster, Raymarch, RaymarchGlobals, Retro,
+    cube, instance_of, instance_of_mat, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input,
+    InstanceRaw, MaterialParams, MeshId, Outline, Raster, Raymarch, RaymarchGlobals, Retro,
 };
 use floptle_scene::{
-    MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ScriptDoc, ShapeDoc, TransformDoc,
+    MaterialDoc, MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ScriptDoc, ShapeDoc, TransformDoc,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -167,8 +167,14 @@ struct EditorCmd {
     drop_asset: Option<String>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
-    /// Save the current primitive color as a named material.
-    save_material: Option<(String, [f32; 3])>,
+    /// Save a material as a named preset under assets/materials/.
+    save_material: Option<(String, MaterialDoc)>,
+    /// Give an entity a default Material component (start customizing its look).
+    add_material: Option<Entity>,
+    /// Remove an entity's Material component (back to the default look).
+    remove_material: Option<Entity>,
+    /// Apply a named material preset to an entity.
+    apply_preset: Option<(Entity, String)>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
     /// Save the current scene.
@@ -368,6 +374,113 @@ fn open_external_editor(cmd: &str, project_root: &Path, file: &str, line: usize)
     }
     if let Err(e) = command.spawn() {
         eprintln!("  Open in IDE ({prog}) failed: {e}");
+    }
+}
+
+/// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
+#[derive(Default)]
+struct MatEditResult {
+    changed: bool,
+    remove: bool,
+    save_as: Option<String>,
+}
+
+/// In-depth material property editors — shared by the Inspector's Material section
+/// and the floating Material Editor window. Edits `m` in place (so undo coalesces
+/// via `inspector_changed`); preset apply/save/remove come back as intents.
+fn material_props_ui(
+    ui: &mut egui::Ui,
+    m: &mut Material,
+    presets: &[(String, floptle_scene::MaterialDoc)],
+    name_buf: &mut String,
+) -> MatEditResult {
+    let mut r = MatEditResult::default();
+
+    egui::Grid::new("mat_top").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+        ui.label("base color");
+        r.changed |= ui.color_edit_button_rgb(&mut m.color).changed();
+        ui.end_row();
+        ui.label("emissive");
+        ui.horizontal(|ui| {
+            r.changed |= ui.color_edit_button_rgb(&mut m.emissive).changed();
+            r.changed |= ui
+                .add(egui::DragValue::new(&mut m.emissive_strength).speed(0.02).range(0.0..=20.0).prefix("×"))
+                .on_hover_text("emissive strength")
+                .changed();
+        });
+        ui.end_row();
+        ui.label("unlit");
+        r.changed |= ui.checkbox(&mut m.unlit, "fullbright / flat").changed();
+        ui.end_row();
+    });
+
+    // These only affect the lit path, so grey them out when unlit.
+    ui.add_enabled_ui(!m.unlit, |ui| {
+        egui::Grid::new("mat_lit").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+            ui.label("specular");
+            ui.horizontal(|ui| {
+                r.changed |= ui.color_edit_button_rgb(&mut m.specular).changed();
+                r.changed |= ui
+                    .add(egui::DragValue::new(&mut m.specular_strength).speed(0.02).range(0.0..=8.0).prefix("×"))
+                    .on_hover_text("specular strength")
+                    .changed();
+            });
+            ui.end_row();
+            ui.label("shininess");
+            r.changed |= ui.add(egui::Slider::new(&mut m.shininess, 1.0..=256.0).logarithmic(true)).changed();
+            ui.end_row();
+            ui.label("rim");
+            ui.horizontal(|ui| {
+                r.changed |= ui.color_edit_button_rgb(&mut m.rim).changed();
+                r.changed |= ui
+                    .add(egui::DragValue::new(&mut m.rim_strength).speed(0.02).range(0.0..=8.0).prefix("×"))
+                    .on_hover_text("rim / fresnel strength")
+                    .changed();
+            });
+            ui.end_row();
+            ui.label("ambient");
+            r.changed |= ui.add(egui::Slider::new(&mut m.ambient, 0.0..=4.0)).changed();
+            ui.end_row();
+        });
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        if !presets.is_empty() {
+            ui.menu_button("Apply preset", |ui| {
+                for (name, doc) in presets {
+                    if ui.button(name).clicked() {
+                        *m = doc.to_material();
+                        r.changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.add(egui::TextEdit::singleline(name_buf).desired_width(100.0).hint_text("preset name"));
+        if ui.button("Save preset").clicked() && !name_buf.trim().is_empty() {
+            r.save_as = Some(name_buf.trim().to_string());
+        }
+    });
+    if ui.button("🗑 Remove material").clicked() {
+        r.remove = true;
+    }
+    r
+}
+
+/// Convert a core [`Material`] into the renderer's per-instance [`MaterialParams`].
+fn material_params(m: Material) -> MaterialParams {
+    MaterialParams {
+        color: m.color,
+        emissive: m.emissive,
+        emissive_strength: m.emissive_strength,
+        specular: m.specular,
+        shininess: m.shininess,
+        specular_strength: m.specular_strength,
+        rim: m.rim,
+        rim_strength: m.rim_strength,
+        unlit: m.unlit,
+        ambient: m.ambient,
     }
 }
 
@@ -910,8 +1023,10 @@ struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
     entity_names: &'a [(Entity, String)],
-    materials: &'a [(String, [f32; 3])],
+    materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
+    /// Whether the floating Material Editor window is open.
+    show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
     /// The project root — the directory the asset browser is rooted at.
     project_root: &'a Path,
@@ -1102,28 +1217,9 @@ impl EditorTabViewer<'_> {
                                     });
                             });
                             ui.horizontal(|ui| {
-                                ui.label("material");
+                                ui.label("color");
                                 cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                egui::ComboBox::from_id_salt("apply_mat")
-                                    .selected_text("apply…")
-                                    .show_ui(ui, |ui| {
-                                        for (mname, mcol) in self.materials {
-                                            if ui.selectable_label(false, mname).clicked() {
-                                                *color = *mcol;
-                                                cmd.inspector_changed = true;
-                                            }
-                                        }
-                                    });
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(self.mat_name_buf)
-                                        .hint_text("new material name")
-                                        .desired_width(110.0),
-                                );
-                                if ui.button("save").clicked() && !self.mat_name_buf.trim().is_empty() {
-                                    cmd.save_material = Some((self.mat_name_buf.trim().to_string(), *color));
-                                }
+                                ui.small("(base color — add a Material below for emissive, specular, …)");
                             });
                         }
                         Matter::Blob { scale } => {
@@ -1137,6 +1233,44 @@ impl EditorTabViewer<'_> {
                         }
                     }
                 }
+
+                // ---- Material (surface look) ----
+                ui.separator();
+                let has_mat = world.get::<Material>(e).is_some();
+                egui::CollapsingHeader::new("🎨 Material").default_open(has_mat).show(ui, |ui| {
+                    if let Some(mat) = world.get_mut::<Material>(e) {
+                        let res = material_props_ui(ui, mat, self.materials, self.mat_name_buf);
+                        cmd.inspector_changed |= res.changed;
+                        if res.remove {
+                            cmd.remove_material = Some(e);
+                        }
+                        if let Some(name) = res.save_as {
+                            cmd.save_material =
+                                Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                        }
+                        if ui.button("⤢ Open in Material Editor").clicked() {
+                            *self.show_material_editor = true;
+                        }
+                    } else {
+                        ui.small("Default look. Add a material to customize emissive, specular, rim, unlit shading…");
+                        ui.horizontal(|ui| {
+                            if ui.button("➕ Add material").clicked() {
+                                cmd.add_material = Some(e);
+                            }
+                            if !self.materials.is_empty() {
+                                ui.menu_button("Apply preset", |ui| {
+                                    for (name, _) in self.materials {
+                                        if ui.button(name).clicked() {
+                                            cmd.apply_preset = Some((e, name.clone()));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+
                 if let Some(t) = world.get_mut::<Transform>(e) {
                     ui.label("translation");
                     ui.horizontal(|ui| {
@@ -1244,6 +1378,48 @@ impl EditorTabViewer<'_> {
         ui.add_space(6.0);
         ui.small("1 select · 2 move · 3 rotate · 4 scale · F1 play · F2 pause");
         ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
+
+        // ---- floating Material Editor window (edits the primary selection) ----
+        if *self.show_material_editor {
+            let mut open = true;
+            egui::Window::new("🎨 Material Editor")
+                .open(&mut open)
+                .default_width(300.0)
+                .show(ui.ctx(), |ui| match self.selection.last().copied() {
+                    Some(e) if world.get::<Matter>(e).is_some() => {
+                        let nm = self
+                            .entity_names
+                            .iter()
+                            .find(|(x, _)| *x == e)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_default();
+                        ui.label(format!("editing: {nm}"));
+                        ui.separator();
+                        if let Some(mat) = world.get_mut::<Material>(e) {
+                            let res = material_props_ui(ui, mat, self.materials, self.mat_name_buf);
+                            cmd.inspector_changed |= res.changed;
+                            if res.remove {
+                                cmd.remove_material = Some(e);
+                            }
+                            if let Some(name) = res.save_as {
+                                cmd.save_material =
+                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                            }
+                        } else {
+                            ui.label("This object uses the default look.");
+                            if ui.button("➕ Add material").clicked() {
+                                cmd.add_material = Some(e);
+                            }
+                        }
+                    }
+                    _ => {
+                        ui.label("Select an object to edit its material.");
+                    }
+                });
+            if !open {
+                *self.show_material_editor = false;
+            }
+        }
     }
 
     fn assets_ui(&mut self, ui: &mut egui::Ui) {
@@ -1960,8 +2136,10 @@ struct Editor {
     show_grid_settings: bool,
     /// Project asset tree shown in the bottom file browser.
     asset_tree: Vec<AssetEntry>,
-    /// Named material presets (name, base color) loaded from assets/materials/.
-    materials: Vec<(String, [f32; 3])>,
+    /// Named material presets loaded from assets/materials/.
+    materials: Vec<(String, floptle_scene::MaterialDoc)>,
+    /// Whether the floating Material Editor window is open.
+    show_material_editor: bool,
     /// Scratch buffer for the "save material" name field.
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
@@ -2435,11 +2613,15 @@ impl Editor {
         }
         for (e, matter) in &ents {
             let Some(t) = self.world.get::<Transform>(*e) else { continue };
+            // A node's Material (if any) overrides the look; else fall back to the
+            // primitive's color (meshes default to white = untinted texture).
+            let mat = self.world.get::<Material>(*e).copied();
             match matter {
                 Matter::Primitive { shape, color } => {
                     if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                         let model = t.render_matrix(cam.world_position);
-                        instances.push((mesh, instance_of(model, *color)));
+                        let mp = mat.map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
+                        instances.push((mesh, instance_of_mat(model, &mp)));
                     }
                 }
                 Matter::Blob { scale } => {
@@ -2448,8 +2630,9 @@ impl Editor {
                 Matter::Mesh { asset_path } => {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
+                        let mp = mat.map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         for &mid in &asset.parts {
-                            instances.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                            instances.push((mid, instance_of_mat(model, &mp)));
                         }
                     }
                 }
@@ -2539,6 +2722,7 @@ impl Editor {
         let paused = self.paused;
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
+        let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
         let script_errors = self.script_errors.as_slice();
         let selected_asset = &mut self.selected_asset;
@@ -2609,6 +2793,8 @@ impl Editor {
                             *show_grid_settings = true;
                             ui.close();
                         }
+                        ui.separator();
+                        ui.checkbox(&mut *show_material_editor, "Material Editor");
                     });
                     ui.menu_button("Project", |ui| {
                         if ui.button("Settings…").clicked() {
@@ -2646,6 +2832,7 @@ impl Editor {
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
+                show_material_editor,
                 asset_tree,
                 project_root,
                 selected_asset,
@@ -3036,12 +3223,32 @@ impl Editor {
             save_external_editor(&c);
             self.external_editor = c;
         }
-        if let Some((name, color)) = cmd.save_material {
+        if let Some((name, doc)) = cmd.save_material {
             let dir = self.materials_dir();
-            let _ = floptle_scene::save_material(&name, &floptle_scene::MaterialDoc { color }, &dir);
+            let _ = floptle_scene::save_material(&name, &doc, &dir);
             self.materials = self.load_materials();
             self.mat_name_buf.clear();
             self.asset_tree = build_assets(&self.project_root);
+        }
+        if let Some(e) = cmd.add_material {
+            // Seed from the primitive's current color (else white), then customize.
+            let base = match self.world.get::<Matter>(e) {
+                Some(Matter::Primitive { color, .. }) => *color,
+                _ => [1.0, 1.0, 1.0],
+            };
+            self.record();
+            self.world.insert(e, Material::tinted(base));
+        }
+        if let Some(e) = cmd.remove_material {
+            self.record();
+            self.world.remove::<Material>(e);
+        }
+        if let Some((e, name)) = cmd.apply_preset {
+            if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
+                let mat = doc.to_material();
+                self.record();
+                self.world.insert(e, mat);
+            }
         }
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
@@ -3205,7 +3412,8 @@ impl Editor {
                     .collect()
             })
             .unwrap_or_default();
-        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts })
+        let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
+        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material })
     }
     fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
         let e = self.world.spawn();
@@ -3224,6 +3432,9 @@ impl Editor {
                 .collect();
             self.world.insert(e, Scripts(insts));
         }
+        if let Some(m) = &node.material {
+            self.world.insert(e, m.to_material());
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -3239,6 +3450,7 @@ impl Editor {
             transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
             matter,
             scripts: Vec::new(),
+            material: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -3290,6 +3502,7 @@ impl Editor {
                 },
                 matter: MatterDoc::Mesh { asset_path: path.to_string() },
                 scripts: Vec::new(),
+                material: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);
@@ -3716,17 +3929,14 @@ impl Editor {
         ] {
             if !mat_dir.join(format!("{n}.ron")).exists() {
                 let _ =
-                    floptle_scene::save_material(n, &floptle_scene::MaterialDoc { color: c }, &mat_dir);
+                    floptle_scene::save_material(n, &MaterialDoc { color: c, ..Default::default() }, &mat_dir);
             }
         }
         seed_default_scripts(&self.scripts_dir());
     }
 
-    fn load_materials(&self) -> Vec<(String, [f32; 3])> {
+    fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
         floptle_scene::load_materials(&self.materials_dir())
-            .into_iter()
-            .map(|(n, m)| (n, m.color))
-            .collect()
     }
 
     /// Load the project's active scene + the file it came from: `scenes/first.ron`
@@ -3856,18 +4066,21 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 transform: TransformDoc { translation: [-2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
                 scripts: Vec::new(),
+                material: None,
             },
             NodeDoc {
                 name: "sphere".into(),
                 transform: TransformDoc { translation: [2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
                 scripts: Vec::new(),
+                material: None,
             },
             NodeDoc {
                 name: "blob".into(),
                 transform: TransformDoc { translation: [0.0, 1.6, 0.0], ..Default::default() },
                 matter: MatterDoc::Blob { scale: 1.0 },
                 scripts: Vec::new(),
+                material: None,
             },
         ],
     }
