@@ -64,8 +64,8 @@ struct RegisteredMesh {
 
 pub struct Raster {
     pipeline: wgpu::RenderPipeline,
-    /// Inverted-hull pipeline for selection outlines (front-face cull, flat color).
-    outline_pipeline: wgpu::RenderPipeline,
+    /// Silhouette-mask pipeline (solid 1.0, no depth/cull) for selection outlines.
+    mask_pipeline: wgpu::RenderPipeline,
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     tex_layout: wgpu::BindGroupLayout,
@@ -160,41 +160,32 @@ impl Raster {
             cache: None,
         });
 
-        // Selection-outline pipeline: an inverted hull. Cull FRONT faces so only the
-        // far shell renders; the real object (drawn after) covers all but a rim. Only
-        // needs the globals (no texture), and outputs the flat instance color.
-        let outline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raster-outline"),
+        // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
+        // single-channel mask (no depth, no cull → the full screen silhouette), which
+        // a post-pass edge-detects into a selection outline. Needs only the globals.
+        let mask_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-mask"),
             bind_group_layouts: &[Some(&globals_layout)],
             immediate_size: 0,
         });
-        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-outline"),
-            layout: Some(&outline_layout),
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-mask"),
+            layout: Some(&mask_layout),
             vertex: wgpu::VertexState {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: Some("fs_outline"),
+                entry_point: Some("fs_mask"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: crate::outline::MASK_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -250,7 +241,7 @@ impl Raster {
 
         Self {
             pipeline,
-            outline_pipeline,
+            mask_pipeline,
             globals_bind,
             globals_buf,
             tex_layout,
@@ -300,14 +291,75 @@ impl Raster {
         self.instance_cap = cap;
     }
 
+    /// Render the given instances (bucketed by mesh) into a single-channel mask as
+    /// solid 1.0 — the selected object's silhouette, for the selection-outline post
+    /// pass. Clears the mask first; no depth, no culling (the full screen silhouette).
+    pub fn draw_mask(
+        &mut self,
+        gpu: &Gpu,
+        mask: &wgpu::TextureView,
+        globals: Globals,
+        instances: &[(MeshId, InstanceRaw)],
+    ) {
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        let mut buckets: Vec<(usize, u32, u32)> = Vec::new();
+        for mesh_idx in 0..self.meshes.len() {
+            let start = raws.len() as u32;
+            for (id, raw) in instances {
+                if id.0 as usize == mesh_idx {
+                    raws.push(*raw);
+                }
+            }
+            let count = raws.len() as u32 - start;
+            if count > 0 {
+                buckets.push((mesh_idx, start, count));
+            }
+        }
+        self.ensure_instances(gpu, raws.len().max(1) as u32);
+        if !raws.is_empty() {
+            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        }
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-mask") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-mask"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: mask,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.mask_pipeline);
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            for (mesh_idx, start, count) in buckets {
+                let mesh = &self.meshes[mesh_idx];
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
     /// Clear the given color + depth targets and draw every instance, bucketed by
     /// mesh so each mesh issues one instanced `draw_indexed` with its own texture
     /// bound. The targets are passed in (rather than hard-wired to the swapchain) so
     /// the scene can render either straight to the window or into a low-res retro
     /// buffer; `color` must use the surface format and `depth` the depth format.
-    ///
-    /// `outline` instances (enlarged shells, flat color) are drawn first, with the
-    /// inverted-hull pipeline, so the real meshes cover all but a selection rim.
     pub fn draw_scene(
         &mut self,
         gpu: &Gpu,
@@ -315,7 +367,6 @@ impl Raster {
         depth: &wgpu::TextureView,
         globals: Globals,
         instances: &[(MeshId, InstanceRaw)],
-        outline: &[(MeshId, InstanceRaw)],
         clear: Option<[f64; 4]>,
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -330,26 +381,20 @@ impl Raster {
             None => (wgpu::LoadOp::Load, wgpu::LoadOp::Load),
         };
 
-        // Pack outline instances first, then scene instances, into one buffer.
-        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(outline.len() + instances.len());
-        let bucket = |raws: &mut Vec<InstanceRaw>, src: &[(MeshId, InstanceRaw)], n: usize| {
-            let mut b: Vec<(usize, u32, u32)> = Vec::new();
-            for mesh_idx in 0..n {
-                let start = raws.len() as u32;
-                for (id, raw) in src {
-                    if id.0 as usize == mesh_idx {
-                        raws.push(*raw);
-                    }
-                }
-                let count = raws.len() as u32 - start;
-                if count > 0 {
-                    b.push((mesh_idx, start, count));
+        let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        let mut buckets: Vec<(usize, u32, u32)> = Vec::new(); // (mesh idx, start, count)
+        for mesh_idx in 0..self.meshes.len() {
+            let start = raws.len() as u32;
+            for (id, raw) in instances {
+                if id.0 as usize == mesh_idx {
+                    raws.push(*raw);
                 }
             }
-            b
-        };
-        let outline_buckets = bucket(&mut raws, outline, self.meshes.len());
-        let scene_buckets = bucket(&mut raws, instances, self.meshes.len());
+            let count = raws.len() as u32 - start;
+            if count > 0 {
+                buckets.push((mesh_idx, start, count));
+            }
+        }
 
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
@@ -377,23 +422,10 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-
-            // Outline shells (inverted hull, flat color), drawn before the meshes.
-            if !outline_buckets.is_empty() {
-                rp.set_pipeline(&self.outline_pipeline);
-                rp.set_bind_group(0, &self.globals_bind, &[]);
-                for (mesh_idx, start, count) in &outline_buckets {
-                    let mesh = &self.meshes[*mesh_idx];
-                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, *start..(*start + *count));
-                }
-            }
-
             rp.set_pipeline(&self.pipeline);
             rp.set_bind_group(0, &self.globals_bind, &[]);
-            for (mesh_idx, start, count) in scene_buckets {
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            for (mesh_idx, start, count) in buckets {
                 let mesh = &self.meshes[mesh_idx];
                 rp.set_bind_group(1, &mesh.tex_bind, &[]);
                 rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));

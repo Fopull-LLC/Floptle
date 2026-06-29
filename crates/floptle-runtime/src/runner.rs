@@ -454,6 +454,8 @@ impl Runner {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
+            light_color: [1.0, 0.98, 0.92, 0.0],
+            ambient: [0.12, 0.12, 0.16, 0.0],
             bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
             center: [center_cam.x, center_cam.y, center_cam.z, self.matter_scale],
             params: [self.app.time.elapsed as f32, 0.0, 0.0, 0.0],
@@ -479,7 +481,7 @@ impl Runner {
                 } else {
                     Some(clear)
                 };
-                raster.draw_scene(gpu, color, depth, globals, &instances, &[], raster_clear);
+                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
 
                 if self.retro_on {
                     retro.blit(gpu, &frame);

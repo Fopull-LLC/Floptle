@@ -1,5 +1,5 @@
 (
-    retro: true,
-    retro_height: 240,
+    retro: false,
+    retro_height: 220,
     matter: true,
 )
