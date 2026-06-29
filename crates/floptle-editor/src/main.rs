@@ -965,8 +965,12 @@ impl Editor {
 
         // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
         // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
-        // so it only touches disjoint fields while gpu/egui are borrowed.
-        self.frame_snapshot = Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
+        // so it only touches disjoint fields while gpu/egui are borrowed. Not while
+        // playing — script-driven transforms must not enter the undo history.
+        if !self.playing {
+            self.frame_snapshot =
+                Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
+        }
 
         // Play mode: run attached scripts (they mutate transforms, e.g. pulsate).
         if self.playing {
@@ -1775,6 +1779,9 @@ impl Editor {
         self.drag = None;
     }
     fn undo(&mut self) {
+        if self.playing {
+            return; // stop play before editing history
+        }
         if let Some(prev) = self.history.undo.pop() {
             let cur = self.snapshot();
             self.history.redo.push(cur);
@@ -1782,6 +1789,9 @@ impl Editor {
         }
     }
     fn redo(&mut self) {
+        if self.playing {
+            return;
+        }
         if let Some(next) = self.history.redo.pop() {
             let cur = self.snapshot();
             self.history.undo.push(cur);
