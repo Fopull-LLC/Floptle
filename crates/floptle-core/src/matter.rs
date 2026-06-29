@@ -51,4 +51,7 @@ pub enum Matter {
     Primitive { shape: Shape, color: [f32; 3] },
     /// Raymarched analytic SDF "blob" (morphing smin-blended spheres).
     Blob { scale: f32 },
+    /// An imported polygon mesh (glTF), referenced by its asset path. The renderer
+    /// (editor) maps the path to its registered GPU mesh parts.
+    Mesh { asset_path: String },
 }
