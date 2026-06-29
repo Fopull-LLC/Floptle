@@ -25,6 +25,10 @@
 //!                density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
 //!                (ADR-0014).
 
+pub mod mesh2sdf;
+
+pub use mesh2sdf::{bake, bake_model, BakeMode, BakePart, BakedSdf, TexRef};
+
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
 /// union). The core "geometry blends together cleanly" operator.
 #[inline]
