@@ -17,7 +17,7 @@ use floptle_core::{Entity, Light, Material, Matter, Name, ScriptInst, Scripts, S
 use floptle_script::ScriptHost;
 use floptle_render::{
     cube, instance_of, instance_of_mat, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input,
-    InstanceRaw, MaterialParams, MeshId, Outline, Raster, Raymarch, RaymarchGlobals, Retro,
+    InstanceRaw, MaterialParams, MeshId, Outline, Raster, Raymarch, RaymarchGlobals, Retro, TexId,
 };
 use floptle_scene::{
     MaterialDoc, MatterDoc, NodeDoc, ProjectConfigDoc, SceneDoc, ScriptDoc, ShapeDoc, TransformDoc,
@@ -175,6 +175,8 @@ struct EditorCmd {
     remove_material: Option<Entity>,
     /// Apply a named material preset to an entity.
     apply_preset: Option<(Entity, String)>,
+    /// Extract a model's embedded textures into assets/textures/ (a model path).
+    extract_textures: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
     /// Save the current scene.
@@ -250,6 +252,22 @@ fn is_script(path: &str) -> bool {
 /// stores and what resolves to `scripts/<name>.lua`.
 fn script_name_of(path: &str) -> String {
     Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+fn is_texture(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".png") || p.ends_with(".jpg") || p.ends_with(".jpeg")
+}
+
+/// Collect every texture image path in the asset tree (for the material picker).
+fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            AssetEntry::Dir(_, children) => collect_texture_paths(children, out),
+            AssetEntry::File { path, .. } if is_texture(path) => out.push(path.clone()),
+            AssetEntry::File { .. } => {}
+        }
+    }
 }
 
 /// Collect the names of every `.lua` script in the asset tree (for "Add Script").
@@ -392,6 +410,7 @@ fn material_props_ui(
     ui: &mut egui::Ui,
     m: &mut Material,
     presets: &[(String, floptle_scene::MaterialDoc)],
+    textures: &[String],
     name_buf: &mut String,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
@@ -399,6 +418,27 @@ fn material_props_ui(
     egui::Grid::new("mat_top").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
         ui.label("base color");
         r.changed |= ui.color_edit_button_rgb(&mut m.color).changed();
+        ui.end_row();
+        ui.label("texture");
+        let cur = m
+            .texture
+            .as_deref()
+            .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+            .unwrap_or_else(|| "none".into());
+        egui::ComboBox::from_id_salt("mat_tex").selected_text(cur).show_ui(ui, |ui| {
+            if ui.selectable_label(m.texture.is_none(), "none").clicked() {
+                m.texture = None;
+                r.changed = true;
+            }
+            for path in textures {
+                let name =
+                    Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                if ui.selectable_label(m.texture.as_deref() == Some(path.as_str()), name).clicked() {
+                    m.texture = Some(path.clone());
+                    r.changed = true;
+                }
+            }
+        });
         ui.end_row();
         ui.label("emissive");
         ui.horizontal(|ui| {
@@ -469,7 +509,7 @@ fn material_props_ui(
 }
 
 /// Convert a core [`Material`] into the renderer's per-instance [`MaterialParams`].
-fn material_params(m: Material) -> MaterialParams {
+fn material_params(m: &Material) -> MaterialParams {
     MaterialParams {
         color: m.color,
         emissive: m.emissive,
@@ -1295,6 +1335,13 @@ impl EditorTabViewer<'_> {
                         Matter::Mesh { asset_path } => {
                             ui.label("imported mesh");
                             ui.small(asset_path.as_str());
+                            if ui
+                                .button("⤓ Extract textures")
+                                .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
+                                .clicked()
+                            {
+                                cmd.extract_textures = Some(asset_path.clone());
+                            }
                         }
                     }
                 }
@@ -1302,9 +1349,11 @@ impl EditorTabViewer<'_> {
                 // ---- Material (surface look) ----
                 ui.separator();
                 let has_mat = world.get::<Material>(e).is_some();
+                let mut tex_list = Vec::new();
+                collect_texture_paths(self.asset_tree, &mut tex_list);
                 egui::CollapsingHeader::new("🎨 Material").default_open(has_mat).show(ui, |ui| {
                     if let Some(mat) = world.get_mut::<Material>(e) {
-                        let res = material_props_ui(ui, mat, self.materials, self.mat_name_buf);
+                        let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
                         cmd.inspector_changed |= res.changed;
                         if res.remove {
                             cmd.remove_material = Some(e);
@@ -1460,8 +1509,10 @@ impl EditorTabViewer<'_> {
                             .unwrap_or_default();
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
+                        let mut tex_list = Vec::new();
+                        collect_texture_paths(self.asset_tree, &mut tex_list);
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.mat_name_buf);
+                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -2198,6 +2249,8 @@ struct Editor {
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models, keyed by asset path → registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
+    /// Material textures registered on the GPU, keyed by image path → handle.
+    texture_registry: HashMap<String, TexId>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -2732,28 +2785,33 @@ impl Editor {
 
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
-        let mut instances: Vec<(MeshId, InstanceRaw)> = Vec::new();
+        let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32)> = Vec::new();
         if let Some((path, pos)) = &drag_ghost {
             if let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
                 let model = ghost.render_matrix(cam.world_position);
                 for &mid in &asset.parts {
-                    instances.push((mid, instance_of(model, [0.7, 0.85, 1.0])));
+                    instances.push((mid, None, instance_of(model, [0.7, 0.85, 1.0])));
                 }
             }
         }
         for (e, matter) in &ents {
             let Some(t) = self.world.get::<Transform>(*e) else { continue };
             // A node's Material (if any) overrides the look; else fall back to the
-            // primitive's color (meshes default to white = untinted texture).
-            let mat = self.world.get::<Material>(*e).copied();
+            // primitive's color (meshes default to white = untinted texture). A
+            // material texture (resolved to a registered handle) re-textures the shape.
+            let mat = self.world.get::<Material>(*e).cloned();
+            let tex = mat
+                .as_ref()
+                .and_then(|m| m.texture.as_deref())
+                .and_then(|p| self.texture_registry.get(p).copied());
             match matter {
                 Matter::Primitive { shape, color } => {
                     if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                         let model = t.render_matrix(cam.world_position);
-                        let mp = mat.map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
-                        instances.push((mesh, instance_of_mat(model, &mp)));
+                        let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
+                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
                     }
                 }
                 Matter::Blob { scale } => {
@@ -2762,9 +2820,9 @@ impl Editor {
                 Matter::Mesh { asset_path } => {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
-                        let mp = mat.map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                        let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         for &mid in &asset.parts {
-                            instances.push((mid, instance_of_mat(model, &mp)));
+                            instances.push((mid, tex, instance_of_mat(model, &mp)));
                         }
                     }
                 }
@@ -3382,6 +3440,9 @@ impl Editor {
                 self.world.insert(e, mat);
             }
         }
+        if let Some(path) = cmd.extract_textures {
+            self.extract_textures(&path);
+        }
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
         }
@@ -3415,6 +3476,56 @@ impl Editor {
                 self.import_model(&path);
             }
         }
+        // Pre-warm material textures so the gather can resolve them next frame.
+        let tex_paths: Vec<String> = self
+            .world
+            .query::<Material>()
+            .filter_map(|(_, m)| m.texture.clone())
+            .filter(|p| !self.texture_registry.contains_key(p))
+            .collect();
+        for p in tex_paths {
+            self.ensure_texture(&p);
+        }
+    }
+
+    /// Decode a model's embedded textures and write them to `<project>/textures/`
+    /// as PNGs (so they can be reused as material textures — e.g. a grass material
+    /// from the retro map). Refreshes the asset tree.
+    fn extract_textures(&mut self, model_path: &str) {
+        let Ok(model) = floptle_assets::import(Path::new(model_path)) else {
+            eprintln!("  extract: failed to read {model_path}");
+            return;
+        };
+        if model.textures.is_empty() {
+            eprintln!("  extract: {model_path} has no embedded textures");
+            return;
+        }
+        let stem = Path::new(model_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "model".into());
+        let dir = self.project_root.join("textures");
+        let mut wrote = 0;
+        for (i, tex) in model.textures.iter().enumerate() {
+            let path = dir.join(format!("{stem}_{i}.png"));
+            if floptle_assets::save_texture_png(tex, &path).is_ok() {
+                wrote += 1;
+            }
+        }
+        println!("  extracted {wrote} texture(s) from {stem} to textures/");
+        self.asset_tree = build_assets(&self.project_root);
+    }
+
+    /// Load + register a material texture (cached by path), returning its handle.
+    fn ensure_texture(&mut self, path: &str) -> Option<TexId> {
+        if let Some(id) = self.texture_registry.get(path) {
+            return Some(*id);
+        }
+        let data = floptle_assets::load_texture(Path::new(path))?;
+        let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
+        let id = raster.register_texture(gpu, &data);
+        self.texture_registry.insert(path.to_string(), id);
+        Some(id)
     }
 
     /// Switch the active tool and cancel any in-progress gizmo drag.

@@ -8,12 +8,26 @@
 use floptle_core::transform::Transform;
 use floptle_render::{
     instance_of_mat, uv_sphere, Globals, Gpu, InstanceRaw, MaterialParams, MeshId, Projection,
-    Raster, RenderCamera,
+    Raster, RenderCamera, TexId, TextureData,
 };
 use glam::{DVec3, Quat, Vec3};
 
-const W: u32 = 1200;
+const W: u32 = 1440;
 const H: u32 = 400;
+
+/// A procedural checker texture (so the probe needs no image file).
+fn checker() -> TextureData {
+    let n = 64u32;
+    let mut px = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let on = ((x / 8) + (y / 8)) % 2 == 0;
+            let c = if on { [60, 200, 90, 255] } else { [30, 120, 50, 255] };
+            px.extend_from_slice(&c);
+        }
+    }
+    TextureData { pixels: px, width: n, height: n }
+}
 
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "materials.png".into());
@@ -63,20 +77,26 @@ fn main() {
     rim.rim = [0.3, 0.9, 1.0];
     rim.rim_strength = 1.6;
 
+    // A sixth sphere: textured (a procedural grass-like checker) + lit.
+    let grass_tex = raster.register_texture(&gpu, &checker());
+    let grass = MaterialParams::flat([1.0, 1.0, 1.0]);
+
     let mats = [matte, emissive, shiny, unlit, rim];
-    let instances: Vec<(MeshId, InstanceRaw)> = mats
+    let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = mats
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let x = -4.4 + i as f64 * 2.2;
+            let x = -5.5 + i as f64 * 2.2;
             let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0));
-            (sphere, instance_of_mat(t.render_matrix(cam.world_position), m))
+            (sphere, None, instance_of_mat(t.render_matrix(cam.world_position), m))
         })
         .collect();
+    let t = Transform::from_translation(DVec3::new(-5.5 + 5.0 * 2.2, 0.0, 0.0));
+    instances.push((sphere, Some(grass_tex), instance_of_mat(t.render_matrix(cam.world_position), &grass)));
 
     raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.05, 1.0]));
     save_png(&gpu, &color_tex, &out);
-    println!("wrote {out} — matte / emissive / specular / unlit / rim");
+    println!("wrote {out} — matte / emissive / specular / unlit / rim / textured");
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {

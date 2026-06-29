@@ -248,9 +248,11 @@ pub fn to_ron(doc: &SceneDoc) -> Result<String, SceneError> {
 /// (color, emissive, specular, rim, unlit, ambient). Used both as a named preset
 /// (one-per-file under `assets/materials/`) and as a node's own material. Every
 /// field past `color` has a serde default, so old color-only files still load.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MaterialDoc {
     pub color: [f32; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
     #[serde(default)]
     pub emissive: [f32; 3],
     #[serde(default)]
@@ -290,6 +292,7 @@ impl Default for MaterialDoc {
 impl MaterialDoc {
     pub fn to_material(&self) -> Material {
         Material {
+            texture: self.texture.clone(),
             color: self.color,
             emissive: self.emissive,
             emissive_strength: self.emissive_strength,
@@ -304,6 +307,7 @@ impl MaterialDoc {
     }
     pub fn from_material(m: &Material) -> Self {
         Self {
+            texture: m.texture.clone(),
             color: m.color,
             emissive: m.emissive,
             emissive_strength: m.emissive_strength,

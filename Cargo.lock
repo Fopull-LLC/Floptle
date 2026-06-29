@@ -861,6 +861,7 @@ dependencies = [
  "floptle-core",
  "floptle-render",
  "gltf",
+ "image",
 ]
 
 [[package]]
