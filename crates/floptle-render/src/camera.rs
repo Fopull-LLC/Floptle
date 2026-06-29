@@ -48,6 +48,13 @@ impl FlyCamera {
         Quat::from_rotation_y(self.yaw) * Quat::from_rotation_x(self.pitch)
     }
 
+    /// Frame `target`: keep the current view direction but reposition so the target
+    /// sits `distance` straight ahead (centered in view).
+    pub fn focus(&mut self, target: DVec3, distance: f64) {
+        let forward = (self.rotation() * Vec3::NEG_Z).as_dvec3();
+        self.position = target - forward * distance;
+    }
+
     /// Apply a mouse-motion delta (pixels) to yaw/pitch.
     pub fn look(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * self.sensitivity;
