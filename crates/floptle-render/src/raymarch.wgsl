@@ -100,9 +100,7 @@ fn map(p: vec3<f32>) -> Matter {
 }
 
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
-    // Epsilon at ~voxel scale: sampling finer than a voxel picks up the trilinear
-    // cells' linear-segment ripples and bands the normal (visible up close).
-    let e = vec2<f32>(0.03, 0.0);
+    let e = vec2<f32>(0.0028, 0.0);
     return normalize(vec3<f32>(
         map(p + e.xyy).d - map(p - e.xyy).d,
         map(p + e.yxy).d - map(p - e.yxy).d,
@@ -157,8 +155,8 @@ fn fs(in: VOut) -> FsOut {
             let diff = max(dot(n, l), 0.0);
             let fres = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
             let albedo = m.col;
-            var col = albedo * (0.2 + 0.8 * diff) + vec3<f32>(0.5, 0.7, 1.0) * fres * 0.2;
-            col = col + pow(max(dot(reflect(rd, n), l), 0.0), 40.0) * vec3<f32>(0.3);
+            var col = albedo * (0.18 + 0.82 * diff) + vec3<f32>(0.5, 0.7, 1.0) * fres * 0.4;
+            col = col + pow(max(dot(reflect(rd, n), l), 0.0), 40.0) * vec3<f32>(0.6);
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
             out.depth = ndc_z;
             drawn = true;
