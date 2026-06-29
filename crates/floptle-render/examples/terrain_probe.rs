@@ -5,11 +5,25 @@
 //! Run: cargo run -p floptle-render --example terrain_probe -- <out.png>
 
 use floptle_field::{Brush, Terrain};
-use floptle_render::{Gpu, Projection, Raymarch, RaymarchGlobals, RenderCamera};
+use floptle_render::{Gpu, Projection, Raymarch, RaymarchGlobals, RenderCamera, TextureData};
 use glam::{DVec3, Quat, Vec3};
 
 const W: u32 = 1024;
 const H: u32 = 640;
+
+/// A 256² checker (stands in for a tiling rock/grass texture).
+fn checker256() -> TextureData {
+    let n = 256u32;
+    let mut px = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let on = ((x / 16) + (y / 16)) % 2 == 0;
+            let c = if on { [150, 150, 158, 255] } else { [90, 92, 100, 255] };
+            px.extend_from_slice(&c);
+        }
+    }
+    TextureData { pixels: px, width: n, height: n }
+}
 
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "terrain.png".into());
@@ -39,8 +53,11 @@ fn main() {
         terrain.paint([0.0, 0.0, 0.0], 4.0, 1.0, [0.45, 0.32, 0.2]);
         terrain.paint([6.0, 1.5, -6.0], 2.4, 1.0, [0.6, 0.6, 0.62]);
     }
+    // Paint a TEXTURE (palette slot 1) onto the big hill.
+    terrain.paint_texture([-5.0, 0.5, -3.0], 5.0, 1);
 
     let mut raymarch = Raymarch::new(&gpu);
+    raymarch.set_terrain_textures(&gpu, &[checker256()]);
     raymarch.set_volume(&gpu, &terrain.baked);
 
     // Camera up and back, looking down at the relief.

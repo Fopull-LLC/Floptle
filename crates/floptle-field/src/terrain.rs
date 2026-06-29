@@ -41,11 +41,12 @@ impl Terrain {
         color: [f32; 3],
     ) -> Self {
         let n = (dims[0] * dims[1] * dims[2]) as usize;
+        // Alpha is the painted texture-slot index (0 = untextured / flat tint).
         let rgba = [
             (color[0] * 255.0) as u8,
             (color[1] * 255.0) as u8,
             (color[2] * 255.0) as u8,
-            255,
+            0,
         ];
         let mut t = Terrain {
             baked: BakedSdf { dims, center, half_extent, distance: vec![0.0; n], color: vec![rgba; n] },
@@ -292,6 +293,33 @@ impl Terrain {
                     let c = &mut self.baked.color[i];
                     for k in 0..3 {
                         c[k] = (c[k] as f32 + (rgb[k] - c[k] as f32) * w) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paint a terrain texture slot (1-based; 0 clears to untextured) onto the
+    /// surface within a brush. Stored in the color alpha; the renderer triplanar-maps
+    /// the matching palette layer. `slot` is the palette index + 1.
+    pub fn paint_texture(&mut self, center: [f32; 3], radius: f32, slot: u8) {
+        let [lo, hi] = self.brush_range(center, radius);
+        for iz in lo[2]..=hi[2] {
+            for iy in lo[1]..=hi[1] {
+                for ix in lo[0]..=hi[0] {
+                    let p = self.voxel_world(ix, iy, iz);
+                    let dc = ((p[0] - center[0]).powi(2)
+                        + (p[1] - center[1]).powi(2)
+                        + (p[2] - center[2]).powi(2))
+                    .sqrt();
+                    if dc > radius {
+                        continue;
+                    }
+                    let i = self.idx(ix, iy, iz);
+                    // Only where there's a surface nearby (so we don't paint deep
+                    // interior cells you'll never see).
+                    if self.baked.distance[i].abs() <= radius {
+                        self.baked.color[i][3] = slot;
                     }
                 }
             }

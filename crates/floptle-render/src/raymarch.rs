@@ -10,6 +10,7 @@
 use floptle_field::BakedSdf;
 
 use crate::device::Gpu;
+use crate::mesh::TextureData;
 
 /// Uniform driving the raymarch — matches `struct Globals` in `raymarch.wgsl`.
 #[repr(C)]
@@ -45,8 +46,13 @@ pub struct Raymarch {
     sampler: wgpu::Sampler,
     _dist_tex: wgpu::Texture,
     _color_tex: wgpu::Texture,
+    terrain_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
 }
+
+/// Layers in the terrain texture palette + the size each is stored at.
+pub const TERRAIN_SLOTS: u32 = 6;
+const TERRAIN_TEX_SIZE: u32 = 256;
 
 impl Raymarch {
     pub fn new(gpu: &Gpu) -> Self {
@@ -76,6 +82,17 @@ impl Raymarch {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The terrain texture palette (2D array, triplanar-mapped).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -171,7 +188,10 @@ impl Raymarch {
             color: vec![[255, 255, 255, 255]],
         };
         let (dist_tex, color_tex) = upload_volume(gpu, &empty);
-        let bind = make_bind(device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler);
+        let terrain_tex = make_terrain_array(gpu, &[]);
+        let bind = make_bind(
+            device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
+        );
 
         Self {
             pipeline,
@@ -181,16 +201,40 @@ impl Raymarch {
             sampler,
             _dist_tex: dist_tex,
             _color_tex: color_tex,
+            terrain_tex,
             bind,
         }
+    }
+
+    /// Upload the terrain texture palette (up to [`TERRAIN_SLOTS`] layers, each
+    /// already resized to 256×256 RGBA8 by the caller). Slot order maps to the
+    /// painted alpha index (slot n = palette layer n).
+    pub fn set_terrain_textures(&mut self, gpu: &Gpu, layers: &[TextureData]) {
+        self.terrain_tex = make_terrain_array(gpu, layers);
+        self.bind = make_bind(
+            &gpu.device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &self._dist_tex,
+            &self._color_tex,
+            &self.sampler,
+            &self.terrain_tex,
+        );
     }
 
     /// Upload a baked mesh as the volume matter (replaces any previous one). The
     /// runtime still drives `vol_center`/`vol_half`/present via `RaymarchGlobals`.
     pub fn set_volume(&mut self, gpu: &Gpu, baked: &BakedSdf) {
         let (dist_tex, color_tex) = upload_volume(gpu, baked);
-        self.bind =
-            make_bind(&gpu.device, &self.bind_layout, &self.globals_buf, &dist_tex, &color_tex, &self.sampler);
+        self.bind = make_bind(
+            &gpu.device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &dist_tex,
+            &color_tex,
+            &self.sampler,
+            &self.terrain_tex,
+        );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
     }
@@ -285,6 +329,7 @@ fn vol_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -292,9 +337,14 @@ fn make_bind(
     dist: &wgpu::Texture,
     color: &wgpu::Texture,
     sampler: &wgpu::Sampler,
+    terrain: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let terrain_view = terrain.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
         layout,
@@ -303,8 +353,57 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dist_view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
         ],
     })
+}
+
+/// Create the terrain palette as a `TERRAIN_SLOTS`-layer 256² sRGB array. Provided
+/// layers are uploaded (caller pre-resizes to 256²); the rest default to white.
+fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width: TERRAIN_TEX_SIZE,
+        height: TERRAIN_TEX_SIZE,
+        depth_or_array_layers: TERRAIN_SLOTS,
+    };
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terrain-palette"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let white = vec![255u8; (TERRAIN_TEX_SIZE * TERRAIN_TEX_SIZE * 4) as usize];
+    for layer in 0..TERRAIN_SLOTS {
+        let data = layers
+            .get(layer as usize)
+            .filter(|t| t.width == TERRAIN_TEX_SIZE && t.height == TERRAIN_TEX_SIZE)
+            .map(|t| t.pixels.as_slice())
+            .unwrap_or(&white);
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(TERRAIN_TEX_SIZE * 4),
+                rows_per_image: Some(TERRAIN_TEX_SIZE),
+            },
+            wgpu::Extent3d {
+                width: TERRAIN_TEX_SIZE,
+                height: TERRAIN_TEX_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    tex
 }
 
 /// Create the distance (R16Float) + color (Rgba8Unorm) 3D textures from a bake.

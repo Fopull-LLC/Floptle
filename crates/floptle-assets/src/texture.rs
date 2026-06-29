@@ -13,6 +13,14 @@ pub fn load_texture(path: &Path) -> Option<TextureData> {
     Some(TextureData { pixels: img.into_raw(), width, height })
 }
 
+/// Decode + resize an image to exactly `w`×`h` RGBA8 (for the terrain palette,
+/// whose layers must all share one size).
+pub fn load_texture_sized(path: &Path, w: u32, h: u32) -> Option<TextureData> {
+    let img = image::open(path).ok()?;
+    let out = img.resize_exact(w, h, image::imageops::FilterType::Triangle).to_rgba8();
+    Some(TextureData { pixels: out.into_raw(), width: w, height: h })
+}
+
 /// Write an RGBA8 [`TextureData`] to `path` as a PNG.
 pub fn save_texture_png(tex: &TextureData, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
