@@ -166,6 +166,8 @@ struct EditorCmd {
     drop_asset: Option<String>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
+    /// Save the current primitive color as a named material.
+    save_material: Option<(String, [f32; 3])>,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -604,6 +606,10 @@ struct Editor {
     show_grid_settings: bool,
     /// Project asset tree shown in the bottom file browser.
     asset_tree: Vec<AssetEntry>,
+    /// Named material presets (name, base color) loaded from assets/materials/.
+    materials: Vec<(String, [f32; 3])>,
+    /// Scratch buffer for the "save material" name field.
+    mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
     play_snapshot: Option<SceneDoc>,
@@ -672,6 +678,22 @@ impl ApplicationHandler for Editor {
             let _ = std::fs::create_dir_all(format!("assets/{d}"));
         }
         self.asset_tree = build_assets(std::path::Path::new("assets"));
+
+        // Seed default materials (once), then load the material presets.
+        let mat_dir = std::path::Path::new("assets/materials");
+        for (n, c) in [
+            ("white", [1.0, 1.0, 1.0]),
+            ("orange", [0.9, 0.45, 0.35]),
+            ("blue", [0.4, 0.7, 0.95]),
+            ("green", [0.5, 0.85, 0.45]),
+            ("gray", [0.6, 0.6, 0.62]),
+        ] {
+            if !mat_dir.join(format!("{n}.ron")).exists() {
+                let _ = floptle_scene::save_material(n, &floptle_scene::MaterialDoc { color: c }, mat_dir);
+            }
+        }
+        self.materials =
+            floptle_scene::load_materials(mat_dir).into_iter().map(|(n, m)| (n, m.color)).collect();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.outline = Some(Outline::new(&gpu));
@@ -1080,6 +1102,8 @@ impl Editor {
         let asset_tree = &self.asset_tree;
         let mut want_refresh_assets = false;
         let playing = self.playing;
+        let materials = &self.materials;
+        let mat_name_buf = &mut self.mat_name_buf;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
@@ -1252,8 +1276,33 @@ impl Editor {
                                                 cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
                                                 cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
                                             });
-                                        ui.label("color");
+                                    });
+                                    // Material: base color + named presets (apply / save).
+                                    ui.horizontal(|ui| {
+                                        ui.label("material");
                                         cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                        egui::ComboBox::from_id_salt("apply_mat")
+                                            .selected_text("apply…")
+                                            .show_ui(ui, |ui| {
+                                                for (mname, mcol) in materials {
+                                                    if ui.selectable_label(false, mname).clicked() {
+                                                        *color = *mcol;
+                                                        cmd.inspector_changed = true;
+                                                    }
+                                                }
+                                            });
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(mat_name_buf)
+                                                .hint_text("new material name")
+                                                .desired_width(110.0),
+                                        );
+                                        if ui.button("save").clicked() && !mat_name_buf.trim().is_empty()
+                                        {
+                                            cmd.save_material =
+                                                Some((mat_name_buf.trim().to_string(), *color));
+                                        }
                                     });
                                 }
                                 Matter::Blob { scale } => {
@@ -1647,6 +1696,14 @@ impl Editor {
         }
         if let Some((path, e)) = cmd.drop_script_on {
             self.attach_script_file(&path, Some(e));
+        }
+        if let Some((name, color)) = cmd.save_material {
+            let dir = std::path::Path::new("assets/materials");
+            let _ = floptle_scene::save_material(&name, &floptle_scene::MaterialDoc { color }, dir);
+            self.materials =
+                floptle_scene::load_materials(dir).into_iter().map(|(n, m)| (n, m.color)).collect();
+            self.mat_name_buf.clear();
+            self.asset_tree = build_assets(std::path::Path::new("assets"));
         }
         if want_refresh_assets {
             self.asset_tree = build_assets(std::path::Path::new("assets"));

@@ -241,6 +241,41 @@ pub fn to_ron(doc: &SceneDoc) -> Result<String, SceneError> {
     ron::ser::to_string_pretty(doc, ron::ser::PrettyConfig::default()).map_err(SceneError::Serialize)
 }
 
+/// A named material preset — a base color today, with room for textures and
+/// blended paint layers later. Stored one-per-file under `assets/materials/`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub struct MaterialDoc {
+    pub color: [f32; 3],
+}
+
+/// Scan `dir` for `*.ron` materials, returning (name, material) sorted by name.
+pub fn load_materials(dir: &Path) -> Vec<(String, MaterialDoc)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("ron") {
+            continue;
+        }
+        let Some(name) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
+        if let Ok(mat) = std::fs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose() {
+            if let Some(mat) = mat {
+                out.push((name, mat));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Write a material to `dir/<name>.ron`.
+pub fn save_material(name: &str, mat: &MaterialDoc, dir: &Path) -> Result<(), SceneError> {
+    let _ = std::fs::create_dir_all(dir);
+    let text = ron::ser::to_string_pretty(mat, ron::ser::PrettyConfig::default())
+        .map_err(SceneError::Serialize)?;
+    std::fs::write(dir.join(format!("{name}.ron")), text).map_err(SceneError::Io)
+}
+
 /// Load the project-wide render config, or the default if the file is missing.
 pub fn load_project(path: &Path) -> ProjectConfigDoc {
     std::fs::read_to_string(path)
