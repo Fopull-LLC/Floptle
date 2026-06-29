@@ -177,6 +177,14 @@ struct EditorCmd {
     apply_preset: Option<(Entity, String)>,
     /// Extract a model's embedded textures into assets/textures/ (a model path).
     extract_textures: Option<String>,
+    /// Re-parent a node: (child, new parent or None = make it a root).
+    reparent: Option<(Entity, Option<Entity>)>,
+    /// Add a new node as a child of an entity (matter, parent).
+    add_parented: Option<(MatterDoc, Entity)>,
+    /// Open the "new scene" name prompt.
+    open_new_scene: bool,
+    /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
+    new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
     /// Save the current scene.
@@ -239,6 +247,11 @@ enum AssetEntry {
 struct AssetPayload {
     path: String,
 }
+
+/// What a hierarchy row carries while dragged — its entity, so dropping it on
+/// another row re-parents it.
+#[derive(Clone)]
+struct NodePayload(Entity);
 
 fn is_model(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
@@ -619,6 +632,17 @@ fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf {
 fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
 }
+
+/// The default node name for a matter kind.
+fn matter_doc_name(m: &MatterDoc) -> &'static str {
+    match m {
+        MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
+        MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
+        MatterDoc::Blob { .. } => "Blob",
+        MatterDoc::Mesh { .. } => "Mesh",
+        MatterDoc::Empty => "Group",
+    }
+}
 fn new_sphere() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.6, 0.9] }
 }
@@ -766,7 +790,8 @@ fn build_gizmo(
         return None;
     }
     let e = selection?;
-    let t = world.get::<Transform>(e)?;
+    // World transform, so the gizmo sits on the node's actual (parented) placement.
+    let t = floptle_core::world_transform(world, e);
     let center = project(t.translation, cam_world, vp, w, h)?;
     let rot = t.rotation;
 
@@ -1190,6 +1215,13 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
 
 impl EditorTabViewer<'_> {
     fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
+        // Scene name + save at the top of the hierarchy.
+        ui.horizontal(|ui| {
+            ui.strong(format!("🎬 {}", self.scene_name));
+            if ui.small_button("💾").on_hover_text("Save scene (Ctrl+S)").clicked() {
+                self.cmd.save_scene = true;
+            }
+        });
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("+ Cube").clicked() {
                 self.cmd.add = Some(new_cube());
@@ -1200,62 +1232,152 @@ impl EditorTabViewer<'_> {
             if ui.small_button("+ Blob").clicked() {
                 self.cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
             }
-        });
-        ui.separator();
-        let names = self.entity_names; // Copy the slice ref so the loop body can &mut self.
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for (e, name) in names {
-                let resp = ui.selectable_label(self.selection.contains(e), name);
-                // Highlight a row a script is being dragged over.
-                let script_hover = resp
-                    .dnd_hover_payload::<AssetPayload>()
-                    .is_some_and(|p| is_script(&p.path));
-                if script_hover {
-                    ui.painter().rect_stroke(
-                        resp.rect,
-                        3.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 230, 140)),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                if resp.clicked() {
-                    *self.selected_asset = None;
-                    if ui.input(|i| i.modifiers.shift) {
-                        if let Some(pos) = self.selection.iter().position(|x| x == e) {
-                            self.selection.remove(pos);
-                        } else {
-                            self.selection.push(*e);
-                        }
-                    } else {
-                        self.selection.clear();
-                        self.selection.push(*e);
-                    }
-                }
-                if resp.secondary_clicked() && !self.selection.contains(e) {
-                    self.selection.clear();
-                    self.selection.push(*e);
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("Duplicate").clicked() {
-                        self.cmd.duplicate = true;
-                        ui.close();
-                    }
-                    if ui.button("Copy").clicked() {
-                        self.cmd.copy = true;
-                        ui.close();
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.cmd.delete = true;
-                        ui.close();
-                    }
-                });
-                if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
-                    if is_script(&p.path) {
-                        self.cmd.drop_script_on = Some((p.path.clone(), *e));
-                    }
-                }
+            if ui.small_button("🗀 Folder").on_hover_text("an empty group to organize / parent nodes").clicked() {
+                self.cmd.add = Some(MatterDoc::Empty);
             }
         });
+        ui.separator();
+
+        // Build the parent→children tree from the world (owned copies, so the
+        // recursive render can freely borrow `self`).
+        let names: HashMap<Entity, String> = self.entity_names.iter().cloned().collect();
+        let order: Vec<Entity> = self.entity_names.iter().map(|(e, _)| *e).collect();
+        let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        let mut roots: Vec<Entity> = Vec::new();
+        for &e in &order {
+            match self.world.get::<floptle_core::Parent>(e).copied() {
+                Some(floptle_core::Parent(p)) if names.contains_key(&p) => {
+                    children.entry(p).or_default().push(e)
+                }
+                _ => roots.push(e),
+            }
+        }
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for r in roots {
+                self.hierarchy_node(ui, r, &children, &names, 0);
+            }
+            // Drop a node onto the empty area below → make it a root (unparent).
+            let bg = ui.allocate_response(ui.available_size(), egui::Sense::hover());
+            if let Some(p) = bg.dnd_release_payload::<NodePayload>() {
+                self.cmd.reparent = Some((p.0, None));
+            }
+        });
+    }
+
+    /// Render one hierarchy row (indented by `depth`) + its children. The row is a
+    /// drag source (drop it on another row to re-parent) and a drop target (for a
+    /// dragged node or a script).
+    fn hierarchy_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        e: Entity,
+        children: &HashMap<Entity, Vec<Entity>>,
+        names: &HashMap<Entity, String>,
+        depth: usize,
+    ) {
+        let name = names.get(&e).cloned().unwrap_or_default();
+        let is_folder = matches!(self.world.get::<Matter>(e), Some(Matter::Empty));
+        let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
+        let icon = if is_folder { "🗀" } else if has_kids { "▾" } else { "•" };
+        let selected = self.selection.contains(&e);
+
+        let resp = ui
+            .horizontal(|ui| {
+                ui.add_space(depth as f32 * 14.0);
+                let text = if selected {
+                    egui::RichText::new(format!("{icon} {name}")).strong().color(ui.visuals().selection.stroke.color)
+                } else {
+                    egui::RichText::new(format!("{icon} {name}"))
+                };
+                ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag()))
+            })
+            .inner;
+        resp.dnd_set_drag_payload(NodePayload(e));
+
+        // Highlight when a node/script is dragged over this row.
+        if resp.dnd_hover_payload::<NodePayload>().is_some()
+            || resp.dnd_hover_payload::<AssetPayload>().is_some_and(|p| is_script(&p.path))
+        {
+            ui.painter().rect_stroke(
+                resp.rect,
+                3.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 230, 140)),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        if resp.clicked() {
+            *self.selected_asset = None;
+            if ui.input(|i| i.modifiers.shift) {
+                if let Some(pos) = self.selection.iter().position(|x| *x == e) {
+                    self.selection.remove(pos);
+                } else {
+                    self.selection.push(e);
+                }
+            } else {
+                self.selection.clear();
+                self.selection.push(e);
+            }
+        }
+        if resp.secondary_clicked() && !selected {
+            self.selection.clear();
+            self.selection.push(e);
+        }
+        resp.context_menu(|ui| {
+            ui.menu_button("➕ Add child", |ui| {
+                if ui.button("🗀 Folder").clicked() {
+                    self.cmd.add_parented = Some((MatterDoc::Empty, e));
+                    ui.close();
+                }
+                if ui.button("Cube").clicked() {
+                    self.cmd.add_parented = Some((new_cube(), e));
+                    ui.close();
+                }
+                if ui.button("Sphere").clicked() {
+                    self.cmd.add_parented = Some((new_sphere(), e));
+                    ui.close();
+                }
+                if ui.button("Blob").clicked() {
+                    self.cmd.add_parented = Some((MatterDoc::Blob { scale: 1.0 }, e));
+                    ui.close();
+                }
+            });
+            if self.world.get::<floptle_core::Parent>(e).is_some() && ui.button("⤴ Unparent").clicked() {
+                self.cmd.reparent = Some((e, None));
+                ui.close();
+            }
+            ui.separator();
+            if ui.button("Duplicate").clicked() {
+                self.cmd.duplicate = true;
+                ui.close();
+            }
+            if ui.button("Copy").clicked() {
+                self.cmd.copy = true;
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                self.cmd.delete = true;
+                ui.close();
+            }
+        });
+        // Drops: a node re-parents under me; a script attaches to me.
+        if let Some(p) = resp.dnd_release_payload::<NodePayload>() {
+            if p.0 != e {
+                self.cmd.reparent = Some((p.0, Some(e)));
+            }
+        }
+        if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
+            if is_script(&p.path) {
+                self.cmd.drop_script_on = Some((p.path.clone(), e));
+            }
+        }
+
+        if let Some(kids) = children.get(&e) {
+            for &c in kids {
+                self.hierarchy_node(ui, c, children, names, depth + 1);
+            }
+        }
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
@@ -1342,6 +1464,10 @@ impl EditorTabViewer<'_> {
                             {
                                 cmd.extract_textures = Some(asset_path.clone());
                             }
+                        }
+                        Matter::Empty => {
+                            ui.label("group / empty");
+                            ui.small("a folder — organizes child nodes; has a transform but no geometry");
                         }
                     }
                 }
@@ -1575,6 +1701,10 @@ impl EditorTabViewer<'_> {
         }
         if ui.button("✎ New Lua Script").clicked() {
             self.cmd.new_script_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        if ui.button("🎬 New Scene").clicked() {
+            self.cmd.open_new_scene = true;
             ui.close();
         }
     }
@@ -2333,6 +2463,8 @@ struct Editor {
     focus_anim: Option<FocusAnim>,
     /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.
     rename_target: Option<(String, String)>,
+    /// New-scene name buffer (Some = the prompt is open).
+    new_scene_buf: Option<String>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -2542,8 +2674,10 @@ impl ApplicationHandler for Editor {
                         self.context_menu = None;
                         if let (Some(h), Some(e)) = (hovered, self.primary()) {
                             // On a gizmo handle → start an undoable edit and grab it.
-                            if let Some(t) = self.world.get::<Transform>(e) {
-                                let start_xf = *t;
+                            // start_xf is the WORLD transform; gizmo math runs in world
+                            // space and is converted back to local on write (parenting).
+                            if self.world.get::<Transform>(e).is_some() {
+                                let start_xf = floptle_core::world_transform(&self.world, e);
                                 self.begin_edit();
                                 self.grabbed = Some(h);
                                 self.drag = Some(DragState {
@@ -2797,7 +2931,8 @@ impl Editor {
             }
         }
         for (e, matter) in &ents {
-            let Some(t) = self.world.get::<Transform>(*e) else { continue };
+            // World transform (composes any parent chain) — a parent carries children.
+            let t = floptle_core::world_transform(&self.world, *e);
             // A node's Material (if any) overrides the look; else fall back to the
             // primitive's color (meshes default to white = untinted texture). A
             // material texture (resolved to a registered handle) re-textures the shape.
@@ -2826,6 +2961,7 @@ impl Editor {
                         }
                     }
                 }
+                Matter::Empty => {} // a group/folder — renders nothing
             }
         }
 
@@ -2860,9 +2996,8 @@ impl Editor {
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
         if let Some(e) = self.selection.last().copied() {
-            if let (Some(m), Some(t)) =
-                (self.world.get::<Matter>(e), self.world.get::<Transform>(e))
-            {
+            if let Some(m) = self.world.get::<Matter>(e) {
+                let t = floptle_core::world_transform(&self.world, e);
                 match m {
                     Matter::Primitive { shape, .. } => {
                         if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
@@ -2881,6 +3016,7 @@ impl Editor {
                     Matter::Blob { scale } => {
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
                     }
+                    Matter::Empty => {}
                 }
             }
         }
@@ -2905,6 +3041,7 @@ impl Editor {
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
         let rename_target = &mut self.rename_target;
+        let new_scene_buf = &mut self.new_scene_buf;
         let external_editor = &mut self.external_editor;
         let asset_tree = &self.asset_tree;
         let project_root = self.project_root.as_path();
@@ -3220,6 +3357,38 @@ impl Editor {
                     *rename_target = None;
                 }
             }
+
+            // ---- new scene modal ----
+            if let Some(buf) = new_scene_buf.as_mut() {
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new("New scene")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(300.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Name your new blank scene:");
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(buf).desired_width(260.0).hint_text("scene name"),
+                        );
+                        edit.request_focus();
+                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            let valid = !buf.trim().is_empty();
+                            if ui.add_enabled(valid, egui::Button::new("Create")).clicked() || (enter && valid) {
+                                cmd.new_scene = Some(buf.clone());
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *new_scene_buf = None;
+                }
+            }
             // (the gizmo now paints inside the Scene tab, clipped to its rect)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
@@ -3384,6 +3553,7 @@ impl Editor {
                 MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
+                MatterDoc::Empty => "Group",
             };
             self.add_node(name, m);
         }
@@ -3442,6 +3612,18 @@ impl Editor {
         }
         if let Some(path) = cmd.extract_textures {
             self.extract_textures(&path);
+        }
+        if let Some((child, parent)) = cmd.reparent {
+            self.reparent(child, parent);
+        }
+        if let Some((matter, parent)) = cmd.add_parented {
+            self.add_parented(matter, parent);
+        }
+        if cmd.open_new_scene {
+            self.new_scene_buf = Some(String::new());
+        }
+        if let Some(name) = cmd.new_scene {
+            self.new_scene(&name);
         }
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
@@ -3656,7 +3838,7 @@ impl Editor {
             })
             .unwrap_or_default();
         let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
-        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material })
+        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material, parent: None })
     }
     fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
         let e = self.world.spawn();
@@ -3694,6 +3876,7 @@ impl Editor {
             matter,
             scripts: Vec::new(),
             material: None,
+            parent: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -3746,6 +3929,7 @@ impl Editor {
                 matter: MatterDoc::Mesh { asset_path: path.to_string() },
                 scripts: Vec::new(),
                 material: None,
+                parent: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);
@@ -3881,7 +4065,8 @@ impl Editor {
 
         let mut best: Option<(Entity, f32)> = None;
         for (e, m) in self.world.query::<Matter>() {
-            let Some(t) = self.world.get::<Transform>(e) else { continue };
+            // Ray-test against the node's WORLD placement (so parented nodes pick).
+            let t = floptle_core::world_transform(&self.world, e);
             let hit = match m {
                 Matter::Primitive { shape, .. } => {
                     // Transform the ray into the object's local frame (the same `t`
@@ -3906,6 +4091,7 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
+                Matter::Empty => None, // no geometry — select folders via the hierarchy
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
@@ -3960,13 +4146,11 @@ impl Editor {
                         return; // axis points (almost) straight at the camera
                     }
                     let units = cursor_delta.dot(sdir) / len2;
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        let mut p = start.translation + (dir * units).as_dvec3();
-                        if snap {
-                            p = snap_dvec3(p, step);
-                        }
-                        t.translation = p;
+                    let mut p = start.translation + (dir * units).as_dvec3();
+                    if snap {
+                        p = snap_dvec3(p, step);
                     }
+                    self.set_world_transform(e, Transform { translation: p, ..start });
                 } else {
                     // Center handle: free move in the camera plane.
                     let rot = cam.rotation;
@@ -3975,13 +4159,11 @@ impl Editor {
                     let dist = (start.translation - cam_world).length().max(0.1) as f32;
                     let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
                     let mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        let mut p = start.translation + mv.as_dvec3();
-                        if snap {
-                            p = snap_dvec3(p, step);
-                        }
-                        t.translation = p;
+                    let mut p = start.translation + mv.as_dvec3();
+                    if snap {
+                        p = snap_dvec3(p, step);
                     }
+                    self.set_world_transform(e, Transform { translation: p, ..start });
                 }
             }
             Tool::Rotate => {
@@ -4002,9 +4184,8 @@ impl Editor {
                     if dir.dot((start.translation - cam_world).as_vec3()) > 0.0 {
                         angle = -angle;
                     }
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        t.rotation = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
-                    }
+                    let rot = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
+                    self.set_world_transform(e, Transform { rotation: rot, ..start });
                 } else {
                     // Center handle: free / trackball rotate about the camera axes —
                     // drag horizontally to spin about camera-up, vertically about
@@ -4013,9 +4194,8 @@ impl Editor {
                     let cam_up = cam.rotation * Vec3::Y;
                     let q = Quat::from_axis_angle(cam_up, cursor_delta.x * TRACKBALL_SENS)
                         * Quat::from_axis_angle(cam_right, cursor_delta.y * TRACKBALL_SENS);
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        t.rotation = (q * start.rotation).normalize();
-                    }
+                    let rot = (q * start.rotation).normalize();
+                    self.set_world_transform(e, Transform { rotation: rot, ..start });
                 }
             }
             Tool::Scale => {
@@ -4029,11 +4209,9 @@ impl Editor {
                     };
                     let n = (s1 - s0).normalize_or_zero();
                     let factor = 1.0 + cursor_delta.dot(n) * SCALE_SENS;
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        let mut sc = start.scale;
-                        sc[i] = (start.scale[i] * factor).max(0.01);
-                        t.scale = sc;
-                    }
+                    let mut sc = start.scale;
+                    sc[i] = (start.scale[i] * factor).max(0.01);
+                    self.set_world_transform(e, Transform { scale: sc, ..start });
                 } else {
                     // Center handle: uniform scale by the cursor's distance ratio.
                     let Some(center) = project(start.translation, cam_world, vp, w, h) else {
@@ -4042,13 +4220,104 @@ impl Editor {
                     let d0 = (drag.cursor_start - center).length().max(1.0);
                     let d1 = (cursor - center).length();
                     let factor = (d1 / d0).max(0.01);
-                    if let Some(t) = self.world.get_mut::<Transform>(e) {
-                        t.scale = (start.scale * factor).max(Vec3::splat(0.01));
-                    }
+                    let sc = (start.scale * factor).max(Vec3::splat(0.01));
+                    self.set_world_transform(e, Transform { scale: sc, ..start });
                 }
             }
             Tool::Select => {}
         }
+    }
+
+    /// Write `world_xf` (an absolute transform) to `e`, converting it back to the
+    /// node's *local* transform when it has a parent (so dragging a child's gizmo
+    /// edits its local placement, and parents still carry it).
+    fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
+        let local = match self.world.get::<floptle_core::Parent>(e).copied() {
+            None => world_xf,
+            Some(floptle_core::Parent(p)) => {
+                let pw = floptle_core::world_transform(&self.world, p);
+                let lm = pw.world_matrix().inverse() * world_xf.world_matrix();
+                let (s, r, t) = lm.to_scale_rotation_translation();
+                Transform { translation: t, rotation: r.as_quat(), scale: s.as_vec3() }
+            }
+        };
+        if let Some(t) = self.world.get_mut::<Transform>(e) {
+            *t = local;
+        }
+    }
+
+    // ---- scene-graph (parenting) -------------------------------------------
+    /// True if `e` is `ancestor` or one of its descendants (cycle guard).
+    fn is_descendant(&self, e: Entity, ancestor: Entity) -> bool {
+        let mut cur = e;
+        for _ in 0..64 {
+            if cur == ancestor {
+                return true;
+            }
+            match self.world.get::<floptle_core::Parent>(cur).copied() {
+                Some(floptle_core::Parent(p)) => cur = p,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Re-parent `child` under `parent` (or make it a root if `None`), preserving
+    /// its world placement. Rejects cycles (can't parent under your own descendant).
+    fn reparent(&mut self, child: Entity, parent: Option<Entity>) {
+        if let Some(p) = parent {
+            if self.is_descendant(p, child) {
+                return;
+            }
+        }
+        self.record();
+        let world = floptle_core::world_transform(&self.world, child);
+        match parent {
+            Some(p) => self.world.insert(child, floptle_core::Parent(p)),
+            None => {
+                self.world.remove::<floptle_core::Parent>(child);
+            }
+        }
+        self.set_world_transform(child, world); // keep the same world placement
+    }
+
+    /// Spawn a new node as a child of `parent`, sitting at the parent's origin.
+    fn add_parented(&mut self, matter: MatterDoc, parent: Entity) {
+        self.record();
+        let name = matter_doc_name(&matter);
+        let e = self.world.spawn();
+        self.world.insert(e, Transform::IDENTITY);
+        self.world.insert(e, Name(name.into()));
+        self.world.insert(e, matter.to_matter());
+        self.world.insert(e, floptle_core::Parent(parent));
+        self.select_single(e);
+    }
+
+    /// Create a new blank scene `<name>.ron`, save it, and switch the editor to it.
+    fn new_scene(&mut self, name: &str) {
+        let name = {
+            let n = name.trim();
+            if n.is_empty() { "untitled".to_string() } else { n.to_string() }
+        };
+        let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
+        let path = self.project_root.join("scenes").join(format!("{name}.ron"));
+        let doc = floptle_scene::SceneDoc {
+            name: name.clone(),
+            lighting: floptle_scene::LightDoc::default(),
+            nodes: Vec::new(),
+        };
+        if let Err(e) = floptle_scene::save(&doc, &path) {
+            eprintln!("  new scene failed: {e}");
+            return;
+        }
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.scene_name = name;
+        self.selection.clear();
+        self.history = History::default();
+        self.mesh_registry.clear();
+        self.asset_tree = build_assets(&self.project_root);
+        println!("  new scene: {}", path.display());
     }
 
     // ---- project paths (everything resolves against `project_root`) ----
@@ -4330,6 +4599,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
                 scripts: Vec::new(),
                 material: None,
+                parent: None,
             },
             NodeDoc {
                 name: "sphere".into(),
@@ -4337,6 +4607,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
                 scripts: Vec::new(),
                 material: None,
+                parent: None,
             },
             NodeDoc {
                 name: "blob".into(),
@@ -4344,6 +4615,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Blob { scale: 1.0 },
                 scripts: Vec::new(),
                 material: None,
+                parent: None,
             },
         ],
     }

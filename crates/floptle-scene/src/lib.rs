@@ -35,6 +35,10 @@ pub struct NodeDoc {
     /// The node's material (surface look). `None` = the engine's default look.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialDoc>,
+    /// Index (into this scene's `nodes`) of this node's parent — its transform is
+    /// local to it. `None` = a root node. The transform is local either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
 }
 
 /// A serializable attached script, mirroring [`floptle_core::ScriptInst`].
@@ -100,6 +104,7 @@ pub enum MatterDoc {
     Primitive { shape: ShapeDoc, color: [f32; 3] },
     Blob { scale: f32 },
     Mesh { asset_path: String },
+    Empty,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -116,6 +121,7 @@ impl From<&Matter> for MatterDoc {
             }
             Matter::Blob { scale } => MatterDoc::Blob { scale: *scale },
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
+            Matter::Empty => MatterDoc::Empty,
         }
     }
 }
@@ -128,6 +134,7 @@ impl MatterDoc {
             }
             MatterDoc::Blob { scale } => Matter::Blob { scale: *scale },
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
+            MatterDoc::Empty => Matter::Empty,
         }
     }
 }
@@ -368,6 +375,8 @@ pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneErro
 /// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,
 /// then spawn the one mandatory Lighting node (`Name` + [`Light`]).
 pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
+    // First pass: spawn each node (keeping the index→entity map for parent links).
+    let mut ents = Vec::with_capacity(doc.nodes.len());
     for node in &doc.nodes {
         let e = world.spawn();
         world.insert(e, node.transform.to_transform());
@@ -379,6 +388,15 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if let Some(m) = &node.material {
             world.insert(e, m.to_material());
         }
+        ents.push(e);
+    }
+    // Second pass: link parents (skip out-of-range / self references).
+    for (i, node) in doc.nodes.iter().enumerate() {
+        if let Some(p) = node.parent {
+            if p < ents.len() && p != i {
+                world.insert(ents[i], floptle_core::Parent(ents[p]));
+            }
+        }
     }
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
@@ -388,8 +406,11 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
 /// Snapshot every `Matter` entity (and the `Light` node) in `world` into a `SceneDoc`.
 pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
     let entities: Vec<_> = world.query::<Matter>().map(|(e, _)| e).collect();
+    // Entity → node index, so parent links serialize as indices into `nodes`.
+    let index: std::collections::HashMap<_, usize> =
+        entities.iter().enumerate().map(|(i, e)| (*e, i)).collect();
     let mut nodes = Vec::with_capacity(entities.len());
-    for e in entities {
+    for &e in &entities {
         let Some(matter) = world.get::<Matter>(e) else { continue };
         let transform =
             world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default();
@@ -399,7 +420,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .map(|s| s.0.iter().map(ScriptDoc::from_inst).collect())
             .unwrap_or_default();
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
-        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material });
+        let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
+        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material, parent });
     }
     let lighting =
         world.query::<Light>().next().map(|(_, l)| LightDoc::from(l)).unwrap_or_default();
@@ -431,6 +453,7 @@ mod tests {
                         unlit: false,
                         ..Default::default()
                     }),
+                    parent: None,
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -438,6 +461,7 @@ mod tests {
                     matter: MatterDoc::Blob { scale: 1.3 },
                     scripts: Vec::new(),
                     material: None,
+                    parent: Some(0), // child of the cube — exercises parent round-trip
                 },
             ],
         }
