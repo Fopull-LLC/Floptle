@@ -179,6 +179,48 @@ impl Default for GridConfig {
     }
 }
 
+/// A node in the project asset tree (the bottom file browser).
+enum AssetEntry {
+    Dir(String, Vec<AssetEntry>),
+    File(String),
+}
+
+/// Read the project tree under `dir` (folders first, then files, alphabetically).
+fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    let mut entries: Vec<_> = rd.flatten().collect();
+    entries.sort_by_key(|e| (e.path().is_file(), e.file_name()));
+    for e in entries {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if e.path().is_dir() {
+            out.push(AssetEntry::Dir(name, build_assets(&e.path())));
+        } else {
+            out.push(AssetEntry::File(name));
+        }
+    }
+    out
+}
+
+/// Render the asset tree (browse-only for now; import lands next).
+fn render_assets(ui: &mut egui::Ui, entries: &[AssetEntry]) {
+    for entry in entries {
+        match entry {
+            AssetEntry::Dir(name, children) => {
+                egui::CollapsingHeader::new(format!("🗀 {name}")).id_salt(name).show(ui, |ui| {
+                    render_assets(ui, children);
+                });
+            }
+            AssetEntry::File(name) => {
+                ui.label(format!("    {name}"));
+            }
+        }
+    }
+}
+
 fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
 }
@@ -518,6 +560,8 @@ struct Editor {
     /// Reference grid + snap settings.
     grid: GridConfig,
     show_grid_settings: bool,
+    /// Project asset tree shown in the bottom file browser.
+    asset_tree: Vec<AssetEntry>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -569,6 +613,13 @@ impl ApplicationHandler for Editor {
 
         // Project-wide render settings live in their own file, shared across scenes.
         self.project = floptle_scene::load_project(std::path::Path::new(PROJECT_PATH));
+
+        // Seed a sample project folder structure (no-op if it exists), then scan it
+        // for the bottom asset browser.
+        for d in ["scenes", "textures", "models", "materials", "audio"] {
+            let _ = std::fs::create_dir_all(format!("assets/{d}"));
+        }
+        self.asset_tree = build_assets(std::path::Path::new("assets"));
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.outline = Some(Outline::new(&gpu));
@@ -928,6 +979,8 @@ impl Editor {
         let show_project_settings = &mut self.show_project_settings;
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
+        let asset_tree = &self.asset_tree;
+        let mut want_refresh_assets = false;
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let grabbed = self.grabbed;
@@ -1151,6 +1204,22 @@ impl Editor {
                 ui.small("1 select · 2 move · 3 rotate · 4 scale");
                 ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
                 ui.small("WASD move · Space/C up/down · Ctrl+Z/Y/C/V/D · Del");
+            });
+
+            // ---- bottom asset / file browser ----
+            egui::Panel::bottom("assets").default_size(150.0).resizable(true).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Assets");
+                    if ui.small_button("⟳").on_hover_text("rescan").clicked() {
+                        want_refresh_assets = true;
+                    }
+                    ui.separator();
+                    ui.small("project files — texture/model/material/audio import lands next");
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    render_assets(ui, asset_tree);
+                });
             });
 
             // ---- project settings window (project-wide rendering) ----
@@ -1397,6 +1466,9 @@ impl Editor {
         }
         if cmd.inspector_changed {
             self.begin_edit();
+        }
+        if want_refresh_assets {
+            self.asset_tree = build_assets(std::path::Path::new("assets"));
         }
     }
 
