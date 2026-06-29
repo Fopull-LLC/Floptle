@@ -1,0 +1,11 @@
+// A built-in behavior: pulse the node's scale with a sine wave.
+// Drag this onto a node to attach it, then press ▶ Play to see it pulsate.
+(
+    kind: "pulsate",
+    enabled: true,
+    params: [
+        ("amplitude", 0.35),
+        ("speed", 2.5),
+        ("base", 1.0),
+    ],
+)

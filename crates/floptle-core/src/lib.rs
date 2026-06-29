@@ -28,11 +28,13 @@ pub mod event;
 pub mod math;
 pub mod matter;
 pub mod origin;
+pub mod script;
 pub mod time;
 pub mod transform;
 
 pub use ecs::{Entity, World};
 pub use matter::{Light, Matter, Name, Shape, Spin};
+pub use script::{run_scripts, ScriptInst, Scripts, SCRIPT_KINDS};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};
 pub use transform::Transform;

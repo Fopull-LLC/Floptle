@@ -1,0 +1,8 @@
+// A built-in behavior: spin the node about Y at `speed` degrees/second.
+(
+    kind: "rotate",
+    enabled: true,
+    params: [
+        ("speed", 45.0),
+    ],
+)
