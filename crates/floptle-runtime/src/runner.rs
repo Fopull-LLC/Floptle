@@ -16,8 +16,8 @@ use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::Entity;
 use floptle_render::{
-    cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Raster, Raymarch,
-    RaymarchGlobals, Retro,
+    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Raster,
+    Raymarch, RaymarchGlobals, Retro,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -27,7 +27,6 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::app::{App, Renderable, Shape};
-use crate::camera::{FlyCamera, Input};
 
 /// Open a window and run the engine until it's closed. Blocks.
 pub fn run() {
