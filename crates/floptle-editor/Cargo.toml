@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
+floptle-scene = { path = "../floptle-scene" }
+floptle-field = { path = "../floptle-field" }
 floptle-shader = { path = "../floptle-shader" }
 floptle-vfx = { path = "../floptle-vfx" }
 floptle-anim = { path = "../floptle-anim" }
@@ -25,3 +27,12 @@ floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
 floptle-script = { path = "../floptle-script" }
+
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }

@@ -9,7 +9,6 @@
 //! without a window (CI / no-display): it advances ~2 simulated seconds and exits.
 
 mod app;
-mod camera;
 mod runner;
 
 use app::App;

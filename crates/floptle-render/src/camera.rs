@@ -1,5 +1,5 @@
-//! A free-fly debug camera and the raw input it reads — the Phase-1 way to move
-//! through the world and look at the scene.
+//! A free-fly debug camera and the raw input it reads — the shared way the runtime
+//! and editor move through the world and look at the scene.
 //!
 //! The camera holds an `f64` world position (large-world-safe, ADR-0015) plus
 //! yaw/pitch in `f32`. WASD moves on the camera's own axes, Space/Ctrl go
@@ -7,10 +7,11 @@
 //! the renderer a [`RenderCamera`]; the world is offset to *it*, never the reverse.
 
 use floptle_core::math::{DVec3, Quat, Vec3};
-use floptle_render::{Projection, RenderCamera};
 
-/// Edge-triggered-free input snapshot: which movement keys are held this frame and
-/// whether mouse-look is active. The runner writes it from winit events.
+use crate::{Projection, RenderCamera};
+
+/// Input snapshot: which movement keys are held this frame and whether mouse-look
+/// is active. The host writes it from winit events.
 #[derive(Default)]
 pub struct Input {
     pub forward: bool,
@@ -37,8 +38,6 @@ pub struct FlyCamera {
 
 impl Default for FlyCamera {
     fn default() -> Self {
-        // Pulled back and slightly up along +Z, framing the three demo meshes
-        // (spread to x = ±2.6) with margin and looking toward the origin.
         Self { position: DVec3::new(0.0, 0.8, 7.0), yaw: 0.0, pitch: 0.0, speed: 4.0, sensitivity: 0.0026 }
     }
 }
@@ -52,7 +51,6 @@ impl FlyCamera {
     /// Apply a mouse-motion delta (pixels) to yaw/pitch.
     pub fn look(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * self.sensitivity;
-        // ~88° clamp keeps the camera from flipping over the poles.
         let limit = std::f32::consts::FRAC_PI_2 - 0.04;
         self.pitch = (self.pitch - dy * self.sensitivity).clamp(-limit, limit);
     }
@@ -60,7 +58,7 @@ impl FlyCamera {
     /// Integrate movement for `dt` seconds from the held keys.
     pub fn update(&mut self, input: &Input, dt: f32) {
         let rot = self.rotation();
-        let forward = rot * Vec3::NEG_Z; // cameras look down -Z
+        let forward = rot * Vec3::NEG_Z;
         let right = rot * Vec3::X;
         let mut dir = Vec3::ZERO;
         if input.forward {
@@ -76,7 +74,7 @@ impl FlyCamera {
             dir -= right;
         }
         if input.up {
-            dir += Vec3::Y; // world up, so vertical move is intuitive regardless of pitch
+            dir += Vec3::Y;
         }
         if input.down {
             dir -= Vec3::Y;
@@ -103,7 +101,6 @@ mod tests {
 
     #[test]
     fn default_looks_down_neg_z() {
-        // At rest the camera faces -Z (toward the origin from +Z), so forward is -Z.
         let cam = FlyCamera::default();
         let fwd = cam.rotation() * Vec3::NEG_Z;
         assert!((fwd - Vec3::NEG_Z).length() < 1e-5, "forward should be -Z, got {fwd:?}");
@@ -111,7 +108,6 @@ mod tests {
 
     #[test]
     fn forward_moves_toward_target() {
-        // Holding W for a second moves the camera the speed-distance along -Z.
         let mut cam = FlyCamera::default();
         let start = cam.position;
         let input = Input { forward: true, ..Default::default() };
@@ -122,7 +118,6 @@ mod tests {
 
     #[test]
     fn pitch_clamps_at_the_poles() {
-        // A huge downward drag can't flip the camera past straight-down.
         let mut cam = FlyCamera::default();
         cam.look(0.0, 1.0e6);
         assert!(cam.pitch >= -std::f32::consts::FRAC_PI_2);

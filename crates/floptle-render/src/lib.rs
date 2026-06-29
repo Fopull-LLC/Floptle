@@ -20,6 +20,7 @@
 
 // Phase 1–2 modules. `material`, `raymarch`, `post`, `light` arrive in Phases 2/4.
 // `mesh` is the CPU/GPU geometry seam (Phase 2); `raster` is the forward pass.
+pub mod camera;
 pub mod device;
 pub mod frame;
 pub mod graph;
@@ -28,6 +29,7 @@ pub mod raster;
 pub mod raymarch;
 pub mod retro;
 
+pub use camera::{FlyCamera, Input};
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
