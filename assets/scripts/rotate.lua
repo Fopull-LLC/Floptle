@@ -5,6 +5,6 @@
 
 defaults = { speed = 45 }  -- degrees per second
 
-function on_update(node, dt)
+function update(node, dt)
   node.yaw = node.yaw + math.rad(params.speed) * dt
 end
