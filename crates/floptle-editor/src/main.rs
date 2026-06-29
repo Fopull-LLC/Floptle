@@ -301,6 +301,34 @@ fn is_material(path: &str) -> bool {
     p.ends_with(".ron") && p.replace('\\', "/").contains("materials/")
 }
 
+/// Shorten `name` to at most `max` chars (…-elided), for fixed-width grid tiles.
+fn truncate_label(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let keep: String = name.chars().take(max.saturating_sub(1)).collect();
+    format!("{keep}…")
+}
+
+/// A small type glyph + tint for an asset file, used in the browser tree + grid.
+fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
+    if is_model(path) {
+        ("🧊", egui::Color32::from_rgb(120, 200, 210))
+    } else if is_script(path) {
+        ("📜", egui::Color32::from_rgb(130, 170, 240))
+    } else if is_texture(path) {
+        ("🖼", egui::Color32::from_rgb(140, 210, 140))
+    } else if is_material(path) {
+        ("🎨", egui::Color32::from_rgb(240, 180, 110))
+    } else if path.to_ascii_lowercase().ends_with(".ron") {
+        ("🎬", egui::Color32::from_rgb(200, 150, 230)) // a scene
+    } else if is_markdown(path) {
+        ("📝", egui::Color32::from_gray(190))
+    } else {
+        ("📄", egui::Color32::from_gray(170))
+    }
+}
+
 /// Open the OS file manager at `path` (revealing the file where supported).
 fn reveal_in_explorer(path: &Path) {
     #[cfg(target_os = "macos")]
@@ -1302,6 +1330,9 @@ struct EditorTabViewer<'a> {
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
+    /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
+    assets_grid: &'a mut bool,
+    assets_grid_dir: &'a mut PathBuf,
     /// The project root — the directory the asset browser is rooted at.
     project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
@@ -1362,7 +1393,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     }
 }
 
-impl EditorTabViewer<'_> {
+impl<'a> EditorTabViewer<'a> {
     fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
         // Scene name + save at the top of the hierarchy.
         ui.horizontal(|ui| {
@@ -1875,9 +1906,21 @@ impl EditorTabViewer<'_> {
                 self.new_asset_menu(ui, &root);
             });
             ui.separator();
-            ui.small("right-click for New Folder / New Script · double-click a script to edit · drag onto the scene or a node");
+            // Tree / Grid view toggle.
+            if ui.selectable_label(!*self.assets_grid, "☰").on_hover_text("file tree").clicked() {
+                *self.assets_grid = false;
+            }
+            if ui.selectable_label(*self.assets_grid, "▦").on_hover_text("icon grid").clicked() {
+                *self.assets_grid = true;
+            }
+            ui.separator();
+            ui.small("right-click for New · double-click a script/folder to open · drag onto the scene");
         });
         ui.separator();
+        if *self.assets_grid {
+            self.assets_grid_ui(ui, &root);
+            return;
+        }
         let tree = self.asset_tree; // Copy the slice ref so the recursion can &mut self.
         let resp = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -1891,6 +1934,173 @@ impl EditorTabViewer<'_> {
         resp.context_menu(|ui| {
             self.new_asset_menu(ui, &root);
         });
+    }
+
+    /// Find the asset entries inside `dir` (absolute, under the project root) by
+    /// walking the cached tree. The returned slice borrows the tree (lifetime `'a`),
+    /// not `self`, so the caller can still `&mut self` while iterating it.
+    fn grid_entries(&self, dir: &Path) -> Option<&'a [AssetEntry]> {
+        let rel = dir.strip_prefix(self.project_root).ok()?;
+        let mut cur: &'a [AssetEntry] = self.asset_tree;
+        for comp in rel.components() {
+            let name = comp.as_os_str().to_string_lossy();
+            cur = cur.iter().find_map(|e| match e {
+                AssetEntry::Dir(n, kids) if n.as_str() == name => Some(kids.as_slice()),
+                _ => None,
+            })?;
+        }
+        Some(cur)
+    }
+
+    /// The icon-grid asset browser: a wrapped flow of tiles for the current folder.
+    /// Folders descend on double-click; files select / open / drag like the tree.
+    fn assets_grid_ui(&mut self, ui: &mut egui::Ui, root: &Path) {
+        // Keep the grid folder valid (e.g. after switching projects).
+        if !self.assets_grid_dir.starts_with(root) {
+            *self.assets_grid_dir = root.to_path_buf();
+        }
+        let dir = self.assets_grid_dir.clone();
+
+        // Breadcrumb row: up button + relative path.
+        ui.horizontal(|ui| {
+            let at_root = dir == root;
+            if ui.add_enabled(!at_root, egui::Button::new("⬆")).on_hover_text("up").clicked() {
+                if let Some(p) = dir.parent() {
+                    *self.assets_grid_dir = p.to_path_buf();
+                }
+            }
+            let rel = dir.strip_prefix(root).ok().map(|p| p.to_string_lossy().to_string());
+            let crumb = match rel.as_deref() {
+                Some("") | None => "assets".to_string(),
+                Some(r) => format!("assets/{r}"),
+            };
+            ui.weak(crumb);
+        });
+        ui.separator();
+
+        let Some(entries) = self.grid_entries(&dir) else {
+            ui.weak("(empty)");
+            return;
+        };
+        let mut enter: Option<PathBuf> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for entry in entries {
+                    match entry {
+                        AssetEntry::Dir(name, _) => {
+                            if self.asset_tile(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name.as_str(), None) {
+                                enter = Some(dir.join(name));
+                            }
+                        }
+                        AssetEntry::File { name, path } => {
+                            let (icon, color) = asset_kind_icon(path.as_str());
+                            self.asset_file_tile(ui, icon, color, name.as_str(), path.as_str());
+                        }
+                    }
+                }
+            });
+            // Right-click empty space → New menu.
+            let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
+            bg.context_menu(|ui| self.new_asset_menu(ui, &dir));
+        });
+        if let Some(d) = enter {
+            *self.assets_grid_dir = d;
+        }
+    }
+
+    /// A bare clickable tile (icon + name). Returns true on double-click (used for
+    /// folders → descend). 84-pt wide so several fit per row.
+    fn asset_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        icon: &str,
+        color: egui::Color32,
+        name: &str,
+        _path: Option<&str>,
+    ) -> bool {
+        let resp = self.tile_frame(ui, icon, color, name, false);
+        resp.double_clicked()
+    }
+
+    /// A file tile: select on click, open on double-click (scripts/markdown), drag a
+    /// payload (models/scripts), and the shared context menu.
+    fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str) {
+        let selected = self.selected_asset.as_deref() == Some(path);
+        let draggable = is_model(path) || is_script(path);
+        let resp = self.tile_frame(ui, icon, color, name, selected);
+        if draggable {
+            resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
+        }
+        if resp.clicked() {
+            *self.selected_asset = Some(path.to_string());
+        }
+        let openable = is_script(path) || is_markdown(path);
+        if resp.double_clicked() && openable {
+            self.cmd.open_script_pref = Some(path.to_string());
+        }
+        let dir = Path::new(path).parent().map(|p| p.to_path_buf());
+        resp.context_menu(|ui| {
+            if openable && ui.button("✎ Open in Scripting tab").clicked() {
+                self.cmd.open_script = Some(path.to_string());
+                self.cmd.focus_scripting = true;
+                ui.close();
+            }
+            if ui.button("🗂 Open in file explorer").clicked() {
+                reveal_in_explorer(Path::new(path));
+                ui.close();
+            }
+            if ui.button("✏ Rename…").clicked() {
+                self.cmd.rename_asset = Some(path.to_string());
+                ui.close();
+            }
+            if ui.button("🗑 Delete").clicked() {
+                self.cmd.delete_asset = Some(path.to_string());
+                ui.close();
+            }
+            if let Some(d) = &dir {
+                ui.separator();
+                self.new_asset_menu(ui, d);
+            }
+        });
+    }
+
+    /// Paint one tile (a framed icon over a name), returning its click_and_drag
+    /// response. Highlights when `selected`.
+    fn tile_frame(
+        &self,
+        ui: &mut egui::Ui,
+        icon: &str,
+        color: egui::Color32,
+        name: &str,
+        selected: bool,
+    ) -> egui::Response {
+        let size = egui::vec2(86.0, 84.0);
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        let bg = if selected {
+            ui.visuals().selection.bg_fill.gamma_multiply(0.5)
+        } else if resp.hovered() {
+            ui.visuals().widgets.hovered.bg_fill
+        } else {
+            ui.visuals().faint_bg_color
+        };
+        p.rect_filled(rect.shrink(2.0), 5.0, bg);
+        if selected {
+            p.rect_stroke(rect.shrink(2.0), 5.0, egui::Stroke::new(1.5, ui.visuals().selection.stroke.color), egui::StrokeKind::Inside);
+        }
+        // Icon glyph centered in the upper part.
+        let icon_pos = egui::pos2(rect.center().x, rect.top() + 30.0);
+        p.text(icon_pos, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(30.0), color);
+        // Name, truncated to two-ish lines at the bottom.
+        let short = truncate_label(name, 22);
+        p.text(
+            egui::pos2(rect.center().x, rect.bottom() - 16.0),
+            egui::Align2::CENTER_CENTER,
+            short,
+            egui::FontId::proportional(11.0),
+            ui.visuals().text_color(),
+        );
+        resp.on_hover_text(name)
     }
 
     /// The shared "New Folder / New Script" submenu, targeting `dir`.
@@ -1933,7 +2143,9 @@ impl EditorTabViewer<'_> {
                     let script = is_script(path);
                     let draggable = model || script;
                     let selected = self.selected_asset.as_deref() == Some(path.as_str());
-                    let label = if draggable { format!("⠿  {name}") } else { format!("    {name}") };
+                    let (icon, _) = asset_kind_icon(path);
+                    let grip = if draggable { "⠿" } else { " " };
+                    let label = format!("{grip} {icon} {name}");
                     // A single widget that senses BOTH click and drag. (The old
                     // dnd_drag_source layered a drag-sense interaction over the label,
                     // and the drag sense swallowed double-clicks — so a script could
@@ -3037,6 +3249,10 @@ struct Editor {
     show_grid_settings: bool,
     /// Project asset tree shown in the bottom file browser.
     asset_tree: Vec<AssetEntry>,
+    /// Asset browser view mode: false = file tree, true = icon grid.
+    assets_grid: bool,
+    /// The folder the icon grid is currently showing (grid view only).
+    assets_grid_dir: PathBuf,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
     /// Whether the floating Material Editor window is open.
@@ -3142,6 +3358,7 @@ impl ApplicationHandler for Editor {
         self.prefer_external_editor = load_prefer_external();
         self.preview_spinning = true;
         self.preview_zoom = 1.0;
+        self.assets_grid_dir = self.project_root.clone();
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -3802,6 +4019,8 @@ impl Editor {
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
         let asset_tree = &self.asset_tree;
+        let assets_grid = &mut self.assets_grid;
+        let assets_grid_dir = &mut self.assets_grid_dir;
         let project_root = self.project_root.as_path();
         let playing = self.playing;
         let paused = self.paused;
@@ -3929,6 +4148,8 @@ impl Editor {
                 mat_name_buf,
                 show_material_editor,
                 asset_tree,
+                assets_grid,
+                assets_grid_dir,
                 project_root,
                 selected_asset,
                 ide,
