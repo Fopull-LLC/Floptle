@@ -57,6 +57,7 @@ egui = "0.35.0"                                          # editor UI — ADR-000
 egui-wgpu = "0.35.0"                                     # egui ↔ wgpu render backend
 egui-winit = "0.35.0"                                    # egui ↔ winit input/window
 egui_dock = "0.20.1"                                     # dockable editor panels
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] } # loose texture decode
 
 # Promoted in later phases:
 # naga        = "29"   # shader IR + WGSL transpile — Phase 3, ADR-0007

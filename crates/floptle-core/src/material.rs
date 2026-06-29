@@ -8,8 +8,11 @@
 
 /// The surface look attached to a node (a component). Default is a plain white
 /// matte — applying it changes nothing until the artist dials in properties.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Material {
+    /// A base-color texture (project-relative path), sampled over the shape and
+    /// multiplied by `color`. `None` = use the shape's own texture / flat color.
+    pub texture: Option<String>,
     /// Base color tint (multiplies any texture).
     pub color: [f32; 3],
     /// Emissive color and its strength (glow that ignores lighting).
@@ -31,6 +34,7 @@ pub struct Material {
 impl Default for Material {
     fn default() -> Self {
         Self {
+            texture: None,
             color: [1.0, 1.0, 1.0],
             emissive: [0.0, 0.0, 0.0],
             emissive_strength: 0.0,

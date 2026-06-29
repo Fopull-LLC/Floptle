@@ -11,7 +11,7 @@
 use floptle_core::transform::Transform;
 use floptle_render::{
     cube, instance_of, uv_sphere, Globals, Gpu, InstanceRaw, MeshId, Projection, Raster, Raymarch,
-    RaymarchGlobals, RenderCamera,
+    RaymarchGlobals, RenderCamera, TexId,
 };
 use glam::{DVec3, Quat, Vec3};
 
@@ -61,9 +61,9 @@ fn main() {
         ambient: [0.12, 0.12, 0.16, 0.0],
     };
 
-    let mesh = |id: MeshId, pos: [f64; 3], color: [f32; 3]| -> (MeshId, InstanceRaw) {
+    let mesh = |id: MeshId, pos: [f64; 3], color: [f32; 3]| -> (MeshId, Option<TexId>, InstanceRaw) {
         let t = Transform::from_translation(DVec3::from(pos));
-        (id, instance_of(t.render_matrix(cam.world_position), color))
+        (id, None, instance_of(t.render_matrix(cam.world_position), color))
     };
     let instances = vec![
         mesh(cube_id, [-2.8, 0.0, 0.0], [0.9, 0.45, 0.35]),

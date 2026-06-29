@@ -16,7 +16,7 @@ use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::Entity;
 use floptle_render::{
-    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Raster,
+    cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Input, InstanceRaw, MeshId, Raster, TexId,
     Raymarch, RaymarchGlobals, Retro,
 };
 use winit::application::ApplicationHandler;
@@ -415,13 +415,14 @@ impl Runner {
         // Renderable query borrow ends before we look up each Transform)
         let renderables: Vec<(Entity, Shape, [f32; 3])> =
             self.app.world.query::<Renderable>().map(|(e, r)| (e, r.shape, r.color)).collect();
-        let mut instances: Vec<(MeshId, InstanceRaw)> = Vec::with_capacity(renderables.len());
+        let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
+            Vec::with_capacity(renderables.len());
         for (e, shape, color) in renderables {
             // skip (don't panic) if a shape has no registered mesh yet
             let Some(&mesh) = self.mesh_ids.get(shape.index()) else { continue };
             if let Some(t) = self.app.world.get::<Transform>(e) {
                 let model = t.render_matrix(cam.world_position);
-                instances.push((mesh, instance_of(model, color)));
+                instances.push((mesh, None, instance_of(model, color)));
             }
         }
         // imported glTF models, fit-scaled and slowly spinning above the row
@@ -432,7 +433,7 @@ impl Runner {
                 scale: Vec3::splat(imp.scale),
             };
             let model = spun.render_matrix(cam.world_position);
-            instances.push((imp.mesh, instance_of(model, imp.color)));
+            instances.push((imp.mesh, None, instance_of(model, imp.color)));
         }
 
         // a quiet, dark indigo backdrop (kept below the objects' shadowed faces so

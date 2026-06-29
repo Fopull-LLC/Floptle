@@ -122,7 +122,20 @@ pub struct Raster {
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
     meshes: Vec<RegisteredMesh>,
+    /// Standalone material textures (decoupled from meshes), bound per-instance so
+    /// a Material can re-texture any shape. Indexed by [`TexId`].
+    textures: Vec<TexBind>,
 }
+
+/// A registered material texture: its bind group + the texture kept alive for it.
+struct TexBind {
+    bind: wgpu::BindGroup,
+    _texture: wgpu::Texture,
+}
+
+/// A handle to a material texture registered with [`Raster::register_texture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TexId(pub u32);
 
 impl Raster {
     pub fn new(gpu: &Gpu) -> Self {
@@ -298,7 +311,26 @@ impl Raster {
             instance_buf,
             instance_cap,
             meshes: Vec::new(),
+            textures: Vec::new(),
         }
+    }
+
+    /// Register a standalone material texture (RGBA8), returning its handle. Bound
+    /// per-instance in `draw_scene` to re-texture a shape regardless of its mesh.
+    pub fn register_texture(&mut self, gpu: &Gpu, data: &TextureData) -> TexId {
+        let id = TexId(self.textures.len() as u32);
+        let texture = upload_texture(gpu, data);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-material-tex"),
+            layout: &self.tex_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        });
+        self.textures.push(TexBind { bind, _texture: texture });
+        id
     }
 
     /// Upload a mesh and its base-color texture (or `None` for a white default),
@@ -414,7 +446,7 @@ impl Raster {
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         globals: Globals,
-        instances: &[(MeshId, InstanceRaw)],
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         clear: Option<[f64; 4]>,
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -429,18 +461,28 @@ impl Raster {
             None => (wgpu::LoadOp::Load, wgpu::LoadOp::Load),
         };
 
+        // Bucket by (mesh, texture-override) — each unique combo is one draw with
+        // its own bound texture. A material texture (Some) re-textures the shape;
+        // None uses the mesh's own base-color texture.
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        let mut buckets: Vec<(usize, u32, u32)> = Vec::new(); // (mesh idx, start, count)
-        for mesh_idx in 0..self.meshes.len() {
+        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+        let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
+        for (id, tex, _) in instances {
+            let k = (id.0 as usize, tex.map(|t| t.0));
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        for (mesh_idx, tex_key) in keys {
             let start = raws.len() as u32;
-            for (id, raw) in instances {
-                if id.0 as usize == mesh_idx {
+            for (id, tex, raw) in instances {
+                if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
                     raws.push(*raw);
                 }
             }
             let count = raws.len() as u32 - start;
             if count > 0 {
-                buckets.push((mesh_idx, start, count));
+                buckets.push((mesh_idx, tex_key, start, count));
             }
         }
 
@@ -473,9 +515,14 @@ impl Raster {
             rp.set_pipeline(&self.pipeline);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            for (mesh_idx, start, count) in buckets {
+            for (mesh_idx, tex_key, start, count) in buckets {
                 let mesh = &self.meshes[mesh_idx];
-                rp.set_bind_group(1, &mesh.tex_bind, &[]);
+                // A material texture overrides the mesh's own base-color texture.
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_bind_group(1, bind, &[]);
                 rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
                 rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));

@@ -13,3 +13,4 @@ floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
 
 gltf = { workspace = true } # Blender/glTF 2.0 import (ADR-0006)
+image = { workspace = true } # loose texture decode (PNG/JPEG) for materials
