@@ -205,6 +205,8 @@ struct EditorCmd {
     refresh_assets: bool,
     /// Open a script file in the Scripting IDE.
     open_script: Option<String>,
+    /// Open a script in the user's PREFERRED editor (in-engine or external).
+    open_script_pref: Option<String>,
     /// Focus the Scripting tab (e.g. after a double-click-to-open).
     focus_scripting: bool,
     /// A File-menu project action (New / Open / Close).
@@ -219,6 +221,8 @@ struct EditorCmd {
     open_in_editor: Option<String>,
     /// Persist a new external-editor command (user preference).
     set_external_editor: Option<String>,
+    /// Persist the "prefer external editor" toggle.
+    set_prefer_external: Option<bool>,
     /// Open the rename modal for this asset (absolute path).
     rename_asset: Option<String>,
     /// Commit a rename from the modal: (current path, new file/folder name).
@@ -282,6 +286,34 @@ fn script_name_of(path: &str) -> String {
 fn is_texture(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.ends_with(".png") || p.ends_with(".jpg") || p.ends_with(".jpeg")
+}
+fn is_markdown(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".md") || p.ends_with(".markdown")
+}
+
+/// Open the OS file manager at `path` (revealing the file where supported).
+fn reveal_in_explorer(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // xdg-open can't select a file, so open its containing folder.
+        let target = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf())
+        };
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
 }
 
 /// Collect every texture image path in the asset tree (for the material picker).
@@ -399,6 +431,27 @@ fn save_external_editor(cmd: &str) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(p, cmd.trim());
+    }
+}
+
+fn prefer_pref_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("prefer_external_editor"))
+}
+
+/// Whether the user prefers their external editor over the in-engine IDE.
+fn load_prefer_external() -> bool {
+    prefer_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn save_prefer_external(v: bool) {
+    if let Some(p) = prefer_pref_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, if v { "1" } else { "0" });
     }
 }
 
@@ -1177,6 +1230,8 @@ struct EditorTabViewer<'a> {
     ide: &'a mut IdeState,
     /// Errors from the last script frame (shown in the Scripting tab).
     script_errors: &'a [String],
+    /// Syntax diagnostic for the active IDE file (line, message) — red squiggle.
+    ide_diag: Option<&'a (usize, String)>,
     gizmo: Option<&'a GizmoFrame>,
     /// The terrain brush telegraph to draw over the viewport, if sculpting.
     terrain_viz: Option<&'a TerrainViz>,
@@ -1236,6 +1291,12 @@ impl EditorTabViewer<'_> {
             if ui.small_button("💾").on_hover_text("Save scene (Ctrl+S)").clicked() {
                 self.cmd.save_scene = true;
             }
+            ui.label("ⓘ").on_hover_text(
+                "Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt\n\
+                 F focus · Q unselect · ↑/↓ step selection · Del delete\n\
+                 F1 play · F2 pause · Ctrl+S save · Ctrl+Z/Y undo/redo\n\
+                 Viewport: LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu",
+            );
         });
         ui.horizontal_wrapped(|ui| {
             if ui.small_button("+ Cube").clicked() {
@@ -1396,9 +1457,8 @@ impl EditorTabViewer<'_> {
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!("scene: {}", self.scene_name));
-        ui.separator();
-        // An asset selected in the browser shows its info here.
+        // The Inspector shows *only* the current selection (the scene name + save
+        // live in the Hierarchy header). An asset selected in the browser shows here.
         if let Some(path) = self.selected_asset.clone() {
             ui.strong("Asset");
             let name_resp = ui.selectable_label(false, &path);
@@ -1406,10 +1466,12 @@ impl EditorTabViewer<'_> {
                 ui.label("glTF model — drag onto the scene to place it.");
             } else if is_script(&path) {
                 ui.label("script — drag onto a node, double-click, or:");
-                let open = ui.button("✎  Open in Scripting").clicked() || name_resp.double_clicked();
-                if open {
+                if ui.button("✎  Open in Scripting").clicked() {
                     self.cmd.open_script = Some(path.clone());
                     self.cmd.focus_scripting = true;
+                }
+                if name_resp.double_clicked() {
+                    self.cmd.open_script_pref = Some(path.clone());
                 }
             }
             ui.separator();
@@ -1568,7 +1630,7 @@ impl EditorTabViewer<'_> {
                 // ---- Scripting ----
                 ui.separator();
                 egui::CollapsingHeader::new("Scripting")
-                    .default_open(world.get::<Scripts>(e).is_some())
+                    .default_open(true)
                     .show(ui, |ui| {
                         // A clear drop target: drag a script here to attach it.
                         let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
@@ -1589,7 +1651,14 @@ impl EditorTabViewer<'_> {
                                 ui.horizontal(|ui| {
                                     cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
                                     ui.strong(&inst.kind);
-                                    if ui.small_button("✕").clicked() {
+                                    if ui.small_button("✎").on_hover_text("edit script").clicked() {
+                                        let p = self
+                                            .project_root
+                                            .join("scripts")
+                                            .join(format!("{}.lua", inst.kind));
+                                        cmd.open_script_pref = Some(p.to_string_lossy().to_string());
+                                    }
+                                    if ui.small_button("✕").on_hover_text("remove").clicked() {
                                         remove = Some(i);
                                     }
                                 });
@@ -1629,17 +1698,10 @@ impl EditorTabViewer<'_> {
             }
             None => {
                 if self.selected_asset.is_none() {
-                    ui.label("(nothing selected)");
+                    ui.weak("Nothing selected. Click an object, or a node in the Hierarchy.");
                 }
             }
         }
-        ui.separator();
-        if ui.button("💾  Save scene").clicked() {
-            cmd.save_scene = true;
-        }
-        ui.add_space(6.0);
-        ui.small("1 select · 2 move · 3 rotate · 4 scale · F1 play · F2 pause");
-        ui.small("LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu");
 
         // ---- floating Material Editor window (edits the primary selection) ----
         if *self.show_material_editor {
@@ -1781,14 +1843,18 @@ impl EditorTabViewer<'_> {
                     if resp.clicked() {
                         *self.selected_asset = Some(path.clone());
                     }
-                    if resp.double_clicked() && script {
-                        self.cmd.open_script = Some(path.clone());
-                        self.cmd.focus_scripting = true;
+                    let openable = script || is_markdown(path);
+                    if resp.double_clicked() && openable {
+                        self.cmd.open_script_pref = Some(path.clone());
                     }
                     resp.context_menu(|ui| {
-                        if script && ui.button("✎ Open in Scripting").clicked() {
+                        if openable && ui.button("✎ Open in Scripting tab").clicked() {
                             self.cmd.open_script = Some(path.clone());
                             self.cmd.focus_scripting = true;
+                            ui.close();
+                        }
+                        if ui.button("🗂 Open in file explorer").clicked() {
+                            reveal_in_explorer(Path::new(path));
                             ui.close();
                         }
                         if ui.button("✏ Rename…").clicked() {
@@ -1996,13 +2062,17 @@ impl EditorTabViewer<'_> {
                 if !hint.is_empty() {
                     ui.small(egui::RichText::new(hint).color(egui::Color32::from_gray(160)));
                 }
-                // Code editor with live Lua syntax highlighting (via a layouter)
-                // and an autocomplete popup for the engine API.
+                // Code editor: Lua syntax highlighting (plain for non-Lua files), a
+                // line-number gutter, an autocomplete popup and red squiggles.
                 let editor_id = egui::Id::new(("ide_editor", self.ide.open[i].path.clone()));
+                let is_lua = self.ide.open[i].path.ends_with(".lua");
                 let font = egui::FontId::monospace(13.0);
-                let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
-                    let mut job = lua_highlight(buf.as_str(), font.clone());
-                    job.wrap.max_width = wrap;
+                let lfont = font.clone();
+                let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                    // No wrap (code editor) — logical lines == rows, so the gutter aligns.
+                    let mut job =
+                        if is_lua { lua_highlight(buf.as_str(), lfont.clone()) } else { plain_job(buf.as_str(), lfont.clone()) };
+                    job.wrap.max_width = f32::INFINITY;
                     ui.fonts_mut(|f| f.layout_job(job))
                 };
                 // Tab accepts the top completion: if the popup was open last frame,
@@ -2011,20 +2081,49 @@ impl EditorTabViewer<'_> {
                 let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
                 let tab_accept =
                     ac_was_open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-                let output = egui::ScrollArea::vertical()
+                let line_count = self.ide.open[i].text.matches('\n').count() + 1;
+                let output = egui::ScrollArea::both()
                     .id_salt("ide_scroll")
                     .show(ui, |ui| {
-                        egui::TextEdit::multiline(&mut self.ide.open[i].text)
-                            .id(editor_id)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(20)
-                            .layouter(&mut layouter)
-                            .show(ui)
+                        ui.horizontal_top(|ui| {
+                            // Line-number gutter (aligned with the un-wrapped rows).
+                            let nums: String = (1..=line_count).fold(String::new(), |mut s, n| {
+                                s.push_str(&format!("{n}\n"));
+                                s
+                            });
+                            ui.add(egui::Label::new(
+                                egui::RichText::new(nums).font(font.clone()).color(egui::Color32::from_gray(100)),
+                            ));
+                            egui::TextEdit::multiline(&mut self.ide.open[i].text)
+                                .id(editor_id)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(20)
+                                .layouter(&mut layouter)
+                                .show(ui)
+                        })
+                        .inner
                     })
                     .inner;
                 if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
+                }
+                // Red squiggle on the line of a Lua syntax error.
+                if let Some((line, _)) = self.ide_diag {
+                    let row = line.saturating_sub(1).min(output.galley.rows.len().saturating_sub(1));
+                    if let Some(r) = output.galley.rows.get(row) {
+                        let rr = r.rect();
+                        let y = output.galley_pos.y + rr.bottom();
+                        let x0 = output.galley_pos.x + rr.left();
+                        let x1 = output.galley_pos.x + rr.right().max(rr.left() + 30.0);
+                        ui.painter().line_segment(
+                            [egui::pos2(x0, y), egui::pos2(x1, y)],
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 80, 80)),
+                        );
+                    }
+                }
+                if let Some((line, msg)) = self.ide_diag {
+                    ui.colored_label(egui::Color32::from_rgb(235, 120, 120), format!("⚠ line {line}: {msg}"));
                 }
                 let ac_open = self.ide_autocomplete(
                     ui,
@@ -2336,6 +2435,17 @@ fn lua_highlight(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
     job
 }
 
+/// A plain monospace layout (no highlighting) — used for non-Lua files (Markdown).
+fn plain_job(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        text,
+        0.0,
+        egui::text::TextFormat { font_id: font, color: egui::Color32::from_gray(212), ..Default::default() },
+    );
+    job
+}
+
 /// The token (run of identifier/`.` chars) ending at `cursor_char`, plus its start
 /// char index — what autocomplete matches against.
 fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
@@ -2551,8 +2661,12 @@ struct Editor {
     script_host: ScriptHost,
     /// Errors from the most recent script frame, shown in the Scripting tab.
     script_errors: Vec<String>,
+    /// Syntax diagnostic (line, message) for the active IDE file, for red squiggles.
+    ide_diag: Option<(usize, String)>,
     /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
     external_editor: String,
+    /// Prefer the external editor over the in-engine IDE for opening scripts.
+    prefer_external_editor: bool,
     /// Smoothed frames-per-second + a throttle so the window title isn't rewritten
     /// every frame.
     fps: f32,
@@ -2607,6 +2721,7 @@ impl ApplicationHandler for Editor {
         self.terrain_detail = 64;
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
+        self.prefer_external_editor = load_prefer_external();
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -2755,6 +2870,9 @@ impl ApplicationHandler for Editor {
                                 KeyCode::Escape => event_loop.exit(),
                                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
                                 KeyCode::KeyF => self.focus_selected(),
+                                KeyCode::KeyQ => self.selection.clear(), // unselect
+                                KeyCode::ArrowUp => self.step_selection(-1),
+                                KeyCode::ArrowDown => self.step_selection(1),
                                 KeyCode::F1 => self.toggle_play(),
                                 KeyCode::F2 => self.toggle_pause(),
                                 _ => {
@@ -2896,6 +3014,15 @@ impl Editor {
         // Terrain brush telegraph + throttled stroke (before the destructure, so it
         // can freely borrow `self`).
         self.terrain_frame_update();
+
+        // Live Lua syntax check for the active IDE file (drives red squiggles).
+        self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
+            if f.path.ends_with(".lua") {
+                self.script_host.check_syntax(&f.text)
+            } else {
+                None
+            }
+        });
 
         // Re-upload the terrain volume to the GPU after an edit (needs &mut Raymarch,
         // before the read-only destructure below).
@@ -3223,6 +3350,7 @@ impl Editor {
             (a, b, c)
         });
         let external_editor = &mut self.external_editor;
+        let prefer_external = &mut self.prefer_external_editor;
         let asset_tree = &self.asset_tree;
         let project_root = self.project_root.as_path();
         let playing = self.playing;
@@ -3232,6 +3360,7 @@ impl Editor {
         let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
         let script_errors = self.script_errors.as_slice();
+        let ide_diag = self.ide_diag.as_ref();
         let selected_asset = &mut self.selected_asset;
         let aspect_mode = &mut self.aspect_mode;
         let viewport_zoom = &mut self.viewport_zoom;
@@ -3347,6 +3476,7 @@ impl Editor {
                 selected_asset,
                 ide,
                 script_errors,
+                ide_diag,
                 gizmo,
                 terrain_viz,
                 grabbed,
@@ -3414,6 +3544,13 @@ impl Editor {
                         }
                     });
                     ui.small("Binary name or path (e.g. code, codium, subl). VSCode-family editors open the project folder and jump to the file. Saved as a user preference.");
+                    if ui
+                        .checkbox(prefer_external, "Open scripts in my external editor")
+                        .on_hover_text("When on, double-clicking a script (or its Edit button, or a console line) opens it here instead of the in-engine IDE.")
+                        .changed()
+                    {
+                        cmd.set_prefer_external = Some(*prefer_external);
+                    }
                 });
 
             // ---- grid settings window ----
@@ -3824,6 +3961,9 @@ impl Editor {
         if let Some(path) = cmd.open_script {
             self.ide.open_file(&path);
         }
+        if let Some(path) = cmd.open_script_pref {
+            self.open_script_preferred(&path);
+        }
         if cmd.focus_scripting {
             if let Some(dock) = self.dock_state.as_mut() {
                 focus_scripting_tab(dock);
@@ -3886,6 +4026,10 @@ impl Editor {
         if let Some(c) = cmd.set_external_editor {
             save_external_editor(&c);
             self.external_editor = c;
+        }
+        if let Some(v) = cmd.set_prefer_external {
+            save_prefer_external(v);
+            self.prefer_external_editor = v;
         }
         if let Some((name, doc)) = cmd.save_material {
             let dir = self.materials_dir();
@@ -4016,6 +4160,19 @@ impl Editor {
         }
         println!("  extracted {wrote} texture(s) from {stem} to textures/");
         self.asset_tree = build_assets(&self.project_root);
+    }
+
+    /// Open a script in the user's preferred editor — the external one (ADR-0011) if
+    /// they prefer it, otherwise the in-engine IDE (focusing the Scripting tab).
+    fn open_script_preferred(&mut self, path: &str) {
+        if self.prefer_external_editor {
+            open_external_editor(&self.external_editor, &self.project_root, path, 1);
+        } else {
+            self.ide.open_file(path);
+            if let Some(dock) = self.dock_state.as_mut() {
+                focus_scripting_tab(dock);
+            }
+        }
     }
 
     /// Load + register a material texture (cached by path), returning its handle.
@@ -4347,6 +4504,21 @@ impl Editor {
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let inv = cam.view_proj(w / h).inverse();
         cursor_ground(cam.world_position, cam.rotation, inv, w, h, self.cursor)
+    }
+
+    /// Move the selection up (-1) / down (+1) through the hierarchy (arrow keys).
+    fn step_selection(&mut self, delta: i32) {
+        let order: Vec<Entity> = self.world.query::<Matter>().map(|(e, _)| e).collect();
+        if order.is_empty() {
+            return;
+        }
+        let cur = self.selection.last().and_then(|s| order.iter().position(|e| e == s));
+        let next = match cur {
+            Some(i) => (i as i32 + delta).clamp(0, order.len() as i32 - 1) as usize,
+            None if delta > 0 => 0,
+            None => order.len() - 1,
+        };
+        self.select_single(order[next]);
     }
 
     /// Frame the selected object in the viewport (the F key): keep the view angle,
