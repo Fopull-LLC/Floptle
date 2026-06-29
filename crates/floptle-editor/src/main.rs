@@ -1086,26 +1086,25 @@ impl Editor {
                 });
             });
 
+            // ---- floating tool strip at the top of the viewport ----
+            egui::Area::new(egui::Id::new("tool_strip"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(140.0, 34.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale] {
+                                if ui.selectable_label(*tool == t, t.label()).clicked() {
+                                    *tool = t;
+                                }
+                            }
+                        });
+                    });
+                });
+
             // ---- left inspector panel ----
             egui::Panel::left("inspector").default_size(290.0).show(ui, |ui| {
                 ui.heading("Floptle Editor");
                 ui.label(format!("scene: {scene_name}"));
-                ui.separator();
-
-                ui.label("Tools");
-                ui.horizontal(|ui| {
-                    for (t, key) in [
-                        (Tool::Select, "1"),
-                        (Tool::Move, "2"),
-                        (Tool::Rotate, "3"),
-                        (Tool::Scale, "4"),
-                    ] {
-                        let txt = format!("{} {}", key, t.label());
-                        if ui.selectable_label(*tool == t, txt).clicked() {
-                            *tool = t;
-                        }
-                    }
-                });
                 ui.separator();
 
                 ui.horizontal(|ui| {
