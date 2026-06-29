@@ -13,7 +13,8 @@ use std::time::Instant;
 
 use floptle_core::math::{DVec3, EulerRot, Mat4, Quat, Vec2, Vec3, Vec4};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Light, Matter, Name, ScriptInst, Scripts, Shape, World, SCRIPT_KINDS};
+use floptle_core::{Entity, Light, Matter, Name, ScriptInst, Scripts, Shape, World};
+use floptle_script::ScriptHost;
 use floptle_render::{
     cube, instance_of, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input, InstanceRaw, MeshId,
     Outline, Raster, Raymarch, RaymarchGlobals, Retro,
@@ -182,8 +183,10 @@ struct EditorCmd {
     project_action: Option<ProjectAction>,
     /// Create a new folder inside this directory (absolute path).
     new_folder_in: Option<String>,
-    /// Create a new script of `kind` inside this directory: (dir path, kind).
-    new_script_in: Option<(String, String)>,
+    /// Create a new blank Lua script inside this directory (absolute path).
+    new_script_in: Option<String>,
+    /// Attach a named `.lua` script to an entity (seed params from its defaults).
+    attach_named: Option<(String, Entity)>,
     /// Open the rename modal for this asset (absolute path).
     rename_asset: Option<String>,
     /// Commit a rename from the modal: (current path, new file/folder name).
@@ -230,7 +233,29 @@ fn is_model(path: &str) -> bool {
     p.ends_with(".glb") || p.ends_with(".gltf")
 }
 fn is_script(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".ron") && path.replace('\\', "/").contains("/scripts/")
+    path.to_ascii_lowercase().ends_with(".lua")
+}
+
+/// The script name (file stem) a `.lua` path refers to — what a `ScriptInst.kind`
+/// stores and what resolves to `scripts/<name>.lua`.
+fn script_name_of(path: &str) -> String {
+    Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// Collect the names of every `.lua` script in the asset tree (for "Add Script").
+fn collect_script_names(entries: &[AssetEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            AssetEntry::Dir(_, children) => collect_script_names(children, out),
+            AssetEntry::File { path, .. } if is_script(path) => {
+                let n = script_name_of(path);
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            AssetEntry::File { .. } => {}
+        }
+    }
 }
 
 /// Read the project tree under `dir` (folders first, then files, alphabetically).
@@ -251,6 +276,25 @@ fn build_assets(dir: &std::path::Path) -> Vec<AssetEntry> {
         }
     }
     out
+}
+
+/// The default Lua scripts every project ships with (ADR-0003): the engine's
+/// built-in behaviors, now plain hot-reloadable Lua the user can read and edit.
+const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
+    ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
+    ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
+    ("float.lua", include_str!("../../../assets/scripts/float.lua")),
+];
+
+/// Write the default scripts into `scripts_dir` (each only if absent).
+fn seed_default_scripts(scripts_dir: &Path) {
+    let _ = std::fs::create_dir_all(scripts_dir);
+    for (name, body) in DEFAULT_SCRIPTS {
+        let p = scripts_dir.join(name);
+        if !p.exists() {
+            let _ = std::fs::write(&p, body);
+        }
+    }
 }
 
 /// A path inside `dir` named `stem[.ext]`, auto-suffixed (`stem_1`, `stem_2`, …)
@@ -689,44 +733,52 @@ enum ProjectAction {
 
 /// The built-in Scripting docs, shown on the IDE's Docs page.
 const SCRIPT_DOCS: &str = "\
-Floptle Scripting — quick start
-================================
+Floptle Scripting — Lua
+=======================
 
-A script is a small behavior you attach to an object. Scripts are written as
-RON and live in your project's `scripts/` folder. Each script has a `kind` and
-a list of tunable `params`:
+Game logic is written in Lua (ADR-0003). A script is a `.lua` file in your
+project's `scripts/` folder; attach it to a node and it runs every frame while
+playing. A script defines plain functions:
 
-    (
-        kind: \"pulsate\",
-        enabled: true,
-        params: [
-            (\"amplitude\", 0.35),
-            (\"speed\", 2.5),
-            (\"base\", 1.0),
-        ],
-    )
+    -- spin.lua
+    defaults = { speed = 45 }          -- tunables (shown in the Inspector)
 
-Attaching a script
-------------------
-• Drag a `.ron` script from the Assets panel onto a node in the Hierarchy, or
-  drop it onto the Inspector's Scripting section.
-• Or select a node and use Inspector ▸ Scripting ▸ + Add Script.
+    function on_start(node)            -- once, when play begins (optional)
+    end
 
-Running
+    function on_update(node, dt)       -- every frame while playing
+      node.yaw = node.yaw + math.rad(params.speed) * dt
+    end
+
+The node
+--------
+`node` is the node's transform, synced before the call and read back after — set
+a field and the object moves:
+  • node.x, node.y, node.z              position (world units)
+  • node.scale                          uniform scale (shortcut)
+  • node.scale_x / scale_y / scale_z    per-axis scale
+  • node.yaw / pitch / roll             rotation, in radians
+
+Globals
 -------
-• Press F1 (or ▶ Play) to run every enabled script. F2 pauses the clock so you
-  can inspect a frozen moment. ⏹ Stop restores the authored scene.
+  • params   this instance's values (a table; seeded from `defaults`)
+  • time     seconds since play started
+  • dt       seconds since last frame (also passed to on_update)
+  • the full Lua standard library (math, string, table, …)
+  • log(\"...\")  prints to the engine console
 
-Built-in kinds
---------------
-• pulsate — breathes an object's scale.   params: amplitude, speed, base
-• rotate  — spins an object about Y.       params: speed (deg/sec)
+Each attached script keeps its own state across frames (set a variable in
+on_start, read it in on_update), and hot-reloads the moment you save the file.
 
-Editing here
------------
-Double-click a script in Assets or the Inspector to open it in this tab. Use
-\"Insert template\" to drop a starter script in, tweak the numbers, then Save.
-The numbers you see in params are the same ones the Inspector edits live.";
+Attaching & running
+--------------------
+• Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
+  section, or use Inspector ▸ Scripting ▸ + Add Script.
+• Press F1 (▶ Play) to run; F2 pauses the clock; ⏹ Stop restores the scene.
+• The Inspector edits a script's params live; errors show at the top of this tab.
+
+Defaults included with every project: rotate.lua, pulsate.lua, float.lua —
+open one to see a working example.";
 
 /// One script file open in the in-engine IDE.
 struct OpenScript {
@@ -780,6 +832,8 @@ struct EditorTabViewer<'a> {
     project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
     ide: &'a mut IdeState,
+    /// Errors from the last script frame (shown in the Scripting tab).
+    script_errors: &'a [String],
     gizmo: Option<&'a GizmoFrame>,
     grabbed: Option<Handle>,
     tool: Tool,
@@ -1049,7 +1103,6 @@ impl EditorTabViewer<'_> {
                             }
                         }
                         let mut remove: Option<usize> = None;
-                        let mut add_kind: Option<&str> = None;
                         if let Some(scr) = world.get_mut::<Scripts>(e) {
                             for (i, inst) in scr.0.iter_mut().enumerate() {
                                 ui.horizontal(|ui| {
@@ -1074,21 +1127,20 @@ impl EditorTabViewer<'_> {
                             ui.small("(no scripts — add one or drag from Assets)");
                         }
                         ui.menu_button("+ Add Script", |ui| {
-                            for k in SCRIPT_KINDS {
-                                if ui.button(*k).clicked() {
-                                    add_kind = Some(*k);
+                            let mut names = Vec::new();
+                            collect_script_names(self.asset_tree, &mut names);
+                            if names.is_empty() {
+                                ui.small("no .lua scripts yet — make one in Assets");
+                            }
+                            for n in names {
+                                if ui.button(&n).clicked() {
+                                    // Routed through a command so params can be seeded
+                                    // from the script's `defaults` (needs the Lua host).
+                                    cmd.attach_named = Some((n, e));
                                     ui.close();
                                 }
                             }
                         });
-                        if let Some(k) = add_kind {
-                            if let Some(scr) = world.get_mut::<Scripts>(e) {
-                                scr.0.push(ScriptInst::new(k));
-                            } else {
-                                world.insert(e, Scripts(vec![ScriptInst::new(k)]));
-                            }
-                            cmd.inspector_changed = true;
-                        }
                     });
             }
             Some(_) => {
@@ -1138,20 +1190,16 @@ impl EditorTabViewer<'_> {
         });
     }
 
-    /// The shared "New Folder / New Script ▸ kind" submenu, targeting `dir`.
+    /// The shared "New Folder / New Script" submenu, targeting `dir`.
     fn new_asset_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
         if ui.button("🗀 New Folder").clicked() {
             self.cmd.new_folder_in = Some(dir.to_string_lossy().to_string());
             ui.close();
         }
-        ui.menu_button("✎ New Script", |ui| {
-            for k in SCRIPT_KINDS {
-                if ui.button(*k).clicked() {
-                    self.cmd.new_script_in = Some((dir.to_string_lossy().to_string(), (*k).to_string()));
-                    ui.close();
-                }
-            }
-        });
+        if ui.button("✎ New Lua Script").clicked() {
+            self.cmd.new_script_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
     }
 
     fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry], dir: &Path) {
@@ -1297,6 +1345,18 @@ impl EditorTabViewer<'_> {
     }
 
     fn scripting_ui(&mut self, ui: &mut egui::Ui) {
+        // Live script errors (from the last play frame) surface here in red.
+        if !self.script_errors.is_empty() {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgb(60, 20, 20))
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("⚠ script errors").strong().color(egui::Color32::from_rgb(255, 150, 150)));
+                    for e in self.script_errors {
+                        ui.label(egui::RichText::new(e).monospace().color(egui::Color32::from_rgb(255, 180, 180)));
+                    }
+                });
+        }
         // Tab strip: Docs + each open file.
         ui.horizontal_wrapped(|ui| {
             if ui.selectable_label(self.ide.active.is_none(), "📖 Docs").clicked() {
@@ -1340,18 +1400,17 @@ impl EditorTabViewer<'_> {
                             self.cmd.refresh_assets = true;
                         }
                     }
-                    ui.menu_button("Insert template", |ui| {
-                        for k in SCRIPT_KINDS {
-                            if ui.button(*k).clicked() {
-                                let tmpl = script_template(k);
-                                self.ide.open[i].text.push_str(&tmpl);
+                    ui.menu_button("Insert snippet", |ui| {
+                        for (label, snippet) in LUA_SNIPPETS {
+                            if ui.button(*label).clicked() {
+                                self.ide.open[i].text.push_str(snippet);
                                 self.ide.open[i].dirty = true;
                                 ui.close();
                             }
                         }
                     });
                 });
-                // Hints: known param names for whichever kind the file references.
+                // Hint: the tunables this script declares via its `defaults` table.
                 let hint = script_hint(&self.ide.open[i].text);
                 if !hint.is_empty() {
                     ui.small(egui::RichText::new(hint).color(egui::Color32::from_gray(160)));
@@ -1378,26 +1437,67 @@ impl EditorTabViewer<'_> {
 }
 
 /// A starter script body for `kind`, with its default params filled in.
-fn script_template(kind: &str) -> String {
-    let inst = ScriptInst::new(kind);
-    let mut s = format!("(\n    kind: \"{kind}\",\n    enabled: true,\n    params: [\n");
-    for (k, v) in &inst.params {
-        s.push_str(&format!("        (\"{k}\", {v}),\n"));
-    }
-    s.push_str("    ],\n)\n");
-    s
+/// A starter Lua script body (ADR-0003) — named after the file it lands in.
+fn script_template(name: &str) -> String {
+    format!(
+        "-- {name}.lua\n\
+         --\n\
+         -- `defaults` are tunables shown in the Inspector; `params` are this\n\
+         -- instance's live values. `node` is the node's transform (x/y/z,\n\
+         -- scale/scale_x..z, yaw/pitch/roll in radians). `time` = seconds since\n\
+         -- play started, `dt` = frame delta. The full Lua stdlib is in scope.\n\
+         \n\
+         defaults = {{ speed = 1.0 }}\n\
+         \n\
+         function on_start(node)\n\
+         \x20 -- runs once when play begins\n\
+         end\n\
+         \n\
+         function on_update(node, dt)\n\
+         \x20 node.yaw = node.yaw + params.speed * dt\n\
+         end\n"
+    )
 }
 
-/// A one-line param hint for whichever known kind the text references.
+/// Insert-menu snippets for the in-engine IDE: (label, Lua to append).
+const LUA_SNIPPETS: &[(&str, &str)] = &[
+    (
+        "on_update",
+        "\nfunction on_update(node, dt)\n  \nend\n",
+    ),
+    (
+        "on_start",
+        "\nfunction on_start(node)\n  \nend\n",
+    ),
+    (
+        "spin (yaw)",
+        "\ndefaults = { speed = 45 }\nfunction on_update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+    ),
+    (
+        "pulse (scale)",
+        "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction on_update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
+    ),
+];
+
+/// A one-line hint listing the tunables a script declares (parsed from its
+/// `defaults = { ... }` table), shown above the code editor.
 fn script_hint(text: &str) -> String {
-    for k in SCRIPT_KINDS {
-        if text.contains(&format!("\"{k}\"")) {
-            let inst = ScriptInst::new(k);
-            let params: Vec<&str> = inst.params.iter().map(|(p, _)| p.as_str()).collect();
-            return format!("{k} params: {}", params.join(", "));
-        }
+    let Some(start) = text.find("defaults") else { return String::new() };
+    let Some(open) = text[start..].find('{') else { return String::new() };
+    let body_start = start + open + 1;
+    let Some(close) = text[body_start..].find('}') else { return String::new() };
+    let body = &text[body_start..body_start + close];
+    let keys: Vec<&str> = body
+        .split(',')
+        .filter_map(|p| p.split('=').next())
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if keys.is_empty() {
+        String::new()
+    } else {
+        format!("params: {}", keys.join(", "))
     }
-    String::new()
 }
 
 fn main() {
@@ -1506,6 +1606,10 @@ struct Editor {
     /// Accumulated play-mode seconds (advances only while playing and not paused).
     play_t: f32,
     play_snapshot: Option<SceneDoc>,
+    /// The Lua VM that runs node scripts in play mode (ADR-0003).
+    script_host: ScriptHost,
+    /// Errors from the most recent script frame, shown in the Scripting tab.
+    script_errors: Vec<String>,
     /// Active camera focus glide (F), or `None`.
     focus_anim: Option<FocusAnim>,
     /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.
@@ -1885,12 +1989,19 @@ impl Editor {
                 Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
         }
 
-        // Play mode: advance the (pausable) script clock and run attached scripts.
+        // Play mode: advance the (pausable) script clock and run the Lua scripts
+        // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
             if !self.paused {
                 self.play_t += dt;
             }
-            floptle_core::run_scripts(&mut self.world, self.play_t);
+            // Direct field access (not the `scripts_dir()` method) so we don't take
+            // a whole-`self` borrow while gpu/egui are mutably borrowed here.
+            let dir = self.project_root.join("scripts");
+            self.script_host.run(&mut self.world, &dir, dt, self.play_t);
+            self.script_errors = self.script_host.errors().to_vec();
+        } else if !self.script_errors.is_empty() {
+            self.script_errors.clear();
         }
 
         // ---- gather the scene from the World ----
@@ -2060,6 +2171,7 @@ impl Editor {
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
         let ide = &mut self.ide;
+        let script_errors = self.script_errors.as_slice();
         let selected_asset = &mut self.selected_asset;
         let aspect_mode = &mut self.aspect_mode;
         let viewport_zoom = &mut self.viewport_zoom;
@@ -2169,6 +2281,7 @@ impl Editor {
                 project_root,
                 selected_asset,
                 ide,
+                script_errors,
                 gizmo,
                 grabbed,
                 tool,
@@ -2528,6 +2641,10 @@ impl Editor {
         if let Some((path, e)) = cmd.drop_script_on {
             self.attach_script_file(&path, Some(e));
         }
+        if let Some((name, e)) = cmd.attach_named {
+            let path = self.scripts_dir().join(format!("{name}.lua"));
+            self.attach_script_file(&path.to_string_lossy(), Some(e));
+        }
         if let Some((name, color)) = cmd.save_material {
             let dir = self.materials_dir();
             let _ = floptle_scene::save_material(&name, &floptle_scene::MaterialDoc { color }, &dir);
@@ -2541,8 +2658,8 @@ impl Editor {
         if let Some(dir) = cmd.new_folder_in {
             self.new_folder(&dir);
         }
-        if let Some((dir, kind)) = cmd.new_script_in {
-            self.new_script(&dir, &kind);
+        if let Some(dir) = cmd.new_script_in {
+            self.new_script(&dir);
         }
         if let Some(path) = cmd.rename_asset {
             // Seed the rename modal with the current file/folder name.
@@ -2789,19 +2906,21 @@ impl Editor {
             self.attach_script_file(path, self.primary());
         }
     }
-    /// Attach the script defined in `path` (a ScriptDoc RON file) to `target`.
+    /// Attach the `.lua` script at `path` to `target`, seeding its `params` from
+    /// the script's declared `defaults`.
     fn attach_script_file(&mut self, path: &str, target: Option<Entity>) {
         let Some(e) = target else { return };
-        if self.world.get::<Transform>(e).is_none() {
+        if self.world.get::<Transform>(e).is_none() || !is_script(path) {
             return;
         }
-        let Ok(text) = std::fs::read_to_string(path) else { return };
-        let Ok(doc) = ron::from_str::<ScriptDoc>(&text) else {
-            eprintln!("  bad script {path}");
+        if !Path::new(path).exists() {
+            eprintln!("  script not found: {path}");
             return;
-        };
+        }
+        let name = script_name_of(path);
+        let params = self.script_host.script_defaults(Path::new(path));
         self.record();
-        let inst = ScriptInst { kind: doc.kind, enabled: doc.enabled, params: doc.params };
+        let inst = ScriptInst { kind: name, enabled: true, params };
         if let Some(scr) = self.world.get_mut::<Scripts>(e) {
             scr.0.push(inst);
         } else {
@@ -3112,10 +3231,10 @@ impl Editor {
         self.selected_asset = Some(target.to_string_lossy().to_string());
     }
 
-    /// Create a new `.ron` script (seeded with `kind`'s default template) and open
-    /// it in the IDE. Scripts must live under a `scripts/` path to be recognised, so
-    /// a `dir` that isn't already inside one falls back to the project `scripts/`.
-    fn new_script(&mut self, dir: &str, kind: &str) {
+    /// Create a new blank `.lua` script (seeded with a skeleton) and open it in the
+    /// IDE. Scripts must live under a `scripts/` path to be recognised, so a `dir`
+    /// that isn't already inside one falls back to the project `scripts/`.
+    fn new_script(&mut self, dir: &str) {
         let dirp = PathBuf::from(dir);
         let target_dir = if dir.replace('\\', "/").contains("/scripts") {
             dirp
@@ -3126,8 +3245,9 @@ impl Editor {
             eprintln!("  new script failed: {e}");
             return;
         }
-        let path = unique_path(&target_dir, kind, Some("ron"));
-        if let Err(e) = std::fs::write(&path, script_template(kind)) {
+        let path = unique_path(&target_dir, "script", Some("lua"));
+        let name = script_name_of(&path.to_string_lossy());
+        if let Err(e) = std::fs::write(&path, script_template(&name)) {
             eprintln!("  new script failed: {e}");
             return;
         }
@@ -3208,6 +3328,7 @@ impl Editor {
                     floptle_scene::save_material(n, &floptle_scene::MaterialDoc { color: c }, &mat_dir);
             }
         }
+        seed_default_scripts(&self.scripts_dir());
     }
 
     fn load_materials(&self) -> Vec<(String, [f32; 3])> {
@@ -3293,13 +3414,8 @@ impl Editor {
         if !first.exists() {
             let _ = floptle_scene::save(&default_scene(), &first);
         }
-        // Example scripts so the IDE/docs have something to show.
-        for (name, kind) in [("pulsate", "pulsate"), ("rotate", "rotate")] {
-            let p = root.join(format!("scripts/{name}.ron"));
-            if !p.exists() {
-                let _ = std::fs::write(&p, script_template(kind));
-            }
-        }
+        // Ship the default Lua scripts so the IDE/docs have something to show.
+        seed_default_scripts(&root.join("scripts"));
         self.open_project(root);
     }
 
