@@ -187,6 +187,10 @@ struct EditorCmd {
     new_script_in: Option<String>,
     /// Attach a named `.lua` script to an entity (seed params from its defaults).
     attach_named: Option<(String, Entity)>,
+    /// Open this file in the user's external editor (ADR-0011).
+    open_in_editor: Option<String>,
+    /// Persist a new external-editor command (user preference).
+    set_external_editor: Option<String>,
     /// Open the rename modal for this asset (absolute path).
     rename_asset: Option<String>,
     /// Commit a rename from the modal: (current path, new file/folder name).
@@ -285,6 +289,87 @@ const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
     ("float.lua", include_str!("../../../assets/scripts/float.lua")),
 ];
+
+// ---- "Open in IDE" (ADR-0011): launch the user's external editor ------------
+
+/// Is `cmd` (a binary name) resolvable on PATH?
+fn on_path(cmd: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path).any(|dir| {
+        dir.join(cmd).is_file()
+            || (cfg!(windows)
+                && ["exe", "cmd", "bat"].iter().any(|e| dir.join(format!("{cmd}.{e}")).is_file()))
+    })
+}
+
+/// Pick a sensible default external editor by probing PATH (VSCode first).
+fn auto_detect_editor() -> String {
+    for c in ["code", "codium", "code-insiders", "zed", "subl", "nvim", "vim", "nano"] {
+        if on_path(c) {
+            return c.to_string();
+        }
+    }
+    "code".to_string()
+}
+
+/// The per-user config directory for Floptle (platform-appropriate).
+fn floptle_config_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("floptle"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/floptle"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .map(|c| c.join("floptle"))
+    }
+}
+
+fn editor_pref_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("external_editor"))
+}
+
+/// The configured external editor command, or an auto-detected default if unset.
+fn load_external_editor() -> String {
+    editor_pref_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(auto_detect_editor)
+}
+
+fn save_external_editor(cmd: &str) {
+    if let Some(p) = editor_pref_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, cmd.trim());
+    }
+}
+
+/// Launch the external editor on `file`. VSCode-family editors open the project as
+/// the workspace root and jump to `file:line` (ADR-0011); others just open the file.
+/// `cmd` may include leading args (e.g. "code -n").
+fn open_external_editor(cmd: &str, project_root: &Path, file: &str, line: usize) {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let Some((prog, pre)) = parts.split_first() else { return };
+    let mut command = std::process::Command::new(prog);
+    command.args(pre);
+    if prog.contains("code") {
+        command.arg(project_root).arg("--goto").arg(format!("{file}:{line}"));
+    } else {
+        command.arg(file);
+    }
+    if let Err(e) = command.spawn() {
+        eprintln!("  Open in IDE ({prog}) failed: {e}");
+    }
+}
 
 /// Write the default scripts into `scripts_dir` (each only if absent).
 fn seed_default_scripts(scripts_dir: &Path) {
@@ -1388,6 +1473,24 @@ impl EditorTabViewer<'_> {
             None => {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.monospace(SCRIPT_DOCS);
+                    ui.add_space(12.0);
+                    ui.separator();
+                    egui::CollapsingHeader::new("📑 API reference")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.small("Hover an entry for details. (Inside a script, start typing for the same suggestions inline.)");
+                            ui.add_space(4.0);
+                            for e in LUA_API {
+                                ui.horizontal(|ui| {
+                                    ui.monospace(
+                                        egui::RichText::new(e.label)
+                                            .color(egui::Color32::from_rgb(78, 201, 176)),
+                                    )
+                                    .on_hover_text(e.doc);
+                                    ui.small(e.doc);
+                                });
+                            }
+                        });
                 });
             }
             Some(i) if i < self.ide.open.len() => {
@@ -1399,6 +1502,18 @@ impl EditorTabViewer<'_> {
                             f.dirty = false;
                             self.cmd.refresh_assets = true;
                         }
+                    }
+                    if ui
+                        .button("⮕ Open in IDE")
+                        .on_hover_text("Open the project in your external editor (set it in Project Settings)")
+                        .clicked()
+                    {
+                        // Save first so the external editor sees the latest text.
+                        let f = &mut self.ide.open[i];
+                        if std::fs::write(&f.path, &f.text).is_ok() {
+                            f.dirty = false;
+                        }
+                        self.cmd.open_in_editor = Some(self.ide.open[i].path.clone());
                     }
                     ui.menu_button("Insert snippet", |ui| {
                         for (label, snippet) in LUA_SNIPPETS {
@@ -1415,28 +1530,121 @@ impl EditorTabViewer<'_> {
                 if !hint.is_empty() {
                     ui.small(egui::RichText::new(hint).color(egui::Color32::from_gray(160)));
                 }
-                let resp = egui::ScrollArea::vertical()
+                // Code editor with live Lua syntax highlighting (via a layouter)
+                // and an autocomplete popup for the engine API.
+                let editor_id = egui::Id::new(("ide_editor", self.ide.open[i].path.clone()));
+                let font = egui::FontId::monospace(13.0);
+                let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                    let mut job = lua_highlight(buf.as_str(), font.clone());
+                    job.wrap.max_width = wrap;
+                    ui.fonts_mut(|f| f.layout_job(job))
+                };
+                let output = egui::ScrollArea::vertical()
+                    .id_salt("ide_scroll")
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.ide.open[i].text)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(20),
-                        )
+                        egui::TextEdit::multiline(&mut self.ide.open[i].text)
+                            .id(editor_id)
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(20)
+                            .layouter(&mut layouter)
+                            .show(ui)
                     })
                     .inner;
-                if resp.changed() {
+                if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
                 }
+                self.ide_autocomplete(
+                    ui,
+                    i,
+                    editor_id,
+                    output.response.response.has_focus(),
+                    output.cursor_range,
+                    &output.galley,
+                    output.galley_pos,
+                );
             }
             _ => {
                 self.ide.active = None;
             }
         }
     }
+
+    /// An autocomplete popup at the caret offering the engine API (click to insert
+    /// the half-typed token; hover for a one-line doc).
+    #[allow(clippy::too_many_arguments)]
+    fn ide_autocomplete(
+        &mut self,
+        ui: &mut egui::Ui,
+        i: usize,
+        editor_id: egui::Id,
+        has_focus: bool,
+        cursor_range: Option<egui::text::CCursorRange>,
+        galley: &egui::text::Galley,
+        galley_pos: egui::Pos2,
+    ) {
+        if !has_focus {
+            return;
+        }
+        let Some(range) = cursor_range else { return };
+        if !range.is_empty() {
+            return; // a selection, not a caret
+        }
+        let cursor = range.primary.index.0;
+        let (start, token) = current_token(&self.ide.open[i].text, cursor);
+        // Pop only on a real prefix: ≥2 chars for a plain word, or any member access.
+        if token.len() < 2 && !token.contains('.') {
+            return;
+        }
+        let lower = token.to_ascii_lowercase();
+        let matches: Vec<&ApiEntry> = LUA_API
+            .iter()
+            .filter(|e| {
+                let l = e.label.to_ascii_lowercase();
+                l.starts_with(&lower) && l != lower
+            })
+            .take(8)
+            .collect();
+        if matches.is_empty() {
+            return;
+        }
+
+        let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
+        let pos = galley_pos + caret.left_bottom().to_vec2();
+        let mut chosen: Option<&'static str> = None;
+        egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(340.0);
+                    for e in &matches {
+                        if ui
+                            .selectable_label(false, egui::RichText::new(e.label).monospace())
+                            .on_hover_text(e.doc)
+                            .clicked()
+                        {
+                            chosen = Some(e.insert);
+                        }
+                    }
+                });
+            });
+
+        if let Some(insert) = chosen {
+            replace_chars(&mut self.ide.open[i].text, start, cursor, insert);
+            self.ide.open[i].dirty = true;
+            let new_idx = start + insert.chars().count();
+            if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_idx))));
+                state.store(ui.ctx(), editor_id);
+            }
+            ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+        }
+    }
 }
 
-/// A starter script body for `kind`, with its default params filled in.
 /// A starter Lua script body (ADR-0003) — named after the file it lands in.
 fn script_template(name: &str) -> String {
     format!(
@@ -1498,6 +1706,163 @@ fn script_hint(text: &str) -> String {
     } else {
         format!("params: {}", keys.join(", "))
     }
+}
+
+// ---- in-engine IDE: Lua syntax highlighting + autocomplete -----------------
+
+/// Lua reserved words (highlighted as keywords).
+const LUA_KEYWORDS: &[&str] = &[
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
+];
+
+/// Identifiers highlighted as engine/builtin API (teal).
+const LUA_API_WORDS: &[&str] = &[
+    "node", "params", "time", "dt", "defaults", "log", "on_start", "on_update", "math", "string",
+    "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
+];
+
+/// One completion / docs entry for the in-engine IDE.
+struct ApiEntry {
+    label: &'static str,
+    insert: &'static str,
+    doc: &'static str,
+}
+
+/// The engine scripting API, surfaced as autocomplete + hover docs (and the Docs
+/// page's reference). Lua stdlib highlights are included so completion is useful.
+const LUA_API: &[ApiEntry] = &[
+    ApiEntry { label: "on_update", insert: "on_update", doc: "function on_update(node, dt) — runs every frame while playing." },
+    ApiEntry { label: "on_start", insert: "on_start", doc: "function on_start(node) — runs once when play begins." },
+    ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
+    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },
+    ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
+    ApiEntry { label: "node.x", insert: "node.x", doc: "World X position (number)." },
+    ApiEntry { label: "node.y", insert: "node.y", doc: "World Y position (number)." },
+    ApiEntry { label: "node.z", insert: "node.z", doc: "World Z position (number)." },
+    ApiEntry { label: "node.scale", insert: "node.scale", doc: "Uniform scale (shortcut). Setting it scales all axes." },
+    ApiEntry { label: "node.scale_x", insert: "node.scale_x", doc: "Scale along X." },
+    ApiEntry { label: "node.scale_y", insert: "node.scale_y", doc: "Scale along Y." },
+    ApiEntry { label: "node.scale_z", insert: "node.scale_z", doc: "Scale along Z." },
+    ApiEntry { label: "node.yaw", insert: "node.yaw", doc: "Heading about Y, in radians." },
+    ApiEntry { label: "node.pitch", insert: "node.pitch", doc: "Pitch about X, in radians." },
+    ApiEntry { label: "node.roll", insert: "node.roll", doc: "Roll about Z, in radians." },
+    ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
+    ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
+    ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
+    ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
+    ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
+    ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
+    ApiEntry { label: "math.deg", insert: "math.deg(", doc: "math.deg(rad) — radians to degrees." },
+    ApiEntry { label: "math.pi", insert: "math.pi", doc: "The constant π." },
+    ApiEntry { label: "math.abs", insert: "math.abs(", doc: "math.abs(x) — absolute value." },
+    ApiEntry { label: "math.max", insert: "math.max(", doc: "math.max(a, b, …) — largest argument." },
+    ApiEntry { label: "math.min", insert: "math.min(", doc: "math.min(a, b, …) — smallest argument." },
+    ApiEntry { label: "math.sqrt", insert: "math.sqrt(", doc: "math.sqrt(x) — square root." },
+    ApiEntry { label: "math.floor", insert: "math.floor(", doc: "math.floor(x) — round down." },
+    ApiEntry { label: "math.random", insert: "math.random(", doc: "math.random() — random in [0,1); math.random(n) — 1..n." },
+    ApiEntry { label: "string.format", insert: "string.format(", doc: "string.format(fmt, …) — printf-style formatting." },
+    ApiEntry { label: "function", insert: "function ", doc: "Define a function." },
+    ApiEntry { label: "local", insert: "local ", doc: "Declare a local variable." },
+];
+
+/// Build a colored layout for Lua source (keywords, strings, numbers, comments,
+/// engine API). A simple single-pass tokenizer — good enough for an in-engine IDE.
+fn lua_highlight(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
+    use egui::Color32;
+    let c_kw = Color32::from_rgb(86, 156, 214);
+    let c_api = Color32::from_rgb(78, 201, 176);
+    let c_str = Color32::from_rgb(206, 145, 120);
+    let c_num = Color32::from_rgb(181, 206, 168);
+    let c_com = Color32::from_rgb(106, 153, 85);
+    let c_def = Color32::from_rgb(212, 212, 212);
+
+    let mut job = egui::text::LayoutJob::default();
+    let mut push = |s: &str, color: Color32| {
+        job.append(s, 0.0, egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() });
+    };
+
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        // line comment
+        if c == b'-' && i + 1 < b.len() && b[i + 1] == b'-' {
+            let s = i;
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            push(&text[s..i], c_com);
+        } else if c == b'"' || c == b'\'' {
+            // string (single line; handles \" escapes)
+            let q = c;
+            let s = i;
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' {
+                    i = (i + 2).min(b.len());
+                    continue;
+                }
+                if b[i] == q || b[i] == b'\n' {
+                    i = (i + 1).min(b.len());
+                    break;
+                }
+                i += 1;
+            }
+            push(&text[s..i], c_str);
+        } else if c.is_ascii_digit() {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
+                i += 1;
+            }
+            push(&text[s..i], c_num);
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let word = &text[s..i];
+            let color = if LUA_KEYWORDS.contains(&word) {
+                c_kw
+            } else if LUA_API_WORDS.contains(&word) {
+                c_api
+            } else {
+                c_def
+            };
+            push(word, color);
+        } else {
+            // one (possibly multibyte) character verbatim
+            let ch = text[i..].chars().next().unwrap();
+            let l = ch.len_utf8();
+            push(&text[i..i + l], c_def);
+            i += l;
+        }
+    }
+    job
+}
+
+/// The token (run of identifier/`.` chars) ending at `cursor_char`, plus its start
+/// char index — what autocomplete matches against.
+fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
+    let chars: Vec<char> = text.chars().collect();
+    let cur = cursor_char.min(chars.len());
+    let mut start = cur;
+    while start > 0 {
+        let c = chars[start - 1];
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    (start, chars[start..cur].iter().collect())
+}
+
+/// Replace the characters in `[start, end)` (char indices) of `s` with `ins`.
+fn replace_chars(s: &mut String, start: usize, end: usize, ins: &str) {
+    let byte = |n: usize| s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len());
+    let (bs, be) = (byte(start), byte(end));
+    s.replace_range(bs..be, ins);
 }
 
 fn main() {
@@ -1610,6 +1975,8 @@ struct Editor {
     script_host: ScriptHost,
     /// Errors from the most recent script frame, shown in the Scripting tab.
     script_errors: Vec<String>,
+    /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
+    external_editor: String,
     /// Active camera focus glide (F), or `None`.
     focus_anim: Option<FocusAnim>,
     /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.
@@ -1655,6 +2022,7 @@ impl ApplicationHandler for Editor {
         self.project_root = PathBuf::from("assets");
         self.dock_state = Some(default_dock());
         self.viewport_zoom = 0.9;
+        self.external_editor = load_external_editor();
         let attrs = Window::default_attributes()
             .with_title("Floptle Editor")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
@@ -2164,6 +2532,7 @@ impl Editor {
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
         let rename_target = &mut self.rename_target;
+        let external_editor = &mut self.external_editor;
         let asset_tree = &self.asset_tree;
         let project_root = self.project_root.as_path();
         let playing = self.playing;
@@ -2333,6 +2702,21 @@ impl Editor {
                     }
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
+
+                    ui.add_space(10.0);
+                    ui.label("External editor — \"Open in IDE\"");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(external_editor)
+                                .desired_width(150.0)
+                                .hint_text("code"),
+                        );
+                        if ui.button("Save").clicked() {
+                            cmd.set_external_editor = Some(external_editor.clone());
+                        }
+                    });
+                    ui.small("Binary name or path (e.g. code, codium, subl). VSCode-family editors open the project folder and jump to the file. Saved as a user preference.");
                 });
 
             // ---- grid settings window ----
@@ -2644,6 +3028,13 @@ impl Editor {
         if let Some((name, e)) = cmd.attach_named {
             let path = self.scripts_dir().join(format!("{name}.lua"));
             self.attach_script_file(&path.to_string_lossy(), Some(e));
+        }
+        if let Some(file) = cmd.open_in_editor {
+            open_external_editor(&self.external_editor, &self.project_root, &file, 1);
+        }
+        if let Some(c) = cmd.set_external_editor {
+            save_external_editor(&c);
+            self.external_editor = c;
         }
         if let Some((name, color)) = cmd.save_material {
             let dir = self.materials_dir();
