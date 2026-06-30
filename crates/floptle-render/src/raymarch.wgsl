@@ -161,14 +161,15 @@ fn inside_volume_box(p: vec3<f32>) -> bool {
 }
 
 // A threshold-crossing is a REAL surface (not the shell) when there is no volume,
-// or we are inside the volume box, or an analytic blob is the matter here. The box
-// test is given a small slack (`thr + 0.03`) so a terrain surface that reaches right
-// up to a box face — a tall hill near the ceiling, a ravine wall touching a side —
-// isn't rejected and punched into a transparent gap. The slab faces are tapered to
-// air in `volume()`, so this never resurrects the box shell.
+// or we are strictly inside the volume box, or an analytic blob is the matter here.
+// The box test must stay STRICT: outside the brick `volume()` returns a constant
+// floor (the box-approach step), and at a far camera the distance-relaxed `thr` grows
+// past that floor — any slack here would accept the box face itself and re-draw the
+// shell. Genuine terrain hits are inside the box; the grazing-gap fill below only
+// records/accepts points inside the box, so it needs no slack here.
 fn real_surface(p: vec3<f32>, thr: f32) -> bool {
     if (G.vol_center.w < 0.5) { return true; }
-    if (inside_volume_box_eps(p, thr + 0.03)) { return true; }
+    if (inside_volume_box(p)) { return true; }
     return G.params.y >= 0.5 && analytic(p).d < thr;
 }
 
