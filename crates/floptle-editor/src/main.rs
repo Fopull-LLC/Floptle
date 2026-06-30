@@ -1437,6 +1437,7 @@ struct EditorTabViewer<'a> {
     gizmo: Option<&'a GizmoFrame>,
     /// The terrain brush telegraph to draw over the viewport, if sculpting.
     terrain_viz: Option<&'a TerrainViz>,
+    camera_gizmos: &'a [CameraGizmo],
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -1561,6 +1562,10 @@ impl<'a> EditorTabViewer<'a> {
         ui.separator();
         if ui.button("Δ Terrain").on_hover_text("a sculptable SDF terrain node").clicked() {
             self.cmd.create_terrain = true;
+            ui.close();
+        }
+        if ui.button("⌖ Camera").on_hover_text("a viewpoint you can give play-mode authority").clicked() {
+            self.cmd.add_camera = Some(parent);
             ui.close();
         }
         if let Some(m) = pick {
@@ -2551,6 +2556,26 @@ impl<'a> EditorTabViewer<'a> {
                 );
             }
         }
+
+        // Camera frustums (active = bright green, others = dim) so cameras are visible.
+        if !self.camera_gizmos.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("camera_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            for g in self.camera_gizmos {
+                let col = if g.active {
+                    egui::Color32::from_rgb(120, 230, 140)
+                } else {
+                    egui::Color32::from_rgb(150, 160, 175)
+                };
+                for (a, b) in &g.lines {
+                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.5, col));
+                }
+            }
+        }
     }
 
     /// Draw the selected asset's preview: a spinning model/material render (drag to
@@ -3396,6 +3421,54 @@ struct TerrainViz {
     normal: Option<(Vec2, Vec2)>,
 }
 
+/// A camera's frustum drawn in the viewport (screen-space px line pairs) so you can
+/// see + position cameras. `active` is the camera holding play-mode authority.
+struct CameraGizmo {
+    lines: Vec<(Vec2, Vec2)>,
+    active: bool,
+}
+
+/// Build a camera frustum's projected screen-space line segments (apex → 4 far
+/// corners + the far rectangle), or empty if it doesn't project.
+#[allow(clippy::too_many_arguments)]
+fn camera_frustum_lines(
+    pos: DVec3,
+    rot: Quat,
+    fov_y: f32,
+    aspect: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let fwd = rot * Vec3::NEG_Z;
+    let up = rot * Vec3::Y;
+    let right = rot * Vec3::X;
+    let far = 2.2f32; // a compact visualization length, not the real far plane
+    let hh = far * (fov_y * 0.5).tan();
+    let hw = hh * aspect.max(0.1);
+    let apex = pos;
+    let center = pos + (fwd * far).as_dvec3();
+    let corners = [
+        center + ((right * hw + up * hh).as_dvec3()),
+        center + ((-right * hw + up * hh).as_dvec3()),
+        center + ((-right * hw - up * hh).as_dvec3()),
+        center + ((right * hw - up * hh).as_dvec3()),
+    ];
+    let pa = project(apex, cam_world, vp, w, h);
+    let pc: Vec<Option<Vec2>> = corners.iter().map(|&c| project(c, cam_world, vp, w, h)).collect();
+    let mut lines = Vec::new();
+    for i in 0..4 {
+        if let (Some(a), Some(b)) = (pa, pc[i]) {
+            lines.push((a, b)); // apex → corner
+        }
+        if let (Some(a), Some(b)) = (pc[i], pc[(i + 1) % 4]) {
+            lines.push((a, b)); // far-rect edge
+        }
+    }
+    lines
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -3467,6 +3540,8 @@ struct Editor {
     terrain_textures_dirty: bool,
     /// The brush telegraph for this frame (projected ring + normal).
     terrain_viz: Option<TerrainViz>,
+    /// Camera frustums to draw in the viewport this frame (so cameras are visible).
+    camera_gizmos: Vec<CameraGizmo>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -3559,6 +3634,9 @@ struct Editor {
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
+    /// In play mode: render the GAME view (from the active camera) vs the editor's
+    /// free-fly scene view. Toggled from the Scene toolbar while playing.
+    game_view: bool,
     /// Paused (in play mode): the script clock freezes.
     paused: bool,
     /// Accumulated play-mode seconds (advances only while playing and not paused).
@@ -4158,8 +4236,65 @@ impl Editor {
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
-        let cam = self.camera.render_camera();
+        // In play mode's GAME view, render from the active camera node; otherwise use
+        // the editor's free-fly camera (the scene view). (Inlined — self methods can't
+        // be called while gpu/egui are borrowed.)
+        let cam = {
+            let active = if self.playing && self.game_view {
+                self.world.query::<Matter>().find_map(|(e, m)| {
+                    matches!(m, Matter::Camera { active: true, .. }).then_some(e)
+                })
+            } else {
+                None
+            };
+            match active {
+                Some(e) => {
+                    let fov_y = match self.world.get::<Matter>(e) {
+                        Some(Matter::Camera { fov_y, .. }) => *fov_y,
+                        _ => 60f32.to_radians(),
+                    };
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    RenderCamera::new(
+                        wt.translation,
+                        wt.rotation,
+                        Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+                    )
+                }
+                None => self.camera.render_camera(),
+            }
+        };
         let view_proj = cam.view_proj(aspect);
+
+        // Camera frustum gizmos so cameras are visible/placeable (hidden in the game
+        // view, where you're seeing the game, not the editor overlays).
+        self.camera_gizmos.clear();
+        if !(self.playing && self.game_view) {
+            let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+            let cams: Vec<(Entity, f32, bool)> = self
+                .world
+                .query::<Matter>()
+                .filter_map(|(e, m)| match m {
+                    Matter::Camera { fov_y, active } => Some((e, *fov_y, *active)),
+                    _ => None,
+                })
+                .collect();
+            for (e, fov_y, active) in cams {
+                let wt = floptle_core::world_transform(&self.world, e);
+                let lines = camera_frustum_lines(
+                    wt.translation,
+                    wt.rotation,
+                    fov_y,
+                    aspect,
+                    cam.world_position,
+                    view_proj,
+                    gw,
+                    gh,
+                );
+                if !lines.is_empty() {
+                    self.camera_gizmos.push(CameraGizmo { lines, active });
+                }
+            }
+        }
 
         // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
         self.gizmo = build_gizmo(
@@ -4369,6 +4504,9 @@ impl Editor {
         let project_root = self.project_root.as_path();
         let playing = self.playing;
         let paused = self.paused;
+        let game_view = &mut self.game_view;
+        let has_active_camera =
+            world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Camera { active: true, .. }));
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
         let show_material_editor = &mut self.show_material_editor;
@@ -4382,6 +4520,7 @@ impl Editor {
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let terrain_viz = self.terrain_viz.as_ref();
+        let camera_gizmos = self.camera_gizmos.as_slice();
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -4467,6 +4606,19 @@ impl Editor {
                         if ui.button(pause_label).clicked() {
                             cmd.toggle_pause = true;
                         }
+                        ui.separator();
+                        // Differentiate the gameplay view (active camera) from the
+                        // editor scene view (free-fly camera).
+                        ui.label("view:");
+                        if ui.selectable_label(*game_view, "⏵ Game").on_hover_text("render from the active camera").clicked() {
+                            *game_view = true;
+                        }
+                        if ui.selectable_label(!*game_view, "⌖ Editor").on_hover_text("free-fly editor camera").clicked() {
+                            *game_view = false;
+                        }
+                        if *game_view && !has_active_camera {
+                            ui.colored_label(egui::Color32::from_rgb(235, 200, 90), "Δ no active camera — using editor view");
+                        }
                     }
                 });
             });
@@ -4510,6 +4662,7 @@ impl Editor {
                 ide_diag,
                 gizmo,
                 terrain_viz,
+                camera_gizmos,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
@@ -5021,6 +5174,15 @@ impl Editor {
             self.create_terrain();
             self.focus_terrain();
         }
+        if let Some(parent) = cmd.add_camera {
+            self.add_camera_node(parent);
+        }
+        if let Some(e) = cmd.set_active_camera {
+            self.set_active_camera(e);
+        }
+        if let Some(e) = cmd.camera_from_view {
+            self.camera_to_view(e);
+        }
         if cmd.clear_terrain {
             let nodes: Vec<Entity> = self.terrains.keys().copied().collect();
             if !nodes.is_empty() {
@@ -5349,6 +5511,9 @@ impl Editor {
             self.paused = false;
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
+            // Press Play → show the GAME view (from the active camera), so it's clear
+            // you're testing the game, not the editor scene view.
+            self.game_view = true;
             self.playing = true;
         }
     }
@@ -6152,6 +6317,63 @@ impl Editor {
         self.select_single(e);
     }
 
+    // ---- cameras -----------------------------------------------------------
+    /// The camera node that currently holds play-mode authority (active = true).
+    fn active_camera(&self) -> Option<Entity> {
+        self.world
+            .query::<Matter>()
+            .find_map(|(e, m)| matches!(m, Matter::Camera { active: true, .. }).then_some(e))
+    }
+
+    /// Spawn a camera node at the current editor viewpoint (so "what you see is the
+    /// shot"). The first camera in a scene becomes the active one.
+    fn add_camera_node(&mut self, parent: Option<Entity>) {
+        self.record();
+        let cam = self.camera.render_camera();
+        let active = self.active_camera().is_none();
+        let e = self.world.spawn();
+        self.world.insert(
+            e,
+            Transform {
+                translation: cam.world_position,
+                rotation: cam.rotation,
+                scale: Vec3::ONE,
+            },
+        );
+        let n = self.world.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Camera { .. })).count() + 1;
+        self.world.insert(e, Name(format!("Camera {n}")));
+        self.world.insert(e, Matter::Camera { fov_y: 60f32.to_radians(), active });
+        if let Some(p) = parent {
+            self.world.insert(e, floptle_core::Parent(p));
+        }
+        self.select_single(e);
+    }
+
+    /// Give `e` play-mode authority, clearing it from every other camera.
+    fn set_active_camera(&mut self, e: Entity) {
+        let cams: Vec<Entity> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(c, m)| matches!(m, Matter::Camera { .. }).then_some(c))
+            .collect();
+        for c in cams {
+            if let Some(Matter::Camera { active, .. }) = self.world.get_mut::<Matter>(c) {
+                *active = c == e;
+            }
+        }
+        self.scene_dirty = true;
+    }
+
+    /// Move a camera node to the current editor viewpoint.
+    fn camera_to_view(&mut self, e: Entity) {
+        self.record();
+        let cam = self.camera.render_camera();
+        if let Some(t) = self.world.get_mut::<Transform>(e) {
+            t.translation = cam.world_position;
+            t.rotation = cam.rotation;
+        }
+    }
+
     /// Where a terrain node's field is stored — one file per terrain id, per scene.
     fn terrain_field_path_id(&self, id: u32) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
@@ -6363,7 +6585,7 @@ impl Editor {
         let doc = floptle_scene::SceneDoc {
             name: name.clone(),
             lighting: floptle_scene::LightDoc::default(),
-            nodes: Vec::new(),
+            nodes: vec![default_camera_node()],
         };
         if let Err(e) = floptle_scene::save(&doc, &path) {
             eprintln!("  new scene failed: {e}");
@@ -6709,11 +6931,33 @@ impl Editor {
 }
 
 /// An empty scene (just lighting) — used when a project is closed.
+/// A default camera node (active) looking at the origin from up + back, so every new
+/// scene starts with a viewpoint that play mode can render from.
+fn default_camera_node() -> floptle_scene::NodeDoc {
+    let pos = Vec3::new(0.0, 3.0, 9.0);
+    let fwd = (Vec3::ZERO - pos).normalize();
+    let right = fwd.cross(Vec3::Y).normalize();
+    let up = right.cross(fwd);
+    let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
+    floptle_scene::NodeDoc {
+        name: "Camera".into(),
+        transform: floptle_scene::TransformDoc {
+            translation: [pos.x as f64, pos.y as f64, pos.z as f64],
+            rotation: rot.to_array(),
+            scale: [1.0, 1.0, 1.0],
+        },
+        matter: floptle_scene::MatterDoc::Camera { fov_y: 60f32.to_radians(), active: true },
+        scripts: Vec::new(),
+        material: None,
+        parent: None,
+    }
+}
+
 fn empty_scene() -> floptle_scene::SceneDoc {
     floptle_scene::SceneDoc {
         name: "untitled".into(),
         lighting: floptle_scene::LightDoc::default(),
-        nodes: Vec::new(),
+        nodes: vec![default_camera_node()],
     }
 }
 
@@ -6748,6 +6992,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 parent: None,
             },
+            default_camera_node(),
         ],
     }
 }

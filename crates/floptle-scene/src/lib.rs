@@ -110,6 +110,18 @@ pub enum MatterDoc {
         #[serde(default)]
         id: u32,
     },
+    /// A camera viewpoint. `fov_y` is the vertical field of view (radians); `active`
+    /// marks the camera that holds play-mode authority on load.
+    Camera {
+        #[serde(default = "default_fov")]
+        fov_y: f32,
+        #[serde(default)]
+        active: bool,
+    },
+}
+
+fn default_fov() -> f32 {
+    60f32.to_radians()
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -128,6 +140,7 @@ impl From<&Matter> for MatterDoc {
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
+            Matter::Camera { fov_y, active } => MatterDoc::Camera { fov_y: *fov_y, active: *active },
         }
     }
 }
@@ -142,6 +155,7 @@ impl MatterDoc {
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
+            MatterDoc::Camera { fov_y, active } => Matter::Camera { fov_y: *fov_y, active: *active },
         }
     }
 }
