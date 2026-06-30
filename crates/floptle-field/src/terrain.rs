@@ -540,16 +540,26 @@ impl Terrain {
     /// distance field well beyond the sphere itself (`min(ground, sphere)` differs
     /// from `ground` across a whole region above a raised bump), and leaving those
     /// cells stale makes the raymarcher overshoot. The per-cell work is cheap and
-    /// only cells the brush actually changes are written.
-    pub fn sculpt(&mut self, brush: Brush, center: [f32; 3], radius: f32, strength: f32) {
+    /// only cells the brush actually changes are written. Returns the inclusive voxel
+    /// AABB of the cells that actually changed (`None` if nothing did), so the editor can
+    /// upload just that sub-box to the GPU instead of the whole volume.
+    pub fn sculpt(
+        &mut self,
+        brush: Brush,
+        center: [f32; 3],
+        radius: f32,
+        strength: f32,
+    ) -> Option<[[u32; 3]; 2]> {
         match brush {
             Brush::Smooth => return self.smooth(center, radius, strength),
             Brush::Flatten => return self.flatten(center, radius, strength),
-            Brush::Paint => return,
+            Brush::Paint => return None,
             _ => {}
         }
         let s = strength.clamp(0.02, 1.0);
         let [w, h, d] = self.baked.dims;
+        let mut lo = [u32::MAX; 3];
+        let mut hi = [0u32; 3];
         for iz in 0..d {
             for iy in 0..h {
                 for ix in 0..w {
@@ -568,14 +578,17 @@ impl Terrain {
                     };
                     if (target - cur).abs() > 1e-6 {
                         self.baked.distance[i] = cur + (target - cur) * s;
+                        lo = [lo[0].min(ix), lo[1].min(iy), lo[2].min(iz)];
+                        hi = [hi[0].max(ix), hi[1].max(iy), hi[2].max(iz)];
                     }
                 }
             }
         }
+        (lo[0] <= hi[0]).then_some([lo, hi])
     }
 
     /// Level the brushed region toward the height the stroke landed on (`center.y`).
-    fn flatten(&mut self, center: [f32; 3], radius: f32, strength: f32) {
+    fn flatten(&mut self, center: [f32; 3], radius: f32, strength: f32) -> Option<[[u32; 3]; 2]> {
         let [lo, hi] = self.brush_range(center, radius);
         let s = strength.clamp(0.02, 1.0);
         for iz in lo[2]..=hi[2] {
@@ -594,6 +607,7 @@ impl Terrain {
                 }
             }
         }
+        Some([lo, hi])
     }
 
     /// The surface normal at a world point (the normalized SDF gradient). Used to
@@ -612,7 +626,7 @@ impl Terrain {
     }
 
     /// Pull the surface toward its local average (a small box blur of distance).
-    fn smooth(&mut self, center: [f32; 3], radius: f32, strength: f32) {
+    fn smooth(&mut self, center: [f32; 3], radius: f32, strength: f32) -> Option<[[u32; 3]; 2]> {
         let [lo, hi] = self.brush_range(center, radius);
         let [w, h, d] = self.baked.dims;
         let src = self.baked.distance.clone();
@@ -647,6 +661,7 @@ impl Terrain {
                 }
             }
         }
+        Some([lo, hi])
     }
 
     /// Paint the surface color within a spherical brush (only near the surface, so
@@ -763,6 +778,25 @@ mod tests {
         let dims = t.baked.dims;
         assert!(!t.ensure_contains([0.0, 0.0, 0.0], 2.0));
         assert_eq!(t.baked.dims, dims);
+    }
+
+    #[test]
+    fn sculpt_returns_changed_aabb() {
+        let mut t = Terrain::flat([32, 24, 32], [0.0; 3], [16.0, 6.0, 16.0], 0.0, [0.4, 0.7, 0.3]);
+        // Raise a bump at the center — the returned box must cover the brush center voxel.
+        let bb = t.sculpt(Brush::Raise, [0.0, 0.0, 0.0], 3.0, 1.0).expect("raise changed cells");
+        let [lo, hi] = bb;
+        for a in 0..3 {
+            assert!(lo[a] <= hi[a], "axis {a}: lo {} hi {}", lo[a], hi[a]);
+            assert!(hi[a] < t.baked.dims[a], "in-bounds");
+        }
+        // The center voxel (≈ mid index) is inside the changed box.
+        let mid = [t.baked.dims[0] / 2, t.baked.dims[1] / 2, t.baked.dims[2] / 2];
+        for a in 0..3 {
+            assert!(lo[a] <= mid[a] && mid[a] <= hi[a], "center axis {a} outside box");
+        }
+        // Painting reports no geometry change (returns None from sculpt's Paint arm).
+        assert!(t.sculpt(Brush::Paint, [0.0; 3], 3.0, 1.0).is_none());
     }
 
     #[test]
