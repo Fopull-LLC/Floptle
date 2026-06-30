@@ -198,6 +198,12 @@ struct EditorCmd {
     open_scene: Option<String>,
     /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
     do_open_scene: Option<(String, bool)>,
+    /// Give this camera node play-mode authority (clear the others).
+    set_active_camera: Option<Entity>,
+    /// Move this camera node to the current editor viewpoint.
+    camera_from_view: Option<Entity>,
+    /// Spawn a camera node, optionally parented to this entity.
+    add_camera: Option<Option<Entity>>,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ⏵ New ⏵ Scene).
@@ -808,6 +814,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Mesh { .. } => "Mesh",
         MatterDoc::Empty => "Group",
         MatterDoc::Terrain { .. } => "Terrain",
+        MatterDoc::Camera { .. } => "Camera",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1792,6 +1799,26 @@ impl<'a> EditorTabViewer<'a> {
                             ui.small("a sculptable SDF field — move it with the transform below");
                             if ui.button("Δ Open Terrain tools").clicked() {
                                 cmd.focus_terrain = true;
+                            }
+                        }
+                        Matter::Camera { fov_y, active } => {
+                            ui.label("camera");
+                            ui.small("a viewpoint — play mode renders from the active camera");
+                            ui.horizontal(|ui| {
+                                ui.label("field of view");
+                                let mut deg = fov_y.to_degrees();
+                                if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
+                                    *fov_y = deg.to_radians();
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            if *active {
+                                ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
+                            } else if ui.button("⌖ Make active camera").clicked() {
+                                cmd.set_active_camera = Some(e);
+                            }
+                            if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
+                                cmd.camera_from_view = Some(e);
                             }
                         }
                     }
@@ -4203,7 +4230,7 @@ impl Editor {
                         }
                     }
                 }
-                Matter::Empty | Matter::Terrain { .. } => {} // group / terrain render via other passes
+                Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => {} // group/terrain/camera render via other passes
             }
         }
 
@@ -4258,7 +4285,7 @@ impl Editor {
                     Matter::Blob { scale } => {
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
                     }
-                    Matter::Empty | Matter::Terrain { .. } => {}
+                    Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => {}
                 }
             }
         }
@@ -4902,6 +4929,7 @@ impl Editor {
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
                 MatterDoc::Terrain { .. } => "Terrain",
+                MatterDoc::Camera { .. } => "Camera",
             };
             self.add_node(name, m);
         }
@@ -5776,7 +5804,7 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
-                Matter::Empty | Matter::Terrain { .. } => None, // no mesh — select via the hierarchy
+                Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => None, // no mesh — select via the hierarchy
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
@@ -6142,6 +6170,16 @@ impl Editor {
         }
         self.next_terrain_id = max_id + 1;
         self.combined_dirty = !self.terrains.is_empty();
+        // Restore the texture palette so painted-texture slots map to images again.
+        if !self.terrains.is_empty() {
+            if let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
+                let slots = floptle_render::TERRAIN_SLOTS as usize;
+                let mut palette: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+                palette.resize(slots, String::new());
+                self.terrain_textures = palette;
+                self.terrain_textures_dirty = true;
+            }
+        }
     }
 
     /// The world translation of a terrain node (places its field in world space).
@@ -6580,6 +6618,17 @@ impl Editor {
                 eprintln!("  save terrain failed: {e}");
             }
         }
+        // The texture PALETTE (which image fills each painted slot) is editor state,
+        // not in the field — persist it so painted textures survive a reload.
+        if !self.terrains.is_empty() {
+            let palette = self.terrain_textures.join("\n");
+            let _ = std::fs::write(self.terrain_palette_path(), palette);
+        }
+    }
+
+    /// Where the scene's terrain texture palette (slot→image paths) is stored.
+    fn terrain_palette_path(&self) -> PathBuf {
+        self.project_root.join("terrain").join(format!("{}.palette", self.scene_name))
     }
 
     /// Ctrl+S: save everything — the project config, the open scene, and every
