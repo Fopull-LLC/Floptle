@@ -220,14 +220,25 @@ fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 }
 
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
-    // A larger epsilon averages out f16/trilinear grid noise in the sampled volume
-    // (which showed up as grain on the terrain) at the cost of slightly softer edges.
-    let e = vec2<f32>(0.02, 0.0);
-    return normalize(vec3<f32>(
-        map(p + e.xyy).d - map(p - e.xyy).d,
-        map(p + e.yxy).d - map(p - e.yxy).d,
-        map(p + e.yyx).d - map(p - e.yyx).d,
-    ));
+    // For TERRAIN (a sampled voxel field) use an epsilon of ~one voxel so the central
+    // difference spans cell boundaries and low-passes residual grid/f16 noise instead
+    // of reporting a single cell's facet (the grain). Analytic blobs have a continuous
+    // gradient and want a small epsilon for crisp edges.
+    var h = 0.012;
+    if (G.vol_center.w >= 0.5 && inside_volume_box_eps(p, 0.08)) {
+        let voxel = 2.0 * G.vol_half.xyz / max(vec3<f32>(textureDimensions(dist_tex)), vec3<f32>(1.0));
+        h = clamp(max(voxel.x, max(voxel.y, voxel.z)), 0.02, 1.0);
+    }
+    // Tetrahedron offsets: 4 taps, isotropic (no axis-aligned facet bias), cheaper
+    // than the 6-tap central cross.
+    let k0 = vec3<f32>(1.0, -1.0, -1.0);
+    let k1 = vec3<f32>(-1.0, -1.0, 1.0);
+    let k2 = vec3<f32>(-1.0, 1.0, -1.0);
+    let k3 = vec3<f32>(1.0, 1.0, 1.0);
+    return normalize(
+        k0 * map(p + k0 * h).d + k1 * map(p + k1 * h).d + k2 * map(p + k2 * h).d
+            + k3 * map(p + k3 * h).d,
+    );
 }
 
 struct FsOut {
