@@ -199,6 +199,9 @@ struct EditorCmd {
     focus_terrain: bool,
     /// Fill the whole target terrain with a color or texture slot.
     fill_terrain: Option<TerrainFill>,
+    /// "Fill bounds" tool: lay flat ground across the active terrain (uses the brush's
+    /// fill_top / fill_floor / fill_inset settings).
+    fill_bounds: bool,
     /// Open this scene file (double-clicked in Assets) — prompts on unsaved changes.
     open_scene: Option<String>,
     /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
@@ -2438,6 +2441,22 @@ impl<'a> EditorTabViewer<'a> {
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
         }
         ui.separator();
+        // Fill-bounds tool. Sculpting near an edge now grows only the BOUNDS (the
+        // surface no longer auto-extends into flat land), so this is the deliberate way
+        // to lay flat ground: pour solid up to `height`, from `floor` below, kept
+        // `inset` in from the walls.
+        egui::CollapsingHeader::new("▦ Fill bounds (flat ground)").default_open(false).show(ui, |ui| {
+            ui.add(egui::Slider::new(&mut terrain_brush.fill_top, -20.0..=20.0).text("fill height (top)"));
+            ui.add(egui::Slider::new(&mut terrain_brush.fill_floor, -40.0..=20.0).text("floor (bottom)"));
+            ui.add(egui::Slider::new(&mut terrain_brush.fill_inset, 0.0..=20.0).text("edge inset"));
+            if ui.button("▦ Fill bounds with flat ground")
+                .on_hover_text("union solid ground into the active terrain up to the height (uses the brush color)")
+                .clicked()
+            {
+                cmd.fill_bounds = true;
+            }
+        });
+        ui.separator();
         if ui.button("🗑 Clear all terrain").on_hover_text("delete every terrain node (or select one + Delete)").clicked() {
             cmd.clear_terrain = true;
         }
@@ -3773,6 +3792,12 @@ struct TerrainBrush {
     color: [f32; 3],
     /// Paint target: -1 = flat color, else a terrain texture palette slot.
     tex_slot: i32,
+    /// "Fill bounds" tool: lay flat ground up to `fill_top`, from `fill_floor` below,
+    /// kept `fill_inset` in from the X/Z walls. (Edge-sculpt no longer auto-extends the
+    /// ground, so this is the deliberate way to make flat areas.)
+    fill_top: f32,
+    fill_floor: f32,
+    fill_inset: f32,
 }
 
 /// A "fill the whole terrain" request from the Terrain tab.
@@ -3791,6 +3816,9 @@ impl Default for TerrainBrush {
             strength: 0.5,
             color: [0.45, 0.32, 0.2],
             tex_slot: -1,
+            fill_top: 0.0,
+            fill_floor: -8.0,
+            fill_inset: 0.0,
         }
     }
 }
@@ -5977,6 +6005,27 @@ impl Editor {
                         TerrainFill::Color(c) => t.fill_color(c),
                         TerrainFill::Texture(slot) => t.fill_texture(slot),
                     }
+                    self.combined_dirty = true;
+                }
+            }
+        }
+        if cmd.fill_bounds {
+            if let Some(e) = self.target_terrain() {
+                let id = match self.world.get::<Matter>(e) {
+                    Some(Matter::Terrain { id }) => *id,
+                    _ => 0,
+                };
+                if let Some(t) = self.terrains.get(&e) {
+                    self.push_history(Snapshot::Terrain(id, t.to_bytes()));
+                }
+                let (top, floor, inset, color) = (
+                    self.terrain_brush.fill_top,
+                    self.terrain_brush.fill_floor,
+                    self.terrain_brush.fill_inset,
+                    self.terrain_brush.color,
+                );
+                if let Some(t) = self.terrains.get_mut(&e) {
+                    t.fill_bounds(top, floor, inset, color);
                     self.combined_dirty = true;
                 }
             }
