@@ -1477,6 +1477,8 @@ struct EditorTabViewer<'a> {
     asset_tree: &'a [AssetEntry],
     /// Per-texture sampling settings (read-only here; changes go via `cmd`).
     texture_settings: &'a HashMap<String, TexSetting>,
+    /// The selected camera's live POV preview (if a camera is selected).
+    cam_preview: Option<egui::TextureId>,
     /// Terrain dock-tab state.
     terrain_brush: &'a mut TerrainBrush,
     terrain_detail: &'a mut u32,
@@ -1877,6 +1879,13 @@ impl<'a> EditorTabViewer<'a> {
                         Matter::Camera { fov_y, active } => {
                             ui.label("camera");
                             ui.small("a viewpoint — play mode renders from the active camera");
+                            // Live preview of what this camera sees.
+                            if let Some(tex) = self.cam_preview {
+                                let w = ui.available_width().min(300.0);
+                                let size = egui::vec2(w, w * 9.0 / 16.0);
+                                ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
+                                ui.small("preview — what this camera sees");
+                            }
                             ui.horizontal(|ui| {
                                 ui.label("field of view");
                                 let mut deg = fov_y.to_degrees();
@@ -3694,6 +3703,8 @@ struct Editor {
     input_scroll: f32,
     /// Offscreen target for the Inspector's spinning model / material preview.
     preview: Option<PreviewTarget>,
+    /// Offscreen 16:9 target for the Inspector's selected-camera POV preview.
+    cam_preview: Option<PreviewTarget>,
     /// Preview orbit angle (radians), whether it auto-spins, and the zoom (camera
     /// distance multiplier — smaller = closer).
     preview_spin: f32,
@@ -4237,6 +4248,11 @@ impl Editor {
             self.terrain_textures_dirty = false;
         }
 
+        // Inspector camera POV preview: if a Camera node is selected, render the scene
+        // from its viewpoint into the 16:9 offscreen target (before the destructure).
+        let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
+        self.update_camera_preview(cam_elapsed);
+
         let (
             Some(gpu),
             Some(raster),
@@ -4648,6 +4664,12 @@ impl Editor {
         let game_view = &mut self.game_view;
         let has_active_camera =
             world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Camera { active: true, .. }));
+        // The selected camera's POV preview texture (only when a camera is selected).
+        let cam_preview = selection
+            .last()
+            .copied()
+            .filter(|&e| matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })))
+            .and(self.cam_preview.as_ref().map(|p| p.tex_id));
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
         let show_material_editor = &mut self.show_material_editor;
@@ -4791,6 +4813,7 @@ impl Editor {
                 show_material_editor,
                 asset_tree,
                 texture_settings,
+                cam_preview,
                 terrain_brush,
                 terrain_detail,
                 terrain_textures,
@@ -5941,6 +5964,165 @@ impl Editor {
                 &instances,
                 Some([0.07, 0.08, 0.10, 1.0]),
             );
+        }
+    }
+
+    /// Lazily create the 16:9 offscreen target the selected-camera POV preview renders
+    /// into, registering its color view with egui as a texture id for the Inspector.
+    fn ensure_cam_preview_target(&mut self) {
+        if self.cam_preview.is_some() {
+            return;
+        }
+        let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
+        let (w, h) = (320u32, 180u32);
+        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = make(
+            gpu.surface_format(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "cam-preview-color",
+        );
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "cam-preview-depth");
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let tex_id =
+            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
+        self.cam_preview = Some(PreviewTarget { color_view, depth_view, tex_id });
+    }
+
+    /// Each frame: if a single Camera node is selected, render the scene from its POV
+    /// into the 16:9 offscreen target so the Inspector can show what it sees. Mirrors
+    /// the main render path (raster meshes + raymarch blobs/terrain), camera-relative
+    /// to the selected camera.
+    fn update_camera_preview(&mut self, elapsed: f32) {
+        let Some(e) = self.selection.last().copied() else { return };
+        let fov_y = match self.world.get::<Matter>(e) {
+            Some(Matter::Camera { fov_y, .. }) => *fov_y,
+            _ => return,
+        };
+        let wt = floptle_core::world_transform(&self.world, e);
+        let cam = RenderCamera::new(
+            wt.translation,
+            wt.rotation,
+            Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+        );
+        let aspect = 16.0 / 9.0;
+        let view_proj = cam.view_proj(aspect);
+
+        let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+        let light = Vec3::from(light_node.direction).normalize_or_zero();
+        let globals = Globals {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_dir: [light.x, light.y, light.z, 0.0],
+            light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+            ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+        };
+
+        // Camera-relative instances + blobs, exactly like the main gather.
+        let ents: Vec<(Entity, Matter)> =
+            self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
+        let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        let mut blobs: Vec<(DVec3, f32)> = Vec::new();
+        for (ent, matter) in &ents {
+            let t = floptle_core::world_transform(&self.world, *ent);
+            let mat = self.world.get::<Material>(*ent).cloned();
+            let tex = mat
+                .as_ref()
+                .and_then(|m| m.texture.as_deref())
+                .and_then(|p| self.texture_registry.get(p).copied());
+            match matter {
+                Matter::Primitive { shape, color } => {
+                    if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        let mp =
+                            mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
+                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
+                    }
+                }
+                Matter::Blob { scale } => blobs.push((t.translation, scale * t.scale.x)),
+                Matter::Mesh { asset_path } => {
+                    if let Some(asset) = self.mesh_registry.get(asset_path) {
+                        let model = t.render_matrix(cam.world_position);
+                        let mp = mat
+                            .as_ref()
+                            .map(material_params)
+                            .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                        for &mid in &asset.parts {
+                            instances.push((mid, tex, instance_of_mat(model, &mp)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let clear = [0.02f32, 0.02, 0.05, 1.0];
+        let terrain_mat = self.terrain_material();
+        let show_blobs = self.project.matter && !blobs.is_empty();
+        let rm = if show_blobs || self.combined.is_some() {
+            let mut arr = [[0.0f32; 4]; 16];
+            let n = blobs.len().min(16);
+            if show_blobs {
+                for (i, (c, s)) in blobs.iter().take(16).enumerate() {
+                    let cr = (*c - cam.world_position).as_vec3();
+                    arr[i] = [cr.x, cr.y, cr.z, s.max(0.05)];
+                }
+            }
+            let tm = &terrain_mat;
+            let mut g = RaymarchGlobals {
+                view_proj: view_proj.to_cols_array_2d(),
+                inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+                light_dir: [light.x, light.y, light.z, 0.0],
+                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+                ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+                bg: [clear[0], clear[1], clear[2], 1.0],
+                center: [0.0; 4],
+                params: [elapsed, if show_blobs { n as f32 } else { 0.0 }, 0.0, 0.0],
+                vol_center: [0.0, 0.0, 0.0, 0.0],
+                vol_half: [1.0, 1.0, 1.0, 0.5],
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
+                terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
+                terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
+                terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
+                terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
+                blobs: arr,
+            };
+            if let Some((hf, bc)) =
+                self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
+            {
+                let cr = DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position;
+                g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0];
+                g.vol_half = [hf[0], hf[1], hf[2], 0.1];
+            }
+            Some(g)
+        } else {
+            None
+        };
+
+        self.ensure_cam_preview_target();
+        if let (Some(gpu), Some(raster), Some(raymarch), Some(prev)) = (
+            self.gpu.as_ref(),
+            self.raster.as_mut(),
+            self.raymarch.as_mut(),
+            self.cam_preview.as_ref(),
+        ) {
+            let raster_clear = if let Some(rm) = rm {
+                raymarch.draw_into(gpu, &prev.color_view, &prev.depth_view, rm);
+                None
+            } else {
+                Some(clear.map(|c| c as f64))
+            };
+            raster.draw_scene(gpu, &prev.color_view, &prev.depth_view, globals, &instances, raster_clear);
         }
     }
 
