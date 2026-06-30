@@ -3732,6 +3732,8 @@ struct Editor {
     raster: Option<Raster>,
     raymarch: Option<Raymarch>,
     retro: Option<Retro>,
+    /// Post-processing stack (bloom + vignette), full frame res.
+    post: Option<floptle_render::PostStack>,
     /// Selection-outline post-process (silhouette mask + edge detect).
     outline: Option<Outline>,
     /// Editor reference-grid renderer.
@@ -4017,6 +4019,7 @@ impl ApplicationHandler for Editor {
         self.load_texture_settings();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
+        self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
 
@@ -4083,6 +4086,9 @@ impl ApplicationHandler for Editor {
                     }
                     if let Some(outline) = self.outline.as_mut() {
                         outline.resize(gpu, size.width, size.height);
+                    }
+                    if let Some(post) = self.post.as_mut() {
+                        post.resize(gpu, size.width, size.height);
                     }
                 }
             }
@@ -4386,6 +4392,7 @@ impl Editor {
             Some(retro),
             Some(outline),
             Some(grid_render),
+            Some(post),
             Some(egui),
             Some(window),
         ) = (
@@ -4395,6 +4402,7 @@ impl Editor {
             self.retro.as_mut(),
             self.outline.as_ref(),
             self.grid_render.as_mut(),
+            self.post.as_ref(),
             self.egui.as_mut(),
             self.window.as_ref(),
         ) else {
@@ -5022,6 +5030,33 @@ impl Editor {
                     if ui.checkbox(&mut project.matter, "SDF matter").changed() {
                         want_save_project = true;
                     }
+
+                    ui.add_space(8.0);
+                    ui.label("Post-processing");
+                    ui.separator();
+                    if ui.checkbox(&mut project.bloom, "Bloom").changed() {
+                        want_save_project = true;
+                    }
+                    if project.bloom {
+                        want_save_project |= ui
+                            .add(egui::Slider::new(&mut project.bloom_threshold, 0.0..=2.0).text("threshold"))
+                            .changed();
+                        want_save_project |= ui
+                            .add(egui::Slider::new(&mut project.bloom_intensity, 0.0..=2.0).text("intensity"))
+                            .changed();
+                    }
+                    if ui.checkbox(&mut project.vignette, "Vignette").changed() {
+                        want_save_project = true;
+                    }
+                    if project.vignette {
+                        want_save_project |= ui
+                            .add(egui::Slider::new(&mut project.vignette_strength, 0.0..=1.0).text("strength"))
+                            .changed();
+                        want_save_project |= ui
+                            .add(egui::Slider::new(&mut project.vignette_radius, 0.3..=1.0).text("radius"))
+                            .changed();
+                    }
+
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
 
@@ -5245,11 +5280,26 @@ impl Editor {
             retro.resize(gpu, self.project.retro_height.max(80));
         }
 
+        // Post-processing (bloom/vignette) runs at full frame res after the scene is
+        // composited (and after any retro downsample), before the outline + egui.
+        let post_settings = floptle_render::PostSettings {
+            bloom: self.project.bloom,
+            bloom_threshold: self.project.bloom_threshold,
+            bloom_intensity: self.project.bloom_intensity,
+            vignette: self.project.vignette,
+            vignette_strength: self.project.vignette_strength,
+            vignette_radius: self.project.vignette_radius,
+        };
+        let post_on = post_settings.any();
+
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
             Some(frame) => {
                 let (color, depth) = if self.project.retro {
                     (retro.color_view(), retro.depth_view())
+                } else if post_on {
+                    // Non-retro + post: render the scene into the post input target.
+                    (post.input_view(), gpu.depth_view())
                 } else {
                     (&frame.view, gpu.depth_view())
                 };
@@ -5274,8 +5324,17 @@ impl Editor {
                         [c[0], c[1], c[2], self.grid.alpha],
                     );
                 }
+                // Retro upscales the low-res scene; into the post input if post is on,
+                // else straight to the frame. Then post (if on) writes to the frame.
                 if self.project.retro {
-                    retro.blit(gpu, &frame);
+                    if post_on {
+                        retro.blit_to(gpu, post.input_view());
+                    } else {
+                        retro.blit(gpu, &frame);
+                    }
+                }
+                if post_on {
+                    post.run(gpu, &post_settings, &frame.view);
                 }
 
                 // Selection outline: mask the selected object's silhouette (full

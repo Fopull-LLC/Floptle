@@ -237,6 +237,32 @@ pub struct ProjectConfigDoc {
     pub retro: bool,
     pub retro_height: u32,
     pub matter: bool,
+    // Post-processing (serde defaults so old project.ron files still load).
+    #[serde(default)]
+    pub bloom: bool,
+    #[serde(default = "default_bloom_threshold")]
+    pub bloom_threshold: f32,
+    #[serde(default = "default_bloom_intensity")]
+    pub bloom_intensity: f32,
+    #[serde(default)]
+    pub vignette: bool,
+    #[serde(default = "default_vignette_strength")]
+    pub vignette_strength: f32,
+    #[serde(default = "default_vignette_radius")]
+    pub vignette_radius: f32,
+}
+
+fn default_bloom_threshold() -> f32 {
+    1.0
+}
+fn default_bloom_intensity() -> f32 {
+    0.7
+}
+fn default_vignette_strength() -> f32 {
+    0.5
+}
+fn default_vignette_radius() -> f32 {
+    0.7
 }
 
 impl Default for ProjectConfigDoc {
@@ -246,9 +272,19 @@ impl Default for ProjectConfigDoc {
 }
 
 impl ProjectConfigDoc {
-    /// The default PS1 look: 240p retro upscale, matter on.
+    /// The default PS1 look: 240p retro upscale, matter on. Post effects start off.
     pub fn ps1() -> Self {
-        Self { retro: true, retro_height: 240, matter: true }
+        Self {
+            retro: true,
+            retro_height: 240,
+            matter: true,
+            bloom: false,
+            bloom_threshold: default_bloom_threshold(),
+            bloom_intensity: default_bloom_intensity(),
+            vignette: false,
+            vignette_strength: default_vignette_strength(),
+            vignette_radius: default_vignette_radius(),
+        }
     }
 
     /// A higher-resolution PS2-ish look.
