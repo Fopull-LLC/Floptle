@@ -119,6 +119,18 @@ pub enum Matter {
     /// translation; `range` is the radius at which its contribution falls to ~zero.
     /// (The scene's single directional/ambient key stays the special `Light` node.)
     PointLight { color: [f32; 3], intensity: f32, range: f32 },
+    /// A gravity source for the physics sim — `Down` for normal-style level gravity,
+    /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
+    GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
+}
+
+/// How a [`Matter::GravityVolume`] pulls bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GravityMode {
+    /// Constant downward (−Y) gravity everywhere — a normal-style game's level gravity.
+    Down,
+    /// Radial pull toward the node — a planet. `radius` bounds the gravity well.
+    Radial,
 }
 
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under

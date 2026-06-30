@@ -12,7 +12,8 @@ use std::path::Path;
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{
-    BodyKind, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts, Shape, World,
+    BodyKind, GravityMode, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts, Shape,
+    World,
 };
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +188,19 @@ pub enum MatterDoc {
         #[serde(default = "default_range")]
         range: f32,
     },
+    /// A physics gravity source (Down = level gravity, Radial = planet).
+    GravityVolume {
+        #[serde(default)]
+        radial: bool,
+        #[serde(default = "default_gravity_strength")]
+        strength: f32,
+        #[serde(default = "default_range")]
+        radius: f32,
+    },
+}
+
+fn default_gravity_strength() -> f32 {
+    9.81
 }
 
 fn default_fov() -> f32 {
@@ -217,6 +231,11 @@ impl From<&Matter> for MatterDoc {
             Matter::PointLight { color, intensity, range } => {
                 MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
             }
+            Matter::GravityVolume { mode, strength, radius } => MatterDoc::GravityVolume {
+                radial: *mode == GravityMode::Radial,
+                strength: *strength,
+                radius: *radius,
+            },
         }
     }
 }
@@ -235,6 +254,11 @@ impl MatterDoc {
             MatterDoc::PointLight { color, intensity, range } => {
                 Matter::PointLight { color: *color, intensity: *intensity, range: *range }
             }
+            MatterDoc::GravityVolume { radial, strength, radius } => Matter::GravityVolume {
+                mode: if *radial { GravityMode::Radial } else { GravityMode::Down },
+                strength: *strength,
+                radius: *radius,
+            },
         }
     }
 }
