@@ -247,7 +247,18 @@ impl Raymarch {
 
     /// Upload a baked mesh as the volume matter (replaces any previous one). The
     /// runtime still drives `vol_center`/`vol_half`/present via `RaymarchGlobals`.
+    ///
+    /// Fast path: when the grid dimensions are unchanged (e.g. sculpting/painting a
+    /// fixed-detail terrain), the existing GPU textures are reused and only their
+    /// data is re-written — no texture allocation or bind-group rebuild, which is
+    /// what made per-stroke editing lag.
     pub fn set_volume(&mut self, gpu: &Gpu, baked: &BakedSdf) {
+        let [w, h, d] = baked.dims;
+        let cur = self._dist_tex.size();
+        if cur.width == w && cur.height == h && cur.depth_or_array_layers == d {
+            write_volume_data(gpu, &self._dist_tex, &self._color_tex, baked);
+            return;
+        }
         let (dist_tex, color_tex) = upload_volume(gpu, baked);
         self.bind = make_bind(
             &gpu.device,
@@ -436,7 +447,6 @@ fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
 fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) {
     let [w, h, d] = baked.dims;
     let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: d };
-
     let dist = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sdf-distance"),
         size,
@@ -447,19 +457,6 @@ fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) 
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let dist_f16: Vec<u16> = baked.distance.iter().map(|&v| f32_to_f16(v)).collect();
-    gpu.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &dist,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytemuck::cast_slice(&dist_f16),
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
-        size,
-    );
-
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sdf-color"),
         size,
@@ -470,9 +467,30 @@ fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) 
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    write_volume_data(gpu, &dist, &color, baked);
+    (dist, color)
+}
+
+/// Write a bake's distance + color into already-allocated 3D textures (same dims).
+/// This is the cheap per-edit path — no allocation, no bind-group rebuild.
+fn write_volume_data(gpu: &Gpu, dist: &wgpu::Texture, color: &wgpu::Texture, baked: &BakedSdf) {
+    let [w, h, d] = baked.dims;
+    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: d };
+    let dist_f16: Vec<u16> = baked.distance.iter().map(|&v| f32_to_f16(v)).collect();
     gpu.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
-            texture: &color,
+            texture: dist,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&dist_f16),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
+        size,
+    );
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: color,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -481,8 +499,6 @@ fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) 
         wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
         size,
     );
-
-    (dist, color)
 }
 
 /// Minimal `f32` → IEEE-754 half (`f16` bits). Flushes denormals to ±0 and clamps
