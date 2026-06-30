@@ -130,6 +130,12 @@ impl Retro {
 
     /// Upscale the low-res target into the window frame with nearest-neighbor.
     pub fn blit(&self, gpu: &Gpu, frame: &Frame) {
+        self.blit_to(gpu, &frame.view);
+    }
+
+    /// Upscale the low-res target into an arbitrary surface-format view (e.g. a
+    /// post-processing input target) with nearest-neighbor.
+    pub fn blit_to(&self, gpu: &Gpu, target: &wgpu::TextureView) {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("retro-blit") });
@@ -137,7 +143,7 @@ impl Retro {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("retro-blit"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
+                    view: target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {

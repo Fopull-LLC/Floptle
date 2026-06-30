@@ -27,6 +27,7 @@ pub mod graph;
 pub mod grid;
 pub mod mesh;
 pub mod outline;
+pub mod post;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;
@@ -37,6 +38,7 @@ pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
 pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use outline::Outline;
+pub use post::{PostSettings, PostStack};
 pub use raster::{
     instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId,
     TexSampling, TexWrap,
