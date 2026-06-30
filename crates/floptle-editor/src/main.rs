@@ -4472,6 +4472,9 @@ struct Editor {
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
+    /// The editor chrome's default panel/window/extreme bg colors, captured once so play
+    /// mode can tint them (and untint cleanly on stop). `None` until the first frame.
+    chrome_bg: Option<(egui::Color32, egui::Color32, egui::Color32)>,
     /// The physics sim while playing (built on Play, dropped on Stop).
     sim: Option<floptle_physics::Sim>,
     /// Paused (in play mode): the script clock freezes.
@@ -5043,6 +5046,9 @@ impl Editor {
         // from its viewpoint into the 16:9 offscreen target (before the destructure).
         let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
         self.update_camera_preview(cam_elapsed);
+        // Whether the Game view is the focused tab (precomputed before the GPU borrow):
+        // game input only feeds scripts here, never in the Scene view.
+        let game_focused = self.game_view();
 
         let (
             Some(gpu),
@@ -5149,15 +5155,22 @@ impl Editor {
                 }
                 self.script_host.set_bodies(states);
             }
-            // Feed the player input to scripts (the Lua `input` API).
-            self.script_host.set_input(floptle_script::InputSnapshot {
-                keys_down: self.input_keys.clone(),
-                keys_pressed: self.input_keys_pressed.clone(),
-                mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
-                mouse_delta: self.input_mouse_delta,
-                scroll: self.input_scroll,
-                buttons_down: self.input_buttons,
-                buttons_pressed: self.input_buttons_pressed,
+            // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
+            // Game view is focused. In the Scene view you're editing, not playing, so the
+            // game gets neutral input (the character stops moving) even though physics
+            // keeps simulating.
+            self.script_host.set_input(if game_focused {
+                floptle_script::InputSnapshot {
+                    keys_down: self.input_keys.clone(),
+                    keys_pressed: self.input_keys_pressed.clone(),
+                    mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
+                    mouse_delta: self.input_mouse_delta,
+                    scroll: self.input_scroll,
+                    buttons_down: self.input_buttons,
+                    buttons_pressed: self.input_buttons_pressed,
+                }
+            } else {
+                floptle_script::InputSnapshot::default()
             });
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
             // (physics doesn't step until after scripts, so this is safe).
@@ -5593,6 +5606,28 @@ impl Editor {
         // ---- build the egui UI (mutating the World) ----
         let raw_input = egui.state.take_egui_input(&window);
         let ctx = egui.ctx.clone();
+        // Play-mode telegraph: tint the editor chrome a little cooler/brighter while
+        // playing, so you never mistake play mode for edit mode (and lose edits on Stop).
+        if self.chrome_bg.is_none() {
+            let style = ctx.style_of(egui::Theme::Dark);
+            let v = &style.visuals;
+            self.chrome_bg = Some((v.panel_fill, v.window_fill, v.extreme_bg_color));
+        }
+        if let Some((pf, wf, ex)) = self.chrome_bg {
+            let playing = self.playing;
+            let tint = |c: egui::Color32| {
+                egui::Color32::from_rgb(
+                    (c.r() as u16 + 10).min(255) as u8,
+                    (c.g() as u16 + 18).min(255) as u8,
+                    (c.b() as u16 + 30).min(255) as u8,
+                )
+            };
+            ctx.all_styles_mut(|s| {
+                s.visuals.panel_fill = if playing { tint(pf) } else { pf };
+                s.visuals.window_fill = if playing { tint(wf) } else { wf };
+                s.visuals.extreme_bg_color = if playing { tint(ex) } else { ex };
+            });
+        }
         // Every named entity, Matter nodes and the Lighting node alike.
         let entity_names: Vec<(Entity, String)> =
             self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
