@@ -8,6 +8,7 @@
 //! so they stay simple and undoable; the editor re-uploads after each stroke.
 
 use crate::mesh2sdf::BakedSdf;
+use crate::smin;
 
 /// A sculptable terrain volume.
 #[derive(Clone, Debug)]
@@ -255,6 +256,124 @@ impl Terrain {
         let c01 = lerp(s(x0, y0, z1), s(x1, y0, z1), fx);
         let c11 = lerp(s(x0, y1, z1), s(x1, y1, z1), fx);
         lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz)
+    }
+
+    /// Nearest-voxel color (RGBA8) at a local point; clamps to the grid outside the
+    /// box. The alpha (painted texture slot) is taken from the nearest voxel, never
+    /// interpolated, so slots stay crisp when combining terrains.
+    pub fn sample_color(&self, p: [f32; 3]) -> [u8; 4] {
+        let [w, h, d] = self.baked.dims;
+        let c = self.baked.center;
+        let hf = self.baked.half_extent;
+        let g = |r: f32, ci: f32, hi: f32, n: u32| {
+            (((r - ci) / (2.0 * hi) + 0.5) * n as f32 - 0.5).clamp(0.0, n as f32 - 1.0)
+        };
+        let x = g(p[0], c[0], hf[0], w).round() as u32;
+        let y = g(p[1], c[1], hf[1], h).round() as u32;
+        let z = g(p[2], c[2], hf[2], d).round() as u32;
+        self.baked.color[self.idx(x.min(w - 1), y.min(h - 1), z.min(d - 1))]
+    }
+
+    /// Fold several terrain fields, each placed at a WORLD `origin` (its node's world
+    /// translation), into ONE world-space [`Terrain`] for rendering. Overlaps blend
+    /// via [`smin`] (the same polynomial smooth-min the GPU uses), so terrains fuse
+    /// seamlessly; painted color/slot blend toward the nearer surface. The combined
+    /// field's own local space IS world space (its `baked.center` is the world union
+    /// center), so the editor renders it with no extra transform.
+    ///
+    /// `k` is the blend radius. Voxel size = the finest of the sources (per axis),
+    /// clamped so no axis exceeds `MAX_DIM` cells (far-apart terrains share a coarser
+    /// grid — the documented resolution-spread trade-off).
+    pub fn combine(volumes: &[([f64; 3], &Terrain)], k: f32) -> Terrain {
+        const MAX_DIM: u32 = 256;
+        if volumes.is_empty() {
+            return Terrain::flat([1, 1, 1], [0.0; 3], [1.0; 3], 0.0, [1.0; 3]);
+        }
+        // Union world bounds + finest per-axis voxel size.
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        let mut vs = [f64::INFINITY; 3];
+        for (origin, t) in volumes {
+            for a in 0..3 {
+                let c = t.baked.center[a] as f64 + origin[a];
+                let h = t.baked.half_extent[a] as f64;
+                lo[a] = lo[a].min(c - h);
+                hi[a] = hi[a].max(c + h);
+                vs[a] = vs[a].min(2.0 * h / t.baked.dims[a].max(1) as f64);
+            }
+        }
+        // Snap the world origin to the lattice (so a sub-voxel move of one terrain
+        // doesn't reshuffle every cell), then size the grid, clamping cells per axis.
+        let mut dims = [0u32; 3];
+        let mut center = [0f32; 3];
+        let mut half = [0f32; 3];
+        let mut world_min = [0f64; 3];
+        let mut cell = [0f64; 3];
+        for a in 0..3 {
+            let mut v = vs[a].max(1e-3);
+            world_min[a] = (lo[a] / v).floor() * v;
+            let extent = (hi[a] - world_min[a]).max(v);
+            let mut n = (extent / v).ceil() as u32 + 1;
+            n = n.clamp(2, MAX_DIM);
+            v = extent / (n as f64 - 1.0); // keep the box spanning the full extent
+            let span = v * n as f64;
+            dims[a] = n;
+            cell[a] = v;
+            half[a] = (span * 0.5) as f32;
+            center[a] = (world_min[a] + span * 0.5) as f32;
+        }
+        let [w, h, d] = dims;
+        let n = (w * h * d) as usize;
+        let mut distance = vec![1.0e4f32; n];
+        let mut color = vec![[255u8, 255, 255, 0]; n];
+        let kk = k.max(1e-4);
+        for iz in 0..d {
+            let wz = world_min[2] + (iz as f64 + 0.5) * cell[2];
+            for iy in 0..h {
+                let wy = world_min[1] + (iy as f64 + 0.5) * cell[1];
+                for ix in 0..w {
+                    let wx = world_min[0] + (ix as f64 + 0.5) * cell[0];
+                    let mut dval = 1.0e4f32;
+                    let mut col = [255u8, 255, 255, 0];
+                    for (origin, t) in volumes {
+                        let lp = [
+                            (wx - origin[0]) as f32,
+                            (wy - origin[1]) as f32,
+                            (wz - origin[2]) as f32,
+                        ];
+                        // AABB early-out: a volume whose box is farther than `dval+k`
+                        // can't lower the smin result, so skip its (8-tap) sample.
+                        let rel = [
+                            lp[0] - t.baked.center[0],
+                            lp[1] - t.baked.center[1],
+                            lp[2] - t.baked.center[2],
+                        ];
+                        let qx = rel[0].abs() - t.baked.half_extent[0];
+                        let qy = rel[1].abs() - t.baked.half_extent[1];
+                        let qz = rel[2].abs() - t.baked.half_extent[2];
+                        if qx.max(qy).max(qz) > dval + kk {
+                            continue;
+                        }
+                        let sd = t.sample(lp);
+                        let scol = t.sample_color(lp);
+                        // smin (distance) + matched color crossfade by the same weight.
+                        let hh = (0.5 + 0.5 * (sd - dval) / kk).clamp(0.0, 1.0);
+                        dval = smin(dval, sd, k);
+                        for c in 0..3 {
+                            col[c] = (scol[c] as f32 * (1.0 - hh) + col[c] as f32 * hh)
+                                .round()
+                                .clamp(0.0, 255.0) as u8;
+                        }
+                        // Slot (alpha) from the NEARER surface, never blended.
+                        col[3] = if hh >= 0.5 { col[3] } else { scol[3] };
+                    }
+                    let oi = ((iz * h + iy) * w + ix) as usize;
+                    distance[oi] = dval;
+                    color[oi] = col;
+                }
+            }
+        }
+        Terrain { baked: BakedSdf { dims, center, half_extent: half, distance, color } }
     }
 
     /// March a ray (world space) and return the first surface hit reached *from
@@ -525,6 +644,27 @@ mod tests {
         let dims = t.baked.dims;
         assert!(!t.ensure_contains([0.0, 0.0, 0.0], 2.0));
         assert_eq!(t.baked.dims, dims);
+    }
+
+    #[test]
+    fn combine_two_overlapping_terrains_blends() {
+        // Two flat terrains, offset so their boxes overlap. The combined field must
+        // span both, have ground near y=0 across the seam, and be solid below.
+        let a = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
+        let b = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.3, 0.4, 0.7]);
+        // place b shifted +10 in x (boxes overlap from x=2..8 of a / -8..-2 of b world)
+        let c = Terrain::combine(&[([0.0, 0.0, 0.0], &a), ([10.0, 0.0, 0.0], &b)], 1.0);
+        // Combined world box spans roughly x in [-8, 18].
+        assert!(c.baked.center[0] > 3.0 && c.baked.center[0] < 7.0, "center {:?}", c.baked.center);
+        assert!(c.baked.half_extent[0] >= 12.0, "half {:?}", c.baked.half_extent);
+        // Ground is flat at y=0 across the whole span (above positive, below negative).
+        for &x in &[-6.0f32, 0.0, 5.0, 10.0, 16.0] {
+            assert!(c.sample([x, 2.0, 0.0]) > 0.0, "above ground at x={x}");
+            assert!(c.sample([x, -2.0, 0.0]) < 0.0, "below ground at x={x}");
+        }
+        // A downward ray in the overlap hits near y=0 (one fused surface, no double).
+        let hit = c.raycast([5.0, 6.0, 0.0], [0.0, -1.0, 0.0]).expect("hits ground in seam");
+        assert!(hit[1].abs() < 0.4, "seam hit y={}", hit[1]);
     }
 
     #[test]

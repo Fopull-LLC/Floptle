@@ -133,10 +133,12 @@ fn volume(p: vec3<f32>) -> Matter {
     let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
     let d = textureSampleLevel(dist_tex, vol_samp, local, 0.0).r;
     let col = textureSampleLevel(color_tex, vol_samp, local, 0.0).rgb;
-    // Round the finite slab's SIDE + BOTTOM faces up to air, so a terrain that fills
+    // Taper the finite slab's SIDE + BOTTOM faces up to air, so a terrain that fills
     // its box doesn't render as hard dirt walls / a visible shell — the surface
-    // rounds off to meet the air at the edges. The TOP ground surface is untouched.
-    let margin = 1.25;
+    // slopes off gently to meet the air at the edges (a gentle slope avoids the
+    // grazing-angle aliasing a steep rounded lip would cause). The TOP ground
+    // surface is untouched.
+    let margin = 2.0;
     let edge = min(min(G.vol_half.x - abs(rel.x), G.vol_half.z - abs(rel.z)), rel.y + G.vol_half.y);
     return Matter(max(d, margin - edge), col);
 }
