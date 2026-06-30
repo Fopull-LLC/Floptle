@@ -239,8 +239,20 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     return cx * w.x + cy * w.y + cz * w.z;
 }
 
-// The terrain texture (if any) at a hit point `p`, multiplied into the tint. Reads
-// the painted slot from the volume color's alpha; slot 0 = untextured.
+// One painted slot's contribution at `rel` (slot index is 0-based; < 0 = untextured,
+// which is just the flat tint).
+fn terrain_slot_color(slot: i32, rel: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
+    if (slot < 0) {
+        return tint;
+    }
+    return triplanar(slot, rel, n) * tint * 1.6; // texture modulates the painted tint
+}
+
+// The terrain texture (if any) at a hit point `p`, multiplied into the tint. The painted
+// slot lives in the volume color's alpha (0 = untextured). The alpha is sampled LINEARLY,
+// so at a boundary between two painted slots it reads a fractional value — we blend the
+// two neighbouring slots by that fraction instead of snapping (round()), which gives a
+// smooth crossfade between textures instead of a hard, jarring seam.
 fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
     if (G.vol_center.w < 0.5) {
         return tint;
@@ -250,12 +262,33 @@ fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
     if (max(q.x, max(q.y, q.z)) > 0.0) {
         return tint; // not inside the terrain box
     }
-    let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    let slot = i32(round(textureSampleLevel(color_tex, vol_samp, local, 0.0).a * 255.0)) - 1;
-    if (slot < 0) {
-        return tint;
+    let inv = 1.0 / (2.0 * G.vol_half.xyz);
+    let local = clamp(rel * inv + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    // The slot only transitions over ONE voxel, so a single linear tap gives a narrow
+    // seam. Average a few taps in the surface PLANE (so we widen along the ground, not
+    // into it) → a soft, several-voxel crossfade. `a` is the 1-based slot (0 = untextured).
+    let voxel = 2.0 * G.vol_half.xyz / max(vec3<f32>(textureDimensions(color_tex)), vec3<f32>(1.0));
+    var t1 = cross(n, vec3<f32>(0.0, 1.0, 0.0));
+    if (dot(t1, t1) < 0.01) { t1 = cross(n, vec3<f32>(1.0, 0.0, 0.0)); }
+    t1 = normalize(t1);
+    let t2 = normalize(cross(n, t1));
+    let o1 = t1 * voxel * 1.5 * inv;
+    let o2 = t2 * voxel * 1.5 * inv;
+    let a = (
+        textureSampleLevel(color_tex, vol_samp, local, 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, clamp(local + o1, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, clamp(local - o1, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, clamp(local + o2, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, clamp(local - o2, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
+    ) * (255.0 / 5.0);
+    if (a < 0.5) {
+        return tint; // fully untextured here
     }
-    return triplanar(slot, rel, n) * tint * 1.6; // texture modulates the painted tint
+    let lo = floor(a);
+    let f = a - lo;
+    let c_lo = terrain_slot_color(i32(lo) - 1, rel, n, tint);
+    let c_hi = terrain_slot_color(i32(ceil(a)) - 1, rel, n, tint);
+    return mix(c_lo, c_hi, f);
 }
 
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
