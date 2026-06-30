@@ -4609,6 +4609,42 @@ fn box_lines(
     lines
 }
 
+/// Oriented box wireframe (12 edges): the 8 corners of a ±`half` cube transformed by
+/// `m` (a node's world matrix), so the box follows the node's rotation + scale — the
+/// outline of a static `Collidable` Cube's box collider.
+fn oriented_box_lines(
+    m: Mat4,
+    half: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let signs: [(f32, f32, f32); 8] = [
+        (-1.0, -1.0, -1.0), (1.0, -1.0, -1.0), (1.0, -1.0, 1.0), (-1.0, -1.0, 1.0),
+        (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0), (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0),
+    ];
+    let corners: Vec<Option<Vec2>> = signs
+        .iter()
+        .map(|&(sx, sy, sz)| {
+            let lp = Vec3::new(sx * half, sy * half, sz * half);
+            project(m.transform_point3(lp).as_dvec3(), cam_world, vp, w, h)
+        })
+        .collect();
+    let edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ];
+    let mut lines = Vec::new();
+    for &(a, b) in &edges {
+        if let (Some(pa), Some(pb)) = (corners[a], corners[b]) {
+            lines.push((pa, pb));
+        }
+    }
+    lines
+}
+
 /// Build a rigidbody collider outline: a 3-ring wireframe sphere, or a capsule (two
 /// end rings + side connectors + cap arcs). Y-up (the editor doesn't tilt the gizmo).
 fn rigidbody_lines(
@@ -5821,6 +5857,42 @@ impl Editor {
                     }
                 }
             }
+            // Static PRIMITIVE collider wireframes (the "Collidable" switch on a Cube /
+            // Sphere / Capsule) — drawn with the same toggle as mesh colliders, plus the
+            // selected one always. Each matches the static collider built at Play.
+            let shape_colliders: Vec<(Entity, floptle_core::Shape)> = self
+                .world
+                .query::<floptle_core::Collidable>()
+                .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
+                    Some(Matter::Primitive { shape, .. }) => Some((e, *shape)),
+                    _ => None,
+                })
+                .collect();
+            for (e, shape) in shape_colliders {
+                if !self.show_mesh_colliders && !self.selection.contains(&e) {
+                    continue;
+                }
+                let wt = floptle_core::world_transform(&self.world, e);
+                let s = wt.scale;
+                let lines = match shape {
+                    floptle_core::Shape::Cube => {
+                        let m = Mat4::from_scale_rotation_translation(s, wt.rotation, wt.translation.as_vec3());
+                        oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
+                    }
+                    floptle_core::Shape::Sphere => rigidbody_lines(
+                        wt.translation, false, 0.85 * s.max_element(), 0.0,
+                        cam.world_position, view_proj, gw, gh,
+                    ),
+                    floptle_core::Shape::Capsule => {
+                        let r = 0.5 * s.x.max(s.z);
+                        rigidbody_lines(
+                            wt.translation, true, r, s.y + 2.0 * r,
+                            cam.world_position, view_proj, gw, gh,
+                        )
+                    }
+                };
+                self.mesh_wire_gizmo.extend(lines);
+            }
         }
 
         // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
@@ -6212,8 +6284,8 @@ impl Editor {
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
                         ui.checkbox(&mut *show_terrain_collider, "Terrain collider wireframe")
                             .on_hover_text("show the terrain's collision surface (what the player walks on)");
-                        ui.checkbox(&mut *show_mesh_colliders, "Mesh collider wireframes")
-                            .on_hover_text("show every walkable mesh collider (the selected one always shows)");
+                        ui.checkbox(&mut *show_mesh_colliders, "Collider wireframes (mesh + shapes)")
+                            .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
                         if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
                             ui.close();
