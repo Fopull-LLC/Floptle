@@ -320,11 +320,10 @@ impl Terrain {
         let q = [rel[0].abs() - hf[0], rel[1].abs() - hf[1], rel[2].abs() - hf[2]];
         let outside =
             (q[0].max(0.0).powi(2) + q[1].max(0.0).powi(2) + q[2].max(0.0).powi(2)).sqrt();
-        if outside > 1e-4 {
-            return outside;
-        }
         let [w, h, d] = self.baked.dims;
-        // Continuous grid coords (voxel centers at integer+0.5).
+        // Continuous grid coords (voxel centers at integer+0.5). For a point outside the
+        // box these clamp to the edge, so the trilinear value below is the nearest EDGE
+        // voxel's distance.
         let g = |r: f32, hi: f32, n: u32| ((r / (2.0 * hi) + 0.5) * n as f32 - 0.5).clamp(0.0, n as f32 - 1.0);
         let gx = g(rel[0], hf[0], w);
         let gy = g(rel[1], hf[1], h);
@@ -338,7 +337,16 @@ impl Terrain {
         let c10 = lerp(s(x0, y1, z0), s(x1, y1, z0), fx);
         let c01 = lerp(s(x0, y0, z1), s(x1, y0, z1), fx);
         let c11 = lerp(s(x0, y1, z1), s(x1, y1, z1), fx);
-        lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz)
+        let interior = lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz);
+        if outside > 1e-4 {
+            // Outside the box, continue the field as AIR: box distance PLUS the nearest
+            // edge's air gap. Without this the box face dips to ~0 even in mid-air, and
+            // that near-zero "shell" reappears when terrains are combined (each terrain's
+            // box face becomes a faint membrane). A solid edge (interior ≤ 0) gives a
+            // clean cliff instead. Mirrors the `grow()` air-fill exactly.
+            return outside + interior.max(0.0);
+        }
+        interior
     }
 
     /// Fill the WHOLE terrain's surface color with `color` (the RGB tint), leaving
