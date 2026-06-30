@@ -179,6 +179,8 @@ struct EditorCmd {
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
+    /// Toggle the static MeshCollider marker on a Mesh node (`true` = add, `false` = remove).
+    set_mesh_collider: Option<(Entity, bool)>,
     /// Remove an entity's Material component (back to the default look).
     remove_material: Option<Entity>,
     /// Apply a named material preset to an entity.
@@ -2159,6 +2161,19 @@ impl<'a> EditorTabViewer<'a> {
                         }
                     }
                 });
+
+                // ---- Static mesh collider (walkable map) — Mesh nodes only ----
+                if matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. })) {
+                    let mut on = world.get::<floptle_core::MeshCollider>(e).is_some();
+                    if ui
+                        .checkbox(&mut on, "▦ Mesh collider (walkable)")
+                        .on_hover_text("collide against this model's triangles on Play, so a character can walk on it")
+                        .changed()
+                    {
+                        cmd.set_mesh_collider = Some((e, on));
+                        cmd.inspector_changed = true;
+                    }
+                }
 
                 if let Some(t) = world.get_mut::<Transform>(e) {
                     ui.label("translation");
@@ -5952,6 +5967,14 @@ impl Editor {
             self.record();
             self.world.remove::<floptle_core::RigidBody>(e);
         }
+        if let Some((e, on)) = cmd.set_mesh_collider {
+            self.record();
+            if on {
+                self.world.insert(e, floptle_core::MeshCollider);
+            } else {
+                self.world.remove::<floptle_core::MeshCollider>(e);
+            }
+        }
         if let Some((e, name)) = cmd.apply_preset {
             if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
                 let mat = doc.to_material();
@@ -6380,6 +6403,38 @@ impl Editor {
         field
     }
 
+    /// Register a static triangle collider for every Mesh node flagged `MeshCollider`,
+    /// so an imported map is walkable. Re-imports the model to get CPU triangles (the
+    /// registry keeps only GPU handles) and bakes the node's world transform into them —
+    /// the same transform the renderer draws with, so the collider lines up with what
+    /// you see. Done once at Play; imports are cached by the OS, the cost is one-time.
+    fn add_mesh_colliders(&self, sim: &mut floptle_physics::Sim) {
+        let meshes: Vec<(Entity, String)> = self
+            .world
+            .query::<floptle_core::MeshCollider>()
+            .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
+                Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
+                _ => None,
+            })
+            .collect();
+        for (e, path) in meshes {
+            let Ok(model) = floptle_assets::gltf_import::import(std::path::Path::new(&path)) else {
+                eprintln!("mesh collider: failed to load {path}");
+                continue;
+            };
+            let wt = floptle_core::world_transform(&self.world, e);
+            let m = Mat4::from_scale_rotation_translation(wt.scale, wt.rotation, wt.translation.as_vec3());
+            let mut verts: Vec<Vec3> = Vec::new();
+            let mut indices: Vec<u32> = Vec::new();
+            for part in &model.parts {
+                let base = verts.len() as u32;
+                verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
+                indices.extend(part.mesh.indices.iter().map(|i| i + base));
+            }
+            sim.add_static_mesh(&verts, &indices);
+        }
+    }
+
     fn toggle_play(&mut self) {
         if self.playing {
             self.playing = false;
@@ -6395,7 +6450,11 @@ impl Editor {
             // Build the physics sim from the scene: RigidBody nodes + the combined
             // terrain (SDF collider) + the gravity field from GravityVolume nodes.
             let gravity = self.build_gravity_field();
-            self.sim = Some(floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity));
+            let mut sim = floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity);
+            // Add static mesh colliders (imported maps flagged "Mesh collider") so a
+            // character can walk on them, not just the terrain.
+            self.add_mesh_colliders(&mut sim);
+            self.sim = Some(sim);
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
             // Press Play → bring the Game tab to the front (active-camera view), so it's
@@ -6437,6 +6496,7 @@ impl Editor {
         let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
         let rigidbody =
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
+        let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         Some(NodeDoc {
             name,
             transform,
@@ -6444,6 +6504,7 @@ impl Editor {
             scripts,
             material,
             rigidbody,
+            mesh_collider,
             parent: None,
         })
     }
@@ -6470,6 +6531,9 @@ impl Editor {
         if let Some(rb) = &node.rigidbody {
             self.world.insert(e, rb.to_rigidbody());
         }
+        if node.mesh_collider {
+            self.world.insert(e, floptle_core::MeshCollider);
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -6487,6 +6551,7 @@ impl Editor {
             scripts: Vec::new(),
             material: None,
             rigidbody: None,
+            mesh_collider: false,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -6887,6 +6952,7 @@ impl Editor {
                 scripts: Vec::new(),
                 material: None,
                 rigidbody: None,
+                mesh_collider: false,
                 parent: None,
             };
             let e = self.spawn_node(&node);
@@ -8089,6 +8155,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         }],
         material: None,
         rigidbody: None,
+        mesh_collider: false,
         parent: None,
     }
 }
@@ -8115,6 +8182,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 scripts: Vec::new(),
                 material: None,
                 rigidbody: None,
+                mesh_collider: false,
                 parent: None,
             },
             NodeDoc {
@@ -8124,6 +8192,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 scripts: Vec::new(),
                 material: None,
                 rigidbody: None,
+                mesh_collider: false,
                 parent: None,
             },
             NodeDoc {
@@ -8133,6 +8202,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 scripts: Vec::new(),
                 material: None,
                 rigidbody: None,
+                mesh_collider: false,
                 parent: None,
             },
             default_camera_node(),

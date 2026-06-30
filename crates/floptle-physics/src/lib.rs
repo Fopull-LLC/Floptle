@@ -107,6 +107,126 @@ impl CollisionShape for SdfTerrain {
     }
 }
 
+/// Grid cell index containing `p` (one cell = `cell` units on a side).
+fn cell_coord(p: Vec3, cell: f32) -> (i32, i32, i32) {
+    ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32)
+}
+
+/// Closest point to `p` on triangle `abc` (Ericson, *Real-Time Collision Detection*).
+fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return a + ab * (d1 / (d1 - d3));
+    }
+    let cp = p - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return a + ac * (d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b) * w;
+    }
+    let denom = 1.0 / (va + vb + vc);
+    a + ab * (vb * denom) + ac * (vc * denom)
+}
+
+/// A static triangle-mesh collider — e.g. an imported map model you walk on. World-space
+/// triangles are bucketed into a uniform spatial hash so closest-point queries only test
+/// nearby triangles. Distance is UNSIGNED (an imported map is rarely watertight); the body
+/// is pushed out along `(p − closest)`, which for a surface you rest on points away from
+/// the face. Resolved every substep, so a body never tunnels to the wrong side.
+pub struct TriMeshCollider {
+    tris: Vec<[Vec3; 3]>,
+    cell: f32,
+    grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
+}
+
+impl TriMeshCollider {
+    /// One cell ≥ any plausible body radius, so a 3×3×3 cell block around a query point
+    /// is guaranteed to contain every triangle within that radius.
+    const CELL: f32 = 2.0;
+
+    pub fn new(verts: &[Vec3], indices: &[u32]) -> Self {
+        let cell = Self::CELL;
+        let mut tris = Vec::with_capacity(indices.len() / 3);
+        let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>> =
+            std::collections::HashMap::new();
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) =
+                (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
+            let ti = tris.len() as u32;
+            tris.push([a, b, c]);
+            let lo = cell_coord(a.min(b).min(c), cell);
+            let hi = cell_coord(a.max(b).max(c), cell);
+            for cz in lo.2..=hi.2 {
+                for cy in lo.1..=hi.1 {
+                    for cx in lo.0..=hi.0 {
+                        grid.entry((cx, cy, cz)).or_default().push(ti);
+                    }
+                }
+            }
+        }
+        Self { tris, cell, grid }
+    }
+
+    /// Closest point on the mesh to `p` (and its squared distance), searching the 3×3×3
+    /// cell block around `p`. `None` if no triangle is within that block.
+    fn nearest(&self, p: Vec3) -> Option<(Vec3, f32)> {
+        let c = cell_coord(p, self.cell);
+        let mut best: Option<(Vec3, f32)> = None;
+        for cz in (c.2 - 1)..=(c.2 + 1) {
+            for cy in (c.1 - 1)..=(c.1 + 1) {
+                for cx in (c.0 - 1)..=(c.0 + 1) {
+                    let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
+                    for &ti in list {
+                        let t = self.tris[ti as usize];
+                        let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
+                        let d2 = (p - q).length_squared();
+                        if best.is_none_or(|(_, bd)| d2 < bd) {
+                            best = Some((q, d2));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+impl CollisionShape for TriMeshCollider {
+    fn distance(&self, p: Vec3) -> f32 {
+        // No nearby triangle → far away (no collision). Unsigned, so always ≥ 0.
+        self.nearest(p).map(|(_, d2)| d2.sqrt()).unwrap_or(1e6)
+    }
+    fn normal(&self, p: Vec3) -> Vec3 {
+        match self.nearest(p) {
+            Some((q, _)) => (p - q).try_normalize().unwrap_or(Vec3::Y),
+            None => Vec3::Y,
+        }
+    }
+}
+
 /// One contribution to the composable gravity field (ADR-0014). A body sums the
 /// enabled sources at its position and treats the result as "down".
 pub enum GravitySource {
@@ -497,6 +617,15 @@ impl Sim {
         Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0 }
     }
 
+    /// Register a static triangle-mesh collider (WORLD-space verts + indices) — e.g. an
+    /// imported map model the player can walk on. Call after [`build`](Self::build); the
+    /// editor bakes a Mesh node's transform into the verts before passing them.
+    pub fn add_static_mesh(&mut self, verts: &[Vec3], indices: &[u32]) {
+        if indices.len() >= 3 && !verts.is_empty() {
+            self.world.add_collider(Box::new(TriMeshCollider::new(verts, indices)));
+        }
+    }
+
     /// Advance by a (variable) real frame delta via a fixed-timestep accumulator, then
     /// write body positions back to the entities' local transform translations.
     /// (Physics bodies are treated as root nodes; parented dynamic bodies are later.)
@@ -562,6 +691,44 @@ mod tests {
         for _ in 0..steps {
             world.step(dt);
         }
+    }
+
+    /// A flat quad (two triangles) in the XZ plane at height `y`, spanning ±`half`.
+    fn floor_quad(y: f32, half: f32) -> (Vec<Vec3>, Vec<u32>) {
+        let v = vec![
+            Vec3::new(-half, y, -half),
+            Vec3::new(half, y, -half),
+            Vec3::new(half, y, half),
+            Vec3::new(-half, y, half),
+        ];
+        (v, vec![0, 1, 2, 0, 2, 3])
+    }
+
+    #[test]
+    fn trimesh_distance_and_normal() {
+        let (v, i) = floor_quad(0.0, 5.0);
+        let m = TriMeshCollider::new(&v, &i);
+        // A point one unit above the quad: unsigned distance 1, normal points up.
+        assert!((m.distance(Vec3::new(0.0, 1.0, 0.0)) - 1.0).abs() < 1e-3);
+        assert!(m.normal(Vec3::new(0.0, 1.0, 0.0)).y > 0.9);
+        // One unit below: distance 1, normal points down (push out the way it came).
+        assert!((m.distance(Vec3::new(0.0, -1.0, 0.0)) - 1.0).abs() < 1e-3);
+        assert!(m.normal(Vec3::new(0.0, -1.0, 0.0)).y < -0.9);
+        // Far away (beyond the search block): reported as no-collision.
+        assert!(m.distance(Vec3::new(0.0, 50.0, 0.0)) > 100.0);
+    }
+
+    #[test]
+    fn sphere_settles_on_mesh_floor() {
+        // A sphere dropped above a triangle-mesh floor comes to rest on top of it.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let (v, i) = floor_quad(0.0, 6.0);
+        w.add_collider(Box::new(TriMeshCollider::new(&v, &i)));
+        let b = w.add_body(Body::sphere(Vec3::new(0.0, 4.0, 0.0), 0.5));
+        simulate(&mut w, 3.0);
+        let body = w.bodies[b];
+        assert!((body.pos.y - 0.5).abs() < 0.08, "rests on mesh floor, y={}", body.pos.y);
+        assert!(body.grounded, "should be grounded on the mesh");
     }
 
     #[test]

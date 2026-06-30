@@ -68,6 +68,12 @@ impl Default for RigidBody {
     }
 }
 
+/// Marks a `Matter::Mesh` node as a STATIC collider you can walk on — the editor bakes
+/// its triangles (in world space) into the physics sim at Play. The model isn't a
+/// dynamic body; it's environment geometry (a level/map). Presence = collidable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshCollider;
+
 /// A scene's lighting, held on a single mandatory "Lighting" node every scene
 /// carries: a directional key light plus flat ambient. These are plain fields a
 /// script can read and write to drive game-time light changes; the renderer turns
