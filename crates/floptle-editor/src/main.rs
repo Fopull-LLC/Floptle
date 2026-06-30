@@ -1605,6 +1605,7 @@ struct EditorTabViewer<'a> {
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
     contact_gizmos: &'a [(Vec2, Vec2)],
+    terrain_wire: &'a [(Vec2, Vec2)],
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -2951,6 +2952,20 @@ impl<'a> EditorTabViewer<'a> {
                 painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(2.0, hit_col));
             }
         }
+
+        // Terrain collider wireframe (where the player can walk) — a soft yellow net.
+        if !self.terrain_wire.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_wire")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let col = egui::Color32::from_rgba_unmultiplied(235, 225, 120, 130);
+            for (a, b) in self.terrain_wire {
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(0.8, col));
+            }
+        }
     }
 
     /// Draw the selected asset's preview: a spinning model/material render (drag to
@@ -3895,6 +3910,96 @@ fn camera_frustum_lines(
     lines
 }
 
+/// World-space line segments tracing the terrain's collision iso-surface (where the SDF
+/// crosses zero — exactly what the player collides with), via coarse Surface Nets: one
+/// vertex per straddling cell (averaged edge crossings), connected to its +X/+Y/+Z
+/// neighbors. `stride` sets coarseness (bigger = fewer lines). Cached by the caller and
+/// projected to screen each frame.
+fn terrain_collider_wire(t: &floptle_field::Terrain, stride: u32) -> Vec<(Vec3, Vec3)> {
+    let b = &t.baked;
+    let [w, h, d] = b.dims;
+    let s = stride.max(1);
+    if w < 2 || h < 2 || d < 2 {
+        return Vec::new();
+    }
+    let dist = |x: u32, y: u32, z: u32| -> f32 {
+        b.distance[((z.min(d - 1) * h + y.min(h - 1)) * w + x.min(w - 1)) as usize]
+    };
+    let gpos = |x: u32, y: u32, z: u32| -> Vec3 {
+        let f = |i: u32, n: u32, c: f32, hf: f32| c - hf + (i as f32 + 0.5) / n as f32 * 2.0 * hf;
+        Vec3::new(
+            f(x.min(w - 1), w, b.center[0], b.half_extent[0]),
+            f(y.min(h - 1), h, b.center[1], b.half_extent[1]),
+            f(z.min(d - 1), d, b.center[2], b.half_extent[2]),
+        )
+    };
+    // Coarse cell grid (each cell spans `s` voxels). One optional vertex per cell.
+    let (cx_n, cy_n, cz_n) = ((w - 1) / s, (h - 1) / s, (d - 1) / s);
+    let ci = |cx: u32, cy: u32, cz: u32| ((cz * cy_n + cy) * cx_n + cx) as usize;
+    let mut verts: Vec<Option<Vec3>> = vec![None; (cx_n * cy_n * cz_n) as usize];
+    // The 12 edges of a cube (corner index pairs), corners ordered (x,y,z) bit = 1<<axis.
+    const EDGES: [(usize, usize); 12] =
+        [(0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6), (4, 5), (4, 6), (3, 7), (5, 7), (6, 7)];
+    for cz in 0..cz_n {
+        for cy in 0..cy_n {
+            for cx in 0..cx_n {
+                let (x0, y0, z0) = (cx * s, cy * s, cz * s);
+                let corner = |k: usize| {
+                    (x0 + (k as u32 & 1) * s, y0 + ((k as u32 >> 1) & 1) * s, z0 + ((k as u32 >> 2) & 1) * s)
+                };
+                let ds: [f32; 8] = std::array::from_fn(|k| {
+                    let (x, y, z) = corner(k);
+                    dist(x, y, z)
+                });
+                if ds.iter().all(|&v| v > 0.0) || ds.iter().all(|&v| v <= 0.0) {
+                    continue; // doesn't straddle the surface
+                }
+                let cp: [Vec3; 8] = std::array::from_fn(|k| {
+                    let (x, y, z) = corner(k);
+                    gpos(x, y, z)
+                });
+                let mut acc = Vec3::ZERO;
+                let mut n = 0.0f32;
+                for (a, c) in EDGES {
+                    if (ds[a] > 0.0) != (ds[c] > 0.0) {
+                        let f = (ds[a] / (ds[a] - ds[c])).clamp(0.0, 1.0);
+                        acc += cp[a].lerp(cp[c], f);
+                        n += 1.0;
+                    }
+                }
+                if n > 0.0 {
+                    verts[ci(cx, cy, cz)] = Some(acc / n);
+                }
+            }
+        }
+    }
+    // Connect each cell's vertex to its +X/+Y/+Z neighbour (a surface-conforming net).
+    let mut segs = Vec::new();
+    for cz in 0..cz_n {
+        for cy in 0..cy_n {
+            for cx in 0..cx_n {
+                let Some(v) = verts[ci(cx, cy, cz)] else { continue };
+                if cx + 1 < cx_n {
+                    if let Some(v2) = verts[ci(cx + 1, cy, cz)] {
+                        segs.push((v, v2));
+                    }
+                }
+                if cy + 1 < cy_n {
+                    if let Some(v2) = verts[ci(cx, cy + 1, cz)] {
+                        segs.push((v, v2));
+                    }
+                }
+                if cz + 1 < cz_n {
+                    if let Some(v2) = verts[ci(cx, cy, cz + 1)] {
+                        segs.push((v, v2));
+                    }
+                }
+            }
+        }
+    }
+    segs
+}
+
 /// Build a point light's projected gizmo: a small 3-axis cross at its position plus a
 /// horizontal ring at its `range` (so its reach on the ground is visible). Empty if
 /// it doesn't project in front of the camera.
@@ -4119,6 +4224,13 @@ struct Editor {
     body_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// Projected collision-contact crosses (telegraphed during Play).
     contact_gizmos: Vec<(Vec2, Vec2)>,
+    /// Show the terrain's collision surface as a wireframe overlay (View menu toggle).
+    show_terrain_collider: bool,
+    /// Cached WORLD-space wireframe of the combined terrain's collision surface; rebuilt
+    /// when the terrain changes (cleared on `combined_dirty`), projected each frame.
+    terrain_wire_world: Vec<(Vec3, Vec3)>,
+    /// This frame's projected terrain-collider wireframe segments (screen space).
+    terrain_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -4687,6 +4799,7 @@ impl Editor {
             }
             self.combined_dirty = false;
             self.terrain_region_dirty = None; // the full upload supersedes any region
+            self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
         } else if let Some((e, mn, mx)) = self.terrain_region_dirty.take() {
             // Fast paint path: upload only the dabbed voxel box. For a single terrain the
             // GPU volume mirrors its field 1:1, so its baked data maps directly. (`combined`
@@ -4903,6 +5016,7 @@ impl Editor {
         self.light_gizmos.clear();
         self.body_gizmos.clear();
         self.contact_gizmos.clear();
+        self.terrain_wire_gizmo.clear();
         if !game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             // Only cameras and point lights get gizmos — gather the few Copy fields we
@@ -4983,6 +5097,27 @@ impl Editor {
                         ) {
                             self.contact_gizmos.push((a, b));
                         }
+                    }
+                }
+            }
+            // Terrain collider wireframe (the SDF surface you walk on). The world-space
+            // segments are cached + rebuilt only when the terrain changes; here we just
+            // re-project them. Coarseness scales with the grid so the line count stays sane.
+            if self.show_terrain_collider {
+                if self.terrain_wire_world.is_empty() {
+                    if let Some(c) = self.combined.as_ref() {
+                        let stride = (c.baked.dims.into_iter().max().unwrap_or(64) / 48).max(2);
+                        self.terrain_wire_world = terrain_collider_wire(c, stride);
+                    }
+                }
+                for &(a, b) in &self.terrain_wire_world {
+                    let wa = DVec3::new(a.x as f64, a.y as f64, a.z as f64);
+                    let wb = DVec3::new(b.x as f64, b.y as f64, b.z as f64);
+                    if let (Some(pa), Some(pb)) = (
+                        project(wa, cam.world_position, view_proj, gw, gh),
+                        project(wb, cam.world_position, view_proj, gw, gh),
+                    ) {
+                        self.terrain_wire_gizmo.push((pa, pb));
                     }
                 }
             }
@@ -5230,6 +5365,7 @@ impl Editor {
         let project_path_buf = &mut self.project_path_buf;
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
+        let show_terrain_collider = &mut self.show_terrain_collider;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
         let pending_open_scene = &mut self.pending_open_scene;
@@ -5275,6 +5411,7 @@ impl Editor {
         let light_gizmos = self.light_gizmos.as_slice();
         let body_gizmos = self.body_gizmos.as_slice();
         let contact_gizmos = self.contact_gizmos.as_slice();
+        let terrain_wire = self.terrain_wire_gizmo.as_slice();
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -5339,6 +5476,8 @@ impl Editor {
                         }
                         ui.separator();
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
+                        ui.checkbox(&mut *show_terrain_collider, "Terrain collider wireframe")
+                            .on_hover_text("show the terrain's collision surface (what the player walks on)");
                         if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
                             ui.close();
@@ -5412,6 +5551,7 @@ impl Editor {
                 light_gizmos,
                 body_gizmos,
                 contact_gizmos,
+                terrain_wire,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
