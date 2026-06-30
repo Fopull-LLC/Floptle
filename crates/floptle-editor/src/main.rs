@@ -1477,7 +1477,8 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
 --------------------
   • input.key(\"w\")          true while held. Names: a-z, 0-9, space, enter,
                             shift, ctrl, alt, left/right/up/down, escape, tab
-  • input.pressed(\"space\")  true only on the frame it goes down (an edge)
+  • input.pressed(\"space\")  true only on the frame it goes DOWN (an edge)
+  • input.released(\"space\") true only on the frame it goes UP (an edge)
   • input.axis(\"a\", \"d\")    -1 / 0 / 1 from a negative/positive key pair
   • input.button(1)         mouse button held (0 left, 1 right, 2 middle)
   • input.clicked(1)        mouse button pressed this frame (an edge)
@@ -1498,7 +1499,42 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
   Use it for ground checks, line-of-sight, shooting, placing things on a surface.
 
 
-5. GLOBALS
+5. REFERENCING OTHER NODES & SCRIPTS
+------------------------------------
+Reach beyond your own node — traverse the hierarchy, find any node/script in
+the scene, and call into other scripts to build systems that span many files.
+
+  Node handles (your `node`, and any node you reach, share the same fields):
+  • node.name / node.id        this node's name / a stable numeric id
+  • node.parent                the parent node handle (or nil)
+  • node:getparent()           same as node.parent
+  • node:children()            array of child handles
+  • node:getchild(\"Gun\")       first child with that name (or nil)
+  • node:find(\"Muzzle\")        first DESCENDANT (any depth) with that name
+  • node:getscript(\"health\")   a script handle on this node (or nil)
+
+  Scene-wide lookups (globals):
+  • find(\"Player\")             first node in the scene with that name (or nil)
+  • findAll(\"Coin\")            array of every node with that name
+  • findScript(\"GameManager\")  script handle for the first node running that
+                               script anywhere — the MANAGER pattern (or nil)
+
+  A script handle talks to another script:
+  • mgr.score                  read a variable it declared (its state)
+  • mgr.score = 10             write that variable
+  • mgr.addScore(5)            call a function it defines
+  • mgr.params                 its params table   • mgr.node  its node handle
+
+    -- a coin hands its points to the shared manager
+    local mgr = findScript(\"manager\")
+    if mgr then mgr.addScore(10) end
+
+Inside a script's own functions, `node` is always ITS node, so a method called
+from elsewhere still acts on the right object. Handles stay valid across frames —
+cache a lookup in start() and reuse it.
+
+
+6. GLOBALS
 ----------
   • params   this instance's tunables — a table SEEDED from `defaults`, so
              `params.speed` works out of the box; the Inspector overrides them
@@ -1508,7 +1544,7 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
   • the full Lua standard library (math, string, table, …)
 
 
-6. MAKING A CHARACTER YOU CAN WALK AROUND AS
+7. MAKING A CHARACTER YOU CAN WALK AROUND AS
 --------------------------------------------
 The first-person recipe (no glue code needed):
   1. Add a Camera node; mark it Active.
@@ -4071,6 +4107,7 @@ const LUA_KEYWORDS: &[&str] = &[
 const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
+    "raycast", "find", "findAll", "findScript", "findScriptInScene",
 ];
 
 /// One completion / docs entry for the in-engine IDE.
@@ -4112,6 +4149,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input", insert: "input", doc: "Player input (play mode). input.key/pressed/axis/mouse/button — make interactive games." },
     ApiEntry { label: "input.key", insert: "input.key(", doc: "input.key(\"w\") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab." },
     ApiEntry { label: "input.pressed", insert: "input.pressed(", doc: "input.pressed(\"space\") — true only on the frame the key goes down (an edge)." },
+    ApiEntry { label: "input.released", insert: "input.released(", doc: "input.released(\"space\") — true only on the frame the key goes up (an edge)." },
     ApiEntry { label: "input.axis", insert: "input.axis(", doc: "input.axis(\"a\", \"d\") — returns -1/0/1 from a negative/positive key pair (e.g. strafing)." },
     ApiEntry { label: "input.mouse", insert: "input.mouse(", doc: "local x, y = input.mouse() — cursor position in pixels." },
     ApiEntry { label: "input.mouse_delta", insert: "input.mouse_delta(", doc: "local dx, dy = input.mouse_delta() — mouse movement since last frame." },
@@ -4119,6 +4157,18 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
     ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
+    ApiEntry { label: "find", insert: "find(", doc: "find(\"Player\") — the first node in the scene with that name (a node handle), or nil." },
+    ApiEntry { label: "findAll", insert: "findAll(", doc: "findAll(\"Coin\") — an array of every node with that name." },
+    ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state." },
+    ApiEntry { label: "findScriptInScene", insert: "findScriptInScene(", doc: "Alias of findScript(kind)." },
+    ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
+    ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
+    ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
+    ApiEntry { label: "node:getparent", insert: "node:getparent()", doc: "The parent node handle, or nil (same as node.parent)." },
+    ApiEntry { label: "node:children", insert: "node:children()", doc: "An array of this node's child handles." },
+    ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
+    ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
+    ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
     ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
     ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
     ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
@@ -4880,6 +4930,7 @@ struct Editor {
     /// window events. Edge sets + deltas are cleared each frame after scripts run.
     input_keys: std::collections::HashSet<String>,
     input_keys_pressed: std::collections::HashSet<String>,
+    input_keys_released: std::collections::HashSet<String>,
     input_buttons: [bool; 3],
     input_buttons_pressed: [bool; 3],
     input_mouse_delta: (f32, f32),
@@ -5208,8 +5259,8 @@ impl ApplicationHandler for Editor {
                             if self.input_keys.insert(name.to_string()) {
                                 self.input_keys_pressed.insert(name.to_string());
                             }
-                        } else {
-                            self.input_keys.remove(name);
+                        } else if self.input_keys.remove(name) {
+                            self.input_keys_released.insert(name.to_string());
                         }
                     }
                     // Discrete commands fire on press only.
@@ -5668,6 +5719,7 @@ impl Editor {
                 floptle_script::InputSnapshot {
                     keys_down: self.input_keys.clone(),
                     keys_pressed: self.input_keys_pressed.clone(),
+                    keys_released: self.input_keys_released.clone(),
                     mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
                     mouse_delta: self.input_mouse_delta,
                     scroll: self.input_scroll,
@@ -5700,6 +5752,7 @@ impl Editor {
         }
         // Clear per-frame input edges after scripts consumed them.
         self.input_keys_pressed.clear();
+        self.input_keys_released.clear();
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
