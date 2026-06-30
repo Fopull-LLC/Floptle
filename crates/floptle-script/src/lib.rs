@@ -495,7 +495,7 @@ impl ScriptHost {
         eid: u32,
         body: Option<BodyState>,
     ) -> mlua::Result<()> {
-        env.set("params", params_table(&self.lua, params)?)?;
+        env.set("params", params_table(&self.lua, env, params)?)?;
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 
@@ -851,8 +851,17 @@ fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<Function>> {
     Ok(None)
 }
 
-fn params_table(lua: &Lua, params: &[(String, f32)]) -> mlua::Result<Table> {
+/// Build the `params` table a script sees: its declared `defaults` as the base, with
+/// any per-instance overrides (Inspector tweaks) layered on top. Seeding from `defaults`
+/// is what makes `params.foo` resolve out of the box — without it, a script with no saved
+/// overrides sees an empty `params` and every `params.foo` reads `nil`.
+fn params_table(lua: &Lua, env: &Table, params: &[(String, f32)]) -> mlua::Result<Table> {
     let t = lua.create_table()?;
+    if let Ok(defaults) = env.get::<Table>("defaults") {
+        for (k, v) in defaults.pairs::<Value, Value>().flatten() {
+            t.set(k, v)?;
+        }
+    }
     for (k, v) in params {
         t.set(k.as_str(), *v as f64)?;
     }
@@ -971,6 +980,31 @@ mod tests {
         let tr = world.get::<Transform>(e).unwrap();
         let (yaw, _, _) = tr.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "yaw was {yaw}");
+    }
+
+    #[test]
+    fn params_seeded_from_defaults_without_overrides() {
+        // A script with `defaults` but NO per-instance overrides must still see params.X
+        // (the bug: params was empty, so params.speed read nil).
+        let dir = std::env::temp_dir().join("floptle_script_test_params_default");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "spin",
+            "defaults = { speed = 90 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "spin".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0, 1.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let (yaw, _, _) = world.get::<Transform>(e).unwrap().rotation.to_euler(EulerRot::YXZ);
+        assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "params.speed default not applied; yaw {yaw}");
     }
 
     #[test]
