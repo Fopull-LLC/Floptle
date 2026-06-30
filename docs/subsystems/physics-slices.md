@@ -24,12 +24,13 @@ gravity field** (so Mario-Galaxy spherical-planet worlds are out-of-the-box).
   `SdfSurface` gravity around a sphere world a body falls *inward* to the surface from
   any side; no energy blow-up over many steps.
 
-## Slice 2 — Kinematic character controller
-Capsule controller (the "cool movement"): move input + gravity + ground snap + slope
-limit; **orients "up" to −gravity** so it runs around spherical planets and up swirling
-fractal walls (ADR-0014). Capsule-vs-SDF via the same trait.
-- **Acceptance:** walks flat ground without sinking/jitter; circumnavigates a
-  sphere-planet under radial gravity staying grounded and upright; respects a slope limit.
+## Slice 2 — Kinematic character controller  ✅
+`Character` capsule controller (the "cool movement"): move input + gravity + ground
+snap + slope limit; **orients "up" to −gravity** so it runs around spherical planets and
+up swirling fractal walls (ADR-0014). Capsule-vs-SDF (both end-spheres) via the same
+trait. **Tests pass:** walks flat ground without sinking; **circumnavigates a
+sphere-planet** under radial gravity staying grounded + upright (Mario Galaxy on foot);
+respects the slope limit (gentle = grounded, steep = slides).
 
 ## Slice 3 — Editor + ECS + play integration
 - Components on entities: `RigidBody { mass, … }` and `Collider { shape, kind: Solid|Trigger }`
