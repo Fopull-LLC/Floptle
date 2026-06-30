@@ -743,7 +743,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Blob { .. } => "Blob",
         MatterDoc::Mesh { .. } => "Mesh",
         MatterDoc::Empty => "Group",
-        MatterDoc::Terrain => "Terrain",
+        MatterDoc::Terrain { .. } => "Terrain",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1723,7 +1723,7 @@ impl<'a> EditorTabViewer<'a> {
                             ui.label("group / empty");
                             ui.small("a folder — organizes child nodes; has a transform but no geometry");
                         }
-                        Matter::Terrain => {
+                        Matter::Terrain { .. } => {
                             ui.label("editable terrain");
                             ui.small("a sculptable SDF field — move it with the transform below");
                             if ui.button("Δ Open Terrain tools").clicked() {
@@ -1956,21 +1956,20 @@ impl<'a> EditorTabViewer<'a> {
                 });
         });
         if let Some((a, b, c)) = terrain_voxels {
-            ui.small(format!("current: {a}×{b}×{c} voxels"));
+            ui.small(format!("combined: {a}×{b}×{c} voxels"));
         }
-        if !terrain_present {
-            if ui.button("✚ Create flat terrain").clicked() {
-                cmd.create_terrain = true;
-            }
-            ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
-            return;
-        }
-        if ui.button("↻ Recreate at this detail").on_hover_text("clears the current terrain").clicked() {
+        // New terrains can be added any time — each is a node you place + blend.
+        if ui.button("✚ New terrain").on_hover_text("adds another terrain node at the cursor; overlapping terrains blend").clicked() {
             cmd.create_terrain = true;
         }
+        if !terrain_present {
+            ui.small("Adds a flat slab; then press 5 (Sculpt) and LMB-drag. Add more — they fuse where they overlap.");
+            return;
+        }
         ui.separator();
-        ui.label("Sculpt tool (key 5) — LMB-drag to brush. Sculpt past an edge to");
-        ui.label("grow the terrain (infinite bounds). Ctrl+Z/Y undo strokes.");
+        ui.label("Sculpt tool (key 5) — LMB-drag brushes the terrain under the");
+        ui.label("cursor. Sculpt past an edge to grow it (infinite bounds).");
+        ui.label("Ctrl+Z/Y undo strokes. Move a terrain with the gizmo to blend.");
         ui.label("Brush");
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⏶ Raise");
@@ -2046,7 +2045,7 @@ impl<'a> EditorTabViewer<'a> {
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");
         }
         ui.separator();
-        if ui.button("🗑 Clear terrain").clicked() {
+        if ui.button("🗑 Clear all terrain").on_hover_text("delete every terrain node (or select one + Delete)").clicked() {
             cmd.clear_terrain = true;
         }
     }
@@ -3304,12 +3303,22 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
-    /// The editable terrain SDF field (None until "Create terrain").
-    terrain: Option<floptle_field::Terrain>,
-    /// The scene node that *is* the terrain (its transform places the volume).
-    terrain_entity: Option<Entity>,
-    /// The terrain volume needs re-uploading to the GPU.
-    terrain_dirty: bool,
+    /// Editable terrain SDF fields, keyed by their scene node Entity (each in its
+    /// node's LOCAL space). Empty until "New Terrain". Multiple terrains are folded
+    /// into one combined field for rendering ([`rebuild_combined`]).
+    terrains: HashMap<Entity, floptle_field::Terrain>,
+    /// The terrain the sculpt brush currently targets (the one under the cursor),
+    /// chosen each frame.
+    active_terrain: Option<Entity>,
+    /// Cached world-space union of every terrain field (what the GPU renders).
+    combined: Option<floptle_field::Terrain>,
+    /// The (node, world origin) set the `combined` was built from — so a moved
+    /// terrain (gizmo/inspector/undo) is detected and triggers a rebuild.
+    combined_origins: Vec<(Entity, DVec3)>,
+    /// The combined field needs rebuilding + re-uploading (any add/edit/move/delete).
+    combined_dirty: bool,
+    /// Monotonic id assigned to each new terrain node (stable across save/load).
+    next_terrain_id: u32,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
     sculpting: bool,
     /// Where the last brush dab landed + when — for movement-spaced, rate-limited
@@ -3319,7 +3328,7 @@ struct Editor {
     /// Pre-stroke field bytes captured on mouse-down — pushed to the undo timeline
     /// on mouse-up if the stroke actually deformed the terrain. `None` between
     /// strokes. The whole stroke collapses to a single undo step.
-    stroke_snapshot: Option<Vec<u8>>,
+    stroke_snapshot: Option<(u32, Vec<u8>)>,
     /// At least one dab landed during the current stroke (so it's worth undoing).
     stroke_dabbed: bool,
     /// Terrain brush settings.
@@ -3451,7 +3460,9 @@ struct Editor {
 /// one stack means Ctrl+Z walks back through scene + terrain edits in true order.
 enum Snapshot {
     Scene(floptle_scene::SceneDoc),
-    Terrain(Vec<u8>),
+    /// A terrain field snapshot: `(terrain id, serialized field)` — keyed by the
+    /// stable id (not Entity) so it survives scene restores.
+    Terrain(u32, Vec<u8>),
 }
 
 /// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
@@ -3687,12 +3698,13 @@ impl ApplicationHandler for Editor {
                         // Sculpt tool: start a brush stroke on the terrain (applied
                         // next frame in terrain_frame_update).
                         self.context_menu = None;
-                        if let Some(t) = self.terrain.as_ref() {
+                        if !self.terrains.is_empty() {
                             self.sculpting = true;
                             self.last_dab_pos = None; // first dab fires immediately
                             self.last_dab_time = None;
-                            // Snapshot the field so the whole stroke is one undo step.
-                            self.stroke_snapshot = Some(t.to_bytes());
+                            // The pre-stroke field is captured on the first dab (once
+                            // we know which terrain is under the cursor).
+                            self.stroke_snapshot = None;
                             self.stroke_dabbed = false;
                         }
                     } else if over_scene {
@@ -3730,9 +3742,9 @@ impl ApplicationHandler for Editor {
                     self.editing = false;
                     self.sculpting = false;
                     // End of a sculpt stroke: bank one undo step if it changed anything.
-                    if let Some(snap) = self.stroke_snapshot.take() {
+                    if let Some((id, snap)) = self.stroke_snapshot.take() {
                         if self.stroke_dabbed {
-                            self.push_history(Snapshot::Terrain(snap));
+                            self.push_history(Snapshot::Terrain(id, snap));
                         }
                     }
                 }
@@ -3832,15 +3844,20 @@ impl Editor {
             }
         });
 
-        // Re-upload the terrain volume to the GPU after an edit (needs &mut Raymarch,
-        // before the read-only destructure below).
-        if self.terrain_dirty {
-            if let (Some(gpu), Some(raymarch), Some(terrain)) =
-                (self.gpu.as_ref(), self.raymarch.as_mut(), self.terrain.as_ref())
+        // A terrain node moved (gizmo/inspector/undo) → rebuild the combined field.
+        if !self.combined_dirty && self.terrains_moved() {
+            self.combined_dirty = true;
+        }
+        // Rebuild the combined terrain (fold all nodes' fields) + re-upload to the GPU
+        // after any add/edit/move/delete (needs &mut Raymarch, before the destructure).
+        if self.combined_dirty {
+            self.rebuild_combined();
+            if let (Some(gpu), Some(raymarch), Some(combined)) =
+                (self.gpu.as_ref(), self.raymarch.as_mut(), self.combined.as_ref())
             {
-                raymarch.set_volume(gpu, &terrain.baked);
+                raymarch.set_volume(gpu, &combined.baked);
             }
-            self.terrain_dirty = false;
+            self.combined_dirty = false;
         }
         // Re-upload the terrain texture palette when it changes. Each slot resolves
         // to a 256² layer (empty / unreadable slots become white so indices align).
@@ -4051,7 +4068,7 @@ impl Editor {
                         }
                     }
                 }
-                Matter::Empty | Matter::Terrain => {} // group / terrain render via other passes
+                Matter::Empty | Matter::Terrain { .. } => {} // group / terrain render via other passes
             }
         }
 
@@ -4106,30 +4123,22 @@ impl Editor {
                     Matter::Blob { scale } => {
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
                     }
-                    Matter::Empty | Matter::Terrain => {}
+                    Matter::Empty | Matter::Terrain { .. } => {}
                 }
             }
         }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
-        // and/or the editable terrain volume. Build its globals if either is present.
+        // and/or the combined terrain volume. Build its globals if either is present.
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm = if show_blobs || self.terrain.is_some() {
+        let rm = if show_blobs || self.combined.is_some() {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             if let Some((hf, bc)) =
-                self.terrain.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
+                self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
             {
-                // The terrain node's transform places the volume box. (Inlined direct
-                // field access — `terrain_origin()` would borrow all of `self` while
-                // gpu/egui are mutably borrowed here.) The field's own `baked.center`
-                // shifts as the slab expands asymmetrically, so the box center is the
-                // node origin plus that local offset.
-                let origin = self
-                    .terrain_entity
-                    .map(|e| floptle_core::world_transform(&self.world, e).translation)
-                    .unwrap_or(DVec3::ZERO);
-                let cr = origin + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64)
-                    - cam.world_position;
+                // The combined field is WORLD-space (its node sits at world origin),
+                // so the box center is just its `baked.center`, camera-relative.
+                let cr = DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position;
                 g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0]; // present
                 g.vol_half = [hf[0], hf[1], hf[2], 0.1];
             }
@@ -4166,8 +4175,8 @@ impl Editor {
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
         let terrain_textures = &mut self.terrain_textures;
-        let terrain_present = self.terrain.is_some();
-        let terrain_voxels = self.terrain.as_ref().map(|t| {
+        let terrain_present = !self.terrains.is_empty();
+        let terrain_voxels = self.combined.as_ref().map(|t| {
             let [a, b, c] = t.baked.dims;
             (a, b, c)
         });
@@ -4724,7 +4733,7 @@ impl Editor {
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
-                MatterDoc::Terrain => "Terrain",
+                MatterDoc::Terrain { .. } => "Terrain",
             };
             self.add_node(name, m);
         }
@@ -4799,9 +4808,16 @@ impl Editor {
             self.focus_terrain();
         }
         if cmd.clear_terrain {
-            self.terrain = None;
-            if let Some(e) = self.terrain_entity.take() {
-                self.world.despawn(e);
+            let nodes: Vec<Entity> = self.terrains.keys().copied().collect();
+            if !nodes.is_empty() {
+                self.record();
+                for e in nodes {
+                    self.world.despawn(e);
+                }
+                self.terrains.clear();
+                self.active_terrain = None;
+                self.combined = None;
+                self.combined_dirty = true;
             }
         }
         if cmd.terrain_palette_changed {
@@ -5014,11 +5030,23 @@ impl Editor {
         self.drag = None;
     }
     /// Swap the live terrain field for serialized `bytes`, queuing a GPU re-upload.
-    fn apply_terrain_bytes(&mut self, bytes: &[u8]) {
+    /// The terrain node carrying `id` (if any), for keyed undo/save.
+    fn terrain_entity_of_id(&self, id: u32) -> Option<Entity> {
+        self.terrains.keys().copied().find(|&e| {
+            matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { id: i }) if *i == id)
+        })
+    }
+
+    /// Restore a terrain field (by id) from serialized `bytes`. Returns the current
+    /// bytes first (for the redo/undo counterpart), or `None` if the id is gone.
+    fn swap_terrain_bytes(&mut self, id: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+        let e = self.terrain_entity_of_id(id)?;
+        let cur = self.terrains.get(&e).map(|t| t.to_bytes());
         if let Some(t) = floptle_field::Terrain::from_bytes(bytes) {
-            self.terrain = Some(t);
-            self.terrain_dirty = true;
+            self.terrains.insert(e, t);
+            self.combined_dirty = true;
         }
+        cur
     }
     fn undo(&mut self) {
         if self.playing {
@@ -5030,11 +5058,10 @@ impl Editor {
                 self.history.redo.push(Snapshot::Scene(cur));
                 self.restore(prev);
             }
-            Some(Snapshot::Terrain(prev)) => {
-                if let Some(cur) = self.terrain.as_ref().map(|t| t.to_bytes()) {
-                    self.history.redo.push(Snapshot::Terrain(cur));
+            Some(Snapshot::Terrain(id, prev)) => {
+                if let Some(cur) = self.swap_terrain_bytes(id, &prev) {
+                    self.history.redo.push(Snapshot::Terrain(id, cur));
                 }
-                self.apply_terrain_bytes(&prev);
             }
             None => {}
         }
@@ -5049,11 +5076,10 @@ impl Editor {
                 self.history.undo.push(Snapshot::Scene(cur));
                 self.restore(next);
             }
-            Some(Snapshot::Terrain(next)) => {
-                if let Some(cur) = self.terrain.as_ref().map(|t| t.to_bytes()) {
-                    self.history.undo.push(Snapshot::Terrain(cur));
+            Some(Snapshot::Terrain(id, next)) => {
+                if let Some(cur) = self.swap_terrain_bytes(id, &next) {
+                    self.history.undo.push(Snapshot::Terrain(id, cur));
                 }
-                self.apply_terrain_bytes(&next);
             }
             None => {}
         }
@@ -5399,9 +5425,11 @@ impl Editor {
         }
         self.record();
         for e in targets {
-            if self.terrain_entity == Some(e) {
-                self.terrain = None;
-                self.terrain_entity = None;
+            if self.terrains.remove(&e).is_some() {
+                if self.active_terrain == Some(e) {
+                    self.active_terrain = None;
+                }
+                self.combined_dirty = true;
             }
             self.world.despawn(e);
         }
@@ -5554,7 +5582,7 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
-                Matter::Empty | Matter::Terrain => None, // no mesh — select via the hierarchy
+                Matter::Empty | Matter::Terrain { .. } => None, // no mesh — select via the hierarchy
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
@@ -5716,7 +5744,7 @@ impl Editor {
     /// drag doesn't stall on the per-voxel work + GPU re-upload.
     fn terrain_frame_update(&mut self) {
         self.terrain_viz = None;
-        if self.tool != Tool::Sculpt || self.terrain.is_none() || !self.cursor_over_scene() {
+        if self.tool != Tool::Sculpt || self.terrains.is_empty() || !self.cursor_over_scene() {
             return;
         }
         let (Some(cursor), Some(gpu)) = (self.cursor, self.gpu.as_ref()) else { return };
@@ -5729,17 +5757,29 @@ impl Editor {
         let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
         let ro_rel = near.truncate() / near.w;
         let rd = (far.truncate() / far.w - ro_rel).normalize();
-        // The field lives in the terrain node's local space, so cast in that space.
-        let origin = self.terrain_origin();
-        let ro_local = cam.world_position + ro_rel.as_dvec3() - origin;
-        let ro = [ro_local.x as f32, ro_local.y as f32, ro_local.z as f32];
         let rd_a = [rd.x, rd.y, rd.z];
 
-        let terrain = self.terrain.as_ref().unwrap();
-        let Some(hit) = terrain.raycast(ro, rd_a) else {
+        // Each field is in its node's LOCAL space — raycast every terrain and brush
+        // the one whose surface the cursor ray hits NEAREST the camera.
+        let entities: Vec<Entity> = self.terrains.keys().copied().collect();
+        let mut best: Option<(Entity, [f32; 3], DVec3, f64)> = None;
+        for e in entities {
+            let origin = self.terrain_world_origin(e);
+            let ro_local = cam.world_position + ro_rel.as_dvec3() - origin;
+            let ro = [ro_local.x as f32, ro_local.y as f32, ro_local.z as f32];
+            if let Some(hit) = self.terrains[&e].raycast(ro, rd_a) {
+                let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64) + origin;
+                let dist = (hitw - cam.world_position).length();
+                if best.as_ref().is_none_or(|b| dist < b.3) {
+                    best = Some((e, hit, origin, dist));
+                }
+            }
+        }
+        let Some((active, hit, origin, _)) = best else {
             return;
         };
-        let nrm = terrain.normal(hit);
+        self.active_terrain = Some(active);
+        let nrm = self.terrains[&active].normal(hit);
         let radius = self.terrain_brush.radius;
 
         // Telegraph: a ring of `radius` around the hit in the surface tangent plane.
@@ -5788,7 +5828,18 @@ impl Editor {
         };
         if due {
             let brush = self.terrain_brush;
-            let terrain = self.terrain.as_mut().unwrap();
+            // Capture the pre-stroke field once per stroke, keyed by terrain id, so
+            // the whole stroke is a single (restorable) undo step.
+            if self.stroke_snapshot.is_none() {
+                let id = match self.world.get::<Matter>(active) {
+                    Some(Matter::Terrain { id }) => *id,
+                    _ => 0,
+                };
+                if let Some(t) = self.terrains.get(&active) {
+                    self.stroke_snapshot = Some((id, t.to_bytes()));
+                }
+            }
+            let terrain = self.terrains.get_mut(&active).unwrap();
             // Infinite terrain: grow the field outward when the brush nears an edge,
             // so the slab has no fixed bounds. (Skip for Paint — painting never
             // extends the shape.) Growth keeps voxel size constant.
@@ -5805,7 +5856,7 @@ impl Editor {
                 }
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
             }
-            self.terrain_dirty = true;
+            self.combined_dirty = true;
             self.stroke_dabbed = true; // mark this stroke as worth an undo step
         }
     }
@@ -5816,67 +5867,154 @@ impl Editor {
         [d, (d * 3 / 8).max(8), d]
     }
 
-    /// Create a fresh flat terrain at the current detail, as a scene node. Its
-    /// transform places the volume; the field is centered in the node's local space.
+    /// Create a fresh flat terrain as a NEW scene node (you can have any number).
+    /// It is placed at the cursor's ground point so multiple terrains can be laid
+    /// out and blended; its field is centered in the node's local space.
     fn create_terrain(&mut self) {
-        self.terrain = Some(floptle_field::Terrain::flat(
+        self.record();
+        let id = self.next_terrain_id;
+        self.next_terrain_id += 1;
+        let pos = self.cursor_world();
+        let field = floptle_field::Terrain::flat(
             self.terrain_dims(),
             [0.0, 0.0, 0.0],
             [16.0, 6.0, 16.0],
             0.0,
             [0.35, 0.6, 0.28],
-        ));
-        self.terrain_dirty = true;
-        // Reuse the existing terrain node, or spawn one.
-        if self.terrain_entity.and_then(|e| self.world.get::<Matter>(e)).is_none() {
-            self.record();
-            let e = self.world.spawn();
-            self.world.insert(e, Transform::IDENTITY);
-            self.world.insert(e, Name("Terrain".into()));
-            self.world.insert(e, Matter::Terrain);
-            self.terrain_entity = Some(e);
-            self.select_single(e);
-        }
+        );
+        let e = self.world.spawn();
+        self.world.insert(e, Transform { translation: pos, ..Transform::IDENTITY });
+        let n = self.terrains.len() + 1;
+        self.world.insert(e, Name(format!("Terrain {n}")));
+        self.world.insert(e, Matter::Terrain { id });
+        self.terrains.insert(e, field);
+        self.active_terrain = Some(e);
+        self.combined_dirty = true;
+        self.select_single(e);
     }
 
-    /// Where a scene's terrain field is stored (one file per scene).
-    fn terrain_field_path(&self) -> PathBuf {
+    /// Where a terrain node's field is stored — one file per terrain id, per scene.
+    fn terrain_field_path_id(&self, id: u32) -> PathBuf {
+        self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
+    }
+
+    /// The legacy single-terrain field path (migrated to the id-keyed name on load).
+    fn legacy_terrain_field_path(&self) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.tfield", self.scene_name))
     }
 
-    /// After loading a scene, adopt its terrain node (if any) and load its field
-    /// from disk; otherwise clear any terrain. Call once `scene_name` is set.
+    /// After loading a scene, adopt every terrain node + load its field from disk
+    /// (id-keyed, with a one-time legacy fallback). Call once `scene_name` is set.
     fn adopt_terrain(&mut self) {
-        let e = self
+        self.terrains.clear();
+        self.active_terrain = None;
+        self.combined = None;
+        let nodes: Vec<(Entity, u32)> = self
             .world
             .query::<Matter>()
-            .find(|(_, m)| matches!(m, Matter::Terrain))
-            .map(|(e, _)| e);
-        self.terrain_entity = e;
-        self.terrain = None;
-        if e.is_some() {
-            self.terrain = std::fs::read(self.terrain_field_path())
+            .filter_map(|(e, m)| match m {
+                Matter::Terrain { id } => Some((e, *id)),
+                _ => None,
+            })
+            .collect();
+        let mut max_id = 0u32;
+        let single = nodes.len() == 1;
+        for (e, id) in nodes {
+            max_id = max_id.max(id);
+            let field = std::fs::read(self.terrain_field_path_id(id))
                 .ok()
-                .and_then(|b| floptle_field::Terrain::from_bytes(&b));
-            // A terrain node with no/garbled field ⏵ start it flat.
-            if self.terrain.is_none() {
-                self.terrain = Some(floptle_field::Terrain::flat(
-                    self.terrain_dims(),
-                    [0.0, 0.0, 0.0],
-                    [16.0, 6.0, 16.0],
-                    0.0,
-                    [0.35, 0.6, 0.28],
-                ));
-            }
-            self.terrain_dirty = true;
+                .and_then(|b| floptle_field::Terrain::from_bytes(&b))
+                // legacy single-terrain scenes stored one `<scene>.tfield`.
+                .or_else(|| {
+                    if single {
+                        std::fs::read(self.legacy_terrain_field_path())
+                            .ok()
+                            .and_then(|b| floptle_field::Terrain::from_bytes(&b))
+                    } else {
+                        None
+                    }
+                })
+                // a terrain node with no/garbled field → start it flat.
+                .unwrap_or_else(|| {
+                    floptle_field::Terrain::flat(
+                        self.terrain_dims(),
+                        [0.0, 0.0, 0.0],
+                        [16.0, 6.0, 16.0],
+                        0.0,
+                        [0.35, 0.6, 0.28],
+                    )
+                });
+            self.terrains.insert(e, field);
         }
+        self.next_terrain_id = max_id + 1;
+        self.combined_dirty = !self.terrains.is_empty();
     }
 
-    /// The world position of the terrain volume's box center (the node's placement).
-    fn terrain_origin(&self) -> DVec3 {
-        self.terrain_entity
-            .map(|e| floptle_core::world_transform(&self.world, e).translation)
-            .unwrap_or(DVec3::ZERO)
+    /// The world translation of a terrain node (places its field in world space).
+    fn terrain_world_origin(&self, e: Entity) -> DVec3 {
+        floptle_core::world_transform(&self.world, e).translation
+    }
+
+    /// Fold every terrain field (each at its node's world translation) into one
+    /// world-space combined field for rendering. Cheap no-op clone for one terrain.
+    /// True if any terrain node has moved (or the set changed) since the combined
+    /// field was last built — i.e. a rebuild is needed.
+    fn terrains_moved(&self) -> bool {
+        if self.terrains.len() != self.combined_origins.len() {
+            return true;
+        }
+        self.terrains.keys().any(|&e| {
+            let o = self.terrain_world_origin(e);
+            !self
+                .combined_origins
+                .iter()
+                .any(|(ce, co)| *ce == e && (*co - o).length() < 1e-5)
+        })
+    }
+
+    fn rebuild_combined(&mut self) {
+        if self.terrains.is_empty() {
+            self.combined = None;
+            self.combined_origins.clear();
+            return;
+        }
+        // Fast path: a single terrain needs no resample — clone it and shift its box
+        // center by the node origin so the field reads in world space.
+        if self.terrains.len() == 1 {
+            let (&e, t) = self.terrains.iter().next().unwrap();
+            let o = self.terrain_world_origin(e);
+            let mut world = t.clone();
+            world.baked.center[0] += o.x as f32;
+            world.baked.center[1] += o.y as f32;
+            world.baked.center[2] += o.z as f32;
+            self.combined = Some(world);
+            self.combined_origins = vec![(e, o)];
+            return;
+        }
+        // Deterministic order (by Matter::Terrain id) so the fold is stable.
+        let mut items: Vec<(u32, Entity)> = self
+            .terrains
+            .keys()
+            .map(|&e| {
+                let id = match self.world.get::<Matter>(e) {
+                    Some(Matter::Terrain { id }) => *id,
+                    _ => 0,
+                };
+                (id, e)
+            })
+            .collect();
+        items.sort_by_key(|(id, _)| *id);
+        let mut origins: Vec<(Entity, DVec3)> = Vec::new();
+        let volumes: Vec<([f64; 3], &floptle_field::Terrain)> = items
+            .iter()
+            .filter_map(|(_, e)| {
+                let o = self.terrain_world_origin(*e);
+                origins.push((*e, o));
+                self.terrains.get(e).map(|t| ([o.x, o.y, o.z], t))
+            })
+            .collect();
+        self.combined = Some(floptle_field::Terrain::combine(&volumes, 0.6));
+        self.combined_origins = origins;
     }
 
     // ---- scene-graph (parenting) -------------------------------------------
@@ -6173,8 +6311,9 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
         self.scene_name = "untitled".into();
-        self.terrain = None;
-        self.terrain_entity = None;
+        self.terrains.clear();
+        self.active_terrain = None;
+        self.combined = None;
         self.selection.clear();
         self.selected_asset = None;
         self.ide = IdeState::default();
@@ -6192,11 +6331,16 @@ impl Editor {
             Ok(()) => println!("  saved {}", path.display()),
             Err(e) => eprintln!("  save failed: {e}"),
         }
-        // The terrain field is large, so it lives beside the scene (not inline).
-        if let Some(t) = &self.terrain {
-            let tp = self.terrain_field_path();
-            let _ = std::fs::create_dir_all(tp.parent().unwrap_or(Path::new(".")));
-            if let Err(e) = std::fs::write(&tp, t.to_bytes()) {
+        // Terrain fields are large, so each lives beside the scene (one file per
+        // terrain id), not inline in the scene doc.
+        let dir = self.project_root.join("terrain");
+        let _ = std::fs::create_dir_all(&dir);
+        for (&e, t) in &self.terrains {
+            let id = match self.world.get::<Matter>(e) {
+                Some(Matter::Terrain { id }) => *id,
+                _ => continue,
+            };
+            if let Err(e) = std::fs::write(self.terrain_field_path_id(id), t.to_bytes()) {
                 eprintln!("  save terrain failed: {e}");
             }
         }
