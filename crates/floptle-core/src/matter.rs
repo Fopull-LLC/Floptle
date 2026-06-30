@@ -69,6 +69,10 @@ pub enum Matter {
     /// `id` is a stable per-terrain key (Entity indices aren't stable across load),
     /// so each terrain's field file + combine slot can be matched back on reload.
     Terrain { id: u32 },
+    /// A camera viewpoint — its transform is the camera pose; `fov_y` is the vertical
+    /// field of view in radians. One camera holds play-mode authority at a time
+    /// (`active`); the gameplay view renders from it, switchable for cutscenes.
+    Camera { fov_y: f32, active: bool },
 }
 
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under
