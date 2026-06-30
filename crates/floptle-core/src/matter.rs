@@ -66,7 +66,9 @@ pub enum Matter {
     Empty,
     /// Editable SDF terrain — like a blob, but a sculptable/paintable voxel field.
     /// The transform places its volume; the field data lives alongside the scene.
-    Terrain,
+    /// `id` is a stable per-terrain key (Entity indices aren't stable across load),
+    /// so each terrain's field file + combine slot can be matched back on reload.
+    Terrain { id: u32 },
 }
 
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under
