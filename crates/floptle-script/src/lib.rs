@@ -60,6 +60,23 @@ fn error_line(msg: &str) -> u32 {
     msg.split(':').find_map(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
 }
 
+/// A snapshot of player input for one frame, fed to scripts via the `input` global
+/// (so games can read the keyboard/mouse). Key names are lowercase
+/// (`"w"`, `"space"`, `"left"`, `"escape"`, …). Mouse position is in pixels;
+/// buttons are 0 = left, 1 = right, 2 = middle.
+#[derive(Clone, Debug, Default)]
+pub struct InputSnapshot {
+    /// Keys currently held this frame.
+    pub keys_down: std::collections::HashSet<String>,
+    /// Keys that went down THIS frame (edge).
+    pub keys_pressed: std::collections::HashSet<String>,
+    pub mouse: (f32, f32),
+    pub mouse_delta: (f32, f32),
+    pub scroll: f32,
+    pub buttons_down: [bool; 3],
+    pub buttons_pressed: [bool; 3],
+}
+
 /// A script source file's reload state: a generation that bumps whenever the file
 /// changes, plus the last error seen for the current generation (so a broken
 /// script is compiled at most once per edit, not re-run every frame).
@@ -102,6 +119,8 @@ pub struct ScriptHost {
     /// Captured `print`/`log` output (and errors) since the last drain — the editor
     /// Console reads these. Shared with the Lua `print`/`log` closures.
     logs: Rc<RefCell<Vec<ScriptLog>>>,
+    /// This frame's player input, shared with the Lua `input` table's functions.
+    input: Rc<RefCell<InputSnapshot>>,
 }
 
 impl Default for ScriptHost {
@@ -155,7 +174,97 @@ impl ScriptHost {
                 let _ = lua.globals().set("print", print);
             }
         }
-        Self { lua, sources: HashMap::new(), instances: HashMap::new(), errors: Vec::new(), logs }
+        // The `input` global: a table of functions reading this frame's input
+        // snapshot (so games can poll the keyboard/mouse).
+        let input: Rc<RefCell<InputSnapshot>> = Rc::new(RefCell::new(InputSnapshot::default()));
+        if let Ok(t) = lua.create_table() {
+            let held = input.clone();
+            let _ = t.set(
+                "key",
+                lua.create_function(move |_, name: String| {
+                    Ok(held.borrow().keys_down.contains(&name.to_lowercase()))
+                })
+                .ok(),
+            );
+            let pressed = input.clone();
+            let _ = t.set(
+                "pressed",
+                lua.create_function(move |_, name: String| {
+                    Ok(pressed.borrow().keys_pressed.contains(&name.to_lowercase()))
+                })
+                .ok(),
+            );
+            let m = input.clone();
+            let _ = t.set(
+                "mouse",
+                lua.create_function(move |_, ()| {
+                    let p = m.borrow().mouse;
+                    Ok((p.0, p.1))
+                })
+                .ok(),
+            );
+            let md = input.clone();
+            let _ = t.set(
+                "mouse_delta",
+                lua.create_function(move |_, ()| {
+                    let d = md.borrow().mouse_delta;
+                    Ok((d.0, d.1))
+                })
+                .ok(),
+            );
+            let sc = input.clone();
+            let _ = t.set(
+                "scroll",
+                lua.create_function(move |_, ()| Ok(sc.borrow().scroll)).ok(),
+            );
+            let bd = input.clone();
+            let _ = t.set(
+                "button",
+                lua.create_function(move |_, i: usize| {
+                    Ok(bd.borrow().buttons_down.get(i).copied().unwrap_or(false))
+                })
+                .ok(),
+            );
+            let bp = input.clone();
+            let _ = t.set(
+                "clicked",
+                lua.create_function(move |_, i: usize| {
+                    Ok(bp.borrow().buttons_pressed.get(i).copied().unwrap_or(false))
+                })
+                .ok(),
+            );
+            // A convenience -1..1 axis from a negative/positive key pair.
+            let ax = input.clone();
+            let _ = t.set(
+                "axis",
+                lua.create_function(move |_, (neg, pos): (String, String)| {
+                    let d = ax.borrow();
+                    let mut v = 0.0f32;
+                    if d.keys_down.contains(&neg.to_lowercase()) {
+                        v -= 1.0;
+                    }
+                    if d.keys_down.contains(&pos.to_lowercase()) {
+                        v += 1.0;
+                    }
+                    Ok(v)
+                })
+                .ok(),
+            );
+            let _ = lua.globals().set("input", t);
+        }
+        Self {
+            lua,
+            sources: HashMap::new(),
+            instances: HashMap::new(),
+            errors: Vec::new(),
+            logs,
+            input,
+        }
+    }
+
+    /// Set the player input for the frame's scripts (call before [`run`](Self::run)).
+    pub fn set_input(&self, snapshot: InputSnapshot) {
+        *self.input.borrow_mut() = snapshot;
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
@@ -560,5 +669,34 @@ mod tests {
         let logs = host.drain_logs();
         assert!(logs.iter().any(|l| l.level == LogLevel::Error), "expected an error log: {logs:?}");
         assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "broken")), "error lacks source: {logs:?}");
+    }
+
+    #[test]
+    fn input_api_drives_a_script() {
+        let dir = std::env::temp_dir().join("floptle_script_test_input");
+        let _ = std::fs::create_dir_all(&dir);
+        // Move +z while "w" is held; jump (+y) on the click edge.
+        write_script(
+            &dir,
+            "mover",
+            "function update(node, dt)\n  if input.key('w') then node.z = node.z + 1.0 end\n  if input.clicked(0) then node.y = node.y + 5.0 end\nend\n",
+        );
+        let (mut world, e) = world_with_script("mover");
+        let mut host = ScriptHost::new();
+
+        // No input → no movement.
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.z, 0.0);
+
+        // Hold "w" + click → moves +z and jumps +y.
+        let mut snap = InputSnapshot::default();
+        snap.keys_down.insert("w".into());
+        snap.buttons_pressed[0] = true;
+        host.set_input(snap);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let t = world.get::<Transform>(e).unwrap();
+        assert!(t.translation.z >= 1.0, "w should move +z, z={}", t.translation.z);
+        assert!(t.translation.y >= 5.0, "click should jump +y, y={}", t.translation.y);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
     }
 }
