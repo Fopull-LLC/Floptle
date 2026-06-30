@@ -130,6 +130,7 @@ impl Grid {
         cam_world: DVec3,
         size: f32,
         extent: i32,
+        y_offset: f32,
         rgba: [f32; 4],
     ) {
         let size = size.max(0.05) as f64;
@@ -137,9 +138,9 @@ impl Grid {
         let cx = (cam_world.x / size).round() * size;
         let cz = (cam_world.z / size).round() * size;
         // Follow the camera's height too: place the plane on the grid line at or just
-        // below the camera (floor-snap), so it stays a useful floor reference at any
-        // altitude instead of being stuck at world y=0.
-        let cy = (cam_world.y / size).floor() * size;
+        // below the camera (floor-snap), shifted down by `y_offset`, so it stays a
+        // useful floor reference at any altitude (and you can drop it further below).
+        let cy = ((cam_world.y - y_offset as f64) / size).floor() * size;
         let half = n as f64 * size;
         let rel = |wx: f64, wz: f64| -> [f32; 3] {
             [(wx - cam_world.x) as f32, (cy - cam_world.y) as f32, (wz - cam_world.z) as f32]

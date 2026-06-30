@@ -263,11 +263,21 @@ struct GridConfig {
     alpha: f32,
     /// Snap moved/created objects to the grid.
     snap: bool,
+    /// How far BELOW the camera the grid plane sits (world units, snapped to `size`).
+    y_offset: f32,
 }
 
 impl Default for GridConfig {
     fn default() -> Self {
-        Self { show: true, size: 1.0, extent: 24, color: [0.45, 0.45, 0.58], alpha: 0.32, snap: false }
+        Self {
+            show: true,
+            size: 1.0,
+            extent: 24,
+            color: [0.45, 0.45, 0.58],
+            alpha: 0.32,
+            snap: false,
+            y_offset: 0.0,
+        }
     }
 }
 
@@ -5123,6 +5133,11 @@ impl Editor {
                     ui.checkbox(&mut grid.snap, "snap objects to grid");
                     ui.add(egui::Slider::new(&mut grid.size, 0.1..=10.0).text("cell size"));
                     ui.add(egui::Slider::new(&mut grid.extent, 4..=120).text("extent (cells)"));
+                    ui.add(
+                        egui::Slider::new(&mut grid.y_offset, 0.0..=50.0)
+                            .text("drop below camera")
+                            .suffix(" m"),
+                    );
                     ui.add(egui::Slider::new(&mut grid.alpha, 0.0..=1.0).text("opacity"));
                     ui.horizontal(|ui| {
                         ui.label("color");
@@ -5351,6 +5366,7 @@ impl Editor {
                         cam.world_position,
                         self.grid.size,
                         self.grid.extent,
+                        self.grid.y_offset,
                         [c[0], c[1], c[2], self.grid.alpha],
                     );
                 }
