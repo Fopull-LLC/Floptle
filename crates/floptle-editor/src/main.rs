@@ -4556,6 +4556,9 @@ struct Editor {
     script_host: ScriptHost,
     /// Errors from the most recent script frame, shown in the Scripting tab.
     script_errors: Vec<String>,
+    /// Cache of each script file's declared `defaults` keyed by path, with the file's
+    /// mtime so we only re-parse when it changes — drives live inspector param sync.
+    script_defaults_cache: HashMap<String, (std::time::SystemTime, Vec<(String, f32)>)>,
     /// Syntax diagnostic (line, message) for the active IDE file, for red squiggles.
     ide_diag: Option<(usize, String)>,
     /// The external editor command for "Open in IDE" (ADR-0011); a user preference.
@@ -5116,6 +5119,10 @@ impl Editor {
         // from its viewpoint into the 16:9 offscreen target (before the destructure).
         let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
         self.update_camera_preview(cam_elapsed);
+        // Keep the Inspector's script param list in sync with each script's `defaults`
+        // (cheap: cached by file mtime, selected node only) so editing a script surfaces
+        // new tunables and drops removed ones live.
+        self.sync_selected_script_params();
         // Whether the Game view is the focused tab (precomputed before the GPU borrow):
         // game input only feeds scripts here, never in the Scene view.
         let game_focused = self.game_view();
@@ -7512,6 +7519,57 @@ impl Editor {
             self.attach_script_file(path, self.primary());
         }
     }
+    /// A script's declared `defaults`, cached by file mtime so we only re-parse the Lua
+    /// when the file actually changes (keeps the per-frame inspector sync cheap).
+    fn cached_script_defaults(&mut self, name: &str) -> Vec<(String, f32)> {
+        let path = self.project_root.join("scripts").join(format!("{name}.lua"));
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let key = name.to_string();
+        if let (Some(mt), Some((cached_mt, vals))) = (mtime, self.script_defaults_cache.get(&key)) {
+            if *cached_mt == mt {
+                return vals.clone();
+            }
+        }
+        let vals = self.script_host.script_defaults(&path);
+        if let Some(mt) = mtime {
+            self.script_defaults_cache.insert(key, (mt, vals.clone()));
+        }
+        vals
+    }
+
+    /// Keep the selected node's script `params` in step with each script's current
+    /// `defaults`, so editing a script (adding/removing/renaming a `defaults` key)
+    /// is reflected live in the Inspector: new defaults appear as tweakable params,
+    /// keys removed from `defaults` drop off, and the user's overridden values for
+    /// keys that still exist are preserved. Display-only (the runtime already merges
+    /// defaults at call time) and not recorded as an undo step.
+    fn sync_selected_script_params(&mut self) {
+        let Some(e) = self.selection.last().copied() else { return };
+        let names: Vec<String> = match self.world.get::<Scripts>(e) {
+            Some(s) => s.0.iter().map(|i| i.kind.clone()).collect(),
+            None => return,
+        };
+        // Resolve each script's current defaults first (needs &mut self for the cache).
+        let defaults: Vec<Vec<(String, f32)>> =
+            names.iter().map(|n| self.cached_script_defaults(n)).collect();
+        let Some(scr) = self.world.get_mut::<Scripts>(e) else { return };
+        for (inst, defs) in scr.0.iter_mut().zip(defaults) {
+            // An empty result means "no defaults declared" OR a transient parse error
+            // (e.g. mid-edit) — never wipe the user's overrides in that case.
+            if defs.is_empty() {
+                continue;
+            }
+            // Drop params no longer declared in defaults.
+            inst.params.retain(|(k, _)| defs.iter().any(|(dk, _)| dk == k));
+            // Add any newly-declared defaults (preserving the order defaults come in).
+            for (dk, dv) in &defs {
+                if !inst.params.iter().any(|(k, _)| k == dk) {
+                    inst.params.push((dk.clone(), *dv));
+                }
+            }
+        }
+    }
+
     /// Attach the `.lua` script at `path` to `target`, seeding its `params` from
     /// the script's declared `defaults`.
     fn attach_script_file(&mut self, path: &str, target: Option<Entity>) {
