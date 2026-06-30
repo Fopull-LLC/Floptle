@@ -1588,11 +1588,16 @@ impl<'a> EditorTabViewer<'a> {
         depth: usize,
     ) {
         let name = names.get(&e).cloned().unwrap_or_default();
-        let is_folder = matches!(self.world.get::<Matter>(e), Some(Matter::Empty));
+        let matter = self.world.get::<Matter>(e);
+        let is_folder = matches!(matter, Some(Matter::Empty));
         let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
         let collapsed = self.collapsed.contains(&e);
         let icon = if is_folder {
-            if collapsed { "🗀" } else { "🗀" }
+            "🗀"
+        } else if matches!(matter, Some(Matter::Camera { .. })) {
+            "⌖"
+        } else if matches!(matter, Some(Matter::Terrain { .. })) {
+            "Δ"
         } else if has_kids {
             "⏷"
         } else {
