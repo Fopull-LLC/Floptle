@@ -1542,6 +1542,7 @@ struct EditorTabViewer<'a> {
     /// The terrain brush telegraph to draw over the viewport, if sculpting.
     terrain_viz: Option<&'a TerrainViz>,
     camera_gizmos: &'a [CameraGizmo],
+    light_gizmos: &'a [Vec<(Vec2, Vec2)>],
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -2732,6 +2733,23 @@ impl<'a> EditorTabViewer<'a> {
                 }
             }
         }
+
+        // Point-light gizmos (a warm cross + range ring) so unselected lights are
+        // visible/placeable. Editor view only (the gather is gated on !game_view).
+        if !self.light_gizmos.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("light_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let col = egui::Color32::from_rgb(245, 210, 110);
+            for lines in self.light_gizmos {
+                for (a, b) in lines {
+                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.5, col));
+                }
+            }
+        }
     }
 
     /// Draw the selected asset's preview: a spinning model/material render (drag to
@@ -3667,6 +3685,34 @@ fn camera_frustum_lines(
     lines
 }
 
+/// Build a point light's projected gizmo: a small 3-axis cross at its position plus a
+/// horizontal ring at its `range` (so its reach on the ground is visible). Empty if
+/// it doesn't project in front of the camera.
+fn point_light_lines(pos: DVec3, range: f32, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Vec<(Vec2, Vec2)> {
+    let mut lines = Vec::new();
+    let s = 0.5; // cross half-size (world units)
+    for a in [DVec3::X, DVec3::Y, DVec3::Z] {
+        if let (Some(p0), Some(p1)) = (
+            project(pos - a * s, cam_world, vp, w, h),
+            project(pos + a * s, cam_world, vp, w, h),
+        ) {
+            lines.push((p0, p1));
+        }
+    }
+    let r = range.clamp(0.2, 500.0) as f64;
+    let segs = 28;
+    let mut prev = project(pos + DVec3::new(r, 0.0, 0.0), cam_world, vp, w, h);
+    for i in 1..=segs {
+        let a = (i as f64 / segs as f64) * std::f64::consts::TAU;
+        let p = project(pos + DVec3::new(a.cos() * r, 0.0, a.sin() * r), cam_world, vp, w, h);
+        if let (Some(pp), Some(cp)) = (prev, p) {
+            lines.push((pp, cp));
+        }
+        prev = p;
+    }
+    lines
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -3746,6 +3792,8 @@ struct Editor {
     terrain_viz: Option<TerrainViz>,
     /// Camera frustums to draw in the viewport this frame (so cameras are visible).
     camera_gizmos: Vec<CameraGizmo>,
+    /// Projected point-light gizmos (cross + range ring) for this frame.
+    light_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -4476,33 +4524,46 @@ impl Editor {
         };
         let view_proj = cam.view_proj(aspect);
 
-        // Camera frustum gizmos so cameras are visible/placeable (hidden in the game
-        // view, where you're seeing the game, not the editor overlays).
+        // Camera frustum + point-light gizmos so they're visible/placeable (hidden in
+        // the game view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
+        self.light_gizmos.clear();
         if !game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-            let cams: Vec<(Entity, f32, bool)> = self
-                .world
-                .query::<Matter>()
-                .filter_map(|(e, m)| match m {
-                    Matter::Camera { fov_y, active } => Some((e, *fov_y, *active)),
-                    _ => None,
-                })
-                .collect();
-            for (e, fov_y, active) in cams {
+            let nodes: Vec<(Entity, Matter)> =
+                self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
+            for (e, m) in nodes {
                 let wt = floptle_core::world_transform(&self.world, e);
-                let lines = camera_frustum_lines(
-                    wt.translation,
-                    wt.rotation,
-                    fov_y,
-                    aspect,
-                    cam.world_position,
-                    view_proj,
-                    gw,
-                    gh,
-                );
-                if !lines.is_empty() {
-                    self.camera_gizmos.push(CameraGizmo { lines, active });
+                match m {
+                    Matter::Camera { fov_y, active } => {
+                        let lines = camera_frustum_lines(
+                            wt.translation,
+                            wt.rotation,
+                            fov_y,
+                            aspect,
+                            cam.world_position,
+                            view_proj,
+                            gw,
+                            gh,
+                        );
+                        if !lines.is_empty() {
+                            self.camera_gizmos.push(CameraGizmo { lines, active });
+                        }
+                    }
+                    Matter::PointLight { range, .. } => {
+                        let lines = point_light_lines(
+                            wt.translation,
+                            range,
+                            cam.world_position,
+                            view_proj,
+                            gw,
+                            gh,
+                        );
+                        if !lines.is_empty() {
+                            self.light_gizmos.push(lines);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4777,6 +4838,7 @@ impl Editor {
         let gizmo = self.gizmo.as_ref();
         let terrain_viz = self.terrain_viz.as_ref();
         let camera_gizmos = self.camera_gizmos.as_slice();
+        let light_gizmos = self.light_gizmos.as_slice();
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -4911,6 +4973,7 @@ impl Editor {
                 gizmo,
                 terrain_viz,
                 camera_gizmos,
+                light_gizmos,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
