@@ -1471,7 +1471,19 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
   • input.scroll()          wheel delta this frame
 
 
-4. GLOBALS
+4. RAYCAST
+----------
+  • raycast(ox,oy,oz, dx,dy,dz, max)  cast a ray against the terrain + mesh
+    colliders. Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
+
+    -- is there ground within 1.2 units below me?
+    local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2)
+    if h then  -- h.y is the ground height, h.ny the slope --  end
+
+  Use it for ground checks, line-of-sight, shooting, placing things on a surface.
+
+
+5. GLOBALS
 ----------
   • params   this instance's tunables — a table SEEDED from `defaults`, so
              `params.speed` works out of the box; the Inspector overrides them
@@ -1481,7 +1493,7 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
   • the full Lua standard library (math, string, table, …)
 
 
-5. MAKING A CHARACTER YOU CAN WALK AROUND AS
+6. MAKING A CHARACTER YOU CAN WALK AROUND AS
 --------------------------------------------
 The first-person recipe (no glue code needed):
   1. Add a Camera node; mark it Active.
@@ -3752,6 +3764,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.button", insert: "input.button(", doc: "input.button(0) — true while a mouse button is held (0 left, 1 right, 2 middle)." },
     ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
+    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
     ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
     ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
     ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
@@ -5146,10 +5159,16 @@ impl Editor {
                 buttons_down: self.input_buttons,
                 buttons_pressed: self.input_buttons_pressed,
             });
+            // Lend the sim's colliders to scripts so `raycast(...)` works this frame
+            // (physics doesn't step until after scripts, so this is safe).
+            if let Some(sim) = self.sim.as_mut() {
+                self.script_host.set_colliders(std::mem::take(&mut sim.world.colliders));
+            }
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
             // Apply script velocity writes, then advance physics (writes transforms back).
             if let Some(sim) = self.sim.as_mut() {
+                sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
                 for (eid, v) in self.script_host.take_body_changes() {
                     sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                 }
