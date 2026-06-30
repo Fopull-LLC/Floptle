@@ -28,6 +28,12 @@ struct Globals {
     point_count: vec4<f32>,            // x = active point-light count
     point_pos: array<vec4<f32>, 16>,   // xyz camera-relative pos, w = range
     point_color: array<vec4<f32>, 16>, // rgb = color * intensity
+    // Per-blob material (same model as terrain_*), indexed by blob.
+    blob_tint: array<vec4<f32>, 16>,     // rgb tint (× procedural color), a unused
+    blob_emissive: array<vec4<f32>, 16>, // rgb, a = strength
+    blob_specular: array<vec4<f32>, 16>, // rgb, a = strength
+    blob_params: array<vec4<f32>, 16>,   // x shininess, y rim_strength, z unlit, w ambient_mul
+    blob_rim: array<vec4<f32>, 16>,      // rgb, a unused
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
@@ -126,6 +132,19 @@ fn analytic(p: vec3<f32>) -> Matter {
         m = smin_matter(m, b, 0.3 * max(G.blobs[i].w, 0.05));
     }
     return m;
+}
+
+// Index of the blob whose surface is nearest `p` — so the hit point shades with that
+// blob's material (the dominant one in the smin blend at a surface point).
+fn nearest_blob(p: vec3<f32>) -> i32 {
+    let count = min(u32(G.params.y), 16u);
+    var bi = 0;
+    var bd = 1e9;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let d = blob_one(p, G.blobs[i].xyz, max(G.blobs[i].w, 0.02)).d;
+        if (d < bd) { bd = d; bi = i32(i); }
+    }
+    return bi;
 }
 
 // March bound from all blobs + the volume box (replaces the old single-blob reach).
@@ -384,11 +403,27 @@ fn fs(in: VOut) -> FsOut {
                     col = col + G.terrain_rim.rgb * rim_f + emissive;
                 }
             } else {
-                // BLOB matter keeps its matte look + a subtle low-frequency rim.
-                col = albedo * (G.ambient.rgb + G.light_color.rgb * diff);
-                col = col + albedo * point_diffuse(p, n); // placeable point lights
-                let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
-                col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
+                // BLOB: shade with the hit blob's Material (same lighting model as the
+                // meshes/terrain) so an assigned Material actually changes its look.
+                // The default (material-less) blob is fed neutral tint + a subtle blue
+                // rim by the editor, reproducing the old matte-with-rim appearance.
+                let bi = clamp(nearest_blob(p), 0, 15);
+                let tinted = albedo * G.blob_tint[bi].rgb;
+                let emissive = G.blob_emissive[bi].rgb * G.blob_emissive[bi].a;
+                let bpar = G.blob_params[bi];
+                if (bpar.z > 0.5) {
+                    col = tinted + emissive; // unlit / fullbright
+                } else {
+                    let ambient = G.ambient.rgb * bpar.w;
+                    col = tinted * (ambient + G.light_color.rgb * diff);
+                    col = col + tinted * point_diffuse(p, n); // placeable point lights
+                    let h = normalize(l + v);
+                    let shininess = max(bpar.x, 1.0);
+                    let spec = pow(max(dot(n, h), 0.0), shininess) * G.blob_specular[bi].a * select(0.0, 1.0, diff > 0.0);
+                    col = col + G.blob_specular[bi].rgb * spec * G.light_color.rgb;
+                    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * bpar.y;
+                    col = col + G.blob_rim[bi].rgb * rim_f + emissive;
+                }
             }
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
             out.depth = ndc_z;
