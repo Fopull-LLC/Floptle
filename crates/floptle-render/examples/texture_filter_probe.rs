@@ -1,28 +1,29 @@
-//! Headless material probe — renders a row of spheres, each with a different
-//! [`MaterialParams`], to a PNG. Validates the extended raster shader (emissive,
-//! Blinn-Phong specular, rim/fresnel, unlit) and lets the retro material look be
-//! inspected WITHOUT a window.
+//! Headless per-texture-filter probe — the same fine checker texture on three
+//! spheres, sampled Pixelated / Smooth / Smooth+Mipmaps. Validates the per-texture
+//! sampler path (group-1 sampler) and the CPU mip-chain upload, and shows the visible
+//! difference (crisp-but-aliased vs bilinear vs shimmer-free minification).
 //!
-//! Run: cargo run -p floptle-render --example material_probe -- <out.png>
+//! Run: cargo run -p floptle-render --example texture_filter_probe -- <out.png>
 
 use floptle_core::transform::Transform;
 use floptle_render::{
     instance_of_mat, uv_sphere, Globals, Gpu, InstanceRaw, MaterialParams, MeshId, Projection,
-    Raster, RenderCamera, TexId, TextureData,
+    Raster, RenderCamera, TexFilter, TexId, TexSampling, TexWrap, TextureData,
 };
 use glam::{DVec3, Quat, Vec3};
 
-const W: u32 = 1440;
-const H: u32 = 400;
+const W: u32 = 1200;
+const H: u32 = 420;
 
-/// A procedural checker texture (so the probe needs no image file).
+/// A FINE checker (small cells) so the far side of the sphere minifies heavily —
+/// where Pixelated aliases into noise and mipmaps smooth it out.
 fn checker() -> TextureData {
-    let n = 64u32;
+    let n = 512u32;
     let mut px = Vec::with_capacity((n * n * 4) as usize);
     for y in 0..n {
         for x in 0..n {
             let on = ((x / 8) + (y / 8)) % 2 == 0;
-            let c = if on { [60, 200, 90, 255] } else { [30, 120, 50, 255] };
+            let c = if on { [235, 235, 240, 255] } else { [40, 45, 60, 255] };
             px.extend_from_slice(&c);
         }
     }
@@ -30,7 +31,7 @@ fn checker() -> TextureData {
 }
 
 fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "materials.png".into());
+    let out = std::env::args().nth(1).unwrap_or_else(|| "texture_filter.png".into());
     let gpu = Gpu::headless(W, H);
 
     let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -46,57 +47,47 @@ fn main() {
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut raster = Raster::new(&gpu);
-    let sphere = raster.register(&gpu, &uv_sphere(0.9, 32, 48), None);
+    let sphere = raster.register(&gpu, &uv_sphere(0.95, 48, 64), None);
+
+    // The same image registered with three different samplings.
+    let tex = checker();
+    let pixelated =
+        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat });
+    let smooth =
+        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Repeat });
+    let mipped = raster.register_texture(
+        &gpu,
+        &tex,
+        TexSampling { filter: TexFilter::SmoothMipmaps, wrap: TexWrap::Repeat },
+    );
 
     let cam = RenderCamera::new(
-        DVec3::new(0.0, 0.0, 7.0),
+        DVec3::new(0.0, 0.0, 6.5),
         Quat::IDENTITY,
-        Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
+        Projection::Perspective { fov_y: 55f32.to_radians(), near: 0.1, far: 2000.0 },
     );
     let view_proj = cam.view_proj(W as f32 / H as f32);
-    let light = Vec3::new(0.4, 0.9, 0.45).normalize();
+    let light = Vec3::new(0.3, 0.7, 0.7).normalize();
     let globals = Globals {
         view_proj: view_proj.to_cols_array_2d(),
         light_dir: [light.x, light.y, light.z, 0.0],
         light_color: [1.0, 0.98, 0.92, 0.0],
-        ambient: [0.12, 0.12, 0.16, 0.0],
+        ambient: [0.5, 0.5, 0.55, 0.0],
     };
 
-    // Five distinct retro materials, left → right.
-    let matte = MaterialParams::flat([0.4, 0.7, 0.95]);
-    let mut emissive = MaterialParams::flat([0.15, 0.0, 0.15]);
-    emissive.emissive = [1.0, 0.1, 0.9];
-    emissive.emissive_strength = 1.4;
-    let mut shiny = MaterialParams::flat([0.75, 0.18, 0.18]);
-    shiny.specular = [1.0, 1.0, 1.0];
-    shiny.shininess = 48.0;
-    shiny.specular_strength = 1.0;
-    let mut unlit = MaterialParams::flat([0.3, 0.9, 0.4]);
-    unlit.unlit = true;
-    let mut rim = MaterialParams::flat([0.18, 0.18, 0.22]);
-    rim.rim = [0.3, 0.9, 1.0];
-    rim.rim_strength = 1.6;
-
-    // A sixth sphere: textured (a procedural grass-like checker) + lit.
-    let grass_tex = raster.register_texture(&gpu, &checker(), Default::default());
-    let grass = MaterialParams::flat([1.0, 1.0, 1.0]);
-
-    let mats = [matte, emissive, shiny, unlit, rim];
-    let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = mats
+    let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
+    let row: [(TexId, f64); 3] = [(pixelated, -2.6), (smooth, 0.0), (mipped, 2.6)];
+    let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = row
         .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let x = -5.5 + i as f64 * 2.2;
+        .map(|&(tex, x)| {
             let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0));
-            (sphere, None, instance_of_mat(t.render_matrix(cam.world_position), m))
+            (sphere, Some(tex), instance_of_mat(t.render_matrix(cam.world_position), &mat))
         })
         .collect();
-    let t = Transform::from_translation(DVec3::new(-5.5 + 5.0 * 2.2, 0.0, 0.0));
-    instances.push((sphere, Some(grass_tex), instance_of_mat(t.render_matrix(cam.world_position), &grass)));
 
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.05, 1.0]));
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.06, 0.07, 0.1, 1.0]));
     save_png(&gpu, &color_tex, &out);
-    println!("wrote {out} — matte / emissive / specular / unlit / rim / textured");
+    println!("wrote {out} — Pixelated | Smooth | Smooth+Mipmaps (left→right)");
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {
