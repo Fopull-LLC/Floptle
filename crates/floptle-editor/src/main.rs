@@ -791,6 +791,13 @@ const LUA_ANNOTATIONS: &str = "\
 ---@field yaw number Heading about Y, in radians.
 ---@field pitch number Pitch about X, in radians.
 ---@field roll number Roll about Z, in radians.
+---@field grounded boolean Physics (rigidbody nodes): resting on a surface this frame.
+---@field vx number Physics: body velocity X (read/write — set it to drive the body).
+---@field vy number Physics: body velocity Y (read/write).
+---@field vz number Physics: body velocity Z (read/write).
+---@field up_x number Physics: body up (−gravity) X — radial on a planet.
+---@field up_y number Physics: body up (−gravity) Y.
+---@field up_z number Physics: body up (−gravity) Z.
 
 ---This instance's tunables, seeded from the script's `defaults` table.
 ---@type table<string, number>
@@ -4620,16 +4627,26 @@ impl Editor {
             // dt-driven motion stops too (not just `time`-driven motion).
             let sdt = if self.paused { 0.0 } else { dt };
             self.play_t += sdt;
-            // Step physics (fixed-timestep) before scripts, so scripts see resolved
-            // positions. Bodies move; transforms are written back into the World.
-            if let Some(sim) = self.sim.as_mut() {
-                sim.advance(&mut self.world, sdt);
-            }
             // Direct field access (not the `scripts_dir()` method) so we don't take
             // a whole-`self` borrow while gpu/egui are mutably borrowed here.
             let dir = self.project_root.join("scripts");
-            // Feed the player input to scripts (the Lua `input` API). Inlined with
-            // direct field access since gpu/egui are mutably borrowed here.
+            // Feed the physics body state to scripts so they can read node.grounded and
+            // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
+            if let Some(sim) = self.sim.as_ref() {
+                let mut states = HashMap::new();
+                for (e, vel, up, grounded) in sim.body_states() {
+                    states.insert(
+                        e.index(),
+                        floptle_script::BodyState {
+                            vel: [vel.x, vel.y, vel.z],
+                            up: [up.x, up.y, up.z],
+                            grounded,
+                        },
+                    );
+                }
+                self.script_host.set_bodies(states);
+            }
+            // Feed the player input to scripts (the Lua `input` API).
             self.script_host.set_input(floptle_script::InputSnapshot {
                 keys_down: self.input_keys.clone(),
                 keys_pressed: self.input_keys_pressed.clone(),
@@ -4641,6 +4658,13 @@ impl Editor {
             });
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
+            // Apply script velocity writes, then advance physics (writes transforms back).
+            if let Some(sim) = self.sim.as_mut() {
+                for (eid, v) in self.script_host.take_body_changes() {
+                    sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                }
+                sim.advance(&mut self.world, sdt);
+            }
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }

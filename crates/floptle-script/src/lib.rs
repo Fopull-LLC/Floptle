@@ -121,6 +121,28 @@ pub struct ScriptHost {
     logs: Rc<RefCell<Vec<ScriptLog>>>,
     /// This frame's player input, shared with the Lua `input` table's functions.
     input: Rc<RefCell<InputSnapshot>>,
+    /// This frame's physics body state per entity index (velocity + grounded), fed in
+    /// before `run` so scripts can read `node.vx/vy/vz/grounded`.
+    bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
+    /// Velocities scripts wrote this frame (entity index → new velocity), drained by
+    /// the editor and applied to the physics sim.
+    body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
+}
+
+/// A physics body's state exposed to its node's scripts.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyState {
+    pub vel: [f32; 3],
+    /// The body's "up" (−gravity) — Y for normal gravity, radial on a planet. Lets a
+    /// controller script move along the surface and jump correctly on any world.
+    pub up: [f32; 3],
+    pub grounded: bool,
+}
+
+impl Default for BodyState {
+    fn default() -> Self {
+        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false }
+    }
 }
 
 impl Default for ScriptHost {
@@ -259,12 +281,26 @@ impl ScriptHost {
             errors: Vec::new(),
             logs,
             input,
+            bodies: Rc::new(RefCell::new(HashMap::new())),
+            body_changes: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
     /// Set the player input for the frame's scripts (call before [`run`](Self::run)).
     pub fn set_input(&self, snapshot: InputSnapshot) {
         *self.input.borrow_mut() = snapshot;
+    }
+
+    /// Feed the physics body state (entity index → vel + grounded) for the frame, so
+    /// scripts can read `node.vx/vy/vz/grounded`. Call before [`run`](Self::run).
+    pub fn set_bodies(&self, map: HashMap<u32, BodyState>) {
+        *self.bodies.borrow_mut() = map;
+    }
+
+    /// Drain the velocities scripts wrote this frame (entity index → new velocity), to
+    /// apply back to the physics sim. Call after [`run`](Self::run).
+    pub fn take_body_changes(&self) -> HashMap<u32, [f32; 3]> {
+        std::mem::take(&mut *self.body_changes.borrow_mut())
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
@@ -426,12 +462,15 @@ impl ScriptHost {
         inst.started = true;
         let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
 
-        if let Err(err) = self.tick(&env, params, tr, dt, time, first) {
+        let eid = e.index();
+        let body = self.bodies.borrow().get(&eid).copied();
+        if let Err(err) = self.tick(&env, params, tr, dt, time, first, eid, body) {
             self.fail(name, format!("{name}: {err}"));
         }
     }
 
     /// One lifecycle tick against an already-built environment.
+    #[allow(clippy::too_many_arguments)]
     fn tick(
         &self,
         env: &Table,
@@ -440,12 +479,14 @@ impl ScriptHost {
         dt: f32,
         time: f32,
         first: bool,
+        eid: u32,
+        body: Option<BodyState>,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, params)?)?;
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 
-        let node = node_table(&self.lua, tr)?;
+        let node = node_table(&self.lua, tr, body)?;
         let pre = node_pre(tr);
         // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
         // still work for older scripts.
@@ -456,6 +497,13 @@ impl ScriptHost {
         }
         if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
             f.call::<()>((node.clone(), dt as f64))?;
+        }
+        // Read back the (possibly script-modified) velocity for a physics body.
+        if body.is_some() {
+            let vx: f64 = node.get("vx").unwrap_or(0.0);
+            let vy: f64 = node.get("vy").unwrap_or(0.0);
+            let vz: f64 = node.get("vz").unwrap_or(0.0);
+            self.body_changes.borrow_mut().insert(eid, [vx as f32, vy as f32, vz as f32]);
         }
         apply_node(&node, tr, &pre)
     }
@@ -796,7 +844,7 @@ fn params_table(lua: &Lua, params: &[(String, f32)]) -> mlua::Result<Table> {
     Ok(t)
 }
 
-fn node_table(lua: &Lua, tr: &Transform) -> mlua::Result<Table> {
+fn node_table(lua: &Lua, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
     let (yaw, pitch, roll) = tr.rotation.to_euler(EulerRot::YXZ);
     let t = lua.create_table()?;
     t.set("x", tr.translation.x)?;
@@ -809,6 +857,17 @@ fn node_table(lua: &Lua, tr: &Transform) -> mlua::Result<Table> {
     t.set("yaw", yaw as f64)?;
     t.set("pitch", pitch as f64)?;
     t.set("roll", roll as f64)?;
+    // Physics body fields (present only on rigidbody nodes): read grounded, read/write
+    // the velocity. The engine reads vx/vy/vz back after `update` and applies them.
+    if let Some(b) = body {
+        t.set("vx", b.vel[0] as f64)?;
+        t.set("vy", b.vel[1] as f64)?;
+        t.set("vz", b.vel[2] as f64)?;
+        t.set("up_x", b.up[0] as f64)?;
+        t.set("up_y", b.up[1] as f64)?;
+        t.set("up_z", b.up[2] as f64)?;
+        t.set("grounded", b.grounded)?;
+    }
     Ok(t)
 }
 
@@ -971,6 +1030,35 @@ mod tests {
         let tr = world.get::<Transform>(e).unwrap();
         let (yaw, _, _) = tr.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "yaw was {yaw}");
+    }
+
+    #[test]
+    fn script_reads_grounded_and_writes_velocity() {
+        // The physics API: a script reads node.grounded + sets node.vx; the engine
+        // reads that velocity back via take_body_changes.
+        let dir = std::env::temp_dir().join("floptle_script_test_physapi");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "drive",
+            "function update(node, dt)\n  if node.grounded then node.vx = 5.0 end\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+            kind: "drive".into(),
+            enabled: true,
+            params: Vec::new(),
+        }]));
+        let mut host = ScriptHost::new();
+        let mut bodies = HashMap::new();
+        bodies.insert(e.index(), BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true });
+        host.set_bodies(bodies);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let changes = host.take_body_changes();
+        assert_eq!(changes.get(&e.index()).copied().unwrap()[0], 5.0);
     }
 
     #[test]
