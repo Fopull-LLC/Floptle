@@ -11,7 +11,9 @@ use std::path::Path;
 
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Light, Material, Matter, Name, ScriptInst, Scripts, Shape, World};
+use floptle_core::{
+    BodyKind, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts, Shape, World,
+};
 use serde::{Deserialize, Serialize};
 
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
@@ -35,10 +37,68 @@ pub struct NodeDoc {
     /// The node's material (surface look). `None` = the engine's default look.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialDoc>,
+    /// A physics rigidbody on this node (`None` = not a physics body).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rigidbody: Option<RigidBodyDoc>,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
+}
+
+/// Serializable physics rigidbody, mirroring [`floptle_core::RigidBody`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct RigidBodyDoc {
+    /// false = sphere, true = capsule.
+    #[serde(default)]
+    pub capsule: bool,
+    #[serde(default = "half_f32")]
+    pub radius: f32,
+    #[serde(default = "two_f32")]
+    pub height: f32,
+    #[serde(default)]
+    pub restitution: f32,
+    #[serde(default = "frict_f32")]
+    pub friction: f32,
+    #[serde(default)]
+    pub lock_pos: [bool; 3],
+    #[serde(default)]
+    pub lock_rot: [bool; 3],
+}
+
+fn half_f32() -> f32 {
+    0.5
+}
+fn two_f32() -> f32 {
+    2.0
+}
+fn frict_f32() -> f32 {
+    0.3
+}
+
+impl RigidBodyDoc {
+    pub fn to_rigidbody(&self) -> RigidBody {
+        RigidBody {
+            kind: if self.capsule { BodyKind::Capsule } else { BodyKind::Sphere },
+            radius: self.radius,
+            height: self.height,
+            restitution: self.restitution,
+            friction: self.friction,
+            lock_pos: self.lock_pos,
+            lock_rot: self.lock_rot,
+        }
+    }
+    pub fn from_rigidbody(rb: &RigidBody) -> Self {
+        Self {
+            capsule: rb.kind == BodyKind::Capsule,
+            radius: rb.radius,
+            height: rb.height,
+            restitution: rb.restitution,
+            friction: rb.friction,
+            lock_pos: rb.lock_pos,
+            lock_rot: rb.lock_rot,
+        }
+    }
 }
 
 /// A serializable attached script, mirroring [`floptle_core::ScriptInst`].
@@ -518,6 +578,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if let Some(m) = &node.material {
             world.insert(e, m.to_material());
         }
+        if let Some(rb) = &node.rigidbody {
+            world.insert(e, rb.to_rigidbody());
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -550,8 +613,17 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .map(|s| s.0.iter().map(ScriptDoc::from_inst).collect())
             .unwrap_or_default();
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
+        let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
-        nodes.push(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material, parent });
+        nodes.push(NodeDoc {
+            name,
+            transform,
+            matter: MatterDoc::from(matter),
+            scripts,
+            material,
+            rigidbody,
+            parent,
+        });
     }
     let lighting =
         world.query::<Light>().next().map(|(_, l)| LightDoc::from(l)).unwrap_or_default();
@@ -583,6 +655,15 @@ mod tests {
                         unlit: false,
                         ..Default::default()
                     }),
+                    rigidbody: Some(RigidBodyDoc {
+                        capsule: true,
+                        radius: 0.6,
+                        height: 2.4,
+                        restitution: 0.2,
+                        friction: 0.5,
+                        lock_pos: [false, false, true],
+                        lock_rot: [true, false, true],
+                    }),
                     parent: None,
                 },
                 NodeDoc {
@@ -591,6 +672,7 @@ mod tests {
                     matter: MatterDoc::Blob { scale: 1.3 },
                     scripts: Vec::new(),
                     material: None,
+                    rigidbody: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -599,6 +681,7 @@ mod tests {
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 },
                     scripts: Vec::new(),
                     material: None,
+                    rigidbody: None,
                     parent: None,
                 },
                 NodeDoc {
@@ -607,6 +690,7 @@ mod tests {
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true },
                     scripts: Vec::new(),
                     material: None,
+                    rigidbody: None,
                     parent: None,
                 },
             ],
@@ -636,6 +720,11 @@ mod tests {
         let cube = snap.nodes.iter().find(|n| n.name == "cube").unwrap();
         assert_eq!(cube.transform.translation, [1.0, 2.0, 3.0]);
         assert!(matches!(cube.matter, MatterDoc::Primitive { shape: ShapeDoc::Cube, .. }));
+        // the cube's rigidbody (shape + constraints) round-trips through the World
+        let rb = cube.rigidbody.expect("cube rigidbody lost");
+        assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
+        assert_eq!(rb.lock_pos, [false, false, true]);
+        assert_eq!(rb.lock_rot, [true, false, true]);
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
