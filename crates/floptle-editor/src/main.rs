@@ -1415,12 +1415,12 @@ const SCRIPT_DOCS: &str = "\
 Floptle Scripting — Lua
 =======================
 
-Game logic is written in Lua (ADR-0003). A script is a `.lua` file in your
-project's `scripts/` folder; attach it to a node and it runs every frame while
-playing. A script defines plain functions:
+Game logic is written in Lua. A script is a `.lua` file in your project's
+`scripts/` folder; attach it to a node and it runs every frame while playing.
+A script defines plain functions and a `defaults` table:
 
     -- spin.lua
-    defaults = { speed = 45 }          -- tunables (shown in the Inspector)
+    defaults = { speed = 45 }          -- tunables (also shown in the Inspector)
 
     function start(node)               -- once, when play begins (optional)
     end
@@ -1429,35 +1429,90 @@ playing. A script defines plain functions:
       node.yaw = node.yaw + math.rad(params.speed) * dt
     end
 
-The node
---------
-`node` is the node's transform, synced before the call and read back after — set
-a field and the object moves:
+Each script keeps its own state across frames (set a variable in start, read it
+in update) and hot-reloads the moment you save the file. `+=  -=  *=  /=  ..=`
+and friends work too.
+
+
+1. THE NODE — transform
+-----------------------
+`node` is synced from the node's transform before each call and read back after,
+so setting a field moves the object:
   • node.x, node.y, node.z              position (world units)
+  • node.yaw, node.pitch, node.roll     rotation, in radians
   • node.scale                          uniform scale (shortcut)
   • node.scale_x / scale_y / scale_z    per-axis scale
-  • node.yaw / pitch / roll             rotation, in radians
 
-Globals
--------
-  • params   this instance's values (a table; seeded from `defaults`)
-  • time     seconds since play started
-  • dt       seconds since last frame (also passed to update)
-  • the full Lua standard library (math, string, table, …)
-  • log(\"...\")  prints to the engine console
 
-Each attached script keeps its own state across frames (set a variable in
-start, read it in update), and hot-reloads the moment you save the file.
+2. THE NODE — physics body
+--------------------------
+These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
+◆ Rigidbody). Drive the body by its velocity instead of teleporting it:
+  • node.vx, node.vy, node.vz   velocity (m/s) — READ the current value, modify,
+                                and WRITE it back; the engine integrates it
+  • node.grounded               true while the body rests on a surface (read-only)
+  • node.up_x, node.up_y, node.up_z   the body's up = −gravity (read-only):
+                                [0,1,0] on a flat world, RADIAL on a planet —
+                                move along it and you handle planets for free
+  • node.height                 capsule standing height — write a smaller value
+                                to crouch (the engine shrinks it, feet planted)
 
-Attaching & running
+
+3. INPUT (play mode)
 --------------------
+  • input.key(\"w\")          true while held. Names: a-z, 0-9, space, enter,
+                            shift, ctrl, alt, left/right/up/down, escape, tab
+  • input.pressed(\"space\")  true only on the frame it goes down (an edge)
+  • input.axis(\"a\", \"d\")    -1 / 0 / 1 from a negative/positive key pair
+  • input.button(1)         mouse button held (0 left, 1 right, 2 middle)
+  • input.clicked(1)        mouse button pressed this frame (an edge)
+  • local dx, dy = input.mouse_delta()   mouse movement since last frame
+  • local x, y  = input.mouse()          cursor position in pixels
+  • input.scroll()          wheel delta this frame
+
+
+4. GLOBALS
+----------
+  • params   this instance's tunables — a table SEEDED from `defaults`, so
+             `params.speed` works out of the box; the Inspector overrides them
+  • time     seconds since play started
+  • dt       seconds since the last frame (also passed to update)
+  • log(\"...\")   print to the engine console
+  • the full Lua standard library (math, string, table, …)
+
+
+5. MAKING A CHARACTER YOU CAN WALK AROUND AS
+--------------------------------------------
+The first-person recipe (no glue code needed):
+  1. Add a Camera node; mark it Active.
+  2. Give it a Rigidbody, shape = Capsule.
+  3. Attach `character.lua`.
+Press Play — you ARE the capsule: it moves under physics and the camera rides
+it. Hold right-mouse to look, WASD to move, Space to jump, Shift to run, hold C
+to crouch. It works on flat ground AND around Radial-gravity planets.
+
+A minimal controller, to show the velocity loop:
+
+    defaults = { speed = 6, jump = 7 }
+    function update(node, dt)
+      local f = (input.key(\"w\") and 1 or 0) - (input.key(\"s\") and 1 or 0)
+      local vy = node.vy                          -- keep gravity/jump
+      if node.grounded and input.pressed(\"space\") then vy = params.jump end
+      node.vx = -math.sin(node.yaw) * f * params.speed
+      node.vz = -math.cos(node.yaw) * f * params.speed
+      node.vy = vy
+    end
+
+
+ATTACHING & RUNNING
+-------------------
 • Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
   section, or use Inspector ⏵ Scripting ⏵ + Add Script.
-• Press F1 (⏵ Play) to run; F2 pauses the clock; ⏹ Stop restores the scene.
+• F1 = ⏵ Play / ⏹ Stop, F2 = pause the clock. Stop restores the scene.
 • The Inspector edits a script's params live; errors show at the top of this tab.
 
-Defaults included with every project: rotate.lua, pulsate.lua, float.lua —
-open one to see a working example.";
+Bundled examples (in scripts/): character.lua (walkable character), freelook.lua
+(fly camera), rotate.lua, pulsate.lua, float.lua — open one for a working start.";
 
 /// One script file open in the in-engine IDE.
 struct OpenScript {
@@ -3673,6 +3728,14 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.yaw", insert: "node.yaw", doc: "Heading about Y, in radians." },
     ApiEntry { label: "node.pitch", insert: "node.pitch", doc: "Pitch about X, in radians." },
     ApiEntry { label: "node.roll", insert: "node.roll", doc: "Roll about Z, in radians." },
+    ApiEntry { label: "node.vx", insert: "node.vx", doc: "Rigidbody velocity X (m/s). Read + write to drive the body; the engine integrates it." },
+    ApiEntry { label: "node.vy", insert: "node.vy", doc: "Rigidbody velocity Y (m/s). Keep this for gravity/jump while replacing the horizontal part." },
+    ApiEntry { label: "node.vz", insert: "node.vz", doc: "Rigidbody velocity Z (m/s)." },
+    ApiEntry { label: "node.grounded", insert: "node.grounded", doc: "True while the rigidbody rests on a surface (read-only). Gate jumps on it." },
+    ApiEntry { label: "node.up_x", insert: "node.up_x", doc: "Body up (−gravity) X — radial on a planet, so move along it for planet gravity. Read-only." },
+    ApiEntry { label: "node.up_y", insert: "node.up_y", doc: "Body up (−gravity) Y (read-only)." },
+    ApiEntry { label: "node.up_z", insert: "node.up_z", doc: "Body up (−gravity) Z (read-only)." },
+    ApiEntry { label: "node.height", insert: "node.height", doc: "Capsule standing height — write a smaller value to crouch (the engine resizes it, feet planted)." },
     ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
     ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
     ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
