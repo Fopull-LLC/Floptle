@@ -686,6 +686,31 @@ fn material_params(m: &Material) -> MaterialParams {
     }
 }
 
+/// Collect up to 16 placeable point lights from the world into the camera-relative
+/// uniform arrays (xyz pos + range; rgb = color×intensity) for the raster + raymarch
+/// passes. Returns (count_vec4, positions, colors).
+fn collect_point_lights(
+    world: &World,
+    cam_world: DVec3,
+) -> ([f32; 4], [[f32; 4]; 16], [[f32; 4]; 16]) {
+    let mut pos = [[0.0f32; 4]; 16];
+    let mut col = [[0.0f32; 4]; 16];
+    let mut n = 0usize;
+    for (e, m) in world.query::<Matter>() {
+        if let Matter::PointLight { color, intensity, range } = m {
+            if n >= 16 {
+                break;
+            }
+            let wp = floptle_core::world_transform(world, e).translation;
+            let c = (wp - cam_world).as_vec3();
+            pos[n] = [c.x, c.y, c.z, range.max(0.0001)];
+            col[n] = [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0];
+            n += 1;
+        }
+    }
+    ([n as f32, 0.0, 0.0, 0.0], pos, col)
+}
+
 /// How a texture is filtered — the serde-friendly mirror of [`floptle_render::TexFilter`],
 /// persisted per texture in `.floptle/textures.ron`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -875,6 +900,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Empty => "Group",
         MatterDoc::Terrain { .. } => "Terrain",
         MatterDoc::Camera { .. } => "Camera",
+        MatterDoc::PointLight { .. } => "Point Light",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1648,6 +1674,10 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.add_camera = Some(parent);
             ui.close();
         }
+        if ui.button("● Point Light").on_hover_text("a placeable omni light (color / intensity / range)").clicked() {
+            pick = Some(MatterDoc::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 });
+            ui.close();
+        }
         if let Some(m) = pick {
             match parent {
                 Some(p) => self.cmd.add_parented = Some((m, p)),
@@ -1678,6 +1708,8 @@ impl<'a> EditorTabViewer<'a> {
             "⌖"
         } else if matches!(matter, Some(Matter::Terrain { .. })) {
             "Δ"
+        } else if matches!(matter, Some(Matter::PointLight { .. })) {
+            "●"
         } else if has_kids {
             "⏷"
         } else {
@@ -1840,6 +1872,8 @@ impl<'a> EditorTabViewer<'a> {
                         ui.label("ambient");
                         cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
                     });
+                    cmd.inspector_changed |=
+                        ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity")).changed();
                 }
             }
             Some(e) if world.get::<Transform>(e).is_some() => {
@@ -1920,6 +1954,18 @@ impl<'a> EditorTabViewer<'a> {
                             if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
                                 cmd.camera_from_view = Some(e);
                             }
+                        }
+                        Matter::PointLight { color, intensity, range } => {
+                            ui.label("point light");
+                            ui.small("an omni light — position comes from the transform below");
+                            ui.horizontal(|ui| {
+                                ui.label("color");
+                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                            });
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
                         }
                     }
                 }
@@ -4476,11 +4522,16 @@ impl Editor {
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let light = Vec3::from(light_node.direction).normalize_or_zero();
+        let li = light_node.intensity;
+        let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
-            light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+            light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+            point_count: pl_count,
+            point_pos: pl_pos,
+            point_color: pl_col,
         };
 
         // A model being dragged from Assets shows a live ghost at the cursor's
@@ -4548,7 +4599,11 @@ impl Editor {
                         }
                     }
                 }
-                Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => {} // group/terrain/camera render via other passes
+                // group / terrain / camera / light render via other passes.
+                Matter::Empty
+                | Matter::Terrain { .. }
+                | Matter::Camera { .. }
+                | Matter::PointLight { .. } => {}
             }
         }
 
@@ -4585,7 +4640,7 @@ impl Editor {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
                 light_dir: [light.x, light.y, light.z, 0.0],
-                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+                light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
                 ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [0.0; 4],
@@ -4598,6 +4653,9 @@ impl Editor {
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
                 terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
                 blobs: arr,
+                point_count: pl_count,
+                point_pos: pl_pos,
+                point_color: pl_col,
             }
         };
 
@@ -4627,7 +4685,10 @@ impl Editor {
                     Matter::Blob { scale } => {
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
                     }
-                    Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => {}
+                    Matter::Empty
+                    | Matter::Terrain { .. }
+                    | Matter::Camera { .. }
+                    | Matter::PointLight { .. } => {}
                 }
             }
         }
@@ -5288,6 +5349,7 @@ impl Editor {
                 MatterDoc::Empty => "Group",
                 MatterDoc::Terrain { .. } => "Terrain",
                 MatterDoc::Camera { .. } => "Camera",
+                MatterDoc::PointLight { .. } => "Point Light",
             };
             self.add_node(name, m);
         }
@@ -5975,6 +6037,7 @@ impl Editor {
             light_dir: [l.x, l.y, l.z, 0.0],
             light_color: [1.0, 0.98, 0.93, 0.0],
             ambient: [0.30, 0.32, 0.38, 0.0],
+            ..Default::default()
         };
 
         self.ensure_preview_target();
@@ -6046,11 +6109,16 @@ impl Editor {
 
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let light = Vec3::from(light_node.direction).normalize_or_zero();
+        let li = light_node.intensity;
+        let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
-            light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+            light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
+            point_count: pl_count,
+            point_pos: pl_pos,
+            point_color: pl_col,
         };
 
         // Camera-relative instances + blobs, exactly like the main gather.
@@ -6108,7 +6176,7 @@ impl Editor {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
                 light_dir: [light.x, light.y, light.z, 0.0],
-                light_color: [light_node.color[0], light_node.color[1], light_node.color[2], 0.0],
+                light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
                 ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [0.0; 4],
@@ -6121,6 +6189,9 @@ impl Editor {
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
                 terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
                 blobs: arr,
+                point_count: pl_count,
+                point_pos: pl_pos,
+                point_color: pl_col,
             };
             if let Some((hf, bc)) =
                 self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
@@ -6389,7 +6460,11 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
-                Matter::Empty | Matter::Terrain { .. } | Matter::Camera { .. } => None, // no mesh — select via the hierarchy
+                // no mesh — select via the hierarchy.
+                Matter::Empty
+                | Matter::Terrain { .. }
+                | Matter::Camera { .. }
+                | Matter::PointLight { .. } => None,
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {

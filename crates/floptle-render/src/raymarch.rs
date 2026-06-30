@@ -44,6 +44,12 @@ pub struct RaymarchGlobals {
     pub terrain_rim: [f32; 4],
     /// Up to 16 blobs: each xyz camera-relative center, w = scale.
     pub blobs: [[f32; 4]; 16],
+    /// x = active point-light count (rest pad to a vec4).
+    pub point_count: [f32; 4],
+    /// Up to 16 point lights: xyz = camera-relative position, w = range.
+    pub point_pos: [[f32; 4]; 16],
+    /// Each point light's rgb = color × intensity (w unused).
+    pub point_color: [[f32; 4]; 16],
 }
 
 impl Default for RaymarchGlobals {
@@ -67,12 +73,18 @@ impl Default for RaymarchGlobals {
             terrain_params: [16.0, 0.0, 0.0, 1.0],
             terrain_rim: [0.0; 4],
             blobs: [[0.0; 4]; 16],
+            point_count: [0.0; 4],
+            point_pos: [[0.0; 4]; 16],
+            point_color: [[0.0; 4]; 16],
         }
     }
 }
 
 /// Max blobs the raymarch shader folds together in one pass.
 pub const MAX_BLOBS: usize = 16;
+
+/// Max placeable point lights accumulated in one pass (raster + raymarch).
+pub const MAX_POINT_LIGHTS: usize = 16;
 
 pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,

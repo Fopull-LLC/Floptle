@@ -118,10 +118,23 @@ pub enum MatterDoc {
         #[serde(default)]
         active: bool,
     },
+    /// A placeable point/omni light (position = node transform).
+    PointLight {
+        #[serde(default = "white3")]
+        color: [f32; 3],
+        #[serde(default = "one_f32")]
+        intensity: f32,
+        #[serde(default = "default_range")]
+        range: f32,
+    },
 }
 
 fn default_fov() -> f32 {
     60f32.to_radians()
+}
+
+fn default_range() -> f32 {
+    10.0
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -141,6 +154,9 @@ impl From<&Matter> for MatterDoc {
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
             Matter::Camera { fov_y, active } => MatterDoc::Camera { fov_y: *fov_y, active: *active },
+            Matter::PointLight { color, intensity, range } => {
+                MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
+            }
         }
     }
 }
@@ -156,6 +172,9 @@ impl MatterDoc {
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
             MatterDoc::Camera { fov_y, active } => Matter::Camera { fov_y: *fov_y, active: *active },
+            MatterDoc::PointLight { color, intensity, range } => {
+                Matter::PointLight { color: *color, intensity: *intensity, range: *range }
+            }
         }
     }
 }
@@ -184,6 +203,8 @@ pub struct LightDoc {
     pub direction: [f32; 3],
     pub color: [f32; 3],
     pub ambient: [f32; 3],
+    #[serde(default = "one_f32")]
+    pub intensity: f32,
 }
 
 impl Default for LightDoc {
@@ -194,13 +215,18 @@ impl Default for LightDoc {
 
 impl From<&Light> for LightDoc {
     fn from(l: &Light) -> Self {
-        Self { direction: l.direction, color: l.color, ambient: l.ambient }
+        Self { direction: l.direction, color: l.color, ambient: l.ambient, intensity: l.intensity }
     }
 }
 
 impl LightDoc {
     pub fn to_light(self) -> Light {
-        Light { direction: self.direction, color: self.color, ambient: self.ambient }
+        Light {
+            direction: self.direction,
+            color: self.color,
+            ambient: self.ambient,
+            intensity: self.intensity,
+        }
     }
 }
 

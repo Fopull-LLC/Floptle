@@ -60,6 +60,7 @@ fn main() {
         light_dir: [light.x, light.y, light.z, 0.0],
         light_color: [1.0, 0.98, 0.92, 0.0],
         ambient: [0.12, 0.12, 0.16, 0.0],
+        ..Default::default()
     };
 
     // Five distinct retro materials, left → right.

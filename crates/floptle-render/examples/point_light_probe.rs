@@ -1,37 +1,22 @@
-//! Headless per-texture-filter probe — the same fine checker texture on three
-//! spheres, sampled Pixelated / Smooth / Smooth+Mipmaps. Validates the per-texture
-//! sampler path (group-1 sampler) and the CPU mip-chain upload, and shows the visible
-//! difference (crisp-but-aliased vs bilinear vs shimmer-free minification).
+//! Headless point-light probe — a row of white spheres lit ONLY by a single point
+//! light (near-zero directional/ambient), so the smooth range falloff + lit
+//! hemisphere are obvious: the sphere nearest the light is bright, distant ones fade
+//! to black past the light's range. Validates the raster point_diffuse path.
 //!
-//! Run: cargo run -p floptle-render --example texture_filter_probe -- <out.png>
+//! Run: cargo run -p floptle-render --example point_light_probe -- <out.png>
 
 use floptle_core::transform::Transform;
 use floptle_render::{
     instance_of_mat, uv_sphere, Globals, Gpu, InstanceRaw, MaterialParams, MeshId, Projection,
-    Raster, RenderCamera, TexFilter, TexId, TexSampling, TexWrap, TextureData,
+    Raster, RenderCamera, TexId,
 };
 use glam::{DVec3, Quat, Vec3};
 
-const W: u32 = 1200;
-const H: u32 = 420;
-
-/// A FINE checker (small cells) so the far side of the sphere minifies heavily —
-/// where Pixelated aliases into noise and mipmaps smooth it out.
-fn checker() -> TextureData {
-    let n = 512u32;
-    let mut px = Vec::with_capacity((n * n * 4) as usize);
-    for y in 0..n {
-        for x in 0..n {
-            let on = ((x / 8) + (y / 8)) % 2 == 0;
-            let c = if on { [235, 235, 240, 255] } else { [40, 45, 60, 255] };
-            px.extend_from_slice(&c);
-        }
-    }
-    TextureData { pixels: px, width: n, height: n }
-}
+const W: u32 = 1300;
+const H: u32 = 360;
 
 fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "texture_filter.png".into());
+    let out = std::env::args().nth(1).unwrap_or_else(|| "point_light.png".into());
     let gpu = Gpu::headless(W, H);
 
     let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -47,48 +32,45 @@ fn main() {
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut raster = Raster::new(&gpu);
-    let sphere = raster.register(&gpu, &uv_sphere(0.95, 48, 64), None);
-
-    // The same image registered with three different samplings.
-    let tex = checker();
-    let pixelated =
-        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat });
-    let smooth =
-        raster.register_texture(&gpu, &tex, TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Repeat });
-    let mipped = raster.register_texture(
-        &gpu,
-        &tex,
-        TexSampling { filter: TexFilter::SmoothMipmaps, wrap: TexWrap::Repeat },
-    );
+    let sphere = raster.register(&gpu, &uv_sphere(0.85, 32, 48), None);
 
     let cam = RenderCamera::new(
-        DVec3::new(0.0, 0.0, 6.5),
+        DVec3::new(0.0, 0.0, 9.0),
         Quat::IDENTITY,
-        Projection::Perspective { fov_y: 55f32.to_radians(), near: 0.1, far: 2000.0 },
+        Projection::Perspective { fov_y: 50f32.to_radians(), near: 0.1, far: 2000.0 },
     );
     let view_proj = cam.view_proj(W as f32 / H as f32);
-    let light = Vec3::new(0.3, 0.7, 0.7).normalize();
+
+    // One point light at world (0, 1.5, 1.5), bright; range 7. Directional ~off.
+    let lpos = DVec3::new(0.0, 1.5, 1.5);
+    let lrel = (lpos - cam.world_position).as_vec3();
+    let mut point_pos = [[0.0f32; 4]; 16];
+    let mut point_color = [[0.0f32; 4]; 16];
+    point_pos[0] = [lrel.x, lrel.y, lrel.z, 7.0];
+    point_color[0] = [3.0, 2.7, 2.2, 0.0]; // warm, bright
+
     let globals = Globals {
         view_proj: view_proj.to_cols_array_2d(),
-        light_dir: [light.x, light.y, light.z, 0.0],
-        light_color: [1.0, 0.98, 0.92, 0.0],
-        ambient: [0.5, 0.5, 0.55, 0.0],
-        ..Default::default()
+        light_dir: [0.0, 1.0, 0.0, 0.0],
+        light_color: [0.0, 0.0, 0.0, 0.0], // no directional — isolate the point light
+        ambient: [0.04, 0.04, 0.05, 0.0],
+        point_count: [1.0, 0.0, 0.0, 0.0],
+        point_pos,
+        point_color,
     };
 
-    let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
-    let row: [(TexId, f64); 3] = [(pixelated, -2.6), (smooth, 0.0), (mipped, 2.6)];
-    let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = row
-        .iter()
-        .map(|&(tex, x)| {
+    let mat = MaterialParams::flat([0.9, 0.9, 0.92]);
+    let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = (0..7)
+        .map(|i| {
+            let x = -6.0 + i as f64 * 2.0;
             let t = Transform::from_translation(DVec3::new(x, 0.0, 0.0));
-            (sphere, Some(tex), instance_of_mat(t.render_matrix(cam.world_position), &mat))
+            (sphere, None, instance_of_mat(t.render_matrix(cam.world_position), &mat))
         })
         .collect();
 
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.06, 0.07, 0.1, 1.0]));
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.04, 1.0]));
     save_png(&gpu, &color_tex, &out);
-    println!("wrote {out} — Pixelated | Smooth | Smooth+Mipmaps (left→right)");
+    println!("wrote {out} — one point light at center; spheres fade with distance/range");
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {

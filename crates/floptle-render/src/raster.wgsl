@@ -12,11 +12,31 @@ struct Globals {
     light_dir: vec4<f32>,    // xyz = normalized world-space direction TO the light
     light_color: vec4<f32>,
     ambient: vec4<f32>,
+    point_count: vec4<f32>,            // x = active point-light count
+    point_pos: array<vec4<f32>, 16>,   // xyz camera-relative pos, w = range
+    point_color: array<vec4<f32>, 16>, // rgb = color * intensity
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+
+// Accumulated diffuse from the point lights at camera-relative position `pos_rel`
+// (same space as point_pos) with surface normal `n`. Smooth falloff to 0 at range.
+fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    let count = min(u32(g.point_count.x), 16u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let lp = g.point_pos[i];
+        let to = lp.xyz - pos_rel;
+        let dist = length(to);
+        let range = max(lp.w, 0.0001);
+        let ndl = max(dot(n, to / max(dist, 1e-4)), 0.0);
+        let x = clamp(1.0 - dist / range, 0.0, 1.0);
+        acc = acc + g.point_color[i].rgb * (ndl * x * x);
+    }
+    return acc;
+}
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -88,6 +108,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let ambient = g.ambient.rgb * in.params.w;
     var lit = albedo * (ambient + g.light_color.rgb * ndl);
+    // Placeable point lights (camera-relative; in.view_pos is in the same space).
+    lit += albedo * point_diffuse(in.view_pos, n);
 
     // Blinn-Phong specular, gated to the lit hemisphere.
     let h = normalize(l + v);

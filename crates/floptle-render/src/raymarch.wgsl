@@ -25,6 +25,9 @@ struct Globals {
     terrain_params: vec4<f32>,   // x shininess, y rim_strength, z unlit, w ambient_mul
     terrain_rim: vec4<f32>,      // rgb, a unused
     blobs: array<vec4<f32>, 16>, // each: xyz camera-relative center, w = scale
+    point_count: vec4<f32>,            // x = active point-light count
+    point_pos: array<vec4<f32>, 16>,   // xyz camera-relative pos, w = range
+    point_color: array<vec4<f32>, 16>, // rgb = color * intensity
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
@@ -35,6 +38,23 @@ struct Globals {
 @group(0) @binding(4) var terrain_tex: texture_2d_array<f32>;
 // A REPEAT sampler so triplanar terrain textures tile across the surface.
 @group(0) @binding(5) var terrain_samp: sampler;
+
+// Accumulated diffuse from the point lights at camera-relative position `p` with
+// surface normal `n`. Smooth falloff to 0 at each light's range.
+fn point_diffuse(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    let count = min(u32(G.point_count.x), 16u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let lp = G.point_pos[i];
+        let to = lp.xyz - p;
+        let dist = length(to);
+        let range = max(lp.w, 0.0001);
+        let ndl = max(dot(n, to / max(dist, 1e-4)), 0.0);
+        let x = clamp(1.0 - dist / range, 0.0, 1.0);
+        acc = acc + G.point_color[i].rgb * (ndl * x * x);
+    }
+    return acc;
+}
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -355,6 +375,7 @@ fn fs(in: VOut) -> FsOut {
                 } else {
                     let ambient = G.ambient.rgb * G.terrain_params.w;
                     col = tinted * (ambient + G.light_color.rgb * diff);
+                    col = col + tinted * point_diffuse(p, n); // placeable point lights
                     let h = normalize(l + v);
                     let shininess = max(G.terrain_params.x, 1.0);
                     let spec = pow(max(dot(n, h), 0.0), shininess) * G.terrain_specular.a * select(0.0, 1.0, diff > 0.0);
@@ -365,6 +386,7 @@ fn fs(in: VOut) -> FsOut {
             } else {
                 // BLOB matter keeps its matte look + a subtle low-frequency rim.
                 col = albedo * (G.ambient.rgb + G.light_color.rgb * diff);
+                col = col + albedo * point_diffuse(p, n); // placeable point lights
                 let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
                 col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
             }

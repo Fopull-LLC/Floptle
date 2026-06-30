@@ -38,6 +38,8 @@ pub struct Light {
     pub direction: [f32; 3],
     pub color: [f32; 3],
     pub ambient: [f32; 3],
+    /// Brightness multiplier on the key (directional) light color.
+    pub intensity: f32,
 }
 
 impl Default for Light {
@@ -46,6 +48,7 @@ impl Default for Light {
             direction: [0.4, 0.9, 0.45],
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
+            intensity: 1.0,
         }
     }
 }
@@ -73,6 +76,10 @@ pub enum Matter {
     /// field of view in radians. One camera holds play-mode authority at a time
     /// (`active`); the gameplay view renders from it, switchable for cutscenes.
     Camera { fov_y: f32, active: bool },
+    /// A placeable point/omni light. Its world position is the node's transform
+    /// translation; `range` is the radius at which its contribution falls to ~zero.
+    /// (The scene's single directional/ambient key stays the special `Light` node.)
+    PointLight { color: [f32; 3], intensity: f32, range: f32 },
 }
 
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under
