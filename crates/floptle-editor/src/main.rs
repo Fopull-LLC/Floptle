@@ -699,6 +699,36 @@ fn material_params(m: &Material) -> MaterialParams {
     }
 }
 
+/// The default look for a Blob with no Material: neutral tint plus the subtle blue
+/// rim the blob shipped with, so material-less blobs render exactly as before while a
+/// blob that DOES carry a Material is fully driven by it.
+fn blob_default_material() -> MaterialParams {
+    let mut m = MaterialParams::flat([1.0, 1.0, 1.0]);
+    m.rim = [0.5, 0.6, 0.8];
+    m.rim_strength = 0.12;
+    m
+}
+
+/// Pack up to 16 blobs' materials into the raymarch uniform arrays (tint, emissive,
+/// specular, params=[shininess,rim,unlit,ambient], rim), mirroring `terrain_*`.
+type BlobMatArrays =
+    ([[f32; 4]; 16], [[f32; 4]; 16], [[f32; 4]; 16], [[f32; 4]; 16], [[f32; 4]; 16]);
+fn blob_mat_arrays(set: &[(DVec3, f32, MaterialParams)]) -> BlobMatArrays {
+    let mut tint = [[1.0f32, 1.0, 1.0, 0.0]; 16];
+    let mut emissive = [[0.0f32; 4]; 16];
+    let mut specular = [[1.0f32, 1.0, 1.0, 0.0]; 16];
+    let mut params = [[16.0f32, 0.0, 0.0, 1.0]; 16];
+    let mut rim = [[0.0f32; 4]; 16];
+    for (i, (_, _, m)) in set.iter().take(16).enumerate() {
+        tint[i] = [m.color[0], m.color[1], m.color[2], 0.0];
+        emissive[i] = [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength];
+        specular[i] = [m.specular[0], m.specular[1], m.specular[2], m.specular_strength];
+        params[i] = [m.shininess, m.rim_strength, if m.unlit { 1.0 } else { 0.0 }, m.ambient];
+        rim[i] = [m.rim[0], m.rim[1], m.rim[2], 0.0];
+    }
+    (tint, emissive, specular, params, rim)
+}
+
 /// Collect up to 16 placeable point lights from the world into the camera-relative
 /// uniform arrays (xyz pos + range; rgb = color×intensity) for the raster + raymarch
 /// passes. Returns (count_vec4, positions, colors).
@@ -4947,7 +4977,7 @@ impl Editor {
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
-        let mut blobs: Vec<(DVec3, f32)> = Vec::new();
+        let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         if let Some((path, pos)) = &drag_ghost {
             if let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
@@ -4977,7 +5007,8 @@ impl Editor {
                     }
                 }
                 Matter::Blob { scale } => {
-                    blobs.push((t.translation, scale * t.scale.x));
+                    let mp = mat.as_ref().map(material_params).unwrap_or_else(blob_default_material);
+                    blobs.push((t.translation, scale * t.scale.x, mp));
                 }
                 Matter::Mesh { asset_path } => {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
@@ -5018,13 +5049,14 @@ impl Editor {
         };
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
-        let make_rm = |set: &[(DVec3, f32)]| -> RaymarchGlobals {
+        let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
             let mut arr = [[0.0f32; 4]; 16];
             let n = set.len().min(16);
-            for (i, (center, scale)) in set.iter().take(16).enumerate() {
+            for (i, (center, scale, _)) in set.iter().take(16).enumerate() {
                 let c = (*center - cam.world_position).as_vec3();
                 arr[i] = [c.x, c.y, c.z, scale.max(0.05)];
             }
+            let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) = blob_mat_arrays(set);
             let tm = &terrain_mat;
             RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
@@ -5046,6 +5078,11 @@ impl Editor {
                 point_count: pl_count,
                 point_pos: pl_pos,
                 point_color: pl_col,
+                blob_tint,
+                blob_emissive,
+                blob_specular,
+                blob_params,
+                blob_rim,
             }
         };
 
@@ -5073,7 +5110,12 @@ impl Editor {
                         }
                     }
                     Matter::Blob { scale } => {
-                        mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x)]));
+                        let mp = self
+                            .world
+                            .get::<Material>(e)
+                            .map(material_params)
+                            .unwrap_or_else(blob_default_material);
+                        mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x, mp)]));
                     }
                     Matter::Empty
                     | Matter::Terrain { .. }
@@ -6638,7 +6680,7 @@ impl Editor {
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
-        let mut blobs: Vec<(DVec3, f32)> = Vec::new();
+        let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         for (ent, matter) in &ents {
             let t = floptle_core::world_transform(&self.world, *ent);
             let mat = self.world.get::<Material>(*ent).cloned();
@@ -6655,7 +6697,10 @@ impl Editor {
                         instances.push((mesh, tex, instance_of_mat(model, &mp)));
                     }
                 }
-                Matter::Blob { scale } => blobs.push((t.translation, scale * t.scale.x)),
+                Matter::Blob { scale } => {
+                    let mp = mat.as_ref().map(material_params).unwrap_or_else(blob_default_material);
+                    blobs.push((t.translation, scale * t.scale.x, mp));
+                }
                 Matter::Mesh { asset_path } => {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
@@ -6679,11 +6724,13 @@ impl Editor {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
             if show_blobs {
-                for (i, (c, s)) in blobs.iter().take(16).enumerate() {
+                for (i, (c, s, _)) in blobs.iter().take(16).enumerate() {
                     let cr = (*c - cam.world_position).as_vec3();
                     arr[i] = [cr.x, cr.y, cr.z, s.max(0.05)];
                 }
             }
+            let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) =
+                if show_blobs { blob_mat_arrays(&blobs) } else { blob_mat_arrays(&[]) };
             let tm = &terrain_mat;
             let mut g = RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
@@ -6705,6 +6752,11 @@ impl Editor {
                 point_count: pl_count,
                 point_pos: pl_pos,
                 point_color: pl_col,
+                blob_tint,
+                blob_emissive,
+                blob_specular,
+                blob_params,
+                blob_rim,
             };
             if let Some((hf, bc)) =
                 self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))

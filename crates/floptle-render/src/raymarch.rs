@@ -50,6 +50,18 @@ pub struct RaymarchGlobals {
     pub point_pos: [[f32; 4]; 16],
     /// Each point light's rgb = color × intensity (w unused).
     pub point_color: [[f32; 4]; 16],
+    /// Per-blob surface material (same model as `terrain_*`), indexed by blob so each
+    /// blob honors its own assigned Material instead of a single hardcoded look.
+    /// `blob_tint`: rgb tint × the blob's procedural color, a = unused.
+    pub blob_tint: [[f32; 4]; 16],
+    /// rgb emissive, a = strength.
+    pub blob_emissive: [[f32; 4]; 16],
+    /// rgb specular, a = strength.
+    pub blob_specular: [[f32; 4]; 16],
+    /// x = shininess, y = rim strength, z = unlit (0/1), w = ambient multiplier.
+    pub blob_params: [[f32; 4]; 16],
+    /// rgb rim/fresnel color, a = unused.
+    pub blob_rim: [[f32; 4]; 16],
 }
 
 impl Default for RaymarchGlobals {
@@ -76,6 +88,11 @@ impl Default for RaymarchGlobals {
             point_count: [0.0; 4],
             point_pos: [[0.0; 4]; 16],
             point_color: [[0.0; 4]; 16],
+            blob_tint: [[1.0, 1.0, 1.0, 0.0]; 16],
+            blob_emissive: [[0.0; 4]; 16],
+            blob_specular: [[1.0, 1.0, 1.0, 0.0]; 16],
+            blob_params: [[16.0, 0.0, 0.0, 1.0]; 16],
+            blob_rim: [[0.0; 4]; 16],
         }
     }
 }
