@@ -8138,6 +8138,7 @@ impl Editor {
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
+        self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         self.scene_dirty = false;
         self.asset_tree = build_assets(&self.project_root);
         println!("  new scene: {}", path.display());
@@ -8371,6 +8372,7 @@ impl Editor {
         // A different project's models live behind the same path strings, so drop the
         // old GPU-mesh cache before re-importing (else import_model early-returns).
         self.mesh_registry.clear();
+        self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         // Re-register any meshes the new scene references.
         let mesh_paths: Vec<String> = self
             .world
@@ -8416,6 +8418,7 @@ impl Editor {
         self.playing = false;
         self.paused = false;
         self.mesh_registry.clear();
+        self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
     }
 
     fn save_scene(&self) {
