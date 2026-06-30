@@ -342,6 +342,8 @@ pub struct MaterialDoc {
     pub unlit: bool,
     #[serde(default = "one_f32")]
     pub ambient: f32,
+    #[serde(default = "one_f32")]
+    pub alpha: f32,
 }
 
 fn white3() -> [f32; 3] {
@@ -374,6 +376,7 @@ impl MaterialDoc {
             rim_strength: self.rim_strength,
             unlit: self.unlit,
             ambient: self.ambient,
+            alpha: self.alpha,
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -389,6 +392,7 @@ impl MaterialDoc {
             rim_strength: m.rim_strength,
             unlit: m.unlit,
             ambient: m.ambient,
+            alpha: m.alpha,
         }
     }
 }

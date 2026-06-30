@@ -57,6 +57,7 @@ fn main() {
         rim_strength: 1.2,
         unlit: false,
         ambient: 1.0,
+        alpha: 1.0,
     };
 
     // The exact orbit-camera math the editor preview uses (spin angle 0.7 rad).

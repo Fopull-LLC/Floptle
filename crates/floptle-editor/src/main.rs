@@ -634,6 +634,12 @@ fn material_props_ui(
             ui.label("ambient");
             r.changed |= ui.add(egui::Slider::new(&mut m.ambient, 0.0..=4.0)).changed();
             ui.end_row();
+            ui.label("opacity");
+            r.changed |= ui
+                .add(egui::Slider::new(&mut m.alpha, 0.0..=1.0))
+                .on_hover_text("1 = opaque; below 1 alpha-blends over the scene (drawn after opaque objects)")
+                .changed();
+            ui.end_row();
         });
     });
 
@@ -674,6 +680,7 @@ fn material_params(m: &Material) -> MaterialParams {
         rim_strength: m.rim_strength,
         unlit: m.unlit,
         ambient: m.ambient,
+        alpha: m.alpha,
     }
 }
 
@@ -4241,11 +4248,12 @@ impl Editor {
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
-        // In play mode's GAME view, render from the active camera node; otherwise use
-        // the editor's free-fly camera (the scene view). (Inlined — self methods can't
-        // be called while gpu/egui are borrowed.)
+        // In GAME view, render from the active camera node; otherwise use the editor's
+        // free-fly camera (the scene view). Game view works whether or not we're playing
+        // — so you can frame/preview the active camera's shot without entering play.
+        // (Inlined — self methods can't be called while gpu/egui are borrowed.)
         let cam = {
-            let active = if self.playing && self.game_view {
+            let active = if self.game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
                     matches!(m, Matter::Camera { active: true, .. }).then_some(e)
                 })
@@ -4273,7 +4281,7 @@ impl Editor {
         // Camera frustum gizmos so cameras are visible/placeable (hidden in the game
         // view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
-        if !(self.playing && self.game_view) {
+        if !self.game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             let cams: Vec<(Entity, f32, bool)> = self
                 .world
@@ -4393,6 +4401,24 @@ impl Editor {
         }
 
         let clear = [0.02f32, 0.02, 0.05, 1.0];
+        // The terrain's surface Material (active terrain's, or any terrain that has one)
+        // so terrain shades like the rest of the scene. Neutral default = plain matte.
+        // (Inlined via disjoint field access — a `&self` method can't be called here
+        // while gpu/raster/etc. are mutably borrowed for the render.)
+        let terrain_mat = {
+            let pick = self
+                .active_terrain
+                .filter(|e| self.world.get::<Material>(*e).is_some())
+                .or_else(|| {
+                    self.terrains
+                        .keys()
+                        .copied()
+                        .find(|&e| self.world.get::<Material>(e).is_some())
+                });
+            pick.and_then(|e| self.world.get::<Material>(e))
+                .map(material_params)
+                .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+        };
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
         let make_rm = |set: &[(DVec3, f32)]| -> RaymarchGlobals {
@@ -4402,6 +4428,7 @@ impl Editor {
                 let c = (*center - cam.world_position).as_vec3();
                 arr[i] = [c.x, c.y, c.z, scale.max(0.05)];
             }
+            let tm = &terrain_mat;
             RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -4413,6 +4440,11 @@ impl Editor {
                 params: [elapsed, n as f32, 0.0, 0.0],
                 vol_center: [0.0, 0.0, 0.0, 0.0], // no baked volume in v1
                 vol_half: [1.0, 1.0, 1.0, 0.5],
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
+                terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
+                terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
+                terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
+                terrain_rim: [tm.rim[0], tm.rim[1], tm.rim[2], 0.0],
                 blobs: arr,
             }
         };
@@ -4611,19 +4643,20 @@ impl Editor {
                         if ui.button(pause_label).clicked() {
                             cmd.toggle_pause = true;
                         }
-                        ui.separator();
-                        // Differentiate the gameplay view (active camera) from the
-                        // editor scene view (free-fly camera).
-                        ui.label("view:");
-                        if ui.selectable_label(*game_view, "⏵ Game").on_hover_text("render from the active camera").clicked() {
-                            *game_view = true;
-                        }
-                        if ui.selectable_label(!*game_view, "⌖ Editor").on_hover_text("free-fly editor camera").clicked() {
-                            *game_view = false;
-                        }
-                        if *game_view && !has_active_camera {
-                            ui.colored_label(egui::Color32::from_rgb(235, 200, 90), "Δ no active camera — using editor view");
-                        }
+                    }
+                    ui.separator();
+                    // Differentiate the gameplay view (active camera) from the editor
+                    // scene view (free-fly camera). Available out of play too, so you can
+                    // preview what the active camera sees without entering play mode.
+                    ui.label("view:");
+                    if ui.selectable_label(*game_view, "⏵ Game").on_hover_text("render from the active camera").clicked() {
+                        *game_view = true;
+                    }
+                    if ui.selectable_label(!*game_view, "⌖ Editor").on_hover_text("free-fly editor camera").clicked() {
+                        *game_view = false;
+                    }
+                    if *game_view && !has_active_camera {
+                        ui.colored_label(egui::Color32::from_rgb(235, 200, 90), "Δ no active camera — using editor view");
                     }
                 });
             });
@@ -6487,6 +6520,26 @@ impl Editor {
         })
     }
 
+    /// The surface [`Material`] that drives terrain shading. Terrain uses the same
+    /// lighting model as the meshes, so this picks whose lighting params (ambient,
+    /// specular/reflectiveness, rim, emissive, unlit, color tint) the combined terrain
+    /// adopts: the active terrain's material if it has one, else any terrain that has
+    /// one, else a neutral matte default. Per-terrain color still comes from painting.
+    fn terrain_material(&self) -> MaterialParams {
+        let pick = self
+            .active_terrain
+            .filter(|e| self.world.get::<Material>(*e).is_some())
+            .or_else(|| {
+                self.terrains
+                    .keys()
+                    .copied()
+                    .find(|&e| self.world.get::<Material>(e).is_some())
+            });
+        pick.and_then(|e| self.world.get::<Material>(e))
+            .map(material_params)
+            .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+    }
+
     fn rebuild_combined(&mut self) {
         if self.terrains.is_empty() {
             self.combined = None;
@@ -6952,7 +7005,12 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             scale: [1.0, 1.0, 1.0],
         },
         matter: floptle_scene::MatterDoc::Camera { fov_y: 60f32.to_radians(), active: true },
-        scripts: Vec::new(),
+        // The default camera flies on play (hold right-mouse to look, WASD to move).
+        scripts: vec![floptle_scene::ScriptDoc {
+            kind: "freelook".into(),
+            enabled: true,
+            params: Vec::new(),
+        }],
         material: None,
         parent: None,
     }

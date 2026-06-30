@@ -30,8 +30,45 @@ pub struct RaymarchGlobals {
     pub vol_center: [f32; 4],
     /// xyz half-extent, w = blend radius k.
     pub vol_half: [f32; 4],
+    /// Terrain surface material (mirrors the raster `MaterialParams`) so terrain shades
+    /// with the same lighting model as the meshes instead of a hardcoded look. Ignored
+    /// by blobs. `terrain_tint`: rgb tint (× painted albedo), a = unused.
+    pub terrain_tint: [f32; 4],
+    /// rgb emissive, a = strength.
+    pub terrain_emissive: [f32; 4],
+    /// rgb specular, a = strength.
+    pub terrain_specular: [f32; 4],
+    /// x = shininess, y = rim strength, z = unlit (0/1), w = ambient multiplier.
+    pub terrain_params: [f32; 4],
+    /// rgb rim/fresnel color, a = unused.
+    pub terrain_rim: [f32; 4],
     /// Up to 16 blobs: each xyz camera-relative center, w = scale.
     pub blobs: [[f32; 4]; 16],
+}
+
+impl Default for RaymarchGlobals {
+    fn default() -> Self {
+        // A neutral terrain material (white tint, no emissive/specular/rim, ambient×1)
+        // matching `Material::default()`; everything else zero.
+        Self {
+            view_proj: [[0.0; 4]; 4],
+            inv_view_proj: [[0.0; 4]; 4],
+            light_dir: [0.0; 4],
+            light_color: [0.0; 4],
+            ambient: [0.0; 4],
+            bg: [0.0; 4],
+            center: [0.0; 4],
+            params: [0.0; 4],
+            vol_center: [0.0; 4],
+            vol_half: [1.0, 1.0, 1.0, 0.5],
+            terrain_tint: [1.0, 1.0, 1.0, 1.0],
+            terrain_emissive: [0.0; 4],
+            terrain_specular: [1.0, 1.0, 1.0, 0.0],
+            terrain_params: [16.0, 0.0, 0.0, 1.0],
+            terrain_rim: [0.0; 4],
+            blobs: [[0.0; 4]; 16],
+        }
+    }
 }
 
 /// Max blobs the raymarch shader folds together in one pass.

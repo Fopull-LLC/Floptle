@@ -1,5 +1,6 @@
-//! Editor reference grid — a depth-tested wireframe grid on the y=0 plane, centered
-//! near the camera so it's always underfoot. Camera-relative (ADR-0015): line
+//! Editor reference grid — a depth-tested wireframe grid on a horizontal plane that
+//! sits just below the camera (snapped to the grid spacing), centered near the camera
+//! so it's always underfoot at any altitude. Camera-relative (ADR-0015): line
 //! endpoints are offset to the camera before upload, so the GPU never sees a large
 //! coordinate. Cheap enough to regenerate every frame.
 
@@ -117,7 +118,8 @@ impl Grid {
 
     /// Draw the grid into the (already-filled) color + depth targets. `size` is the
     /// spacing between lines and `extent` the number of cells out from the center
-    /// (which tracks the camera, snapped to `size`).
+    /// (which tracks the camera in X/Z/Y, snapped to `size` — the plane sits on the
+    /// grid line just below the camera).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -134,9 +136,13 @@ impl Grid {
         let n = extent.clamp(1, 200);
         let cx = (cam_world.x / size).round() * size;
         let cz = (cam_world.z / size).round() * size;
+        // Follow the camera's height too: place the plane on the grid line at or just
+        // below the camera (floor-snap), so it stays a useful floor reference at any
+        // altitude instead of being stuck at world y=0.
+        let cy = (cam_world.y / size).floor() * size;
         let half = n as f64 * size;
         let rel = |wx: f64, wz: f64| -> [f32; 3] {
-            [(wx - cam_world.x) as f32, -cam_world.y as f32, (wz - cam_world.z) as f32]
+            [(wx - cam_world.x) as f32, (cy - cam_world.y) as f32, (wz - cam_world.z) as f32]
         };
         let mut verts: Vec<[f32; 3]> = Vec::with_capacity(((2 * n + 1) * 4) as usize);
         for i in -n..=n {

@@ -88,6 +88,7 @@ fn main() {
         vol_center: [0.0, 0.0, 0.0, 0.0],
         vol_half: [1.0, 1.0, 1.0, 0.5],
         blobs,
+        ..Default::default()
     };
 
     // Same draw order as the editor: blob first (clears + writes depth), then the
