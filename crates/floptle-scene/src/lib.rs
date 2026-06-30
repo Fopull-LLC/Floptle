@@ -565,7 +565,7 @@ mod tests {
     fn demo() -> SceneDoc {
         SceneDoc {
             name: "demo".into(),
-            lighting: LightDoc::default(),
+            lighting: LightDoc { intensity: 2.5, ..LightDoc::default() },
             nodes: vec![
                 NodeDoc {
                     name: "cube".into(),
@@ -593,6 +593,22 @@ mod tests {
                     material: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
+                NodeDoc {
+                    name: "lamp".into(),
+                    transform: TransformDoc::default(),
+                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 },
+                    scripts: Vec::new(),
+                    material: None,
+                    parent: None,
+                },
+                NodeDoc {
+                    name: "eye".into(),
+                    transform: TransformDoc::default(),
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true },
+                    scripts: Vec::new(),
+                    material: None,
+                    parent: None,
+                },
             ],
         }
     }
@@ -610,15 +626,25 @@ mod tests {
         let doc = demo();
         let mut world = World::new();
         spawn_into(&doc, &mut world);
-        // 2 matter nodes + the mandatory Lighting node
-        assert_eq!(world.len(), 3);
+        // 4 matter nodes (cube, blob, lamp, eye) + the mandatory Lighting node
+        assert_eq!(world.len(), 5);
         let snap = to_doc("demo", &world);
-        assert_eq!(snap.nodes.len(), 2);
-        assert_eq!(snap.lighting, LightDoc::default());
+        assert_eq!(snap.nodes.len(), 4);
+        // non-default directional intensity survives
+        assert_eq!(snap.lighting.intensity, 2.5);
         // the cube's authored translation survives the World round-trip
         let cube = snap.nodes.iter().find(|n| n.name == "cube").unwrap();
         assert_eq!(cube.transform.translation, [1.0, 2.0, 3.0]);
         assert!(matches!(cube.matter, MatterDoc::Primitive { shape: ShapeDoc::Cube, .. }));
+        // the point light's color/intensity/range round-trip
+        let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
+        assert_eq!(
+            lamp.matter,
+            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 }
+        );
+        // the camera's fov/active round-trip
+        let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
+        assert_eq!(eye.matter, MatterDoc::Camera { fov_y: 1.0, active: true });
     }
 }
 

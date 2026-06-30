@@ -565,7 +565,25 @@ fn lvalue_start(out: &[u8], end: usize) -> usize {
             }
             continue;
         }
-        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
+        if c == b')' {
+            // Balance back to the matching '(' — a call/parenthesized receiver, so
+            // `f().x` / `(a).b` are captured whole rather than just the trailing field.
+            let mut depth = 0;
+            while j > 0 {
+                let d = out[j - 1];
+                j -= 1;
+                if d == b')' {
+                    depth += 1;
+                } else if d == b'(' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b':' {
             j -= 1;
             continue;
         }
@@ -591,6 +609,16 @@ fn preprocess(src: &str) -> String {
 
         // Line / long comment.
         if c == b'-' && b.get(i + 1) == Some(&b'-') {
+            // A comment can't be part of a rewritten RHS — close it first, so
+            // `x += 1 -- note` becomes `x = x + (1) -- note`, not `(1 -- note)`.
+            if pending_close {
+                while out.last().is_some_and(|&p| p == b' ' || p == b'\t') {
+                    out.pop();
+                }
+                out.push(b')');
+                out.push(b' ');
+                pending_close = false;
+            }
             out.push(b'-');
             out.push(b'-');
             i += 2;
@@ -644,9 +672,11 @@ fn preprocess(src: &str) -> String {
             continue;
         }
 
-        // A block-ending keyword also terminates a rewritten RHS (e.g. the `end` in
-        // `if c then x += 1 end`). These are reserved words, so they can't be part of
-        // the expression. Close the paren before copying the keyword.
+        // A block-ending or statement-introducing keyword also terminates a rewritten
+        // RHS (the `end` in `if c then x += 1 end`, or the `return` in
+        // `function f() x += 1 return x end`). These are reserved words that can't be
+        // part of the expression, so close the paren before copying the keyword.
+        // (`function` is excluded — it can begin an anonymous-function expression.)
         if pending_close && (c.is_ascii_alphabetic() || c == b'_') {
             let prev_ident = out.last().is_some_and(|&p| p.is_ascii_alphanumeric() || p == b'_');
             if !prev_ident {
@@ -655,7 +685,22 @@ fn preprocess(src: &str) -> String {
                     k += 1;
                 }
                 let word = std::str::from_utf8(&b[i..k]).unwrap_or("");
-                if matches!(word, "end" | "else" | "elseif" | "then" | "do" | "until") {
+                if matches!(
+                    word,
+                    "end" | "else"
+                        | "elseif"
+                        | "then"
+                        | "do"
+                        | "until"
+                        | "return"
+                        | "local"
+                        | "break"
+                        | "goto"
+                        | "if"
+                        | "while"
+                        | "for"
+                        | "repeat"
+                ) {
                     while out.last().is_some_and(|&p| p == b' ' || p == b'\t') {
                         out.pop();
                     }
@@ -885,6 +930,22 @@ mod tests {
     fn preprocess_preserves_line_count() {
         let src = "x += 1\ny -= 2\n-- z += 3\n";
         assert_eq!(preprocess(src).matches('\n').count(), src.matches('\n').count());
+    }
+
+    #[test]
+    fn preprocess_closes_rhs_at_comments_and_statements() {
+        // Trailing comment must not be swallowed into the RHS parentheses.
+        assert_eq!(preprocess("x += 1 -- note"), "x = x + (1) -- note");
+        assert_eq!(preprocess("s ..= 'z' -- c"), "s = s .. ('z') -- c");
+        // A call/parenthesized receiver lvalue is captured whole.
+        assert_eq!(preprocess("f().x += 1"), "f().x = f().x + (1)");
+        assert_eq!(preprocess("(a).b -= 2"), "(a).b = (a).b - (2)");
+        // A statement-introducing keyword on the same line terminates the RHS.
+        assert_eq!(
+            preprocess("function f() x += 1 return x end"),
+            "function f() x = x + (1) return x end"
+        );
+        assert_eq!(preprocess("while c do n += 1 end"), "while c do n = n + (1) end");
     }
 
     #[test]
