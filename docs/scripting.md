@@ -113,6 +113,25 @@ Available while playing.
 Key names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`, `backspace`,
 `delete`, `shift`, `ctrl`, `alt`, and arrows `left` `right` `up` `down`.
 
+### Raycasting
+
+`raycast(ox,oy,oz, dx,dy,dz, max)` casts a ray against the world's colliders (the
+terrain **and** any walkable mesh colliders) and returns a hit table or `nil`:
+
+```lua
+-- ground within 1.2 units below me?
+local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2)
+if h then
+  -- h.x, h.y, h.z   the hit point
+  -- h.nx, h.ny, h.nz the surface normal there
+  -- h.distance       how far the ray travelled
+end
+```
+
+Use it for ground checks, line-of-sight, shooting, or dropping objects onto a surface.
+(The built-in `node.grounded` already does a robust contact check for the character;
+raycast is the general-purpose tool for everything else.)
+
 ## 6. Globals: `params`, `time`, `dt`, `log`
 
 | Global | Meaning |
