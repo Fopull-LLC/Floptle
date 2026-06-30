@@ -28,13 +28,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
 
 use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Scripts, World};
+use floptle_core::{Entity, Material, Matter, Scripts, World};
 use mlua::{Function, Lua, RegistryKey, Table, Value, Variadic};
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -139,6 +139,18 @@ pub struct ScriptHost {
     scene: Rc<RefCell<SceneMirror>>,
     /// Live per-(entity, script) environments, for script handles.
     envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
+    /// Mesh model paths scripts wrote this frame (entity index → new asset path), applied
+    /// to the ECS `Matter::Mesh` in `run` and drained by the editor to re-import the GPU mesh.
+    model_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// Material refs scripts assigned this frame (entity index → preset name / asset path),
+    /// resolved against `materials` and applied to the ECS in `run`.
+    material_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// The material presets the editor lends each frame (name → Material), so a script can
+    /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
+    materials: Rc<RefCell<HashMap<String, Material>>>,
+    /// The project root, so `assets.getFile` / `assets.getContents` can resolve paths the
+    /// dev writes relative to it (the `Assets/` folder). Set by the editor each frame.
+    project_root: Rc<RefCell<PathBuf>>,
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from
@@ -156,6 +168,8 @@ struct SceneMirror {
     scripts: HashMap<u32, Vec<String>>,
     /// Live transforms (read/written by node handles; flushed to the ECS after `run`).
     transforms: HashMap<u32, Transform>,
+    /// Mesh nodes' current model path (so a script can read `node.model`).
+    models: HashMap<u32, String>,
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
@@ -175,6 +189,10 @@ struct Shared {
     /// (entity index, script kind) → that instance's live Lua environment table, so a
     /// script handle can read its state, call its methods, and read its params.
     envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
+    /// `node.model = ...` writes (entity index → asset path), applied to `Matter::Mesh`.
+    model_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// `node.material = ...` writes (entity index → preset name / asset path).
+    material_changes: Rc<RefCell<HashMap<u32, String>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -367,6 +385,57 @@ impl ScriptHost {
             }
         }
 
+        // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
+        // `Assets/` folder by a path the dev writes relative to it (e.g. "models/armor.glb").
+        // getFile returns the full asset path (or nil if missing); getContents returns an
+        // array of every file's path under a directory (recursive), for building tables of
+        // assets. The returned strings are exactly what `node.model` / `node.material` accept.
+        let project_root: Rc<RefCell<PathBuf>> = Rc::new(RefCell::new(PathBuf::from("assets")));
+        if let Ok(t) = lua.create_table() {
+            let pr = project_root.clone();
+            let _ = t.set(
+                "getFile",
+                lua.create_function(move |lua, path: String| {
+                    let full = pr.borrow().join(&path);
+                    Ok(if full.is_file() {
+                        Value::String(lua.create_string(full.to_string_lossy().as_bytes())?)
+                    } else {
+                        Value::Nil
+                    })
+                })
+                .ok(),
+            );
+            let pr2 = project_root.clone();
+            let _ = t.set(
+                "getContents",
+                lua.create_function(move |lua, dir: String| {
+                    let base = pr2.borrow().join(&dir);
+                    let mut files: Vec<String> = Vec::new();
+                    let mut stack = vec![base];
+                    while let Some(d) = stack.pop() {
+                        if let Ok(rd) = std::fs::read_dir(&d) {
+                            for entry in rd.flatten() {
+                                let p = entry.path();
+                                if p.is_dir() {
+                                    stack.push(p);
+                                } else if p.is_file() {
+                                    files.push(p.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                    files.sort();
+                    let arr = lua.create_table()?;
+                    for (i, f) in files.iter().enumerate() {
+                        arr.set(i + 1, lua.create_string(f.as_bytes())?)?;
+                    }
+                    Ok(arr)
+                })
+                .ok(),
+            );
+            let _ = lua.globals().set("assets", t);
+        }
+
         // The cross-node / cross-script reference layer: a scene-graph mirror plus Lua
         // `node`/`script` handles and the `find`/`findScript` globals (see
         // `install_handle_api`). Shared (interior-mutable) with the handle closures.
@@ -376,6 +445,8 @@ impl ScriptHost {
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
+            model_changes: Rc::new(RefCell::new(HashMap::new())),
+            material_changes: Rc::new(RefCell::new(HashMap::new())),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -394,6 +465,10 @@ impl ScriptHost {
             colliders,
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
+            model_changes: shared.model_changes.clone(),
+            material_changes: shared.material_changes.clone(),
+            materials: Rc::new(RefCell::new(HashMap::new())),
+            project_root,
         }
     }
 
@@ -431,6 +506,25 @@ impl ScriptHost {
     /// the editor to apply to the sim (crouch). Call after [`run`](Self::run).
     pub fn take_body_height_changes(&self) -> HashMap<u32, f32> {
         std::mem::take(&mut *self.body_height_changes.borrow_mut())
+    }
+
+    /// Lend the material presets (name → Material) so a script can apply one with
+    /// `node.material = "<name>"`. Call before [`run`](Self::run).
+    pub fn set_materials(&self, map: HashMap<String, Material>) {
+        *self.materials.borrow_mut() = map;
+    }
+
+    /// Point `assets.getFile` / `assets.getContents` at the project's asset root (the
+    /// `Assets/` folder). Paths the dev writes are resolved relative to this.
+    pub fn set_project_root(&self, root: PathBuf) {
+        *self.project_root.borrow_mut() = root;
+    }
+
+    /// Drain the mesh model swaps scripts wrote this frame (entity index → new asset
+    /// path), so the editor can re-import the GPU mesh. The `Matter::Mesh` component is
+    /// already updated by [`run`](Self::run); this only signals which paths to load.
+    pub fn take_model_changes(&self) -> HashMap<u32, String> {
+        std::mem::take(&mut *self.model_changes.borrow_mut())
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
@@ -524,6 +618,28 @@ impl ScriptHost {
         }
         // Flush transforms that a handle wrote on OTHER nodes back to the ECS.
         self.flush_scene(world);
+        // Apply script-driven component swaps: mesh model + material. (Model paths stay in
+        // `model_changes` for the editor to drain and re-import the GPU mesh; materials are
+        // resolved here against the lent preset map and applied directly.)
+        {
+            let scene = self.scene.borrow();
+            for (eid, path) in self.model_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if let Some(Matter::Mesh { asset_path }) = world.get_mut::<Matter>(ent) {
+                        *asset_path = path.clone();
+                    }
+                }
+            }
+            let mats = self.materials.borrow();
+            for (eid, refstr) in self.material_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if let Some(m) = mats.get(&material_key(refstr)) {
+                        world.insert(ent, m.clone());
+                    }
+                }
+            }
+        }
+        self.material_changes.borrow_mut().clear();
 
         // Drop environments whose (node, script) no longer exists.
         let stale: Vec<(u32, String)> =
@@ -547,11 +663,15 @@ impl ScriptHost {
         s.transforms.clear();
         s.ents.clear();
         s.dirty.clear();
+        s.models.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
             s.ents.insert(id, e);
             s.transforms.insert(id, *tr);
+            if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) {
+                s.models.insert(id, asset_path.clone());
+            }
             if let Some(n) = world.get::<floptle_core::Name>(e) {
                 s.names.insert(id, n.0.clone());
             }
@@ -1186,6 +1306,15 @@ fn as_num(v: &Value) -> Option<f64> {
     }
 }
 
+/// The preset name a `node.material = ...` ref resolves to: the file stem of a path
+/// (`"assets/materials/Gold.ron"` → `"Gold"`) or the bare name as given (`"Gold"`).
+fn material_key(refstr: &str) -> String {
+    Path::new(refstr)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| refstr.to_string())
+}
+
 /// Install the cross-node / cross-script reference layer into the Lua state: the `node`
 /// and `script` metatables (transform/body access + hierarchy traversal + method/state
 /// access) and the `find` / `findAll` / `findScript` globals. The handle closures share
@@ -1238,6 +1367,15 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                     let p = scene.borrow().parent.get(&e).copied();
                     return Ok(match p {
                         Some(p) => Value::Table(new_node_handle(lua, p)?),
+                        None => Value::Nil,
+                    });
+                }
+                // The mesh node's current model path (nil on non-mesh nodes). Assigning it
+                // (see __newindex) swaps the model at runtime.
+                "model" => {
+                    let m = scene.borrow().models.get(&e).cloned();
+                    return Ok(match m {
+                        Some(p) => Value::String(lua.create_string(&p)?),
                         None => Value::Nil,
                     });
                 }
@@ -1294,6 +1432,8 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
         let bodies = shared.bodies.clone();
         let body_changes = shared.body_changes.clone();
         let body_height = shared.body_height_changes.clone();
+        let model_changes = shared.model_changes.clone();
+        let material_changes = shared.material_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // Transform writes.
@@ -1385,6 +1525,23 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                 "height" => {
                     if let Some(n) = as_num(&val) {
                         body_height.borrow_mut().insert(e, n as f32);
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+            // Component swaps (applied to the ECS at the end of `run`): the mesh model path
+            // and a material (preset name or `assets.getFile("materials/X.ron")`).
+            match key.as_str() {
+                "model" => {
+                    if let Value::String(s) = &val {
+                        model_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                    }
+                    return Ok(());
+                }
+                "material" => {
+                    if let Value::String(s) = &val {
+                        material_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
                     }
                     return Ok(());
                 }
@@ -1985,5 +2142,88 @@ mod tests {
             "manager.x = {}",
             world.get::<Transform>(mgr).unwrap().translation.x
         );
+    }
+
+    #[test]
+    fn script_reads_and_swaps_mesh_model() {
+        // node.model reflects the current Mesh asset; assigning it swaps the model
+        // (applied to the ECS in run + reported via take_model_changes for re-import).
+        let dir = std::env::temp_dir().join("floptle_script_test_model");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "swap",
+            "function update(node, dt)\n  if node.model == \"assets/models/old.glb\" then node.model = \"assets/models/new.glb\" end\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "assets/models/old.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "swap".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        match world.get::<Matter>(e).unwrap() {
+            Matter::Mesh { asset_path } => assert_eq!(asset_path, "assets/models/new.glb"),
+            other => panic!("expected mesh, got {other:?}"),
+        }
+        let changes = host.take_model_changes();
+        assert_eq!(changes.get(&e.index()).map(|s| s.as_str()), Some("assets/models/new.glb"));
+    }
+
+    #[test]
+    fn script_applies_material_preset() {
+        // node.material = "<name>" resolves against the lent presets and inserts a Material.
+        let dir = std::env::temp_dir().join("floptle_script_test_material");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "paint", "function update(node, dt)\n  node.material = \"Gold\"\nend\n");
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "paint".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        let mut mats = HashMap::new();
+        mats.insert("Gold".to_string(), Material::tinted([1.0, 0.84, 0.0]));
+        host.set_materials(mats);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let mat = world.get::<Material>(e).expect("material applied");
+        assert_eq!(mat.color, [1.0, 0.84, 0.0]);
+    }
+
+    #[test]
+    fn assets_api_resolves_under_project_root() {
+        // assets.getFile returns the path for an existing file (nil for a missing one);
+        // assets.getContents lists a directory. Encode the three results into node.x.
+        let root = std::env::temp_dir().join("floptle_script_test_assets_root");
+        let models = root.join("models");
+        let _ = std::fs::create_dir_all(&models);
+        let _ = std::fs::write(models.join("armor.glb"), b"x");
+        let dir = std::env::temp_dir().join("floptle_script_test_assets_scripts");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "probe",
+            "function update(node, dt)\n  local f = assets.getFile(\"models/armor.glb\")\n  local missing = assets.getFile(\"models/nope.glb\")\n  local c = assets.getContents(\"models\")\n  node.x = (f ~= nil and 1 or 0) + (missing == nil and 10 or 0) + (#c == 1 and 100 or 0)\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "probe".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_project_root(root);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 111.0);
     }
 }

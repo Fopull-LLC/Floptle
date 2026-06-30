@@ -15,10 +15,11 @@ it up immediately.
 4. [`node` — the physics body](#4-node--the-physics-body)
 5. [`input` — keyboard & mouse](#5-input--keyboard--mouse)
 6. [Globals: `params`, `time`, `dt`, `log`](#6-globals-params-time-dt-log)
-7. [Referencing other nodes & scripts](#7-referencing-other-nodes--scripts)
-8. [Recipe: a walkable first-person character](#8-recipe-a-walkable-first-person-character)
-9. [Bundled example scripts](#9-bundled-example-scripts)
-10. [Tips & gotchas](#10-tips--gotchas)
+7. [Assets & swapping models / materials](#7-assets--swapping-models--materials)
+8. [Referencing other nodes & scripts](#8-referencing-other-nodes--scripts)
+9. [Recipe: a walkable first-person character](#9-recipe-a-walkable-first-person-character)
+10. [Bundled example scripts](#10-bundled-example-scripts)
+11. [Tips & gotchas](#11-tips--gotchas)
 
 ---
 
@@ -149,7 +150,60 @@ The full Lua standard library (`math`, `string`, `table`, …) is available.
 > `params.<key>`. Declaring `defaults` is what makes a value tweakable per-node in the
 > Inspector; if you don't override it there, `params.<key>` is just the default.
 
-## 7. Referencing other nodes & scripts
+## 7. Assets & swapping models / materials
+
+Scripts can reach into the project's **`Assets/`** folder and change a node's
+components at runtime — swap a mesh's model, apply a material — so one script can drive
+a whole wardrobe of looks.
+
+### `assets` — referencing files in code
+
+`assets` resolves files by a path written **relative to `Assets/`** (the same path the
+Asset Browser shows; right-click any asset ▸ **Copy asset path** to grab it).
+
+| Call | Returns |
+|---|---|
+| `assets.getFile("models/armor.glb")` | the asset's path (a string you hand to `node.model` / `node.material`), or `nil` if it doesn't exist |
+| `assets.getContents("models")` | an array of **every file** under that directory (recursive) — great for building tables |
+
+```lua
+-- Build a database of armor models once, then swap between them.
+local armor = {
+  assets.getFile("models/armor/leather.glb"),
+  assets.getFile("models/armor/iron.glb"),
+  assets.getFile("models/armor/gold.glb"),
+}
+-- …or grab a whole folder at once:
+local allTextures = assets.getContents("textures")
+```
+
+### `node.model` — swap a mesh's model
+
+On a **Mesh** node, `node.model` reads its current model path and **writing it swaps the
+model live** (the engine re-imports and renders the new one):
+
+```lua
+function update(node, dt)
+  if input.pressed("e") then
+    node.model = assets.getFile("models/armor/gold.glb")   -- equip gold
+  end
+end
+```
+
+### `node.material` — apply a material
+
+Assign a **material preset** (by name, or an `assets.getFile("materials/…ron")`) and the
+node takes on that look:
+
+```lua
+node.material = "Gold"                              -- a preset by name
+node.material = assets.getFile("materials/Rusty.ron")
+```
+
+> These work through the **node handle** too, so a manager script can re-skin any node it
+> reaches: `find("Player"):getchild("Body").model = assets.getFile("models/hurt.glb")`.
+
+## 8. Referencing other nodes & scripts
 
 A script isn't limited to its own node. You can **walk the hierarchy**, **find any
 node or script in the scene**, and **call into another script** — read its state, set
@@ -230,7 +284,7 @@ called from elsewhere still acts on the right object), and `params` is its tunab
 > single manager. Looking something up by name? Cache it in `start` and reuse it; a
 > handle stays valid across frames.
 
-## 8. Recipe: a walkable first-person character
+## 9. Recipe: a walkable first-person character
 
 No glue code required:
 
@@ -265,7 +319,7 @@ function update(node, dt)
 end
 ```
 
-## 9. Bundled example scripts
+## 10. Bundled example scripts
 
 Every project ships these under `scripts/` — open one for a working start:
 
@@ -277,7 +331,7 @@ Every project ships these under `scripts/` — open one for a working start:
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |
 
-## 10. Tips & gotchas
+## 11. Tips & gotchas
 
 - **Run, then Play:** scripts only execute while the game is playing (F1). Stop
   restores the scene to its pre-Play state.
