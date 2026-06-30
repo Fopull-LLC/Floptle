@@ -340,6 +340,66 @@ impl Raymarch {
         self._color_tex = color_tex;
     }
 
+    /// Upload only the sub-box `[min, max)` (voxel coords) of `baked` into the existing
+    /// 3D textures — the fast path for a brush dab, so painting/editing a huge terrain
+    /// doesn't re-convert and re-upload the whole volume every frame. `baked.dims` MUST
+    /// match the current textures (caller falls back to [`set_volume`] on a resize).
+    pub fn set_volume_region(&mut self, gpu: &Gpu, baked: &BakedSdf, min: [u32; 3], max: [u32; 3]) {
+        let [w, h, d] = baked.dims;
+        let cur = self._dist_tex.size();
+        if cur.width != w || cur.height != h || cur.depth_or_array_layers != d {
+            self.set_volume(gpu, baked); // dims changed — full path (reallocates)
+            return;
+        }
+        let x0 = min[0].min(w);
+        let y0 = min[1].min(h);
+        let z0 = min[2].min(d);
+        let x1 = max[0].clamp(x0, w);
+        let y1 = max[1].clamp(y0, h);
+        let z1 = max[2].clamp(z0, d);
+        let (rw, rh, rd) = (x1 - x0, y1 - y0, z1 - z0);
+        if rw == 0 || rh == 0 || rd == 0 {
+            return;
+        }
+        // Pack the sub-box tightly (x-fastest), converting distance to f16.
+        let mut dist = Vec::with_capacity((rw * rh * rd) as usize);
+        let mut col = Vec::with_capacity((rw * rh * rd) as usize);
+        for z in z0..z1 {
+            for y in y0..y1 {
+                let row = ((z * h + y) * w) as usize;
+                for x in x0..x1 {
+                    let i = row + x as usize;
+                    dist.push(f32_to_f16(baked.distance[i]));
+                    col.push(baked.color[i]);
+                }
+            }
+        }
+        let origin = wgpu::Origin3d { x: x0, y: y0, z: z0 };
+        let extent = wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: rd };
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self._dist_tex,
+                mip_level: 0,
+                origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&dist),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 2), rows_per_image: Some(rh) },
+            extent,
+        );
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self._color_tex,
+                mip_level: 0,
+                origin,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&col),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rw * 4), rows_per_image: Some(rh) },
+            extent,
+        );
+    }
+
     /// Clear `color`/`depth` and draw the SDF matter into them (with true depth).
     pub fn draw_into(
         &self,
