@@ -229,25 +229,56 @@ fn fs(in: VOut) -> FsOut {
 
     let max_t = march_bound();
     var t = 0.0;
+    var prev_t = 0.0;
     var hit = false;
     var m: Matter;
-    for (var i = 0; i < 160; i = i + 1) {
+    for (var i = 0; i < 192; i = i + 1) {
         let p = ro + rd * t;
         m = map(p);
-        // Distance-relaxed threshold: grows with t so grazing rays near the
-        // silhouette converge instead of exhausting the step budget (holes).
-        let thr = 0.0015 * t + 0.0025;
+        // Distance-relaxed threshold for the COARSE hit (the precise surface is then
+        // found by bisection below). A gentle t-growth still helps grazing rays
+        // converge without exhausting the step budget, but it's kept small so the far
+        // silhouette stays sharp (the old larger growth left a fuzzy wispy horizon).
+        let thr = 0.0006 * t + 0.002;
         if (m.d < thr && real_surface(p, thr)) {
             hit = true;
             break;
         }
-        // Conservative step (0.8): the smin-blended + trilinear-sampled field is
+        prev_t = t;
+        // Conservative step (0.85): the smin-blended + trilinear-sampled field is
         // not a perfectly exact SDF, so understep to avoid overshoot cracks when
         // the camera is close to the surface.
-        t = t + max(m.d, 0.003) * 0.8;
+        t = t + max(m.d, 0.003) * 0.85;
         if (t > max_t) {
             break;
         }
+    }
+
+    // Refine the loose threshold hit to the TRUE surface (where the field crosses
+    // zero) by bisection. The relaxed threshold above hits at a t that varies with
+    // distance, which on a grazing surface produced visible depth BANDING; bisecting
+    // to d≈0 gives a consistent surface depth + cleaner normals (no banding/grain).
+    if (hit) {
+        var a = prev_t; // outside (d > 0)
+        var b = t;      // at/just inside the threshold
+        // Walk `b` until it's truly inside (d < 0) so [a,b] brackets the crossing.
+        var bracketed = false;
+        for (var k = 0; k < 10; k = k + 1) {
+            if (map(ro + rd * b).d < 0.0) { bracketed = true; break; }
+            a = b;
+            b = b + 0.02;
+        }
+        // Only refine when we actually bracket a zero crossing. A grazing silhouette
+        // ray that never goes inside keeps its (smooth) threshold hit instead of a
+        // bogus bisection result — that was the wispy far-horizon edge.
+        if (bracketed) {
+            for (var j = 0; j < 14; j = j + 1) {
+                let tm = 0.5 * (a + b);
+                if (map(ro + rd * tm).d < 0.0) { b = tm; } else { a = tm; }
+            }
+            t = 0.5 * (a + b);
+        }
+        m = map(ro + rd * t);
     }
 
     var out: FsOut;
