@@ -49,8 +49,13 @@ Each is an `egui_dock` tab over the shared `EditorState`:
   (§3). The centerpiece.
 - **Hierarchy** — the node tree (the Node facade over the ECS, [ADR-0005](../decisions/0005-scene-model-ecs-node-hybrid.md));
   reparent by drag, multi-select, rename.
-- **Inspector** — components & params of the selection; add/remove components,
-  attach scripts, edit transforms.
+- **Inspector** — a **modular component stack** (Unity-style). The selection shows
+  *only the components it actually has* — its **Type** (geometry / camera / light /
+  …, mutually exclusive), **Transform**, and any **Material / Rigidbody / Collider /
+  Scripts** — each with a remove (🗑) and a **copy ⎘ / paste 📋** of its current
+  values onto another component of the same kind. A **➕ Add Component** button at the
+  bottom opens a **searchable, icon'd menu** to add the rest (or switch the Type). Make
+  an **Empty** node and build it up from nothing; physics edits apply **live in Play**.
 - **Asset Browser** — project assets; import-on-drop, drag-to-use, reimport
   ([`./asset-pipeline.md`](./asset-pipeline.md) §6).
 - **Particle Timeline** — the video-editor-style VFX authoring surface
