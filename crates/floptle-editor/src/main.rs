@@ -1564,6 +1564,8 @@ struct EditorTabViewer<'a> {
     terrain_viz: Option<&'a TerrainViz>,
     camera_gizmos: &'a [CameraGizmo],
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
+    body_gizmos: &'a [Vec<(Vec2, Vec2)>],
+    contact_gizmos: &'a [(Vec2, Vec2)],
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -2856,6 +2858,26 @@ impl<'a> EditorTabViewer<'a> {
                 }
             }
         }
+
+        // Rigidbody collider outlines (cyan) + collision-contact crosses (orange).
+        if !self.body_gizmos.is_empty() || !self.contact_gizmos.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("physics_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let body_col = egui::Color32::from_rgb(110, 220, 210);
+            for lines in self.body_gizmos {
+                for (a, b) in lines {
+                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.2, body_col));
+                }
+            }
+            let hit_col = egui::Color32::from_rgb(255, 150, 60);
+            for (a, b) in self.contact_gizmos {
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(2.0, hit_col));
+            }
+        }
     }
 
     /// Draw the selected asset's preview: a spinning model/material render (drag to
@@ -3868,6 +3890,62 @@ fn gravity_volume_lines(
     lines
 }
 
+/// Build a rigidbody collider outline: a 3-ring wireframe sphere, or a capsule (two
+/// end rings + side connectors + cap arcs). Y-up (the editor doesn't tilt the gizmo).
+fn rigidbody_lines(
+    pos: DVec3,
+    capsule: bool,
+    radius: f32,
+    height: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let mut lines = Vec::new();
+    let r = radius.max(0.02) as f64;
+    let segs = 24;
+    let ring = |center: DVec3, plane: u8, out: &mut Vec<(Vec2, Vec2)>| {
+        let at = |a: f64| -> DVec3 {
+            let (c, s) = (a.cos() * r, a.sin() * r);
+            match plane {
+                0 => DVec3::new(c, 0.0, s), // XZ
+                1 => DVec3::new(c, s, 0.0), // XY
+                _ => DVec3::new(0.0, c, s), // YZ
+            }
+        };
+        let mut prev = project(center + at(0.0), cam_world, vp, w, h);
+        for i in 1..=segs {
+            let p = project(center + at((i as f64 / segs as f64) * std::f64::consts::TAU), cam_world, vp, w, h);
+            if let (Some(a), Some(b)) = (prev, p) {
+                out.push((a, b));
+            }
+            prev = p;
+        }
+    };
+    if capsule {
+        let half = ((height.max(2.0 * radius) as f64) * 0.5 - r).max(0.0);
+        let top = pos + DVec3::new(0.0, half, 0.0);
+        let bot = pos - DVec3::new(0.0, half, 0.0);
+        ring(top, 0, &mut lines);
+        ring(bot, 0, &mut lines);
+        ring(top, 1, &mut lines);
+        ring(bot, 1, &mut lines);
+        for (dx, dz) in [(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)] {
+            let a = project(top + DVec3::new(dx, 0.0, dz), cam_world, vp, w, h);
+            let b = project(bot + DVec3::new(dx, 0.0, dz), cam_world, vp, w, h);
+            if let (Some(a), Some(b)) = (a, b) {
+                lines.push((a, b));
+            }
+        }
+    } else {
+        ring(pos, 0, &mut lines);
+        ring(pos, 1, &mut lines);
+        ring(pos, 2, &mut lines);
+    }
+    lines
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -3951,6 +4029,10 @@ struct Editor {
     camera_gizmos: Vec<CameraGizmo>,
     /// Projected point-light gizmos (cross + range ring) for this frame.
     light_gizmos: Vec<Vec<(Vec2, Vec2)>>,
+    /// Projected rigidbody collider outlines (sphere/capsule) for this frame.
+    body_gizmos: Vec<Vec<(Vec2, Vec2)>>,
+    /// Projected collision-contact crosses (telegraphed during Play).
+    contact_gizmos: Vec<(Vec2, Vec2)>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -4715,6 +4797,8 @@ impl Editor {
         // the game view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
         self.light_gizmos.clear();
+        self.body_gizmos.clear();
+        self.contact_gizmos.clear();
         if !game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             // Only cameras and point lights get gizmos — gather the few Copy fields we
@@ -4760,6 +4844,40 @@ impl Editor {
                         );
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
+                        }
+                    }
+                }
+            }
+            // Rigidbody collider outlines, so physics bodies are visible/placeable.
+            let bodies: Vec<(Entity, floptle_core::RigidBody)> =
+                self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect();
+            for (e, rb) in bodies {
+                let p = floptle_core::world_transform(&self.world, e).translation;
+                let lines = rigidbody_lines(
+                    p,
+                    rb.kind == floptle_core::BodyKind::Capsule,
+                    rb.radius,
+                    rb.height,
+                    cam.world_position,
+                    view_proj,
+                    gw,
+                    gh,
+                );
+                if !lines.is_empty() {
+                    self.body_gizmos.push(lines);
+                }
+            }
+            // Collision telegraph: a small cross at each contact resolved this step.
+            if let Some(sim) = self.sim.as_ref() {
+                let cs = 0.15;
+                for c in &sim.world.contacts {
+                    let cp = DVec3::new(c.point.x as f64, c.point.y as f64, c.point.z as f64);
+                    for off in [DVec3::X, DVec3::Y, DVec3::Z] {
+                        if let (Some(a), Some(b)) = (
+                            project(cp - off * cs, cam.world_position, view_proj, gw, gh),
+                            project(cp + off * cs, cam.world_position, view_proj, gw, gh),
+                        ) {
+                            self.contact_gizmos.push((a, b));
                         }
                     }
                 }
@@ -5039,6 +5157,8 @@ impl Editor {
         let terrain_viz = self.terrain_viz.as_ref();
         let camera_gizmos = self.camera_gizmos.as_slice();
         let light_gizmos = self.light_gizmos.as_slice();
+        let body_gizmos = self.body_gizmos.as_slice();
+        let contact_gizmos = self.contact_gizmos.as_slice();
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -5174,6 +5294,8 @@ impl Editor {
                 terrain_viz,
                 camera_gizmos,
                 light_gizmos,
+                body_gizmos,
+                contact_gizmos,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
