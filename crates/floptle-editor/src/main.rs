@@ -1597,11 +1597,86 @@ struct IdeState {
     /// A pending "scroll to this 1-based line" request (Console jump-to-source),
     /// consumed by `scripting_ui` on the next frame it draws the editor.
     goto: Option<usize>,
+    /// Ctrl+F find-in-file: bar open, the query, and a one-shot focus request.
+    find_open: bool,
+    find_query: String,
+    find_focus: bool,
+    /// "Find all references" results (most recent search) + the word searched.
+    refs: Vec<RefHit>,
+    refs_word: String,
+}
+
+/// One "find all references" result: the file, its display name, the 1-based line, and
+/// that line's text.
+struct RefHit {
+    path: String,
+    name: String,
+    line: usize,
+    text: String,
 }
 
 impl Default for IdeState {
     fn default() -> Self {
-        Self { open: Vec::new(), active: None, goto: None }
+        Self {
+            open: Vec::new(),
+            active: None,
+            goto: None,
+            find_open: false,
+            find_query: String::new(),
+            find_focus: false,
+            refs: Vec::new(),
+            refs_word: String::new(),
+        }
+    }
+}
+
+/// Byte ranges of every occurrence of `needle` in `hay`, case-insensitive (ASCII).
+/// Offsets are valid byte indices into `hay` (an ASCII needle only matches at ASCII
+/// byte positions, so multi-byte UTF-8 in `hay` is never split).
+fn find_ranges(hay: &str, needle: &str) -> Vec<(usize, usize)> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let (hb, nb) = (hay.as_bytes(), needle.as_bytes());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + nb.len() <= hb.len() {
+        if (0..nb.len()).all(|k| hb[i + k].eq_ignore_ascii_case(&nb[k])) {
+            out.push((i, i + nb.len()));
+            i += nb.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+/// Append whole-word, case-sensitive occurrences of `word` in `text` (one per line) to
+/// `out` as [`RefHit`]s — the engine of "find all references".
+fn collect_word_hits(path: &str, name: &str, text: &str, word: &str, out: &mut Vec<RefHit>) {
+    if word.is_empty() {
+        return;
+    }
+    for (ln, line) in text.lines().enumerate() {
+        let lb = line.as_bytes();
+        for (s, _) in line.match_indices(word) {
+            let e = s + word.len();
+            let before_ok = s == 0 || !is_ident_byte(lb[s - 1]);
+            let after_ok = e >= lb.len() || !is_ident_byte(lb[e]);
+            if before_ok && after_ok {
+                out.push(RefHit {
+                    path: path.to_string(),
+                    name: name.to_string(),
+                    line: ln + 1,
+                    text: line.trim().to_string(),
+                });
+                break; // one hit per line keeps the list readable
+            }
+        }
     }
 }
 
@@ -3454,6 +3529,38 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
+    /// Populate the IDE's "references" list with every whole-word, case-sensitive use of
+    /// `word` across all open buffers (using their live, unsaved text) plus every other
+    /// `.lua` file in the project's scripts directory.
+    fn gather_references(&mut self, word: &str) {
+        let mut hits = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for f in &self.ide.open {
+            seen.insert(f.path.clone());
+            collect_word_hits(&f.path, &f.name, &f.text, word, &mut hits);
+        }
+        let dir = self.project_root.join("scripts");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("lua") {
+                    continue;
+                }
+                let ps = p.to_string_lossy().to_string();
+                if seen.contains(&ps) {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    let name =
+                        p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    collect_word_hits(&ps, &name, &text, word, &mut hits);
+                }
+            }
+        }
+        self.ide.refs = hits;
+        self.ide.refs_word = word.to_string();
+    }
+
     fn scripting_ui(&mut self, ui: &mut egui::Ui) {
         // Live script errors (from the last play frame) surface here in red.
         if !self.script_errors.is_empty() {
@@ -3558,6 +3665,68 @@ impl<'a> EditorTabViewer<'a> {
                 // Code editor: Lua syntax highlighting (plain for non-Lua files), a
                 // line-number gutter, an autocomplete popup and red squiggles.
                 let editor_id = egui::Id::new(("ide_editor", self.ide.open[i].path.clone()));
+                // Ctrl+F toggles the find-in-file bar (and focuses it).
+                if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
+                    self.ide.find_open = true;
+                    self.ide.find_focus = true;
+                }
+                if self.ide.find_open {
+                    let text = self.ide.open[i].text.clone();
+                    let ranges = find_ranges(&text, &self.ide.find_query);
+                    let (mut do_next, mut do_prev, mut close) = (false, false, false);
+                    ui.horizontal(|ui| {
+                        ui.label("🔍");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.ide.find_query)
+                                .desired_width(200.0)
+                                .hint_text("find (Enter = next)"),
+                        );
+                        if self.ide.find_focus {
+                            resp.request_focus();
+                            self.ide.find_focus = false;
+                        }
+                        if resp.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+                            if ui.input(|inp| inp.modifiers.shift) { do_prev = true } else { do_next = true }
+                        }
+                        if ui.button("◀").on_hover_text("previous match").clicked() { do_prev = true; }
+                        if ui.button("▶").on_hover_text("next match").clicked() { do_next = true; }
+                        ui.label(
+                            if self.ide.find_query.is_empty() { String::new() }
+                            else if ranges.is_empty() { "no matches".to_string() }
+                            else { format!("{} matches", ranges.len()) },
+                        );
+                        if ui.button("✕").on_hover_text("close (Esc)").clicked() { close = true; }
+                    });
+                    if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) { close = true; }
+                    if (do_next || do_prev) && !ranges.is_empty() {
+                        let cur = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|r| r.primary.index.0)
+                            .unwrap_or(0);
+                        let char_starts: Vec<usize> =
+                            ranges.iter().map(|&(a, _)| text[..a].chars().count()).collect();
+                        let idx = if do_next {
+                            char_starts.iter().position(|&a| a > cur).unwrap_or(0)
+                        } else {
+                            char_starts.iter().rposition(|&a| a < cur).unwrap_or(char_starts.len() - 1)
+                        };
+                        let (bs, be) = ranges[idx];
+                        let cs = text[..bs].chars().count();
+                        let ce = text[..be].chars().count();
+                        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(cs),
+                                egui::text::CCursor::new(ce),
+                            )));
+                            state.store(ui.ctx(), editor_id);
+                        }
+                        ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+                        self.ide.goto = Some(text[..bs].matches('\n').count() + 1);
+                    }
+                    if close {
+                        self.ide.find_open = false;
+                    }
+                }
                 let is_lua = self.ide.open[i].path.ends_with(".lua");
                 let font = egui::FontId::monospace(13.0);
                 let lfont = font.clone();
@@ -3601,6 +3770,30 @@ impl<'a> EditorTabViewer<'a> {
                 if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
                 }
+                // Right-click an identifier → "Find all references". The word is taken
+                // from the pointer position over the code (via the galley).
+                let rc_word = output
+                    .response
+                    .response
+                    .hover_pos()
+                    .map(|p| {
+                        let cc = output.galley.cursor_from_pos(p - output.galley_pos);
+                        word_at(&self.ide.open[i].text, cc.index.0)
+                    })
+                    .filter(|w| !w.is_empty());
+                output.response.response.context_menu(|ui| {
+                    match &rc_word {
+                        Some(w) => {
+                            if ui.button(format!("🔎 Find all references to \"{w}\"")).clicked() {
+                                self.gather_references(w);
+                                ui.close();
+                            }
+                        }
+                        None => {
+                            ui.label("right-click a word to find its references");
+                        }
+                    }
+                });
                 // A pending Console jump scrolls the requested line into view.
                 if let Some(line) = self.ide.goto.take() {
                     let row = line.saturating_sub(1).min(output.galley.rows.len().saturating_sub(1));
@@ -3653,6 +3846,35 @@ impl<'a> EditorTabViewer<'a> {
                             ui.monospace(egui::RichText::new(api.label).color(egui::Color32::from_rgb(78, 201, 176)));
                             ui.label(api.doc);
                         });
+                    }
+                }
+
+                // "Find all references" results — click a row to jump to that file + line.
+                if !self.ide.refs.is_empty() {
+                    ui.separator();
+                    let word = self.ide.refs_word.clone();
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("⌕ {} reference(s) to \"{word}\"", self.ide.refs.len()));
+                        if ui.small_button("✕ clear").clicked() {
+                            self.ide.refs.clear();
+                        }
+                    });
+                    let mut jump: Option<(String, usize)> = None;
+                    egui::ScrollArea::vertical().max_height(150.0).id_salt("refs_scroll").show(ui, |ui| {
+                        for r in &self.ide.refs {
+                            let row = format!("{}:{}", r.name, r.line);
+                            if ui
+                                .selectable_label(false, egui::RichText::new(format!("{row}   {}", r.text)).monospace())
+                                .clicked()
+                            {
+                                jump = Some((r.path.clone(), r.line));
+                            }
+                        }
+                    });
+                    if let Some((path, line)) = jump {
+                        if self.ide.open_file(&path) {
+                            self.ide.goto = Some(line);
+                        }
                     }
                 }
             }
