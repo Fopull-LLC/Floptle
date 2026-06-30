@@ -4,7 +4,17 @@ Start here. Floptle is a lightweight, hyperoptimized Rust game engine for surrea
 otherworldly visuals (Fopull LLC). This repo is currently **planning + scaffold** —
 the design is written before the engine is built.
 
-## Read in this order
+## Using the engine (start here to build something)
+
+- [getting-started.md](getting-started.md) — from empty project to a **walkable
+  first-person scene**: sculpt terrain, add a player, gravity, mesh colliders, scripts.
+- [scripting.md](scripting.md) — the complete **Lua API**: the `node` transform + physics
+  body, `input`, `raycast`, globals, and the character recipe. (Mirrored in-engine on the
+  Scripting ▸ § Docs page.)
+- [physics.md](physics.md) — **rigidbodies, gravity, colliders, raycasting** and how the
+  play loop runs.
+
+## Design docs (how it's built and why)
 
 1. [VISION.md](VISION.md) — the north star: the feeling we chase, who it's for, the headline features.
 2. [ARCHITECTURE.md](ARCHITECTURE.md) — how the crates and subsystems fit together.
