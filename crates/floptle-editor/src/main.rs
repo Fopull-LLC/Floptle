@@ -175,9 +175,9 @@ impl ComponentClip {
     }
 }
 
-/// A component section header row: bold title on the left, right-aligned action
-/// buttons (copy ⎘ always; paste 📋 when `can_paste`; remove 🗑 when `can_remove`).
-/// Returns `(copy, paste, remove)` — which button was clicked this frame.
+/// A component section header row: bold title on the left, a right-aligned `⋮`
+/// overflow menu (Copy ⎘ always; Paste 📋 when `can_paste`; Remove 🗑 when
+/// `can_remove`). Returns `(copy, paste, remove)` — which item was clicked.
 fn component_header(
     ui: &mut egui::Ui,
     title: &str,
@@ -190,19 +190,25 @@ fn component_header(
     ui.horizontal(|ui| {
         ui.strong(title);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if can_remove
-                && ui.small_button("🗑").on_hover_text("remove this component").clicked()
-            {
-                remove = true;
-            }
-            if can_paste
-                && ui.small_button("📋").on_hover_text("paste copied values").clicked()
-            {
-                paste = true;
-            }
-            if ui.small_button("⎘").on_hover_text("copy this component's values").clicked() {
-                copy = true;
-            }
+            ui.menu_button("⋮", |ui| {
+                if ui.button("⎘  Copy values").clicked() {
+                    copy = true;
+                    ui.close();
+                }
+                if can_paste && ui.button("📋  Paste values").clicked() {
+                    paste = true;
+                    ui.close();
+                }
+                if can_remove {
+                    ui.separator();
+                    if ui.button("🗑  Remove component").clicked() {
+                        remove = true;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("component options");
         });
     });
     (copy, paste, remove)
@@ -2325,172 +2331,174 @@ impl<'a> EditorTabViewer<'a> {
                         cmd.paste_component = Some(e);
                     }
                 }
-                if let Some(m) = world.get_mut::<Matter>(e) {
-                    match m {
-                        Matter::Primitive { shape, color } => {
-                            ui.horizontal(|ui| {
-                                ui.label("shape");
-                                egui::ComboBox::from_id_salt("shape")
-                                    .selected_text(format!("{shape:?}"))
-                                    .show_ui(ui, |ui| {
-                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
-                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
-                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
-                                    });
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("color");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                                ui.small("(base color — add a Material below for emissive, specular, …)");
-                            });
-                        }
-                        Matter::Blob { scale } => {
-                            cmd.inspector_changed |= ui
-                                .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
-                                .changed();
-                        }
-                        Matter::Mesh { asset_path } => {
-                            ui.label("imported mesh");
-                            ui.small(asset_path.as_str());
-                            if ui
-                                .button("⏏ Extract textures")
-                                .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
-                                .clicked()
-                            {
-                                cmd.extract_textures = Some(asset_path.clone());
+                ui.indent("type_props", |ui| {
+                    if let Some(m) = world.get_mut::<Matter>(e) {
+                        match m {
+                            Matter::Primitive { shape, color } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("shape");
+                                    egui::ComboBox::from_id_salt("shape")
+                                        .selected_text(format!("{shape:?}"))
+                                        .show_ui(ui, |ui| {
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
+                                        });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("color");
+                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                    ui.small("(base color — add a Material below for emissive, specular, …)");
+                                });
                             }
-                        }
-                        Matter::Empty => {
-                            ui.label("group / empty");
-                            ui.small("a folder — organizes child nodes; has a transform but no geometry");
-                        }
-                        Matter::Terrain { .. } => {
-                            ui.label("editable terrain");
-                            ui.small("a sculptable SDF field — move it with the transform below");
-                            if ui.button("Δ Open Terrain tools").clicked() {
-                                cmd.focus_terrain = true;
-                            }
-                        }
-                        Matter::Camera { fov_y, active } => {
-                            ui.label("camera");
-                            ui.small("a viewpoint — play mode renders from the active camera");
-                            // Live preview of what this camera sees.
-                            if let Some(tex) = self.cam_preview {
-                                let w = ui.available_width().min(300.0);
-                                let size = egui::vec2(w, w * 9.0 / 16.0);
-                                ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
-                                ui.small("preview — what this camera sees");
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("field of view");
-                                let mut deg = fov_y.to_degrees();
-                                if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
-                                    *fov_y = deg.to_radians();
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            if *active {
-                                ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
-                            } else if ui.button("⌖ Make active camera").clicked() {
-                                cmd.set_active_camera = Some(e);
-                            }
-                            if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
-                                cmd.camera_from_view = Some(e);
-                            }
-                        }
-                        Matter::PointLight { color, intensity, range } => {
-                            ui.label("point light");
-                            ui.small("an omni light — position comes from the transform below");
-                            ui.horizontal(|ui| {
-                                ui.label("color");
-                                cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
-                            });
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
-                        }
-                        Matter::GravityVolume { mode, strength, radius } => {
-                            use floptle_core::GravityMode;
-                            ui.label("gravity volume");
-                            ui.small("level physics gravity — Down (normal) or Radial (planet)");
-                            ui.horizontal(|ui| {
-                                let mut radial = *mode == GravityMode::Radial;
-                                if ui.selectable_label(!radial, "⬇ Down").clicked() {
-                                    radial = false;
-                                }
-                                if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
-                                    radial = true;
-                                }
-                                let new =
-                                    if radial { GravityMode::Radial } else { GravityMode::Down };
-                                if new != *mode {
-                                    *mode = new;
-                                    cmd.inspector_changed = true;
-                                }
-                            });
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(strength, 0.0..=60.0).text("strength")).changed();
-                            if *mode == GravityMode::Radial {
+                            Matter::Blob { scale } => {
                                 cmd.inspector_changed |= ui
-                                    .add(egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
+                                    .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
                                     .changed();
                             }
-                        }
-                        Matter::Skybox { color, size, texture, tint } => {
-                            ui.label("skybox");
-                            ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
-                            let mut textured = texture.is_some();
-                            ui.horizontal(|ui| {
-                                if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
-                                    *texture = None;
-                                    cmd.inspector_changed = true;
+                            Matter::Mesh { asset_path } => {
+                                ui.label("imported mesh");
+                                ui.small(asset_path.as_str());
+                                if ui
+                                    .button("⏏ Extract textures")
+                                    .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
+                                    .clicked()
+                                {
+                                    cmd.extract_textures = Some(asset_path.clone());
                                 }
-                                if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
-                                    let mut tl = Vec::new();
-                                    collect_texture_paths(self.asset_tree, &mut tl);
-                                    *texture = Some(tl.first().cloned().unwrap_or_default());
-                                    cmd.inspector_changed = true;
+                            }
+                            Matter::Empty => {
+                                ui.label("group / empty");
+                                ui.small("a folder — organizes child nodes; has a transform but no geometry");
+                            }
+                            Matter::Terrain { .. } => {
+                                ui.label("editable terrain");
+                                ui.small("a sculptable SDF field — move it with the transform below");
+                                if ui.button("Δ Open Terrain tools").clicked() {
+                                    cmd.focus_terrain = true;
                                 }
-                            });
-                            textured = texture.is_some();
-                            if !textured {
+                            }
+                            Matter::Camera { fov_y, active } => {
+                                ui.label("camera");
+                                ui.small("a viewpoint — play mode renders from the active camera");
+                                // Live preview of what this camera sees.
+                                if let Some(tex) = self.cam_preview {
+                                    let w = ui.available_width().min(300.0);
+                                    let size = egui::vec2(w, w * 9.0 / 16.0);
+                                    ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
+                                    ui.small("preview — what this camera sees");
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label("field of view");
+                                    let mut deg = fov_y.to_degrees();
+                                    if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
+                                        *fov_y = deg.to_radians();
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                if *active {
+                                    ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
+                                } else if ui.button("⌖ Make active camera").clicked() {
+                                    cmd.set_active_camera = Some(e);
+                                }
+                                if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
+                                    cmd.camera_from_view = Some(e);
+                                }
+                            }
+                            Matter::PointLight { color, intensity, range } => {
+                                ui.label("point light");
+                                ui.small("an omni light — position comes from the transform below");
                                 ui.horizontal(|ui| {
                                     ui.label("color");
                                     cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
                                 });
-                            } else {
-                                let mut tl = Vec::new();
-                                collect_texture_paths(self.asset_tree, &mut tl);
-                                let cur = texture.clone().unwrap_or_default();
-                                let label = |p: &str| {
-                                    Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
-                                };
-                                ui.horizontal(|ui| {
-                                    ui.label("texture");
-                                    egui::ComboBox::from_id_salt("sky-tex")
-                                        .selected_text(if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) })
-                                        .show_ui(ui, |ui| {
-                                            for p in &tl {
-                                                if ui.selectable_label(&cur == p, label(p)).clicked() {
-                                                    *texture = Some(p.clone());
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
-                                });
-                                ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
-                                ui.horizontal(|ui| {
-                                    ui.label("tint");
-                                    cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
-                                });
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
                             }
-                            cmd.inspector_changed |= ui
-                                .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
-                                .changed();
+                            Matter::GravityVolume { mode, strength, radius } => {
+                                use floptle_core::GravityMode;
+                                ui.label("gravity volume");
+                                ui.small("level physics gravity — Down (normal) or Radial (planet)");
+                                ui.horizontal(|ui| {
+                                    let mut radial = *mode == GravityMode::Radial;
+                                    if ui.selectable_label(!radial, "⬇ Down").clicked() {
+                                        radial = false;
+                                    }
+                                    if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
+                                        radial = true;
+                                    }
+                                    let new =
+                                        if radial { GravityMode::Radial } else { GravityMode::Down };
+                                    if new != *mode {
+                                        *mode = new;
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(strength, 0.0..=60.0).text("strength")).changed();
+                                if *mode == GravityMode::Radial {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
+                                        .changed();
+                                }
+                            }
+                            Matter::Skybox { color, size, texture, tint } => {
+                                ui.label("skybox");
+                                ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+                                let mut textured = texture.is_some();
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
+                                        *texture = None;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
+                                        let mut tl = Vec::new();
+                                        collect_texture_paths(self.asset_tree, &mut tl);
+                                        *texture = Some(tl.first().cloned().unwrap_or_default());
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                textured = texture.is_some();
+                                if !textured {
+                                    ui.horizontal(|ui| {
+                                        ui.label("color");
+                                        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                    });
+                                } else {
+                                    let mut tl = Vec::new();
+                                    collect_texture_paths(self.asset_tree, &mut tl);
+                                    let cur = texture.clone().unwrap_or_default();
+                                    let label = |p: &str| {
+                                        Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label("texture");
+                                        egui::ComboBox::from_id_salt("sky-tex")
+                                            .selected_text(if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) })
+                                            .show_ui(ui, |ui| {
+                                                for p in &tl {
+                                                    if ui.selectable_label(&cur == p, label(p)).clicked() {
+                                                        *texture = Some(p.clone());
+                                                        cmd.inspector_changed = true;
+                                                    }
+                                                }
+                                            });
+                                    });
+                                    ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
+                                    ui.horizontal(|ui| {
+                                        ui.label("tint");
+                                        cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
+                                    });
+                                }
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
+                                    .changed();
+                            }
                         }
                     }
-                }
+                });
 
                 // ===== Transform (always present) =====
                 ui.separator();
@@ -2510,38 +2518,40 @@ impl<'a> EditorTabViewer<'a> {
                         cmd.paste_component = Some(e);
                     }
                 }
-                if let Some(t) = world.get_mut::<Transform>(e) {
-                    ui.label("translation");
-                    ui.horizontal(|ui| {
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
-                    });
-                    ui.label("rotation (deg)");
-                    let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
-                    let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
-                    let mut rot_changed = false;
-                    ui.horizontal(|ui| {
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
-                    });
-                    if rot_changed {
-                        t.rotation = Quat::from_euler(
-                            EulerRot::YXZ,
-                            deg[0].to_radians(),
-                            deg[1].to_radians(),
-                            deg[2].to_radians(),
-                        );
-                        cmd.inspector_changed = true;
+                ui.indent("xform_props", |ui| {
+                    if let Some(t) = world.get_mut::<Transform>(e) {
+                        ui.label("translation");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
+                        });
+                        ui.label("rotation (deg)");
+                        let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                        let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                        let mut rot_changed = false;
+                        ui.horizontal(|ui| {
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                        });
+                        if rot_changed {
+                            t.rotation = Quat::from_euler(
+                                EulerRot::YXZ,
+                                deg[0].to_radians(),
+                                deg[1].to_radians(),
+                                deg[2].to_radians(),
+                            );
+                            cmd.inspector_changed = true;
+                        }
+                        ui.label("scale");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                        });
                     }
-                    ui.label("scale");
-                    ui.horizontal(|ui| {
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
-                    });
-                }
+                });
 
                 // ===== Material (only when the node has one) =====
                 if world.get::<Material>(e).is_some() {
@@ -2565,20 +2575,22 @@ impl<'a> EditorTabViewer<'a> {
                     }
                     let mut tex_list = Vec::new();
                     collect_texture_paths(self.asset_tree, &mut tex_list);
-                    if let Some(mat) = world.get_mut::<Material>(e) {
-                        let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
-                        cmd.inspector_changed |= res.changed;
-                        if res.remove {
-                            cmd.remove_material = Some(e);
+                    ui.indent("material_props", |ui| {
+                        if let Some(mat) = world.get_mut::<Material>(e) {
+                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
+                            cmd.inspector_changed |= res.changed;
+                            if res.remove {
+                                cmd.remove_material = Some(e);
+                            }
+                            if let Some(name) = res.save_as {
+                                cmd.save_material =
+                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                            }
+                            if ui.button("⛶ Open in Material Editor").clicked() {
+                                *self.show_material_editor = true;
+                            }
                         }
-                        if let Some(name) = res.save_as {
-                            cmd.save_material =
-                                Some((name, floptle_scene::MaterialDoc::from_material(mat)));
-                        }
-                        if ui.button("⛶ Open in Material Editor").clicked() {
-                            *self.show_material_editor = true;
-                        }
-                    }
+                    });
                 }
 
                 // ===== Rigidbody (only when the node has one) =====
@@ -2601,63 +2613,65 @@ impl<'a> EditorTabViewer<'a> {
                     if remove {
                         cmd.remove_rigidbody = Some(e);
                     }
-                    if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
-                        use floptle_core::BodyKind;
-                        ui.horizontal(|ui| {
-                            ui.label("shape");
-                            egui::ComboBox::from_id_salt("rb-shape")
-                                .selected_text(match rb.kind {
-                                    BodyKind::Sphere => "Sphere",
-                                    BodyKind::Capsule => "Capsule",
-                                    BodyKind::Box => "Box",
-                                })
-                                .show_ui(ui, |ui| {
-                                    cmd.inspector_changed |=
-                                        ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
-                                    cmd.inspector_changed |=
-                                        ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
-                                    cmd.inspector_changed |=
-                                        ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
-                                });
-                        });
-                        if rb.kind == BodyKind::Box {
-                            ui.label("half-extents");
+                    ui.indent("rb_props", |ui| {
+                        if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
+                            use floptle_core::BodyKind;
                             ui.horizontal(|ui| {
+                                ui.label("shape");
+                                egui::ComboBox::from_id_salt("rb-shape")
+                                    .selected_text(match rb.kind {
+                                        BodyKind::Sphere => "Sphere",
+                                        BodyKind::Capsule => "Capsule",
+                                        BodyKind::Box => "Box",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
+                                    });
+                            });
+                            if rb.kind == BodyKind::Box {
+                                ui.label("half-extents");
+                                ui.horizontal(|ui| {
+                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
+                                            .changed();
+                                    }
+                                });
+                            } else {
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                                if rb.kind == BodyKind::Capsule {
+                                    cmd.inspector_changed |=
+                                        ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                                }
+                            }
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rb.gravity, "affected by gravity")
+                                .on_hover_text("off = floats (still collides; a script can still move it)")
+                                .changed();
+                            ui.horizontal(|ui| {
+                                ui.label("freeze pos");
                                 for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
-                                        .changed();
+                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
                                 }
                             });
-                        } else {
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
-                            if rb.kind == BodyKind::Capsule {
-                                cmd.inspector_changed |=
-                                    ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
-                            }
+                            ui.horizontal(|ui| {
+                                ui.label("freeze rot");
+                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
+                                }
+                            });
                         }
-                        cmd.inspector_changed |=
-                            ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
-                        cmd.inspector_changed |=
-                            ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
-                        cmd.inspector_changed |= ui
-                            .checkbox(&mut rb.gravity, "affected by gravity")
-                            .on_hover_text("off = floats (still collides; a script can still move it)")
-                            .changed();
-                        ui.horizontal(|ui| {
-                            ui.label("freeze pos");
-                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("freeze rot");
-                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
-                            }
-                        });
-                    }
+                    });
                 }
 
                 // ===== Collider (static collision; only when the node has one) =====
@@ -2710,67 +2724,89 @@ impl<'a> EditorTabViewer<'a> {
                         ui.strong("⚙ Scripts");
                         if matches!(clip, Some(ComponentClip::Script(_))) {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .small_button("📋")
-                                    .on_hover_text("paste copied script (adds it, or updates a matching one)")
-                                    .clicked()
-                                {
-                                    cmd.paste_component = Some(e);
-                                }
+                                ui.menu_button("⋮", |ui| {
+                                    if ui.button("📋  Paste script").clicked() {
+                                        cmd.paste_component = Some(e);
+                                        ui.close();
+                                    }
+                                })
+                                .response
+                                .on_hover_text("adds the copied script, or updates a matching one");
                             });
                         }
                     });
                     let mut remove: Option<usize> = None;
                     let mut copy_idx: Option<usize> = None;
-                    if let Some(scr) = world.get_mut::<Scripts>(e) {
-                        for (i, inst) in scr.0.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
-                                ui.strong(&inst.kind);
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("🗑").on_hover_text("remove").clicked() {
-                                        remove = Some(i);
-                                    }
-                                    if ui.small_button("⎘").on_hover_text("copy this script's values").clicked() {
-                                        copy_idx = Some(i);
-                                    }
-                                    if ui.small_button("🖊").on_hover_text("edit script").clicked() {
-                                        let p = self
-                                            .project_root
-                                            .join("scripts")
-                                            .join(format!("{}.lua", inst.kind));
-                                        cmd.open_script_pref = Some(p.to_string_lossy().to_string());
-                                    }
+                    ui.indent("script_list", |ui| {
+                        if let Some(scr) = world.get_mut::<Scripts>(e) {
+                            for (i, inst) in scr.0.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
+                                    ui.strong(&inst.kind);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.menu_button("⋮", |ui| {
+                                            if ui.button("⎘  Copy values").clicked() {
+                                                copy_idx = Some(i);
+                                                ui.close();
+                                            }
+                                            if ui.button("🖊  Edit script").clicked() {
+                                                let p = self
+                                                    .project_root
+                                                    .join("scripts")
+                                                    .join(format!("{}.lua", inst.kind));
+                                                cmd.open_script_pref = Some(p.to_string_lossy().to_string());
+                                                ui.close();
+                                            }
+                                            ui.separator();
+                                            if ui.button("🗑  Remove").clicked() {
+                                                remove = Some(i);
+                                                ui.close();
+                                            }
+                                        });
+                                    });
                                 });
-                            });
-                            for (k, v) in inst.params.iter_mut() {
-                                cmd.inspector_changed |= ui
-                                    .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
-                                    .changed();
+                                for (k, v) in inst.params.iter_mut() {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
+                                        .changed();
+                                }
+                                ui.add_space(4.0);
                             }
-                            ui.add_space(4.0);
+                            if let Some(i) = copy_idx {
+                                cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
+                            }
+                            if let Some(i) = remove {
+                                scr.0.remove(i);
+                                cmd.inspector_changed = true;
+                            }
                         }
-                        if let Some(i) = copy_idx {
-                            cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
-                        }
-                        if let Some(i) = remove {
-                            scr.0.remove(i);
-                            cmd.inspector_changed = true;
-                        }
-                    }
+                    });
                 }
 
                 // ===== ➕ Add Component (searchable, icon'd) =====
                 ui.separator();
                 ui.add_space(2.0);
-                ui.menu_button("➕  Add Component", |ui| {
-                    ui.set_min_width(232.0);
+                let add_btn = ui.button("➕  Add Component");
+                let add_popup_id = egui::Popup::default_response_id(&add_btn);
+                // True only on the frame the menu transitions closed → open, so we
+                // focus the search box exactly once (start typing immediately).
+                let add_opening =
+                    add_btn.clicked() && !egui::Popup::is_id_open(ui.ctx(), add_popup_id);
+                // CloseOnClickOutside (not the menu default CloseOnClick) so clicking
+                // the search field doesn't dismiss the menu.
+                egui::Popup::menu(&add_btn)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .width(236.0)
+                    .show(|ui| {
                     let filter = &mut *self.add_component_filter;
-                    ui.add(
+                    let search = ui.add(
                         egui::TextEdit::singleline(filter)
                             .hint_text("🔍 search components…")
                             .desired_width(212.0),
                     );
+                    if add_opening {
+                        search.request_focus();
+                    }
                     let f = filter.trim().to_lowercase();
                     let hit = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
 
