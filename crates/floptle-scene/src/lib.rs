@@ -41,6 +41,9 @@ pub struct NodeDoc {
     /// A physics rigidbody on this node (`None` = not a physics body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rigidbody: Option<RigidBodyDoc>,
+    /// Marks a Mesh node as a static walkable collider (its triangles collide at Play).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_collider: bool,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,6 +611,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if let Some(rb) = &node.rigidbody {
             world.insert(e, rb.to_rigidbody());
         }
+        if node.mesh_collider {
+            world.insert(e, floptle_core::MeshCollider);
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -641,6 +647,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .unwrap_or_default();
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
+        let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -649,6 +656,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             scripts,
             material,
             rigidbody,
+            mesh_collider,
             parent,
         });
     }
@@ -691,6 +699,7 @@ mod tests {
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
                     }),
+                    mesh_collider: true, // exercise the mesh-collider round-trip
                     parent: None,
                 },
                 NodeDoc {
@@ -700,6 +709,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    mesh_collider: false,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -709,6 +719,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    mesh_collider: false,
                     parent: None,
                 },
                 NodeDoc {
@@ -718,6 +729,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    mesh_collider: false,
                     parent: None,
                 },
             ],
@@ -752,6 +764,7 @@ mod tests {
         assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
+        assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
