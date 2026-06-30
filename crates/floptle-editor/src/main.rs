@@ -190,7 +190,7 @@ fn component_header(
     ui.horizontal(|ui| {
         ui.strong(title);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("⋮", |ui| {
+            ui.menu_button("…", |ui| {
                 if ui.button("⎘  Copy values").clicked() {
                     copy = true;
                     ui.close();
@@ -251,6 +251,8 @@ struct EditorCmd {
     /// Change a node's "type" (its `Matter`) — geometry/camera/light/… are mutually
     /// exclusive, so picking one in "Add Component" replaces the current type.
     set_matter: Option<(Entity, Matter)>,
+    /// Import (GPU-load) a model so a freshly-assigned/swapped mesh path renders.
+    import_model: Option<String>,
     /// Copy a component's current values onto the editor clipboard.
     copy_component: Option<ComponentClip>,
     /// Paste the editor clipboard onto this entity (the held clip decides the kind).
@@ -491,6 +493,27 @@ fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
         match e {
             AssetEntry::Dir(_, children) => collect_texture_paths(children, out),
             AssetEntry::File { path, .. } if is_texture(path) => out.push(path.clone()),
+            AssetEntry::File { .. } => {}
+        }
+    }
+}
+
+/// The path the dev types after `Assets/` — `path` with the project root stripped, so it
+/// round-trips through `assets.getFile(...)` in a script. Falls back to the full path.
+fn asset_rel_path(path: &str, project_root: &Path) -> String {
+    Path::new(path)
+        .strip_prefix(project_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Collect the path of every importable model (.glb/.gltf) in the asset tree — for the
+/// Inspector's mesh model picker and the Add Component menu.
+fn collect_model_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            AssetEntry::Dir(_, children) => collect_model_paths(children, out),
+            AssetEntry::File { path, .. } if is_model(path) => out.push(path.clone()),
             AssetEntry::File { .. } => {}
         }
     }
@@ -1658,6 +1681,20 @@ from elsewhere still acts on the right object. Handles stay valid across frames 
 cache a lookup in start() and reuse it.
 
 
+ASSETS, MODELS & MATERIALS
+--------------------------
+Reference files under Assets/ in code, and swap a node's components at runtime.
+  • assets.getFile(\"models/x.glb\")   the file's path (or nil) — pass it to model/material
+  • assets.getContents(\"models\")      array of EVERY file under a folder (recursive)
+  • node.model                        a Mesh node's model — assign to SWAP it live
+  • node.material = \"Gold\"             apply a material preset (a name, or a .ron path)
+
+    -- equip a different model on a key press
+    if input.pressed(\"e\") then node.model = assets.getFile(\"models/gold.glb\") end
+
+(Right-click an asset ▸ Copy asset path to grab the string to type.)
+
+
 6. GLOBALS
 ----------
   • params   this instance's tunables — a table SEEDED from `defaults`, so
@@ -2358,6 +2395,31 @@ impl<'a> EditorTabViewer<'a> {
                             }
                             Matter::Mesh { asset_path } => {
                                 ui.label("imported mesh");
+                                // Swap the model freely — pick any model in the project.
+                                let mut models = Vec::new();
+                                collect_model_paths(self.asset_tree, &mut models);
+                                let file_label = |p: &str| {
+                                    Path::new(p)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| p.to_string())
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label("model");
+                                    egui::ComboBox::from_id_salt("mesh-model")
+                                        .selected_text(file_label(asset_path))
+                                        .show_ui(ui, |ui| {
+                                            for p in &models {
+                                                if ui.selectable_label(asset_path == p, file_label(p)).clicked()
+                                                    && asset_path != p
+                                                {
+                                                    *asset_path = p.clone();
+                                                    cmd.import_model = Some(p.clone());
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                });
                                 ui.small(asset_path.as_str());
                                 if ui
                                     .button("⏏ Extract textures")
@@ -2724,7 +2786,7 @@ impl<'a> EditorTabViewer<'a> {
                         ui.strong("⚙ Scripts");
                         if matches!(clip, Some(ComponentClip::Script(_))) {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.menu_button("⋮", |ui| {
+                                ui.menu_button("…", |ui| {
                                     if ui.button("📋  Paste script").clicked() {
                                         cmd.paste_component = Some(e);
                                         ui.close();
@@ -2744,7 +2806,7 @@ impl<'a> EditorTabViewer<'a> {
                                     cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
                                     ui.strong(&inst.kind);
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.menu_button("⋮", |ui| {
+                                        ui.menu_button("…", |ui| {
                                             if ui.button("⎘  Copy values").clicked() {
                                                 copy_idx = Some(i);
                                                 ui.close();
@@ -2871,6 +2933,23 @@ impl<'a> EditorTabViewer<'a> {
                                 items.push(("Type — replaces current", lbl.to_string(), Add::Type(mt)));
                             }
                         }
+                        // Each importable model is a Mesh type you can become.
+                        let mut models = Vec::new();
+                        collect_model_paths(self.asset_tree, &mut models);
+                        for p in models {
+                            let name = Path::new(&p)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.clone());
+                            let is_cur = matches!(cur, Some(Matter::Mesh { asset_path }) if *asset_path == p);
+                            if !is_cur {
+                                items.push((
+                                    "Mesh — replaces type",
+                                    format!("✦  {name}"),
+                                    Add::Type(Matter::Mesh { asset_path: p }),
+                                ));
+                            }
+                        }
                     }
 
                     let mut picked = false;
@@ -2893,7 +2972,13 @@ impl<'a> EditorTabViewer<'a> {
                             }
                         }
                         let mut shown = false;
-                        for cat in ["Physics", "Rendering", "Scripts", "Type — replaces current"] {
+                        for cat in [
+                            "Physics",
+                            "Rendering",
+                            "Scripts",
+                            "Type — replaces current",
+                            "Mesh — replaces type",
+                        ] {
                             if !items.iter().any(|(c, l, _)| *c == cat && hit(l)) {
                                 continue;
                             }
@@ -3290,6 +3375,14 @@ impl<'a> EditorTabViewer<'a> {
                 reveal_in_explorer(Path::new(path));
                 ui.close();
             }
+            if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
+                ui.ctx().copy_text(asset_rel_path(path, self.project_root));
+                ui.close();
+            }
+            if ui.button("⎘ Copy full path").clicked() {
+                ui.ctx().copy_text(path.to_string());
+                ui.close();
+            }
             if ui.button("🖊 Rename…").clicked() {
                 self.cmd.rename_asset = Some(path.to_string());
                 ui.close();
@@ -3428,6 +3521,14 @@ impl<'a> EditorTabViewer<'a> {
                         }
                         if ui.button("🗀 Open in file explorer").clicked() {
                             reveal_in_explorer(Path::new(path));
+                            ui.close();
+                        }
+                        if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
+                            ui.ctx().copy_text(asset_rel_path(path, self.project_root));
+                            ui.close();
+                        }
+                        if ui.button("⎘ Copy full path").clicked() {
+                            ui.ctx().copy_text(path.clone());
                             ui.close();
                         }
                         if ui.button("🖊 Rename…").clicked() {
@@ -4456,7 +4557,7 @@ const LUA_KEYWORDS: &[&str] = &[
 const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
-    "raycast", "find", "findAll", "findScript", "findScriptInScene",
+    "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets",
 ];
 
 /// One completion / docs entry for the in-engine IDE.
@@ -4492,6 +4593,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.up_y", insert: "node.up_y", doc: "Body up (−gravity) Y (read-only)." },
     ApiEntry { label: "node.up_z", insert: "node.up_z", doc: "Body up (−gravity) Z (read-only)." },
     ApiEntry { label: "node.height", insert: "node.height", doc: "Capsule standing height — write a smaller value to crouch (the engine resizes it, feet planted)." },
+    ApiEntry { label: "node.model", insert: "node.model", doc: "A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile(\"models/x.glb\"))." },
+    ApiEntry { label: "node.material", insert: "node.material", doc: "Apply a material — assign a preset name (\"Gold\") or an assets.getFile(\"materials/X.ron\")." },
     ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
     ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
     ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
@@ -4506,6 +4609,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
     ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
+    ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
+    ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
+    ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },
     ApiEntry { label: "find", insert: "find(", doc: "find(\"Player\") — the first node in the scene with that name (a node handle), or nil." },
     ApiEntry { label: "findAll", insert: "findAll(", doc: "findAll(\"Coin\") — an array of every node with that name." },
     ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state." },
@@ -6088,8 +6194,34 @@ impl Editor {
             if let Some(sim) = self.sim.as_mut() {
                 self.script_host.set_colliders(std::mem::take(&mut sim.world.colliders));
             }
+            // Lend the asset root (for `assets.getFile/getContents`) and the material
+            // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
+            self.script_host.set_project_root(self.project_root.clone());
+            self.script_host.set_materials(
+                self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
+            );
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
+            // GPU-load any models a script swapped via `node.model` (the Matter is already
+            // updated by run; we re-import here so the new mesh renders THIS frame). Inlined
+            // with the in-scope `gpu`/`raster` borrows — `self.import_model` can't run while
+            // they're held.
+            for (_eid, path) in self.script_host.take_model_changes() {
+                if !self.mesh_registry.contains_key(&path) {
+                    match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
+                        Ok(model) => {
+                            let parts = model
+                                .parts
+                                .iter()
+                                .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                                .collect();
+                            self.mesh_registry
+                                .insert(path.clone(), MeshAsset { parts, size: model.size });
+                        }
+                        Err(e) => eprintln!("  swap-import {path} failed: {e}"),
+                    }
+                }
+            }
             // Apply script velocity writes, then advance physics (writes transforms back).
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
@@ -7450,10 +7582,17 @@ impl Editor {
             // Switch the node's "type" (mutually-exclusive components). Terrain owns an
             // out-of-ECS SDF field, so never morph one through here.
             if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+                // Becoming a Mesh: GPU-load the model so it renders this frame.
+                if let Matter::Mesh { asset_path } = &mt {
+                    self.import_model(&asset_path.clone());
+                }
                 self.record();
                 self.world.insert(e, mt);
                 self.rebuild_sim();
             }
+        }
+        if let Some(path) = cmd.import_model {
+            self.import_model(&path);
         }
         if let Some(clip) = cmd.copy_component {
             self.component_clip = Some(clip);
