@@ -4816,13 +4816,14 @@ impl Editor {
             // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
             if let Some(sim) = self.sim.as_ref() {
                 let mut states = HashMap::new();
-                for (e, vel, up, grounded) in sim.body_states() {
+                for (e, vel, up, grounded, height) in sim.body_states() {
                     states.insert(
                         e.index(),
                         floptle_script::BodyState {
                             vel: [vel.x, vel.y, vel.z],
                             up: [up.x, up.y, up.z],
                             grounded,
+                            height,
                         },
                     );
                 }
@@ -4844,6 +4845,9 @@ impl Editor {
             if let Some(sim) = self.sim.as_mut() {
                 for (eid, v) in self.script_host.take_body_changes() {
                     sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                }
+                for (eid, h) in self.script_host.take_body_height_changes() {
+                    sim.set_body_height(eid, h);
                 }
                 sim.advance(&mut self.world, sdt);
             }

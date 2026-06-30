@@ -332,6 +332,15 @@ impl Body {
         Self { shape: BodyShape::Capsule { half_height: half }, ..Self::sphere(pos, radius) }
     }
 
+    /// Total standing height (tip to tip): `2·radius` for a sphere, the full capsule
+    /// length for a capsule.
+    fn height(&self) -> f32 {
+        match self.shape {
+            BodyShape::Sphere => 2.0 * self.radius,
+            BodyShape::Capsule { half_height } => 2.0 * (half_height + self.radius),
+        }
+    }
+
     /// The collision sphere centers (1 for a sphere, 2 for a capsule's ends).
     fn centers(&self) -> ([Vec3; 2], usize) {
         match self.shape {
@@ -640,12 +649,13 @@ impl Sim {
         self.writeback_transforms(ecs);
     }
 
-    /// Per body: (entity, velocity, up, grounded) — so the editor can expose it to
-    /// scripts (`up` is −gravity, for surface-relative movement on planets).
-    pub fn body_states(&self) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool)> + '_ {
+    /// Per body: (entity, velocity, up, grounded, height) — so the editor can expose it
+    /// to scripts (`up` is −gravity, for surface-relative movement on planets; `height`
+    /// lets a controller read/animate its capsule height for crouching).
+    pub fn body_states(&self) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool, f32)> + '_ {
         self.map.iter().map(move |l| {
             let b = &self.world.bodies[l.body];
-            (l.entity, b.vel, b.up, b.grounded)
+            (l.entity, b.vel, b.up, b.grounded, b.height())
         })
     }
 
@@ -654,6 +664,24 @@ impl Sim {
         for l in &self.map {
             if l.entity.index() == eid {
                 self.world.bodies[l.body].vel = vel;
+                return;
+            }
+        }
+    }
+
+    /// Set a capsule body's total standing height (for crouch). The feet stay planted —
+    /// the body shrinks/grows from the top, so the center (and a camera at it) lowers
+    /// when crouching. No-op on a sphere body or when the height is unchanged.
+    pub fn set_body_height(&mut self, eid: u32, height: f32) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                let b = &mut self.world.bodies[l.body];
+                if let BodyShape::Capsule { half_height } = b.shape {
+                    let r = b.radius;
+                    let new_half = (height.max(2.0 * r) * 0.5 - r).max(0.0);
+                    b.pos += b.up * (new_half - half_height); // keep feet planted
+                    b.shape = BodyShape::Capsule { half_height: new_half };
+                }
                 return;
             }
         }
