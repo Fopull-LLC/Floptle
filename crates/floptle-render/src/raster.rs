@@ -13,10 +13,46 @@
 //! what low-res game textures want. Per-material shaders, transparency, and the
 //! render-graph integration are later work.
 
+use std::collections::HashMap;
+
 use glam::Mat4;
 
 use crate::device::Gpu;
 use crate::mesh::{GpuMesh, MeshData, MeshId, TextureData, Vertex};
+
+/// How a texture is filtered (and, for `SmoothMipmaps`, minified). The default
+/// `Pixelated` is crisp nearest-neighbor — the engine's pixel-art look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TexFilter {
+    /// Nearest-neighbor — crisp pixels, no smoothing (good for pixel art).
+    Pixelated,
+    /// Bilinear — smooth magnification, no mipmaps.
+    Smooth,
+    /// Trilinear — smooth + mipmapped, so the texture doesn't shimmer/alias when
+    /// minified into the distance (the quality/"compression" lever).
+    SmoothMipmaps,
+}
+
+/// How a texture's coordinates wrap outside `[0,1]` (e.g. when tiled across terrain).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TexWrap {
+    Repeat,
+    Clamp,
+    Mirror,
+}
+
+/// A texture's sampling settings (filter + wrap). Default = crisp tiling pixel-art.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TexSampling {
+    pub filter: TexFilter,
+    pub wrap: TexWrap,
+}
+
+impl Default for TexSampling {
+    fn default() -> Self {
+        Self { filter: TexFilter::Pixelated, wrap: TexWrap::Repeat }
+    }
+}
 
 /// Frame-global uniform: camera view·projection and the directional light.
 #[repr(C)]
@@ -124,7 +160,9 @@ pub struct Raster {
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     tex_layout: wgpu::BindGroupLayout,
-    _sampler: wgpu::Sampler, // owned by globals_bind; kept for lifetime clarity
+    /// One sampler per distinct [`TexSampling`], built on demand and reused (textures
+    /// pick theirs by filter/wrap; samplers are cheap to share).
+    samplers: HashMap<TexSampling, wgpu::Sampler>,
     default_tex: wgpu::Texture,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
@@ -153,17 +191,32 @@ impl Raster {
             source: wgpu::ShaderSource::Wgsl(include_str!("raster.wgsl").into()),
         });
 
-        // Group 0: frame globals (uniform) + the shared sampler.
+        // Group 0: frame globals (uniform).
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raster-globals"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        // Group 1: the per-material base-color texture + its own sampler (so each
+        // texture can choose its own filtering / wrap mode).
+        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-texture"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -174,20 +227,6 @@ impl Raster {
                     count: None,
                 },
             ],
-        });
-        // Group 1: the per-material base-color texture.
-        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("raster-texture"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -305,27 +344,13 @@ impl Raster {
             mapped_at_creation: false,
         });
 
-        // Nearest + REPEAT: crisp, tiling pixel-art textures.
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("raster-samp"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
         let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster-globals"),
             layout: &globals_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals_buf.as_entire_binding(),
+            }],
         });
 
         // 1×1 white default for meshes registered without a texture (the tint then
@@ -350,7 +375,7 @@ impl Raster {
             globals_bind,
             globals_buf,
             tex_layout,
-            _sampler: sampler,
+            samplers: HashMap::new(),
             default_tex,
             instance_buf,
             instance_cap,
@@ -359,26 +384,69 @@ impl Raster {
         }
     }
 
-    /// Register a standalone material texture (RGBA8), returning its handle. Bound
-    /// per-instance in `draw_scene` to re-texture a shape regardless of its mesh.
-    pub fn register_texture(&mut self, gpu: &Gpu, data: &TextureData) -> TexId {
+    /// A sampler for the given settings, created on first use and cached.
+    fn sampler_for(&mut self, gpu: &Gpu, s: TexSampling) -> wgpu::Sampler {
+        if let Some(samp) = self.samplers.get(&s) {
+            return samp.clone();
+        }
+        let (mag, min, mip) = match s.filter {
+            TexFilter::Pixelated => (
+                wgpu::FilterMode::Nearest,
+                wgpu::FilterMode::Nearest,
+                wgpu::MipmapFilterMode::Nearest,
+            ),
+            TexFilter::Smooth => (
+                wgpu::FilterMode::Linear,
+                wgpu::FilterMode::Linear,
+                wgpu::MipmapFilterMode::Nearest,
+            ),
+            TexFilter::SmoothMipmaps => (
+                wgpu::FilterMode::Linear,
+                wgpu::FilterMode::Linear,
+                wgpu::MipmapFilterMode::Linear,
+            ),
+        };
+        let addr = match s.wrap {
+            TexWrap::Repeat => wgpu::AddressMode::Repeat,
+            TexWrap::Clamp => wgpu::AddressMode::ClampToEdge,
+            TexWrap::Mirror => wgpu::AddressMode::MirrorRepeat,
+        };
+        let samp = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raster-samp"),
+            address_mode_u: addr,
+            address_mode_v: addr,
+            address_mode_w: addr,
+            mag_filter: mag,
+            min_filter: min,
+            mipmap_filter: mip,
+            ..Default::default()
+        });
+        self.samplers.insert(s, samp.clone());
+        samp
+    }
+
+    /// Register a standalone material texture (RGBA8) with the given sampling, returning
+    /// its handle. Bound per-instance in `draw_scene` to re-texture a shape regardless
+    /// of its mesh. Re-registering the same image with new settings returns a fresh id.
+    pub fn register_texture(&mut self, gpu: &Gpu, data: &TextureData, sampling: TexSampling) -> TexId {
         let id = TexId(self.textures.len() as u32);
-        let texture = upload_texture(gpu, data);
+        let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps));
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.sampler_for(gpu, sampling);
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster-material-tex"),
             layout: &self.tex_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
         });
         self.textures.push(TexBind { bind, _texture: texture });
         id
     }
 
     /// Upload a mesh and its base-color texture (or `None` for a white default),
-    /// returning its handle.
+    /// returning its handle. The mesh's own texture uses the default (crisp) sampling.
     pub fn register(&mut self, gpu: &Gpu, data: &MeshData, texture: Option<&TextureData>) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
         let gpu_mesh = GpuMesh::upload(gpu, data);
@@ -388,13 +456,14 @@ impl Raster {
             .as_ref()
             .unwrap_or(&self.default_tex)
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.sampler_for(gpu, TexSampling::default());
         let tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raster-mesh-tex"),
             layout: &self.tex_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
         });
 
         self.meshes.push(RegisteredMesh { gpu_mesh, tex_bind, _texture: owned });
@@ -598,37 +667,68 @@ impl Raster {
     }
 }
 
-/// Upload an RGBA8 image as an sRGB texture (base-color data is sRGB-encoded).
+/// Upload an RGBA8 image as a single-level sRGB texture (base-color data is sRGB).
 fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
+    upload_texture_mips(gpu, t, false)
+}
+
+/// Upload an RGBA8 image as an sRGB texture; if `gen_mips`, generate a full mip chain
+/// (box-filtered on the CPU) so it can be sampled trilinearly without shimmering when
+/// minified into the distance.
+fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool) -> wgpu::Texture {
+    let w0 = t.width.max(1);
+    let h0 = t.height.max(1);
+    let mip_count = if gen_mips { 1 + (w0.max(h0) as f32).log2().floor() as u32 } else { 1 };
     let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("raster-basecolor"),
-        size: wgpu::Extent3d {
-            width: t.width.max(1),
-            height: t.height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
+        size: wgpu::Extent3d { width: w0, height: h0, depth_or_array_layers: 1 },
+        mip_level_count: mip_count.max(1),
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    gpu.queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &t.pixels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * t.width.max(1)),
-            rows_per_image: Some(t.height.max(1)),
-        },
-        wgpu::Extent3d { width: t.width.max(1), height: t.height.max(1), depth_or_array_layers: 1 },
-    );
+    let write = |level: u32, w: u32, h: u32, pixels: &[u8]| {
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    };
+    write(0, w0, h0, &t.pixels);
+    if gen_mips {
+        let mut cur = t.pixels.clone();
+        let (mut cw, mut ch) = (w0, h0);
+        for level in 1..mip_count {
+            let nw = (cw >> 1).max(1);
+            let nh = (ch >> 1).max(1);
+            let mut next = vec![0u8; (nw * nh * 4) as usize];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let sx = (x * 2).min(cw - 1);
+                    let sy = (y * 2).min(ch - 1);
+                    let sx1 = (sx + 1).min(cw - 1);
+                    let sy1 = (sy + 1).min(ch - 1);
+                    for c in 0..4u32 {
+                        let p = |px: u32, py: u32| cur[((py * cw + px) * 4 + c) as usize] as u32;
+                        let avg = (p(sx, sy) + p(sx1, sy) + p(sx, sy1) + p(sx1, sy1) + 2) / 4;
+                        next[((y * nw + x) * 4 + c) as usize] = avg as u8;
+                    }
+                }
+            }
+            write(level, nw, nh, &next);
+            cur = next;
+            cw = nw;
+            ch = nh;
+        }
+    }
     texture
 }
 

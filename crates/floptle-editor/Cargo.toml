@@ -38,3 +38,4 @@ egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 egui_dock = { workspace = true }
 ron = { workspace = true }
+serde = { workspace = true }

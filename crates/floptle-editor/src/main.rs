@@ -200,6 +200,8 @@ struct EditorCmd {
     open_scene: Option<String>,
     /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
     do_open_scene: Option<(String, bool)>,
+    /// Change a texture's sampling (filter/wrap): (image path, new setting).
+    set_texture_setting: Option<(String, TexSetting)>,
     /// Give this camera node play-mode authority (clear the others).
     set_active_camera: Option<Entity>,
     /// Move this camera node to the current editor viewpoint.
@@ -681,6 +683,55 @@ fn material_params(m: &Material) -> MaterialParams {
         unlit: m.unlit,
         ambient: m.ambient,
         alpha: m.alpha,
+    }
+}
+
+/// How a texture is filtered — the serde-friendly mirror of [`floptle_render::TexFilter`],
+/// persisted per texture in `.floptle/textures.ron`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum FilterMode {
+    /// Crisp nearest-neighbor (pixel art).
+    #[default]
+    Pixelated,
+    /// Bilinear smoothing.
+    Smooth,
+    /// Trilinear (bilinear + mipmaps) — smooth and shimmer-free into the distance.
+    SmoothMipmaps,
+}
+
+/// How a texture wraps outside [0,1] — serde mirror of [`floptle_render::TexWrap`].
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum WrapMode {
+    #[default]
+    Repeat,
+    Clamp,
+    Mirror,
+}
+
+/// A texture's sampling settings, persisted per project. Default = crisp tiling.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+struct TexSetting {
+    #[serde(default)]
+    filter: FilterMode,
+    #[serde(default)]
+    wrap: WrapMode,
+}
+
+impl TexSetting {
+    fn to_sampling(self) -> floptle_render::TexSampling {
+        use floptle_render::{TexFilter, TexSampling, TexWrap};
+        TexSampling {
+            filter: match self.filter {
+                FilterMode::Pixelated => TexFilter::Pixelated,
+                FilterMode::Smooth => TexFilter::Smooth,
+                FilterMode::SmoothMipmaps => TexFilter::SmoothMipmaps,
+            },
+            wrap: match self.wrap {
+                WrapMode::Repeat => TexWrap::Repeat,
+                WrapMode::Clamp => TexWrap::Clamp,
+                WrapMode::Mirror => TexWrap::Mirror,
+            },
+        }
     }
 }
 
@@ -1424,6 +1475,8 @@ struct EditorTabViewer<'a> {
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
+    /// Per-texture sampling settings (read-only here; changes go via `cmd`).
+    texture_settings: &'a HashMap<String, TexSetting>,
     /// Terrain dock-tab state.
     terrain_brush: &'a mut TerrainBrush,
     terrain_detail: &'a mut u32,
@@ -1731,6 +1784,7 @@ impl<'a> EditorTabViewer<'a> {
                 self.material_asset_ui(ui, &path);
             } else if is_texture(&path) {
                 self.asset_preview_ui(ui);
+                self.texture_settings_ui(ui, &path);
             } else if is_script(&path) {
                 ui.label("script — drag onto a node, double-click, or:");
                 if ui.button("🖊  Open in Scripting").clicked() {
@@ -2634,6 +2688,48 @@ impl<'a> EditorTabViewer<'a> {
 
     /// Editable properties for a selected material preset, with a Save back to its
     /// `.ron`. Edits mutate the live preview material, so the sphere updates as you go.
+    /// Per-texture sampling controls (filter + wrap), shown when a texture asset is
+    /// selected. Changes are recorded on `cmd` and applied (persist + re-register)
+    /// after the frame.
+    fn texture_settings_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        ui.separator();
+        ui.strong("Sampling");
+        let mut s = self.texture_settings.get(path).copied().unwrap_or_default();
+        let before = s;
+        egui::Grid::new("tex-sampling").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label("filter");
+            egui::ComboBox::from_id_salt("tex-filter")
+                .selected_text(match s.filter {
+                    FilterMode::Pixelated => "Pixelated",
+                    FilterMode::Smooth => "Smooth",
+                    FilterMode::SmoothMipmaps => "Smooth + Mipmaps",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.filter, FilterMode::Pixelated, "Pixelated");
+                    ui.selectable_value(&mut s.filter, FilterMode::Smooth, "Smooth");
+                    ui.selectable_value(&mut s.filter, FilterMode::SmoothMipmaps, "Smooth + Mipmaps");
+                });
+            ui.end_row();
+            ui.label("wrap");
+            egui::ComboBox::from_id_salt("tex-wrap")
+                .selected_text(match s.wrap {
+                    WrapMode::Repeat => "Repeat",
+                    WrapMode::Clamp => "Clamp",
+                    WrapMode::Mirror => "Mirror",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.wrap, WrapMode::Repeat, "Repeat");
+                    ui.selectable_value(&mut s.wrap, WrapMode::Clamp, "Clamp");
+                    ui.selectable_value(&mut s.wrap, WrapMode::Mirror, "Mirror");
+                });
+            ui.end_row();
+        });
+        ui.small("Pixelated = crisp · Smooth = bilinear · +Mipmaps = no shimmer at distance.");
+        if s != before {
+            self.cmd.set_texture_setting = Some((path.to_string(), s));
+        }
+    }
+
     fn material_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         let Some((mpath, mat)) = self.preview_material.as_mut() else { return };
         if mpath != path {
@@ -3514,6 +3610,12 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
+    /// The sampling each registered texture was last built with, so a settings change
+    /// forces a re-register (with the new sampler / mips).
+    texture_registry_setting: HashMap<String, TexSetting>,
+    /// Per-texture sampling settings (filter + wrap), keyed by image path. Persisted to
+    /// `.floptle/textures.ron`. Absent ⏵ the crisp tiling default.
+    texture_settings: HashMap<String, TexSetting>,
     /// Editable terrain SDF fields, keyed by their scene node Entity (each in its
     /// node's LOCAL space). Empty until "New Terrain". Multiple terrains are folded
     /// into one combined field for rendering ([`rebuild_combined`]).
@@ -3775,6 +3877,7 @@ impl ApplicationHandler for Editor {
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
+        self.load_texture_settings();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.outline = Some(Outline::new(&gpu));
@@ -4536,6 +4639,7 @@ impl Editor {
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
         let asset_tree = &self.asset_tree;
+        let texture_settings = &self.texture_settings;
         let assets_grid = &mut self.assets_grid;
         let assets_grid_dir = &mut self.assets_grid_dir;
         let project_root = self.project_root.as_path();
@@ -4686,6 +4790,7 @@ impl Editor {
                 mat_name_buf,
                 show_material_editor,
                 asset_tree,
+                texture_settings,
                 terrain_brush,
                 terrain_detail,
                 terrain_textures,
@@ -5215,6 +5320,14 @@ impl Editor {
         if let Some(parent) = cmd.add_camera {
             self.add_camera_node(parent);
         }
+        if let Some((path, setting)) = cmd.set_texture_setting.take() {
+            self.texture_settings.insert(path.clone(), setting);
+            // Drop the cached registration so the texture re-uploads with the new
+            // sampler (and mips) on next use, and persist the change.
+            self.texture_registry.remove(&path);
+            self.texture_registry_setting.remove(&path);
+            self.save_texture_settings();
+        }
         if let Some(e) = cmd.set_active_camera {
             self.set_active_camera(e);
         }
@@ -5389,16 +5502,41 @@ impl Editor {
         }
     }
 
-    /// Load + register a material texture (cached by path), returning its handle.
+    /// Load + register a material texture (cached by path + its sampling settings),
+    /// returning its handle. Re-registers if the texture's filter/wrap was changed.
     fn ensure_texture(&mut self, path: &str) -> Option<TexId> {
-        if let Some(id) = self.texture_registry.get(path) {
-            return Some(*id);
+        let want = self.texture_settings.get(path).copied().unwrap_or_default();
+        if let (Some(id), Some(prev)) =
+            (self.texture_registry.get(path), self.texture_registry_setting.get(path))
+        {
+            if *prev == want {
+                return Some(*id);
+            }
         }
         let data = floptle_assets::load_texture(Path::new(path))?;
         let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
-        let id = raster.register_texture(gpu, &data);
+        let id = raster.register_texture(gpu, &data, want.to_sampling());
         self.texture_registry.insert(path.to_string(), id);
+        self.texture_registry_setting.insert(path.to_string(), want);
         Some(id)
+    }
+
+    /// Persist the per-texture sampling settings to `.floptle/textures.ron`.
+    fn save_texture_settings(&self) {
+        let dir = self.project_root.join(".floptle");
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(s) = ron::ser::to_string_pretty(&self.texture_settings, Default::default()) {
+            let _ = std::fs::write(dir.join("textures.ron"), s);
+        }
+    }
+
+    /// Load the per-texture sampling settings from `.floptle/textures.ron` (if present).
+    fn load_texture_settings(&mut self) {
+        let path = self.project_root.join(".floptle").join("textures.ron");
+        self.texture_settings = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| ron::from_str(&s).ok())
+            .unwrap_or_default();
     }
 
     /// Switch the active tool and cancel any in-progress gizmo drag.
@@ -6877,6 +7015,9 @@ impl Editor {
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.materials = self.load_materials();
         self.asset_tree = build_assets(&self.project_root);
+        self.load_texture_settings();
+        self.texture_registry.clear();
+        self.texture_registry_setting.clear();
         self.selection.clear();
         self.selected_asset = None;
         self.ide = IdeState::default();

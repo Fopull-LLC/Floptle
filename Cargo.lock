@@ -897,6 +897,7 @@ dependencies = [
  "log",
  "pollster",
  "ron",
+ "serde",
  "wgpu",
  "winit",
 ]

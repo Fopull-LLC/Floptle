@@ -1,8 +1,9 @@
 // Forward raster: instanced, depth-tested meshes with directional diffuse light
 // and a per-material base-color texture.
 //
-// Group 0 (shared, set once per frame): the camera/light globals + the sampler.
-// Group 1 (per mesh): the base-color texture. Per-vertex stream (buffer 0):
+// Group 0 (shared, set once per frame): the camera/light globals.
+// Group 1 (per mesh/material): the base-color texture + its sampler (so each texture
+// chooses its own filtering / wrap mode). Per-vertex stream (buffer 0):
 // pos/normal/uv. Per-instance stream (buffer 1): camera-relative model matrix
 // (locations 3..6), inverse-transpose normal matrix columns (7..9), tint (10).
 
@@ -14,8 +15,8 @@ struct Globals {
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
-@group(0) @binding(1) var samp: sampler;
 @group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
