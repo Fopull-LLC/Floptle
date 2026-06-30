@@ -44,6 +44,10 @@ pub struct NodeDoc {
     /// Marks a Mesh node as a static walkable collider (its triangles collide at Play).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mesh_collider: bool,
+    /// The "collidable" switch: a static collider auto-shaped from this node's geometry
+    /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collidable: bool,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -53,13 +57,18 @@ pub struct NodeDoc {
 /// Serializable physics rigidbody, mirroring [`floptle_core::RigidBody`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct RigidBodyDoc {
-    /// false = sphere, true = capsule.
+    /// true = capsule (legacy field; ignored when `boxed` is set).
     #[serde(default)]
     pub capsule: bool,
+    /// true = box (sized by `half_extents`). Takes priority over `capsule`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub boxed: bool,
     #[serde(default = "half_f32")]
     pub radius: f32,
     #[serde(default = "two_f32")]
     pub height: f32,
+    #[serde(default = "half3_f32")]
+    pub half_extents: [f32; 3],
     #[serde(default)]
     pub restitution: f32,
     #[serde(default = "frict_f32")]
@@ -81,6 +90,9 @@ fn half_f32() -> f32 {
 fn two_f32() -> f32 {
     2.0
 }
+fn half3_f32() -> [f32; 3] {
+    [0.5, 0.5, 0.5]
+}
 fn frict_f32() -> f32 {
     0.3
 }
@@ -88,9 +100,16 @@ fn frict_f32() -> f32 {
 impl RigidBodyDoc {
     pub fn to_rigidbody(&self) -> RigidBody {
         RigidBody {
-            kind: if self.capsule { BodyKind::Capsule } else { BodyKind::Sphere },
+            kind: if self.boxed {
+                BodyKind::Box
+            } else if self.capsule {
+                BodyKind::Capsule
+            } else {
+                BodyKind::Sphere
+            },
             radius: self.radius,
             height: self.height,
+            half_extents: self.half_extents,
             restitution: self.restitution,
             friction: self.friction,
             gravity: self.gravity,
@@ -101,8 +120,10 @@ impl RigidBodyDoc {
     pub fn from_rigidbody(rb: &RigidBody) -> Self {
         Self {
             capsule: rb.kind == BodyKind::Capsule,
+            boxed: rb.kind == BodyKind::Box,
             radius: rb.radius,
             height: rb.height,
+            half_extents: rb.half_extents,
             restitution: rb.restitution,
             friction: rb.friction,
             gravity: rb.gravity,
@@ -621,6 +642,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if node.mesh_collider {
             world.insert(e, floptle_core::MeshCollider);
         }
+        if node.collidable {
+            world.insert(e, floptle_core::Collidable);
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -655,6 +679,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
+        let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -664,6 +689,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             material,
             rigidbody,
             mesh_collider,
+            collidable,
             parent,
         });
     }
@@ -699,8 +725,10 @@ mod tests {
                     }),
                     rigidbody: Some(RigidBodyDoc {
                         capsule: true,
+                        boxed: false,
                         radius: 0.6,
                         height: 2.4,
+                        half_extents: [0.5, 0.5, 0.5],
                         restitution: 0.2,
                         friction: 0.5,
                         gravity: false, // exercise the gravity-flag round-trip
@@ -708,6 +736,7 @@ mod tests {
                         lock_rot: [true, false, true],
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
+                    collidable: true,    // exercise the collidable round-trip
                     parent: None,
                 },
                 NodeDoc {
@@ -718,6 +747,7 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    collidable: false,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -728,6 +758,7 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    collidable: false,
                     parent: None,
                 },
                 NodeDoc {
@@ -738,6 +769,7 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    collidable: false,
                     parent: None,
                 },
             ],
@@ -773,6 +805,7 @@ mod tests {
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
+        assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!rb.gravity, "rigidbody gravity flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
