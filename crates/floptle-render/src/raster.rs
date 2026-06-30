@@ -62,6 +62,26 @@ pub struct Globals {
     pub light_dir: [f32; 4],
     pub light_color: [f32; 4],
     pub ambient: [f32; 4],
+    /// x = active point-light count (rest pad to a vec4).
+    pub point_count: [f32; 4],
+    /// Up to 16 point lights: xyz = camera-relative position, w = range.
+    pub point_pos: [[f32; 4]; 16],
+    /// Each point light's rgb = color × intensity (w unused).
+    pub point_color: [[f32; 4]; 16],
+}
+
+impl Default for Globals {
+    fn default() -> Self {
+        Self {
+            view_proj: [[0.0; 4]; 4],
+            light_dir: [0.0; 4],
+            light_color: [0.0; 4],
+            ambient: [0.0; 4],
+            point_count: [0.0; 4],
+            point_pos: [[0.0; 4]; 16],
+            point_color: [[0.0; 4]; 16],
+        }
+    }
 }
 
 /// Per-instance GPU data: model matrix, inverse-transpose normal matrix (3 padded

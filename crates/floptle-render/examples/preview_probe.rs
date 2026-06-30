@@ -84,6 +84,7 @@ fn main() {
         light_dir: [l.x, l.y, l.z, 0.0],
         light_color: [1.0, 0.98, 0.93, 0.0],
         ambient: [0.30, 0.32, 0.38, 0.0],
+        ..Default::default()
     };
     raster.draw_scene(&gpu, &color_view, &depth_view, globals, &instances, Some([0.07, 0.08, 0.10, 1.0]));
 
