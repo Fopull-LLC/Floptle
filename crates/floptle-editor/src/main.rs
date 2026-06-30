@@ -176,6 +176,9 @@ struct EditorCmd {
     save_material: Option<(String, MaterialDoc)>,
     /// Give an entity a default Material component (start customizing its look).
     add_material: Option<Entity>,
+    /// Add / remove a physics RigidBody on this entity.
+    add_rigidbody: Option<Entity>,
+    remove_rigidbody: Option<Entity>,
     /// Remove an entity's Material component (back to the default look).
     remove_material: Option<Entity>,
     /// Apply a named material preset to an entity.
@@ -2007,6 +2010,27 @@ impl<'a> EditorTabViewer<'a> {
                                 });
                             }
                         });
+                    }
+                });
+
+                // ---- Physics (Rigidbody) ----
+                let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
+                egui::CollapsingHeader::new("◆ Rigidbody").default_open(has_rb).show(ui, |ui| {
+                    if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
+                        cmd.inspector_changed |=
+                            ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                        cmd.inspector_changed |=
+                            ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
+                        cmd.inspector_changed |=
+                            ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                        if ui.button("🗑 Remove rigidbody").clicked() {
+                            cmd.remove_rigidbody = Some(e);
+                        }
+                    } else {
+                        ui.small("A dynamic physics body — falls under gravity and collides with the terrain on Play.");
+                        if ui.button("✚ Add rigidbody").clicked() {
+                            cmd.add_rigidbody = Some(e);
+                        }
                     }
                 });
 
@@ -3890,6 +3914,8 @@ struct Editor {
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
+    /// The physics sim while playing (built on Play, dropped on Stop).
+    sim: Option<floptle_physics::Sim>,
     /// Paused (in play mode): the script clock freezes.
     paused: bool,
     /// Accumulated play-mode seconds (advances only while playing and not paused).
@@ -4470,6 +4496,11 @@ impl Editor {
             // dt-driven motion stops too (not just `time`-driven motion).
             let sdt = if self.paused { 0.0 } else { dt };
             self.play_t += sdt;
+            // Step physics (fixed-timestep) before scripts, so scripts see resolved
+            // positions. Bodies move; transforms are written back into the World.
+            if let Some(sim) = self.sim.as_mut() {
+                sim.advance(&mut self.world, sdt);
+            }
             // Direct field access (not the `scripts_dir()` method) so we don't take
             // a whole-`self` borrow while gpu/egui are mutably borrowed here.
             let dir = self.project_root.join("scripts");
@@ -5524,6 +5555,14 @@ impl Editor {
             self.record();
             self.world.remove::<Material>(e);
         }
+        if let Some(e) = cmd.add_rigidbody {
+            self.record();
+            self.world.insert(e, floptle_core::RigidBody::default());
+        }
+        if let Some(e) = cmd.remove_rigidbody {
+            self.record();
+            self.world.remove::<floptle_core::RigidBody>(e);
+        }
         if let Some((e, name)) = cmd.apply_preset {
             if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
                 let mat = doc.to_material();
@@ -5905,6 +5944,7 @@ impl Editor {
         if self.playing {
             self.playing = false;
             self.paused = false;
+            self.sim = None; // drop the physics sim; restore reverts moved transforms
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
@@ -5912,6 +5952,14 @@ impl Editor {
             self.play_snapshot = Some(self.snapshot());
             self.play_t = 0.0;
             self.paused = false;
+            // Build the physics sim from the scene: RigidBody nodes + the combined
+            // terrain (SDF collider), under uniform gravity (gravity-volume nodes come
+            // in a later slice).
+            self.sim = Some(floptle_physics::Sim::build(
+                &self.world,
+                self.combined.as_ref(),
+                floptle_physics::GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+            ));
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
             // Press Play → bring the Game tab to the front (active-camera view), so it's

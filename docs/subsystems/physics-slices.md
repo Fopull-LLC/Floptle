@@ -33,16 +33,20 @@ sphere-planet** under radial gravity staying grounded + upright (Mario Galaxy on
 respects the slope limit (gentle = grounded, steep = slides).
 
 ## Slice 3 — Editor + ECS + play integration
-- Components on entities: `RigidBody { mass, … }` and `Collider { shape, kind: Solid|Trigger }`
-  (shape = sphere/capsule/box/auto-from-terrain). Serialize via `MatterDoc`/a sidecar like
-  materials. Toggle Solid vs Trigger in the inspector; collider gizmos.
-- On **Play**: build a `PhysicsWorld` from the scene (terrain → `SdfTerrain` collider,
-  bodies from `RigidBody`+`Collider`), step on a fixed-timestep accumulator decoupled from
-  render fps, write resolved transforms back to the ECS; restore on Stop.
-- Gravity **volume nodes** (`Uniform` / `Point`(planet) / `SdfSurface`) feed the field; a
-  body samples the summed field each step → spherical-planet gameplay with zero code.
-- **Acceptance (playtest):** drop a ball in a scene, press Play, it falls and rolls on the
-  sculpted terrain; a planet node makes objects orbit/stick.
+**3a ✅ (bridge, tested):** `floptle_core::RigidBody` component (radius/restitution/friction)
++ `floptle_physics::Sim` — builds a `PhysicsWorld` from the ECS (RigidBody entities + the
+combined terrain as an `SdfTerrain` collider), advances on a fixed-timestep accumulator,
+and writes resolved positions back to the entities' transforms. Unit-tested.
+**3b ✅ (editor wiring — needs playtest):** a "◆ Rigidbody" inspector section (Add/remove +
+radius/bounce/friction); on **Play** the editor builds the `Sim` (RigidBody nodes + combined
+terrain, uniform −Y gravity for now) and steps it before scripts each frame, writing
+transforms back; **Stop** drops the sim and the snapshot restore reverts moved nodes.
+- **Acceptance (playtest):** add a Rigidbody to a node, press Play — it falls and rolls on
+  the sculpted terrain; Stop restores it.
+- **Remaining for Slice 3:** gravity **volume nodes** (`Uniform`/`Point`-planet/`SdfSurface`)
+  feeding the field (so planet gameplay needs no code), `RigidBody` scene serialization
+  (currently editor-session only), and collider gizmos. Capsule controllers wire in via the
+  same Sim once a "player" node type exists.
 
 ## Slice 4 — Lua physics API + triggers + mesh colliders
 - Lua: `body.velocity`, `apply_impulse`, `is_grounded`, and `on_collision` /
