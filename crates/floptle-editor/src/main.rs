@@ -196,7 +196,7 @@ struct EditorCmd {
     focus_terrain: bool,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
-    /// Create a new blank scene with this name (from Assets ▸ New ▸ Scene).
+    /// Create a new blank scene with this name (from Assets ⏵ New ⏵ Scene).
     new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
@@ -313,19 +313,19 @@ fn truncate_label(name: &str, max: usize) -> String {
 /// A small type glyph + tint for an asset file, used in the browser tree + grid.
 fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
     if is_model(path) {
-        ("🧊", egui::Color32::from_rgb(120, 200, 210))
+        ("⬣", egui::Color32::from_rgb(120, 200, 210))
     } else if is_script(path) {
-        ("📜", egui::Color32::from_rgb(130, 170, 240))
+        ("¶", egui::Color32::from_rgb(130, 170, 240))
     } else if is_texture(path) {
         ("🖼", egui::Color32::from_rgb(140, 210, 140))
     } else if is_material(path) {
-        ("🎨", egui::Color32::from_rgb(240, 180, 110))
+        ("◑", egui::Color32::from_rgb(240, 180, 110))
     } else if path.to_ascii_lowercase().ends_with(".ron") {
-        ("🎬", egui::Color32::from_rgb(200, 150, 230)) // a scene
+        ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
     } else if is_markdown(path) {
-        ("📝", egui::Color32::from_gray(190))
+        ("§", egui::Color32::from_gray(190))
     } else {
-        ("📄", egui::Color32::from_gray(170))
+        ("▣", egui::Color32::from_gray(170))
     }
 }
 
@@ -866,7 +866,7 @@ fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, radius: f32) -> Option<f32> {
 /// Nearest positive ray–AABB hit `t` for a box centered at the origin with the given
 /// `half` extent (slab method; `rd` need not be unit).
 fn ray_aabb(ro: Vec3, rd: Vec3, half: f32) -> Option<f32> {
-    let inv = Vec3::ONE / rd; // 0 components → ±inf, handled by the min/max
+    let inv = Vec3::ONE / rd; // 0 components ⏵ ±inf, handled by the min/max
     let t1 = (Vec3::splat(-half) - ro) * inv;
     let t2 = (Vec3::splat(half) - ro) * inv;
     let near = t1.min(t2).max_element();
@@ -1097,7 +1097,7 @@ impl EditorTab {
         match self {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
-            EditorTab::Terrain => "⛰ Terrain",
+            EditorTab::Terrain => "Δ Terrain",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
             EditorTab::Scene => "Scene",
@@ -1221,8 +1221,8 @@ start, read it in update), and hot-reloads the moment you save the file.
 Attaching & running
 --------------------
 • Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
-  section, or use Inspector ▸ Scripting ▸ + Add Script.
-• Press F1 (▶ Play) to run; F2 pauses the clock; ⏹ Stop restores the scene.
+  section, or use Inspector ⏵ Scripting ⏵ + Add Script.
+• Press F1 (⏵ Play) to run; F2 pauses the clock; ⏹ Stop restores the scene.
 • The Inspector edits a script's params live; errors show at the top of this tab.
 
 Defaults included with every project: rotate.lua, pulsate.lua, float.lua —
@@ -1418,34 +1418,22 @@ impl<'a> EditorTabViewer<'a> {
     fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
         // Scene name + save at the top of the hierarchy.
         ui.horizontal(|ui| {
-            ui.strong(format!("🎬 {}", self.scene_name));
-            if ui.small_button("💾").on_hover_text("Save scene (Ctrl+S)").clicked() {
+            ui.strong(format!("⎙ {}", self.scene_name));
+            if ui.small_button("Save").on_hover_text("Save scene (Ctrl+S)").clicked() {
                 self.cmd.save_scene = true;
             }
-            ui.label("ⓘ").on_hover_text(
-                "Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt\n\
-                 F focus · Q unselect · ↑/↓ step selection · Del delete\n\
+            ui.label("?").on_hover_text(
+                "Right-click here for New ▸ Cube / Sphere / Folder / Terrain / Camera …\n\
+                 Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt\n\
+                 F focus · Q unselect · G grid · ⏶/⏷ step selection · Del delete\n\
                  F1 play · F2 pause · Ctrl+S save · Ctrl+Z/Y undo/redo\n\
                  Viewport: LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu",
             );
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui.small_button("+ Cube").clicked() {
-                self.cmd.add = Some(new_cube());
-            }
-            if ui.small_button("+ Sphere").clicked() {
-                self.cmd.add = Some(new_sphere());
-            }
-            if ui.small_button("+ Blob").clicked() {
-                self.cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
-            }
-            if ui.small_button("🗀 Folder").on_hover_text("an empty group to organize / parent nodes").clicked() {
-                self.cmd.add = Some(MatterDoc::Empty);
-            }
+            ui.menu_button("✚ New", |ui| self.node_new_menu(ui, None));
         });
         ui.separator();
 
-        // Build the parent→children tree from the world (owned copies, so the
+        // Build the parent⏵children tree from the world (owned copies, so the
         // recursive render can freely borrow `self`).
         let names: HashMap<Entity, String> = self.entity_names.iter().cloned().collect();
         let order: Vec<Entity> = self.entity_names.iter().map(|(e, _)| *e).collect();
@@ -1464,12 +1452,50 @@ impl<'a> EditorTabViewer<'a> {
             for r in roots {
                 self.hierarchy_node(ui, r, &children, &names, 0);
             }
-            // Drop a node onto the empty area below → make it a root (unparent).
-            let bg = ui.allocate_response(ui.available_size(), egui::Sense::hover());
+            // Empty area below the tree: drop a node here to unparent it; right-click
+            // for the New menu (create at scene root).
+            let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
             if let Some(p) = bg.dnd_release_payload::<NodePayload>() {
                 self.cmd.reparent = Some((p.0, None));
             }
+            bg.context_menu(|ui| {
+                ui.menu_button("✚ New", |ui| self.node_new_menu(ui, None));
+            });
         });
+    }
+
+    /// The shared "New node" menu — used by the Hierarchy header, the empty-area
+    /// right-click (creates at scene root, `parent = None`), and each node's
+    /// "Add child" submenu (`parent = Some(e)`).
+    fn node_new_menu(&mut self, ui: &mut egui::Ui, parent: Option<Entity>) {
+        let mut pick: Option<MatterDoc> = None;
+        if ui.button("■ Cube").clicked() {
+            pick = Some(new_cube());
+            ui.close();
+        }
+        if ui.button("○ Sphere").clicked() {
+            pick = Some(new_sphere());
+            ui.close();
+        }
+        if ui.button("◑ Blob").clicked() {
+            pick = Some(MatterDoc::Blob { scale: 1.0 });
+            ui.close();
+        }
+        if ui.button("🗀 Folder").on_hover_text("an empty group to organize / parent nodes").clicked() {
+            pick = Some(MatterDoc::Empty);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Δ Terrain").on_hover_text("a sculptable SDF terrain node").clicked() {
+            self.cmd.create_terrain = true;
+            ui.close();
+        }
+        if let Some(m) = pick {
+            match parent {
+                Some(p) => self.cmd.add_parented = Some((m, p)),
+                None => self.cmd.add = Some(m),
+            }
+        }
     }
 
     /// Render one hierarchy row (indented by `depth`) + its children. The row is a
@@ -1488,9 +1514,9 @@ impl<'a> EditorTabViewer<'a> {
         let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
         let collapsed = self.collapsed.contains(&e);
         let icon = if is_folder {
-            if collapsed { "🗀" } else { "🗁" }
+            if collapsed { "🗀" } else { "🗀" }
         } else if has_kids {
-            "▾"
+            "⏷"
         } else {
             "•"
         };
@@ -1502,7 +1528,7 @@ impl<'a> EditorTabViewer<'a> {
             .horizontal(|ui| {
                 ui.add_space(depth as f32 * 14.0);
                 if is_folder && has_kids {
-                    let tri = if collapsed { "▸" } else { "▾" };
+                    let tri = if collapsed { "⏵" } else { "⏷" };
                     let t = ui.add(
                         egui::Label::new(tri).selectable(false).sense(egui::Sense::click()),
                     );
@@ -1559,25 +1585,8 @@ impl<'a> EditorTabViewer<'a> {
             self.selection.push(e);
         }
         resp.context_menu(|ui| {
-            ui.menu_button("➕ Add child", |ui| {
-                if ui.button("🗀 Folder").clicked() {
-                    self.cmd.add_parented = Some((MatterDoc::Empty, e));
-                    ui.close();
-                }
-                if ui.button("Cube").clicked() {
-                    self.cmd.add_parented = Some((new_cube(), e));
-                    ui.close();
-                }
-                if ui.button("Sphere").clicked() {
-                    self.cmd.add_parented = Some((new_sphere(), e));
-                    ui.close();
-                }
-                if ui.button("Blob").clicked() {
-                    self.cmd.add_parented = Some((MatterDoc::Blob { scale: 1.0 }, e));
-                    ui.close();
-                }
-            });
-            if self.world.get::<floptle_core::Parent>(e).is_some() && ui.button("⤴ Unparent").clicked() {
+            ui.menu_button("✚ Add child", |ui| self.node_new_menu(ui, Some(e)));
+            if self.world.get::<floptle_core::Parent>(e).is_some() && ui.button("⮪ Unparent").clicked() {
                 self.cmd.reparent = Some((e, None));
                 ui.close();
             }
@@ -1634,7 +1643,7 @@ impl<'a> EditorTabViewer<'a> {
                 self.asset_preview_ui(ui);
             } else if is_script(&path) {
                 ui.label("script — drag onto a node, double-click, or:");
-                if ui.button("✎  Open in Scripting").clicked() {
+                if ui.button("🖊  Open in Scripting").clicked() {
                     self.cmd.open_script = Some(path.clone());
                     self.cmd.focus_scripting = true;
                 }
@@ -1703,7 +1712,7 @@ impl<'a> EditorTabViewer<'a> {
                             ui.label("imported mesh");
                             ui.small(asset_path.as_str());
                             if ui
-                                .button("⤓ Extract textures")
+                                .button("⏏ Extract textures")
                                 .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
                                 .clicked()
                             {
@@ -1717,7 +1726,7 @@ impl<'a> EditorTabViewer<'a> {
                         Matter::Terrain => {
                             ui.label("editable terrain");
                             ui.small("a sculptable SDF field — move it with the transform below");
-                            if ui.button("⛰ Open Terrain tools").clicked() {
+                            if ui.button("Δ Open Terrain tools").clicked() {
                                 cmd.focus_terrain = true;
                             }
                         }
@@ -1729,7 +1738,7 @@ impl<'a> EditorTabViewer<'a> {
                 let has_mat = world.get::<Material>(e).is_some();
                 let mut tex_list = Vec::new();
                 collect_texture_paths(self.asset_tree, &mut tex_list);
-                egui::CollapsingHeader::new("🎨 Material").default_open(has_mat).show(ui, |ui| {
+                egui::CollapsingHeader::new("◑ Material").default_open(has_mat).show(ui, |ui| {
                     if let Some(mat) = world.get_mut::<Material>(e) {
                         let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
                         cmd.inspector_changed |= res.changed;
@@ -1740,13 +1749,13 @@ impl<'a> EditorTabViewer<'a> {
                             cmd.save_material =
                                 Some((name, floptle_scene::MaterialDoc::from_material(mat)));
                         }
-                        if ui.button("⤢ Open in Material Editor").clicked() {
+                        if ui.button("⛶ Open in Material Editor").clicked() {
                             *self.show_material_editor = true;
                         }
                     } else {
                         ui.small("Default look. Add a material to customize emissive, specular, rim, unlit shading…");
                         ui.horizontal(|ui| {
-                            if ui.button("➕ Add material").clicked() {
+                            if ui.button("✚ Add material").clicked() {
                                 cmd.add_material = Some(e);
                             }
                             if !self.materials.is_empty() {
@@ -1805,7 +1814,7 @@ impl<'a> EditorTabViewer<'a> {
                             egui::Frame::group(ui.style()),
                             |ui| {
                                 ui.set_min_height(20.0);
-                                ui.small("⬇  drop a script here to attach");
+                                ui.small("⏷  drop a script here to attach");
                             },
                         );
                         if let Some(p) = dropped {
@@ -1819,14 +1828,14 @@ impl<'a> EditorTabViewer<'a> {
                                 ui.horizontal(|ui| {
                                     cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
                                     ui.strong(&inst.kind);
-                                    if ui.small_button("✎").on_hover_text("edit script").clicked() {
+                                    if ui.small_button("🖊").on_hover_text("edit script").clicked() {
                                         let p = self
                                             .project_root
                                             .join("scripts")
                                             .join(format!("{}.lua", inst.kind));
                                         cmd.open_script_pref = Some(p.to_string_lossy().to_string());
                                     }
-                                    if ui.small_button("✕").on_hover_text("remove").clicked() {
+                                    if ui.small_button("×").on_hover_text("remove").clicked() {
                                         remove = Some(i);
                                     }
                                 });
@@ -1874,7 +1883,7 @@ impl<'a> EditorTabViewer<'a> {
         // ---- floating Material Editor window (edits the primary selection) ----
         if *self.show_material_editor {
             let mut open = true;
-            egui::Window::new("🎨 Material Editor")
+            egui::Window::new("◑ Material Editor")
                 .open(&mut open)
                 .default_width(300.0)
                 .show(ui.ctx(), |ui| match self.selection.last().copied() {
@@ -1901,7 +1910,7 @@ impl<'a> EditorTabViewer<'a> {
                             }
                         } else {
                             ui.label("This object uses the default look.");
-                            if ui.button("➕ Add material").clicked() {
+                            if ui.button("✚ Add material").clicked() {
                                 cmd.add_material = Some(e);
                             }
                         }
@@ -1950,7 +1959,7 @@ impl<'a> EditorTabViewer<'a> {
             ui.small(format!("current: {a}×{b}×{c} voxels"));
         }
         if !terrain_present {
-            if ui.button("➕ Create flat terrain").clicked() {
+            if ui.button("✚ Create flat terrain").clicked() {
                 cmd.create_terrain = true;
             }
             ui.small("Then press 5 (Sculpt tool) and LMB-drag in the viewport.");
@@ -1964,11 +1973,11 @@ impl<'a> EditorTabViewer<'a> {
         ui.label("grow the terrain (infinite bounds). Ctrl+Z/Y undo strokes.");
         ui.label("Brush");
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⬆ Raise");
-            ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⬇ Lower");
-            ui.selectable_value(&mut terrain_brush.mode, Brush::Flatten, "▱ Flatten");
-            ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "～ Smooth");
-            ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "🎨 Paint");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Raise, "⏶ Raise");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Lower, "⏷ Lower");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Flatten, "⊟ Flatten");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Smooth, "≈ Smooth");
+            ui.selectable_value(&mut terrain_brush.mode, Brush::Paint, "◑ Paint");
         });
         ui.add(egui::Slider::new(&mut terrain_brush.radius, 0.5..=8.0).text("radius"));
         ui.add(egui::Slider::new(&mut terrain_brush.strength, 0.05..=1.0).text("strength"));
@@ -2010,7 +2019,7 @@ impl<'a> EditorTabViewer<'a> {
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default()
                     };
-                    if ui.selectable_label(sel, format!("🖌 {label}")).clicked() {
+                    if ui.selectable_label(sel, format!("🖊 {label}")).clicked() {
                         terrain_brush.tex_slot = slot as i32;
                     }
                     egui::ComboBox::from_id_salt(("tslot", slot))
@@ -2049,7 +2058,7 @@ impl<'a> EditorTabViewer<'a> {
             if ui.small_button("⟳").on_hover_text("rescan").clicked() {
                 self.cmd.refresh_assets = true;
             }
-            ui.menu_button("➕ New", |ui| {
+            ui.menu_button("✚ New", |ui| {
                 self.new_asset_menu(ui, &root);
             });
             ui.separator();
@@ -2057,7 +2066,7 @@ impl<'a> EditorTabViewer<'a> {
             if ui.selectable_label(!*self.assets_grid, "☰").on_hover_text("file tree").clicked() {
                 *self.assets_grid = false;
             }
-            if ui.selectable_label(*self.assets_grid, "▦").on_hover_text("icon grid").clicked() {
+            if ui.selectable_label(*self.assets_grid, "⊞").on_hover_text("icon grid").clicked() {
                 *self.assets_grid = true;
             }
             ui.separator();
@@ -2111,7 +2120,7 @@ impl<'a> EditorTabViewer<'a> {
         // Breadcrumb row: up button + relative path.
         ui.horizontal(|ui| {
             let at_root = dir == root;
-            if ui.add_enabled(!at_root, egui::Button::new("⬆")).on_hover_text("up").clicked() {
+            if ui.add_enabled(!at_root, egui::Button::new("⏶")).on_hover_text("up").clicked() {
                 if let Some(p) = dir.parent() {
                     *self.assets_grid_dir = p.to_path_buf();
                 }
@@ -2146,7 +2155,7 @@ impl<'a> EditorTabViewer<'a> {
                     }
                 }
             });
-            // Right-click empty space → New menu.
+            // Right-click empty space ⏵ New menu.
             let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
             bg.context_menu(|ui| self.new_asset_menu(ui, &dir));
         });
@@ -2156,7 +2165,7 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// A bare clickable tile (icon + name). Returns true on double-click (used for
-    /// folders → descend). 84-pt wide so several fit per row.
+    /// folders ⏵ descend). 84-pt wide so several fit per row.
     fn asset_tile(
         &mut self,
         ui: &mut egui::Ui,
@@ -2187,16 +2196,16 @@ impl<'a> EditorTabViewer<'a> {
         }
         let dir = Path::new(path).parent().map(|p| p.to_path_buf());
         resp.context_menu(|ui| {
-            if openable && ui.button("✎ Open in Scripting tab").clicked() {
+            if openable && ui.button("🖊 Open in Scripting tab").clicked() {
                 self.cmd.open_script = Some(path.to_string());
                 self.cmd.focus_scripting = true;
                 ui.close();
             }
-            if ui.button("🗂 Open in file explorer").clicked() {
+            if ui.button("🗀 Open in file explorer").clicked() {
                 reveal_in_explorer(Path::new(path));
                 ui.close();
             }
-            if ui.button("✏ Rename…").clicked() {
+            if ui.button("🖊 Rename…").clicked() {
                 self.cmd.rename_asset = Some(path.to_string());
                 ui.close();
             }
@@ -2256,11 +2265,11 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.new_folder_in = Some(dir.to_string_lossy().to_string());
             ui.close();
         }
-        if ui.button("✎ New Lua Script").clicked() {
+        if ui.button("🖊 New Lua Script").clicked() {
             self.cmd.new_script_in = Some(dir.to_string_lossy().to_string());
             ui.close();
         }
-        if ui.button("🎬 New Scene").clicked() {
+        if ui.button("⎙ New Scene").clicked() {
             self.cmd.open_new_scene = true;
             ui.close();
         }
@@ -2291,14 +2300,14 @@ impl<'a> EditorTabViewer<'a> {
                     let draggable = model || script;
                     let selected = self.selected_asset.as_deref() == Some(path.as_str());
                     let (icon, _) = asset_kind_icon(path);
-                    let grip = if draggable { "⠿" } else { " " };
+                    let grip = if draggable { "¦" } else { " " };
                     let label = format!("{grip} {icon} {name}");
                     // A single widget that senses BOTH click and drag. (The old
                     // dnd_drag_source layered a drag-sense interaction over the label,
                     // and the drag sense swallowed double-clicks — so a script could
                     // only be dragged, never opened.) One click_and_drag widget lets
-                    // egui tell a tap from a drag cleanly: tap → select / double-tap
-                    // → open; press-and-move → drag a payload onto the scene or a node.
+                    // egui tell a tap from a drag cleanly: tap ⏵ select / double-tap
+                    // ⏵ open; press-and-move ⏵ drag a payload onto the scene or a node.
                     let resp = if draggable {
                         let text = if selected {
                             egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
@@ -2323,16 +2332,16 @@ impl<'a> EditorTabViewer<'a> {
                         self.cmd.open_script_pref = Some(path.clone());
                     }
                     resp.context_menu(|ui| {
-                        if openable && ui.button("✎ Open in Scripting tab").clicked() {
+                        if openable && ui.button("🖊 Open in Scripting tab").clicked() {
                             self.cmd.open_script = Some(path.clone());
                             self.cmd.focus_scripting = true;
                             ui.close();
                         }
-                        if ui.button("🗂 Open in file explorer").clicked() {
+                        if ui.button("🗀 Open in file explorer").clicked() {
                             reveal_in_explorer(Path::new(path));
                             ui.close();
                         }
-                        if ui.button("✏ Rename…").clicked() {
+                        if ui.button("🖊 Rename…").clicked() {
                             self.cmd.rename_asset = Some(path.clone());
                             ui.close();
                         }
@@ -2492,7 +2501,7 @@ impl<'a> EditorTabViewer<'a> {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));
             }
         }
-        if ui.button("💾 Save to this preset").clicked() {
+        if ui.button("Save to this preset").clicked() {
             let stem = Path::new(path)
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -2523,19 +2532,19 @@ impl<'a> EditorTabViewer<'a> {
         let mut do_copy = false;
         let mut do_clear = false;
         ui.horizontal_wrapped(|ui| {
-            ui.toggle_value(&mut c.show_debug, format!("🗨 {nd}")).on_hover_text("messages");
-            ui.toggle_value(&mut c.show_warn, format!("⚠ {nw}")).on_hover_text("warnings");
-            ui.toggle_value(&mut c.show_error, format!("⛔ {ne}")).on_hover_text("errors");
+            ui.toggle_value(&mut c.show_debug, format!("· {nd}")).on_hover_text("messages");
+            ui.toggle_value(&mut c.show_warn, format!("Δ {nw}")).on_hover_text("warnings");
+            ui.toggle_value(&mut c.show_error, format!("⊗ {ne}")).on_hover_text("errors");
             ui.separator();
             ui.toggle_value(&mut c.collapse, "⊟").on_hover_text("collapse duplicate lines");
             ui.separator();
-            ui.label("🔍");
+            ui.label("○");
             ui.add(
                 egui::TextEdit::singleline(&mut c.search)
                     .hint_text("search")
                     .desired_width(150.0),
             );
-            if !c.search.is_empty() && ui.small_button("✕").clicked() {
+            if !c.search.is_empty() && ui.small_button("×").clicked() {
                 c.search.clear();
             }
             ui.separator();
@@ -2622,9 +2631,9 @@ impl<'a> EditorTabViewer<'a> {
                         LogLevel::Error => egui::Color32::from_rgb(235, 95, 95),
                     };
                     let icon = match lvl {
-                        LogLevel::Debug => "🗨",
-                        LogLevel::Warn => "⚠",
-                        LogLevel::Error => "⛔",
+                        LogLevel::Debug => "·",
+                        LogLevel::Warn => "Δ",
+                        LogLevel::Error => "⊗",
                     };
                     let resp = ui
                         .horizontal_wrapped(|ui| {
@@ -2636,15 +2645,16 @@ impl<'a> EditorTabViewer<'a> {
                                             .monospace()
                                             .weak(),
                                     )
-                                    .selectable(false),
+                                    .selectable(true),
                                 );
                             }
+                            // Selectable so you can drag-select + copy a line; a
+                            // double-click still jumps to its source.
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(format!("{icon} {msg}")).color(color).monospace(),
                                 )
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
+                                .selectable(true),
                             )
                         })
                         .inner;
@@ -2683,7 +2693,7 @@ impl<'a> EditorTabViewer<'a> {
                 .fill(egui::Color32::from_rgb(60, 20, 20))
                 .inner_margin(6.0)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("⚠ script errors").strong().color(egui::Color32::from_rgb(255, 150, 150)));
+                    ui.label(egui::RichText::new("Δ script errors").strong().color(egui::Color32::from_rgb(255, 150, 150)));
                     for e in self.script_errors {
                         ui.label(egui::RichText::new(e).monospace().color(egui::Color32::from_rgb(255, 180, 180)));
                     }
@@ -2691,7 +2701,7 @@ impl<'a> EditorTabViewer<'a> {
         }
         // Tab strip: Docs + each open file.
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.ide.active.is_none(), "📖 Docs").clicked() {
+            if ui.selectable_label(self.ide.active.is_none(), "§ Docs").clicked() {
                 self.ide.active = None;
             }
             let mut close: Option<usize> = None;
@@ -2701,7 +2711,7 @@ impl<'a> EditorTabViewer<'a> {
                 if ui.selectable_label(self.ide.active == Some(i), title).clicked() {
                     self.ide.active = Some(i);
                 }
-                if ui.small_button("✕").clicked() {
+                if ui.small_button("×").clicked() {
                     close = Some(i);
                 }
             }
@@ -2722,7 +2732,7 @@ impl<'a> EditorTabViewer<'a> {
                     ui.monospace(SCRIPT_DOCS);
                     ui.add_space(12.0);
                     ui.separator();
-                    egui::CollapsingHeader::new("📑 API reference")
+                    egui::CollapsingHeader::new("§ API reference")
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.small("Hover an entry for details. (Inside a script, start typing for the same suggestions inline.)");
@@ -2743,7 +2753,7 @@ impl<'a> EditorTabViewer<'a> {
             Some(i) if i < self.ide.open.len() => {
                 ui.horizontal(|ui| {
                     ui.small(self.ide.open[i].path.clone());
-                    if ui.button("💾 Save").clicked() {
+                    if ui.button("Save").clicked() {
                         let f = &mut self.ide.open[i];
                         if std::fs::write(&f.path, &f.text).is_ok() {
                             f.dirty = false;
@@ -2751,7 +2761,7 @@ impl<'a> EditorTabViewer<'a> {
                         }
                     }
                     if ui
-                        .button("⮕ Open in IDE")
+                        .button("⏵ Open in IDE")
                         .on_hover_text("Open the project in your external editor (set it in Project Settings)")
                         .clicked()
                     {
@@ -2850,7 +2860,7 @@ impl<'a> EditorTabViewer<'a> {
                     }
                 }
                 if let Some((line, msg)) = self.ide_diag {
-                    ui.colored_label(egui::Color32::from_rgb(235, 120, 120), format!("⚠ line {line}: {msg}"));
+                    ui.colored_label(egui::Color32::from_rgb(235, 120, 120), format!("Δ line {line}: {msg}"));
                 }
                 let ac_open = self.ide_autocomplete(
                     ui,
@@ -2935,7 +2945,7 @@ impl<'a> EditorTabViewer<'a> {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(340.0);
-                    ui.small("↹ Tab to accept");
+                    ui.small("Tab to accept");
                     for (n, e) in matches.iter().enumerate() {
                         let label = if n == 0 {
                             egui::RichText::new(e.label).monospace().strong()
@@ -3290,9 +3300,9 @@ struct Editor {
     world: World,
     /// Mesh handles indexed by `Shape as usize` (Cube=0, Sphere=1).
     mesh_ids: Vec<MeshId>,
-    /// Imported glTF models, keyed by asset path → registered mesh parts.
+    /// Imported glTF models, keyed by asset path ⏵ registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
-    /// Material textures registered on the GPU, keyed by image path → handle.
+    /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
     /// The editable terrain SDF field (None until "Create terrain").
     terrain: Option<floptle_field::Terrain>,
@@ -3492,7 +3502,7 @@ impl ApplicationHandler for Editor {
         if self.window.is_some() {
             return;
         }
-        // The default project is the repo's `assets/` folder; File ▸ Open/New
+        // The default project is the repo's `assets/` folder; File ⏵ Open/New
         // re-points this elsewhere.
         self.project_root = PathBuf::from("assets");
         self.dock_state = Some(default_dock());
@@ -3650,6 +3660,7 @@ impl ApplicationHandler for Editor {
                                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
                                 KeyCode::KeyF => self.focus_selected(),
                                 KeyCode::KeyQ => self.selection.clear(), // unselect
+                                KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
                                 KeyCode::ArrowUp => self.step_selection(-1),
                                 KeyCode::ArrowDown => self.step_selection(1),
                                 KeyCode::Enter | KeyCode::NumpadEnter => self.toggle_folder_selected(),
@@ -3689,7 +3700,7 @@ impl ApplicationHandler for Editor {
                         // clicking a panel/menu, which isn't over_scene, keeps it).
                         self.context_menu = None;
                         if let (Some(h), Some(e)) = (hovered, self.primary()) {
-                            // On a gizmo handle → start an undoable edit and grab it.
+                            // On a gizmo handle ⏵ start an undoable edit and grab it.
                             // start_xf is the WORLD transform; gizmo math runs in world
                             // space and is converted back to local on write (parenting).
                             if self.world.get::<Transform>(e).is_some() {
@@ -3704,7 +3715,7 @@ impl ApplicationHandler for Editor {
                                 });
                             }
                         } else if let Some(cursor) = self.cursor {
-                            // Empty viewport → pick: single-select, or Shift to add.
+                            // Empty viewport ⏵ pick: single-select, or Shift to add.
                             match self.pick(cursor) {
                                 Some(e) if self.shift => self.select_toggle(e),
                                 Some(e) => self.select_single(e),
@@ -3731,7 +3742,7 @@ impl ApplicationHandler for Editor {
                 let over_scene = self.cursor_over_scene();
                 if pressed {
                     // Begin a possible look; if the cursor barely moves before release
-                    // it's a click → open a context menu instead.
+                    // it's a click ⏵ open a context menu instead.
                     self.rmb_press = self.cursor;
                     self.rmb_moved = 0.0;
                     self.context_menu = None;
@@ -3752,7 +3763,7 @@ impl ApplicationHandler for Editor {
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                         window.set_cursor_visible(true);
                     }
-                    // A click (negligible motion) over the viewport → context menu.
+                    // A click (negligible motion) over the viewport ⏵ context menu.
                     if was_looking && self.rmb_moved < 6.0 {
                         if let Some(p) = self.rmb_press {
                             self.cursor = Some(p);
@@ -4245,7 +4256,7 @@ impl Editor {
                         }
                         ui.separator();
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
-                        if ui.button("⛰ Terrain tools").clicked() {
+                        if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
                             ui.close();
                         }
@@ -4257,12 +4268,12 @@ impl Editor {
                         }
                     });
                     ui.separator();
-                    let play_label = if playing { "⏹ Stop  (F1)" } else { "▶ Play  (F1)" };
+                    let play_label = if playing { "⏹ Stop  (F1)" } else { "⏵ Play  (F1)" };
                     if ui.button(play_label).clicked() {
                         cmd.toggle_play = true;
                     }
                     if playing {
-                        let pause_label = if paused { "▶ Resume  (F2)" } else { "⏸ Pause  (F2)" };
+                        let pause_label = if paused { "⏵ Resume  (F2)" } else { "⏸ Pause  (F2)" };
                         if ui.button(pause_label).clicked() {
                             cmd.toggle_pause = true;
                         }
@@ -4448,7 +4459,7 @@ impl Editor {
                     });
             }
 
-            // ---- new / open project window (rfd unavailable → a text path) ----
+            // ---- new / open project window (rfd unavailable ⏵ a text path) ----
             egui::Window::new("Project")
                 .open(show_project_mgr)
                 .resizable(false)
@@ -5061,6 +5072,8 @@ impl Editor {
             self.play_snapshot = Some(self.snapshot());
             self.play_t = 0.0;
             self.paused = false;
+            // Start play with a clean Console so you only see this run's output.
+            self.console.entries.clear();
             self.playing = true;
         }
     }
@@ -5553,7 +5566,7 @@ impl Editor {
     }
 
     /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
-    /// start-of-drag snapshot (no per-event accumulation → no drift).
+    /// start-of-drag snapshot (no per-event accumulation ⏵ no drift).
     fn gizmo_drag(&mut self) {
         let (Some(drag), Some(cursor), Some(e)) = (self.drag, self.cursor, self.primary()) else {
             return;
@@ -5845,7 +5858,7 @@ impl Editor {
             self.terrain = std::fs::read(self.terrain_field_path())
                 .ok()
                 .and_then(|b| floptle_field::Terrain::from_bytes(&b));
-            // A terrain node with no/garbled field → start it flat.
+            // A terrain node with no/garbled field ⏵ start it flat.
             if self.terrain.is_none() {
                 self.terrain = Some(floptle_field::Terrain::flat(
                     self.terrain_dims(),
@@ -6252,3 +6265,4 @@ fn default_scene() -> floptle_scene::SceneDoc {
         ],
     }
 }
+

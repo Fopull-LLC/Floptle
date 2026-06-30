@@ -27,6 +27,8 @@ struct Globals {
 // Terrain texture palette (triplanar-mapped). The volume color's alpha selects a
 // slot: 0 = untextured (flat tint), n = palette layer n-1.
 @group(0) @binding(4) var terrain_tex: texture_2d_array<f32>;
+// A REPEAT sampler so triplanar terrain textures tile across the surface.
+@group(0) @binding(5) var terrain_samp: sampler;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -131,7 +133,27 @@ fn volume(p: vec3<f32>) -> Matter {
     let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
     let d = textureSampleLevel(dist_tex, vol_samp, local, 0.0).r;
     let col = textureSampleLevel(color_tex, vol_samp, local, 0.0).rgb;
-    return Matter(d, col);
+    // Round the finite slab's SIDE + BOTTOM faces up to air, so a terrain that fills
+    // its box doesn't render as hard dirt walls / a visible shell — the surface
+    // rounds off to meet the air at the edges. The TOP ground surface is untouched.
+    let margin = 1.25;
+    let edge = min(min(G.vol_half.x - abs(rel.x), G.vol_half.z - abs(rel.z)), rel.y + G.vol_half.y);
+    return Matter(max(d, margin - edge), col);
+}
+
+// True only when `p` is strictly inside the volume box — used to reject false hits
+// on the box's bounding faces (the box-approach distance is never a real surface).
+fn inside_volume_box(p: vec3<f32>) -> bool {
+    let q = abs(p - G.vol_center.xyz) - G.vol_half.xyz;
+    return max(q.x, max(q.y, q.z)) < 0.0;
+}
+
+// A threshold-crossing is a REAL surface (not the shell) when there is no volume,
+// or we are inside the volume box, or an analytic blob is the matter here.
+fn real_surface(p: vec3<f32>, thr: f32) -> bool {
+    if (G.vol_center.w < 0.5) { return true; }
+    if (inside_volume_box(p)) { return true; }
+    return G.params.y >= 0.5 && analytic(p).d < thr;
 }
 
 // The whole field: every piece of matter folded together with smin.
@@ -155,9 +177,9 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let scale = 0.22; // ~4.5 world units per tile
     let an = abs(n) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
-    let cx = textureSampleLevel(terrain_tex, vol_samp, rel.zy * scale, slot, 0.0).rgb;
-    let cy = textureSampleLevel(terrain_tex, vol_samp, rel.xz * scale, slot, 0.0).rgb;
-    let cz = textureSampleLevel(terrain_tex, vol_samp, rel.xy * scale, slot, 0.0).rgb;
+    let cx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
+    let cy = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
+    let cz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
     return cx * w.x + cy * w.y + cz * w.z;
 }
 
@@ -212,7 +234,8 @@ fn fs(in: VOut) -> FsOut {
         m = map(p);
         // Distance-relaxed threshold: grows with t so grazing rays near the
         // silhouette converge instead of exhausting the step budget (holes).
-        if (m.d < 0.0015 * t + 0.0025) {
+        let thr = 0.0015 * t + 0.0025;
+        if (m.d < thr && real_surface(p, thr)) {
             hit = true;
             break;
         }
@@ -272,7 +295,8 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     for (var i = 0; i < 160; i = i + 1) {
         let p = ro + rd * t;
         let d = map(p).d;
-        if (d < 0.0015 * t + 0.0025) {
+        let thr = 0.0015 * t + 0.0025;
+        if (d < thr && real_surface(p, thr)) {
             let clip = G.view_proj * vec4<f32>(p, 1.0);
             let ndc_z = clip.z / clip.w;
             if (clip.w > 0.0 && ndc_z >= 0.0 && ndc_z <= 1.0) {
