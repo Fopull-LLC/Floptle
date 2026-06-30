@@ -34,6 +34,11 @@ struct Globals {
     blob_specular: array<vec4<f32>, 16>, // rgb, a = strength
     blob_params: array<vec4<f32>, 16>,   // x shininess, y rim_strength, z unlit, w ambient_mul
     blob_rim: array<vec4<f32>, 16>,      // rgb, a unused
+    sky_params: vec4<f32>,               // x = mode (0 solid, 1 texture), y = size
+    sky_tint: vec4<f32>,                 // rgb tint × sampled texel
+    sky_rot0: vec4<f32>,                 // inverse skybox rotation, column 0 (xyz)
+    sky_rot1: vec4<f32>,                 // column 1
+    sky_rot2: vec4<f32>,                 // column 2
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
@@ -44,6 +49,26 @@ struct Globals {
 @group(0) @binding(4) var terrain_tex: texture_2d_array<f32>;
 // A REPEAT sampler so triplanar terrain textures tile across the surface.
 @group(0) @binding(5) var terrain_samp: sampler;
+// The equirectangular skybox texture (sampled for background pixels, reusing the
+// REPEAT terrain sampler so it wraps seamlessly).
+@group(0) @binding(6) var sky_tex: texture_2d<f32>;
+
+const PI: f32 = 3.14159265359;
+
+// The environment color along world ray direction `dir`: a flat color, or the equirect
+// sky texture (rotated by the skybox node so a script can spin it) times its tint.
+fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    if (G.sky_params.x < 0.5) {
+        return G.bg.rgb;
+    }
+    // Rotate the ray into the skybox's local frame (inverse rotation, as 3 columns).
+    let r = mat3x3<f32>(G.sky_rot0.xyz, G.sky_rot1.xyz, G.sky_rot2.xyz);
+    let d = normalize(r * dir);
+    let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5; // longitude → [0,1]
+    let v = acos(clamp(d.y, -1.0, 1.0)) / PI;   // latitude  → [0,1] (top→bottom)
+    let texel = textureSampleLevel(sky_tex, terrain_samp, vec2<f32>(u, v), 0.0).rgb;
+    return texel * G.sky_tint.rgb;
+}
 
 // Accumulated diffuse from the point lights at camera-relative position `p` with
 // surface normal `n`. Smooth falloff to 0 at each light's range.
@@ -464,7 +489,7 @@ fn fs(in: VOut) -> FsOut {
         }
     }
     if (!drawn) {
-        out.color = vec4<f32>(G.bg.rgb, 1.0);
+        out.color = vec4<f32>(sky_color(rd), 1.0);
         out.depth = 1.0;
     }
     return out;

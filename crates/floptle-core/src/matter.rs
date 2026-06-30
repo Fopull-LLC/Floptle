@@ -147,6 +147,18 @@ pub enum Matter {
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
+    /// The scene's environment background — a face-inverted sphere of radius `size`
+    /// drawn behind everything. `color` is the solid sky color (grey by default); when
+    /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by
+    /// `tint`. The node's transform rotation orients the sky (a script can spin it).
+    Skybox { color: [f32; 3], size: f32, texture: Option<String>, tint: [f32; 3] },
+}
+
+impl Matter {
+    /// The default skybox: solid mid-grey, a large radius, no texture.
+    pub fn default_skybox() -> Self {
+        Matter::Skybox { color: [0.5, 0.5, 0.52], size: 500.0, texture: None, tint: [1.0, 1.0, 1.0] }
+    }
 }
 
 /// How a [`Matter::GravityVolume`] pulls bodies.

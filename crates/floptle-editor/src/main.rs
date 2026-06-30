@@ -960,6 +960,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Camera { .. } => "Camera",
         MatterDoc::PointLight { .. } => "Point Light",
         MatterDoc::GravityVolume { .. } => "Gravity Volume",
+        MatterDoc::Skybox { .. } => "Skybox",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1821,6 +1822,10 @@ impl<'a> EditorTabViewer<'a> {
             pick = Some(MatterDoc::GravityVolume { radial: false, strength: 9.81, radius: 20.0 });
             ui.close();
         }
+        if ui.button("◐ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
+            pick = Some(MatterDoc::from(&Matter::default_skybox()));
+            ui.close();
+        }
         if let Some(m) = pick {
             match parent {
                 Some(p) => self.cmd.add_parented = Some((m, p)),
@@ -1855,6 +1860,8 @@ impl<'a> EditorTabViewer<'a> {
             "●"
         } else if matches!(matter, Some(Matter::GravityVolume { .. })) {
             "⬇"
+        } else if matches!(matter, Some(Matter::Skybox { .. })) {
+            "◐"
         } else if has_kids {
             "⏷"
         } else {
@@ -2139,6 +2146,58 @@ impl<'a> EditorTabViewer<'a> {
                                     .add(egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
                                     .changed();
                             }
+                        }
+                        Matter::Skybox { color, size, texture, tint } => {
+                            ui.label("skybox");
+                            ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+                            let mut textured = texture.is_some();
+                            ui.horizontal(|ui| {
+                                if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
+                                    *texture = None;
+                                    cmd.inspector_changed = true;
+                                }
+                                if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
+                                    let mut tl = Vec::new();
+                                    collect_texture_paths(self.asset_tree, &mut tl);
+                                    *texture = Some(tl.first().cloned().unwrap_or_default());
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            textured = texture.is_some();
+                            if !textured {
+                                ui.horizontal(|ui| {
+                                    ui.label("color");
+                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                });
+                            } else {
+                                let mut tl = Vec::new();
+                                collect_texture_paths(self.asset_tree, &mut tl);
+                                let cur = texture.clone().unwrap_or_default();
+                                let label = |p: &str| {
+                                    Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label("texture");
+                                    egui::ComboBox::from_id_salt("sky-tex")
+                                        .selected_text(if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) })
+                                        .show_ui(ui, |ui| {
+                                            for p in &tl {
+                                                if ui.selectable_label(&cur == p, label(p)).clicked() {
+                                                    *texture = Some(p.clone());
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
+                                ui.horizontal(|ui| {
+                                    ui.label("tint");
+                                    cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
+                                });
+                            }
+                            cmd.inspector_changed |= ui
+                                .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
+                                .changed();
                         }
                     }
                 }
@@ -4244,6 +4303,43 @@ fn gravity_volume_lines(
     lines
 }
 
+/// Resolve the scene's Skybox node into raymarch uniform fields:
+/// `(sky_params [mode, size, _, _], sky_tint rgba, sky_rot 3 columns, solid_color rgb)`.
+/// Falls back to the default dark background when there's no Skybox node.
+fn skybox_uniforms(
+    world: &floptle_core::World,
+) -> ([f32; 4], [f32; 4], [[f32; 4]; 3], [f32; 3]) {
+    let found = world.query::<Matter>().find_map(|(e, m)| match m {
+        Matter::Skybox { color, size, texture, tint } => {
+            Some((e, *color, *size, texture.is_some(), *tint))
+        }
+        _ => None,
+    });
+    match found {
+        Some((e, color, size, textured, tint)) => {
+            let rot = floptle_core::world_transform(world, e).rotation;
+            let m = Mat3::from_quat(rot.inverse());
+            let rot_cols = [
+                [m.x_axis.x, m.x_axis.y, m.x_axis.z, 0.0],
+                [m.y_axis.x, m.y_axis.y, m.y_axis.z, 0.0],
+                [m.z_axis.x, m.z_axis.y, m.z_axis.z, 0.0],
+            ];
+            (
+                [if textured { 1.0 } else { 0.0 }, size, 0.0, 0.0],
+                [tint[0], tint[1], tint[2], 1.0],
+                rot_cols,
+                color,
+            )
+        }
+        None => (
+            [0.0; 4],
+            [1.0; 4],
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+            [0.02, 0.02, 0.05],
+        ),
+    }
+}
+
 /// Build a world-axis-aligned box wireframe (12 edges) centered at `center` with the
 /// given world half-extents — the outline of a `BodyKind::Box` collider (which the
 /// solver treats as axis-aligned).
@@ -4420,6 +4516,9 @@ struct Editor {
     terrain_textures: Vec<String>,
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
+    /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so
+    /// we only re-upload when the skybox node's texture actually changes.
+    sky_texture_loaded: Option<String>,
     /// The brush telegraph for this frame (projected ring + normal).
     terrain_viz: Option<TerrainViz>,
     /// Camera frustums to draw in the viewport this frame (so cameras are visible).
@@ -5114,6 +5213,18 @@ impl Editor {
             }
             self.terrain_textures_dirty = false;
         }
+        // Re-upload the skybox texture when the skybox node's texture path changes.
+        let sky_tex_path = self.world.query::<Matter>().find_map(|(_, m)| match m {
+            Matter::Skybox { texture, .. } => texture.clone(),
+            _ => None,
+        });
+        if sky_tex_path != self.sky_texture_loaded {
+            let data = sky_tex_path.as_ref().and_then(|p| floptle_assets::load_texture(Path::new(p)));
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                raymarch.set_sky_texture(gpu, data.as_ref());
+            }
+            self.sky_texture_loaded = sky_tex_path;
+        }
 
         // Inspector camera POV preview: if a Camera node is selected, render the scene
         // from its viewpoint into the 16:9 offscreen target (before the destructure).
@@ -5565,16 +5676,20 @@ impl Editor {
                         }
                     }
                 }
-                // group / terrain / camera / light / gravity render via other passes.
+                // group / terrain / camera / light / gravity / skybox render elsewhere.
                 Matter::Empty
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
-                | Matter::GravityVolume { .. } => {}
+                | Matter::GravityVolume { .. }
+                | Matter::Skybox { .. } => {}
             }
         }
 
-        let clear = [0.02f32, 0.02, 0.05, 1.0];
+        // Skybox: a Skybox node drives the environment background — a solid color, or an
+        // equirect texture × tint, rotated by the node so a script can spin the sky.
+        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
         // The terrain's surface Material (active terrain's, or any terrain that has one)
         // so terrain shades like the rest of the scene. Neutral default = plain matte.
         // (Inlined via disjoint field access — a `&self` method can't be called here
@@ -5629,6 +5744,9 @@ impl Editor {
                 blob_specular,
                 blob_params,
                 blob_rim,
+                sky_params,
+                sky_tint,
+                sky_rot,
             }
         };
 
@@ -5667,7 +5785,8 @@ impl Editor {
                     | Matter::Terrain { .. }
                     | Matter::Camera { .. }
                     | Matter::PointLight { .. }
-                    | Matter::GravityVolume { .. } => {}
+                    | Matter::GravityVolume { .. }
+                    | Matter::Skybox { .. } => {}
                 }
             }
         }
@@ -6428,6 +6547,7 @@ impl Editor {
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
+                MatterDoc::Skybox { .. } => "Skybox",
             };
             self.add_node(name, m);
         }
@@ -7403,7 +7523,8 @@ impl Editor {
             }
         }
 
-        let clear = [0.02f32, 0.02, 0.05, 1.0];
+        let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
+        let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
         let terrain_mat = self.terrain_material();
         let show_blobs = self.project.matter && !blobs.is_empty();
         let rm = if show_blobs || self.combined.is_some() {
@@ -7443,6 +7564,9 @@ impl Editor {
                 blob_specular,
                 blob_params,
                 blob_rim,
+                sky_params,
+                sky_tint,
+                sky_rot,
             };
             if let Some((hf, bc)) =
                 self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
@@ -7780,7 +7904,8 @@ impl Editor {
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
-                | Matter::GravityVolume { .. } => None,
+                | Matter::GravityVolume { .. }
+                | Matter::Skybox { .. } => None,
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
