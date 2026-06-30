@@ -1,24 +1,25 @@
-//! Headless terrain probe — sculpt a few hills into an editable SDF terrain field
-//! and raymarch it to a PNG, validating that the volume path renders a sculpted
-//! [`floptle_field::Terrain`] (the same path the editor will drive).
+//! Headless GRAZING-ANGLE terrain probe — the case that exposed transparent gaps
+//! along hill/ravine silhouettes. The camera sits low and looks roughly horizontally
+//! across tall hills and a deep ravine, so the terrain edges are seen at a grazing
+//! angle. The background is vivid MAGENTA: any transparent gap punched through the
+//! terrain shows up as magenta pixels *inside* the terrain body, easy to spot.
 //!
-//! Run: cargo run -p floptle-render --example terrain_probe -- <out.png>
+//! Run: cargo run -p floptle-render --example terrain_grazing_probe -- <out.png>
 
 use floptle_field::{Brush, Terrain};
 use floptle_render::{Gpu, Projection, Raymarch, RaymarchGlobals, RenderCamera, TextureData};
 use glam::{DVec3, Quat, Vec3};
 
-const W: u32 = 1024;
-const H: u32 = 640;
+const W: u32 = 900;
+const H: u32 = 420;
 
-/// A 256² checker (stands in for a tiling rock/grass texture).
-fn checker256() -> TextureData {
+fn flat256() -> TextureData {
     let n = 256u32;
     let mut px = Vec::with_capacity((n * n * 4) as usize);
     for y in 0..n {
         for x in 0..n {
             let on = ((x / 16) + (y / 16)) % 2 == 0;
-            let c = if on { [150, 150, 158, 255] } else { [90, 92, 100, 255] };
+            let c = if on { [150, 150, 158, 255] } else { [110, 112, 120, 255] };
             px.extend_from_slice(&c);
         }
     }
@@ -26,7 +27,7 @@ fn checker256() -> TextureData {
 }
 
 fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "terrain.png".into());
+    let out = std::env::args().nth(1).unwrap_or_else(|| "terrain_grazing.png".into());
     let gpu = Gpu::headless(W, H);
 
     let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -41,55 +42,51 @@ fn main() {
     });
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // A flat grass field, then sculpt some hills + a dug pit, and paint a brown path.
-    let mut terrain = Terrain::flat([112, 48, 112], [0.0, 0.0, 0.0], [16.0, 6.0, 16.0], 0.0, [0.35, 0.6, 0.28]);
-    for _ in 0..30 {
-        terrain.sculpt(Brush::Raise, [-5.0, 0.5, -3.0], 4.0, 1.0);
-        terrain.sculpt(Brush::Raise, [4.0, 0.5, 2.0], 3.0, 1.0);
-        terrain.sculpt(Brush::Raise, [6.0, 1.5, -6.0], 2.2, 1.0);
-        terrain.sculpt(Brush::Lower, [-2.0, 0.0, 6.0], 3.0, 1.0);
+    // Tall hills + a deep narrow ravine — lots of grazing silhouette edges.
+    let mut terrain = Terrain::flat([112, 48, 112], [0.0, 0.0, 0.0], [16.0, 7.0, 16.0], 0.0, [0.35, 0.6, 0.28]);
+    for _ in 0..40 {
+        terrain.sculpt(Brush::Raise, [-6.0, 1.0, -2.0], 4.5, 1.0);
+        terrain.sculpt(Brush::Raise, [5.0, 2.0, -7.0], 3.0, 1.0);
+        terrain.sculpt(Brush::Raise, [8.0, 1.0, 4.0], 3.5, 1.0);
+        terrain.sculpt(Brush::Lower, [0.5, 0.0, 1.0], 2.2, 1.0); // deep ravine
+        terrain.sculpt(Brush::Lower, [2.0, 0.0, -3.0], 1.8, 1.0);
     }
-    for _ in 0..20 {
-        terrain.paint([0.0, 0.0, 0.0], 4.0, 1.0, [0.45, 0.32, 0.2]);
-        terrain.paint([6.0, 1.5, -6.0], 2.4, 1.0, [0.6, 0.6, 0.62]);
-    }
-    // Paint a TEXTURE (palette slot 1) onto the big hill.
-    terrain.paint_texture([-5.0, 0.5, -3.0], 5.0, 1);
 
     let mut raymarch = Raymarch::new(&gpu);
-    raymarch.set_terrain_textures(&gpu, &[checker256()]);
+    raymarch.set_terrain_textures(&gpu, &[flat256()]);
     raymarch.set_volume(&gpu, &terrain.baked);
 
-    // Camera up and back, looking down at the relief.
-    let cam_pos = DVec3::new(0.0, 11.0, 20.0);
-    let fwd = (Vec3::ZERO - cam_pos.as_vec3()).normalize();
+    // Low camera, looking nearly horizontally across the relief (grazing).
+    let cam_pos = DVec3::new(1.5, 2.6, 18.0);
+    let target = Vec3::new(0.0, 1.8, 0.0);
+    let fwd = (target - cam_pos.as_vec3()).normalize();
     let rot = Quat::from_rotation_arc(Vec3::NEG_Z, fwd);
     let cam = RenderCamera::new(
         cam_pos,
         rot,
-        Projection::Perspective { fov_y: 55f32.to_radians(), near: 0.1, far: 2000.0 },
+        Projection::Perspective { fov_y: 52f32.to_radians(), near: 0.05, far: 2000.0 },
     );
     let view_proj = cam.view_proj(W as f32 / H as f32);
     let light = Vec3::new(0.4, 0.9, 0.45).normalize();
-    let cr = (DVec3::ZERO - cam.world_position).as_vec3(); // camera-relative box center
+    let cr = (DVec3::ZERO - cam.world_position).as_vec3();
 
     let rm = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
         light_dir: [light.x, light.y, light.z, 0.0],
         light_color: [1.0, 0.98, 0.92, 0.0],
-        ambient: [0.22, 0.24, 0.3, 0.0],
-        bg: [0.5, 0.62, 0.78, 1.0],
+        ambient: [0.25, 0.27, 0.33, 0.0],
+        bg: [1.0, 0.0, 1.0, 1.0], // MAGENTA — any terrain gap shows as magenta
         center: [0.0; 4],
-        params: [0.0, 0.0, 0.0, 0.0], // no blobs
-        vol_center: [cr.x, cr.y, cr.z, 1.0], // present
-        vol_half: [16.0, 6.0, 16.0, 0.1],
+        params: [0.0, 0.0, 0.0, 0.0],
+        vol_center: [cr.x, cr.y, cr.z, 1.0],
+        vol_half: [16.0, 7.0, 16.0, 0.1],
         blobs: [[0.0; 4]; 16],
-        ..Default::default()
+        ..Default::default() // neutral terrain material
     };
     raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
     save_png(&gpu, &color_tex, &out);
-    println!("wrote {out} — sculpted terrain (hills, a pit, painted path)");
+    println!("wrote {out} — grazing hills + ravine (magenta bg = gap detector)");
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {

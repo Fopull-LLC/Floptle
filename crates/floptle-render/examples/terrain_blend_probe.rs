@@ -80,6 +80,7 @@ fn main() {
         vol_center: [cr.x, cr.y, cr.z, 1.0],
         vol_half: [hf[0], hf[1], hf[2], 0.1],
         blobs: [[0.0; 4]; 16],
+        ..Default::default()
     };
     raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
     save_png(&gpu, &color_tex, &out);

@@ -29,6 +29,9 @@ pub struct Material {
     pub unlit: bool,
     /// Multiplier on the scene ambient term (0 = pure black shadows).
     pub ambient: f32,
+    /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
+    /// over what's behind it; multiplied by any base-color texture's own alpha.
+    pub alpha: f32,
 }
 
 impl Default for Material {
@@ -45,6 +48,7 @@ impl Default for Material {
             rim_strength: 0.0,
             unlit: false,
             ambient: 1.0,
+            alpha: 1.0,
         }
     }
 }

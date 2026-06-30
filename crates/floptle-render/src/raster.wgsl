@@ -74,12 +74,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(g.light_dir.xyz);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
-    let albedo = textureSample(tex, samp, in.uv).rgb * in.color.rgb;
+    let texel = textureSample(tex, samp, in.uv);
+    let albedo = texel.rgb * in.color.rgb;
     let emissive = in.emissive.rgb * in.emissive.a;
+    // Opacity: the material's alpha (in.color.a) times the texture's own alpha.
+    let alpha = in.color.a * texel.a;
 
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
-        return vec4<f32>(albedo + emissive, 1.0);
+        return vec4<f32>(albedo + emissive, alpha);
     }
 
     let ambient = g.ambient.rgb * in.params.w;
@@ -95,7 +98,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
 
-    return vec4<f32>(lit + emissive, 1.0);
+    return vec4<f32>(lit + emissive, alpha);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

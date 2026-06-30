@@ -62,6 +62,8 @@ pub struct MaterialParams {
     pub rim_strength: f32,
     pub unlit: bool,
     pub ambient: f32,
+    /// Opacity (1 = opaque). Below 1 the instance is alpha-blended over the scene.
+    pub alpha: f32,
 }
 
 impl MaterialParams {
@@ -78,6 +80,7 @@ impl MaterialParams {
             rim_strength: 0.0,
             unlit: false,
             ambient: 1.0,
+            alpha: 1.0,
         }
     }
 }
@@ -112,6 +115,10 @@ struct RegisteredMesh {
 
 pub struct Raster {
     pipeline: wgpu::RenderPipeline,
+    /// Same as `pipeline` but alpha-blended with depth-write OFF, for instances whose
+    /// material opacity is < 1. Drawn after the opaque pass so they composite over the
+    /// solid scene.
+    transparent_pipeline: wgpu::RenderPipeline,
     /// Silhouette-mask pipeline (solid 1.0, no depth/cull) for selection outlines.
     mask_pipeline: wgpu::RenderPipeline,
     globals_bind: wgpu::BindGroup,
@@ -221,6 +228,42 @@ impl Raster {
             cache: None,
         });
 
+        // Transparent variant: identical vertex/fragment, but alpha-blends and does NOT
+        // write depth, so an object behind it still shows through and later opaque draws
+        // aren't occluded by it. (No back-to-front sort yet, so overlapping transparent
+        // surfaces are approximate — enough for the basic transparency this exposes.)
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-transparent"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
         // single-channel mask (no depth, no cull → the full screen silhouette), which
         // a post-pass edge-detects into a selection outline. Needs only the globals.
@@ -302,6 +345,7 @@ impl Raster {
 
         Self {
             pipeline,
+            transparent_pipeline,
             mask_pipeline,
             globals_bind,
             globals_buf,
@@ -463,28 +507,43 @@ impl Raster {
 
         // Bucket by (mesh, texture-override) — each unique combo is one draw with
         // its own bound texture. A material texture (Some) re-textures the shape;
-        // None uses the mesh's own base-color texture.
+        // None uses the mesh's own base-color texture. Opaque and transparent draws are
+        // bucketed separately (and packed contiguously into one instance buffer) so the
+        // transparent ones can render last, blended, in a second pass.
+        const OPAQUE_CUTOFF: f32 = 0.999;
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
-        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
-        let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
-        for (id, tex, _) in instances {
-            let k = (id.0 as usize, tex.map(|t| t.0));
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-        for (mesh_idx, tex_key) in keys {
-            let start = raws.len() as u32;
-            for (id, tex, raw) in instances {
-                if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
-                    raws.push(*raw);
+        let bucketize =
+            |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
+                let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+                let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
+                for (id, tex, raw) in instances {
+                    if (raw.color[3] >= OPAQUE_CUTOFF) != want_opaque {
+                        continue;
+                    }
+                    let k = (id.0 as usize, tex.map(|t| t.0));
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
                 }
-            }
-            let count = raws.len() as u32 - start;
-            if count > 0 {
-                buckets.push((mesh_idx, tex_key, start, count));
-            }
-        }
+                for (mesh_idx, tex_key) in keys {
+                    let start = raws.len() as u32;
+                    for (id, tex, raw) in instances {
+                        if (raw.color[3] >= OPAQUE_CUTOFF) != want_opaque {
+                            continue;
+                        }
+                        if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
+                            raws.push(*raw);
+                        }
+                    }
+                    let count = raws.len() as u32 - start;
+                    if count > 0 {
+                        buckets.push((mesh_idx, tex_key, start, count));
+                    }
+                }
+                buckets
+            };
+        let opaque_buckets = bucketize(true, &mut raws);
+        let transparent_buckets = bucketize(false, &mut raws);
 
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
@@ -512,20 +571,27 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.pipeline);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            for (mesh_idx, tex_key, start, count) in buckets {
-                let mesh = &self.meshes[mesh_idx];
-                // A material texture overrides the mesh's own base-color texture.
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            let draw = |rp: &mut wgpu::RenderPass<'_>, buckets: &[(usize, Option<u32>, u32, u32)]| {
+                for &(mesh_idx, tex_key, start, count) in buckets {
+                    let mesh = &self.meshes[mesh_idx];
+                    // A material texture overrides the mesh's own base-color texture.
+                    let bind = match tex_key {
+                        Some(t) => &self.textures[t as usize].bind,
+                        None => &mesh.tex_bind,
+                    };
+                    rp.set_bind_group(1, bind, &[]);
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
+            };
+            rp.set_pipeline(&self.pipeline);
+            draw(&mut rp, &opaque_buckets);
+            if !transparent_buckets.is_empty() {
+                rp.set_pipeline(&self.transparent_pipeline);
+                draw(&mut rp, &transparent_buckets);
             }
         }
         gpu.queue.submit([encoder.finish()]);
@@ -586,7 +652,7 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
             [nm.y_axis.x, nm.y_axis.y, nm.y_axis.z, 0.0],
             [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, 0.0],
         ],
-        color: [m.color[0], m.color[1], m.color[2], 1.0],
+        color: [m.color[0], m.color[1], m.color[2], m.alpha],
         emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],
         specular: [m.specular[0], m.specular[1], m.specular[2], m.specular_strength],
         params: [m.shininess, m.rim_strength, if m.unlit { 1.0 } else { 0.0 }, m.ambient],

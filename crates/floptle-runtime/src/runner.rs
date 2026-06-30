@@ -465,6 +465,7 @@ impl Runner {
             vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, present],
             vol_half: [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7],
             blobs,
+            ..Default::default()
         };
 
         match gpu.acquire() {

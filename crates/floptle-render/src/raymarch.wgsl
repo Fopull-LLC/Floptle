@@ -18,6 +18,12 @@ struct Globals {
     params: vec4<f32>,      // x = time, y = blob count
     vol_center: vec4<f32>,  // baked volume: xyz camera-relative box center, w = present
     vol_half: vec4<f32>,    // xyz half-extent, w = blend radius k
+    // Terrain surface material (same model as the raster meshes). Ignored by blobs.
+    terrain_tint: vec4<f32>,     // rgb tint (× painted albedo), a unused
+    terrain_emissive: vec4<f32>, // rgb, a = strength
+    terrain_specular: vec4<f32>, // rgb, a = strength
+    terrain_params: vec4<f32>,   // x shininess, y rim_strength, z unlit, w ambient_mul
+    terrain_rim: vec4<f32>,      // rgb, a unused
     blobs: array<vec4<f32>, 16>, // each: xyz camera-relative center, w = scale
 };
 @group(0) @binding(0) var<uniform> G: Globals;
@@ -143,18 +149,26 @@ fn volume(p: vec3<f32>) -> Matter {
     return Matter(max(d, margin - edge), col);
 }
 
-// True only when `p` is strictly inside the volume box — used to reject false hits
-// on the box's bounding faces (the box-approach distance is never a real surface).
-fn inside_volume_box(p: vec3<f32>) -> bool {
+// True when `p` is inside the volume box expanded by `e` — used to reject false hits
+// on the box's bounding faces (the box-approach distance is never a real surface),
+// while a small `e` still admits genuine terrain hits sitting right at a face.
+fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
     let q = abs(p - G.vol_center.xyz) - G.vol_half.xyz;
-    return max(q.x, max(q.y, q.z)) < 0.0;
+    return max(q.x, max(q.y, q.z)) < e;
+}
+fn inside_volume_box(p: vec3<f32>) -> bool {
+    return inside_volume_box_eps(p, 0.0);
 }
 
 // A threshold-crossing is a REAL surface (not the shell) when there is no volume,
-// or we are inside the volume box, or an analytic blob is the matter here.
+// or we are inside the volume box, or an analytic blob is the matter here. The box
+// test is given a small slack (`thr + 0.03`) so a terrain surface that reaches right
+// up to a box face — a tall hill near the ceiling, a ravine wall touching a side —
+// isn't rejected and punched into a transparent gap. The slab faces are tapered to
+// air in `volume()`, so this never resurrects the box shell.
 fn real_surface(p: vec3<f32>, thr: f32) -> bool {
     if (G.vol_center.w < 0.5) { return true; }
-    if (inside_volume_box(p)) { return true; }
+    if (inside_volume_box_eps(p, thr + 0.03)) { return true; }
     return G.params.y >= 0.5 && analytic(p).d < thr;
 }
 
@@ -232,7 +246,15 @@ fn fs(in: VOut) -> FsOut {
     var prev_t = 0.0;
     var hit = false;
     var m: Matter;
-    for (var i = 0; i < 192; i = i + 1) {
+    // Closest approach to a real surface, so a grazing ray that never quite trips the
+    // coarse threshold — the silhouette of a hill/ravine, where the step shrinks and
+    // the iteration budget runs out — can be accepted below instead of leaving a
+    // transparent hole. (Those holes are what the low-res retro filter blew up into
+    // visible blocky gaps along terrain edges.)
+    var min_d = 1e9;
+    var min_t = 0.0;
+    var min_prev = 0.0;
+    for (var i = 0; i < 256; i = i + 1) {
         let p = ro + rd * t;
         m = map(p);
         // Distance-relaxed threshold for the COARSE hit (the precise surface is then
@@ -240,6 +262,11 @@ fn fs(in: VOut) -> FsOut {
         // converge without exhausting the step budget, but it's kept small so the far
         // silhouette stays sharp (the old larger growth left a fuzzy wispy horizon).
         let thr = 0.0006 * t + 0.002;
+        if (m.d < min_d && real_surface(p, 0.08)) {
+            min_d = m.d;
+            min_t = t;
+            min_prev = prev_t;
+        }
         if (m.d < thr && real_surface(p, thr)) {
             hit = true;
             break;
@@ -252,6 +279,14 @@ fn fs(in: VOut) -> FsOut {
         if (t > max_t) {
             break;
         }
+    }
+    // Grazing-silhouette fill: no clean hit, but the ray passed within ~a voxel of a
+    // real surface → accept that closest approach (refined by the bisection below).
+    if (!hit && min_d < 0.06 + 0.0015 * min_t) {
+        hit = true;
+        t = min_t;
+        prev_t = min_prev;
+        m = map(ro + rd * t);
     }
 
     // Refine the loose threshold hit to the TRUE surface (where the field crosses
@@ -290,16 +325,37 @@ fn fs(in: VOut) -> FsOut {
         if (clip.w > 0.0 && ndc_z >= 0.0 && ndc_z <= 1.0) {
             let n = calc_normal(p);
             let l = normalize(G.light_dir.xyz);
+            let v = -rd; // toward the camera (the camera sits at the ray origin)
             let diff = max(dot(n, l), 0.0);
             // The terrain palette texture (if painted) modulates the per-voxel tint.
             let albedo = terrain_albedo(p, n, m.col);
-            // Matte shading consistent with the raster meshes: ambient + colored
-            // diffuse, plus a subtle low-frequency rim. No high-power specular /
-            // sharp fresnel — those alias into concentric rings on a smooth SDF
-            // surface (especially at low retro resolution).
-            var col = albedo * (G.ambient.rgb + G.light_color.rgb * diff);
-            let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
-            col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
+            var col: vec3<f32>;
+            if (G.vol_center.w >= 0.5 && inside_volume_box_eps(p, 0.06)) {
+                // TERRAIN: shade with its Material using the SAME model as the raster
+                // meshes (ambient×mul + diffuse, Blinn-Phong specular, rim, emissive,
+                // unlit), so terrain sits consistently next to everything else instead
+                // of the old hardcoded look with a fixed blue rim. Defaults (no/neutral
+                // material) give plain matte — no specular, no rim.
+                let tinted = albedo * G.terrain_tint.rgb;
+                let emissive = G.terrain_emissive.rgb * G.terrain_emissive.a;
+                if (G.terrain_params.z > 0.5) {
+                    col = tinted + emissive; // unlit / fullbright
+                } else {
+                    let ambient = G.ambient.rgb * G.terrain_params.w;
+                    col = tinted * (ambient + G.light_color.rgb * diff);
+                    let h = normalize(l + v);
+                    let shininess = max(G.terrain_params.x, 1.0);
+                    let spec = pow(max(dot(n, h), 0.0), shininess) * G.terrain_specular.a * select(0.0, 1.0, diff > 0.0);
+                    col = col + G.terrain_specular.rgb * spec * G.light_color.rgb;
+                    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * G.terrain_params.y;
+                    col = col + G.terrain_rim.rgb * rim_f + emissive;
+                }
+            } else {
+                // BLOB matter keeps its matte look + a subtle low-frequency rim.
+                col = albedo * (G.ambient.rgb + G.light_color.rgb * diff);
+                let rim = pow(1.0 - max(dot(n, -rd), 0.0), 2.0);
+                col = col + vec3<f32>(0.5, 0.6, 0.8) * rim * 0.12;
+            }
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
             out.depth = ndc_z;
             drawn = true;
