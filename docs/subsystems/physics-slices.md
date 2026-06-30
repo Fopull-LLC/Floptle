@@ -48,10 +48,25 @@ transforms back; **Stop** drops the sim and the snapshot restore reverts moved n
   (currently editor-session only), and collider gizmos. Capsule controllers wire in via the
   same Sim once a "player" node type exists.
 
-## Slice 4 — Lua physics API + triggers + mesh colliders
-- Lua: `body.velocity`, `apply_impulse`, `is_grounded`, and `on_collision` /
-  `on_trigger_enter`/`exit` callbacks (builds on the existing input API).
-- Trigger volumes fire enter/stay/exit events (no resolution).
+## Slice 4 — usable rigidbodies (capsule, constraints, gravity, Lua, gizmos)  ✅
+Shipped so physics games are buildable in-editor:
+- **Capsule** body shape (depenetrates both end-spheres, stands upright); **axis
+  constraints** `lock_pos`/`lock_rot` (freeze translation / keep upright); **contacts**
+  recorded per step.
+- **RigidBody serialization** (NodeDoc.rigidbody) — bodies persist in the scene.
+- **GravityVolume nodes**: `Down` (level gravity) vs `Radial` (planet well, radius-bounded);
+  the Sim builds the field from them (default −Y if none) → normal games AND Mario-Galaxy
+  out of the box.
+- **Codeable bodies (Lua)**: a rigidbody node's script reads `node.grounded`,
+  reads/writes `node.vx/vy/vz`, and reads `node.up_x/y/z` (−gravity). Default
+  `assets/scripts/character.lua` (RMB look, WASD, Space jump) works on flat ground and
+  around planets.
+- **Gizmos/telegraph**: cyan collider outlines (sphere/capsule), gravity-well gizmos,
+  and orange contact crosses telegraphing collisions during Play.
+
+### Remaining (later)
+- `apply_impulse` helper + `on_collision`/`on_trigger_enter`/`exit` callbacks; trigger
+  volumes (Collider kind = Trigger, no resolution).
 - Static **mesh colliders** for imported glTF (parry3d BVH) so non-SDF geometry collides.
 
 ## Slice 5 — Vehicle + gravity tooling (later/research)
