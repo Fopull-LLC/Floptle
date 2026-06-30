@@ -32,7 +32,10 @@
 //! advanced on a fixed timestep with penetration resolution. Editor/ECS wiring,
 //! capsule character controllers, triggers, and mesh colliders are later slices.
 
-use floptle_core::math::Vec3;
+use floptle_core::math::{DVec3, Vec3};
+use floptle_core::transform::Transform;
+use floptle_core::{Entity, RigidBody, World, world_transform};
+use floptle_field::Terrain;
 
 /// Anything physics can query: a signed distance field with a surface normal.
 /// Distance is **positive outside** the solid (in air) and **negative inside**.
@@ -342,6 +345,61 @@ impl Character {
     }
 }
 
+/// Drives a [`PhysicsWorld`] from the ECS each Play (Slice 3 bridge): builds bodies
+/// from `RigidBody` entities + an SDF terrain collider, advances on a fixed-timestep
+/// accumulator decoupled from render fps, and writes resolved positions back to the
+/// entities' transforms.
+pub struct Sim {
+    pub world: PhysicsWorld,
+    /// Body entity ↔ index into `world.bodies`.
+    map: Vec<(Entity, usize)>,
+    accum: f32,
+    pub fixed_dt: f32,
+}
+
+impl Sim {
+    /// Build the sim from the ECS: every `RigidBody` entity becomes a dynamic sphere at
+    /// its world position; `terrain` (e.g. the editor's combined field) becomes the SDF
+    /// collider. `gravity` is the scene's gravity field.
+    pub fn build(ecs: &World, terrain: Option<&Terrain>, gravity: GravityField) -> Self {
+        let mut world = PhysicsWorld::new(gravity);
+        if let Some(t) = terrain {
+            world.add_collider(Box::new(SdfTerrain { terrain: t.clone() }));
+        }
+        let mut map = Vec::new();
+        // Collect first (immutable borrow of the ECS) then build the bodies.
+        let found: Vec<(Entity, RigidBody)> =
+            ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
+        for (e, rb) in found {
+            let p = world_transform(ecs, e).translation;
+            let mut b = Body::sphere(Vec3::new(p.x as f32, p.y as f32, p.z as f32), rb.radius.max(0.01));
+            b.restitution = rb.restitution;
+            b.friction = rb.friction;
+            map.push((e, world.add_body(b)));
+        }
+        Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0 }
+    }
+
+    /// Advance by a (variable) real frame delta via a fixed-timestep accumulator, then
+    /// write body positions back to the entities' local transform translations.
+    /// (Physics bodies are treated as root nodes; parented dynamic bodies are later.)
+    pub fn advance(&mut self, ecs: &mut World, real_dt: f32) {
+        self.accum += real_dt.clamp(0.0, 0.25);
+        let mut iters = 0;
+        while self.accum >= self.fixed_dt && iters < 8 {
+            self.world.step(self.fixed_dt);
+            self.accum -= self.fixed_dt;
+            iters += 1;
+        }
+        for &(e, i) in &self.map {
+            let p = self.world.bodies[i].pos;
+            if let Some(t) = ecs.get_mut::<Transform>(e) {
+                t.translation = DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +558,24 @@ mod tests {
         walk(&w2, &mut ch2, Vec3::ZERO, 2.0);
         assert!(!ch2.grounded, "steep slope must not ground the character");
         assert!(ch2.pos.x > 0.3, "should have slid downhill, x {}", ch2.pos.x);
+    }
+
+    #[test]
+    fn sim_drops_a_rigidbody_onto_terrain() {
+        // The full ECS bridge: a RigidBody entity above a flat terrain falls and settles
+        // on it, with the result written back to the entity's transform.
+        let terrain =
+            Terrain::flat([16, 16, 16], [0.0, 0.0, 0.0], [8.0, 8.0, 8.0], 0.0, [0.4, 0.6, 0.3]);
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, Some(&terrain), GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        for _ in 0..240 {
+            sim.advance(&mut ecs, 1.0 / 60.0);
+        }
+        let y = ecs.get::<Transform>(e).unwrap().translation.y;
+        assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
     }
 }

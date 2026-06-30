@@ -28,6 +28,23 @@ pub struct Spin {
     pub speed: f32,
 }
 
+/// Marks an entity as a dynamic physics body (a sphere of `radius`, centered on the
+/// entity's world translation). Read by `floptle-physics` to build the sim each Play.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidBody {
+    pub radius: f32,
+    /// Bounciness 0..1 (0 = no bounce).
+    pub restitution: f32,
+    /// Surface friction 0..1 (0 = frictionless).
+    pub friction: f32,
+}
+
+impl Default for RigidBody {
+    fn default() -> Self {
+        Self { radius: 0.5, restitution: 0.0, friction: 0.3 }
+    }
+}
+
 /// A scene's lighting, held on a single mandatory "Lighting" node every scene
 /// carries: a directional key light plus flat ambient. These are plain fields a
 /// script can read and write to drive game-time light changes; the renderer turns
