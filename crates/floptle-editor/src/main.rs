@@ -2197,6 +2197,10 @@ impl<'a> EditorTabViewer<'a> {
                             ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
                         cmd.inspector_changed |=
                             ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                        cmd.inspector_changed |= ui
+                            .checkbox(&mut rb.gravity, "affected by gravity")
+                            .on_hover_text("off = floats (still collides; a script can still move it)")
+                            .changed();
                         ui.horizontal(|ui| {
                             ui.label("freeze pos");
                             for (i, ax) in ["x", "y", "z"].iter().enumerate() {
@@ -6773,9 +6777,8 @@ impl Editor {
                 }
             }
         }
-        if field.sources.is_empty() {
-            field.sources.push(floptle_physics::GravitySource::Uniform(Vec3::new(0.0, -9.81, 0.0)));
-        }
+        // No GravityVolume node → ZERO gravity (a space/zero-g world). Add a Gravity
+        // Volume (Down for normal gravity, Radial for a planet) to pull bodies.
         field
     }
 
