@@ -4305,10 +4305,12 @@ struct Editor {
     combined_origins: Vec<(Entity, DVec3)>,
     /// The combined field needs rebuilding + re-uploading (any add/edit/move/delete).
     combined_dirty: bool,
-    /// A paint dab on a single terrain only dirties a small voxel box — uploaded to the
-    /// GPU directly (no full re-clone + re-upload), so painting a big terrain stays
-    /// smooth. `(entity, min inclusive, max exclusive)`, merged across dabs in a frame.
-    terrain_region_dirty: Option<(Entity, [u32; 3], [u32; 3])>,
+    /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
+    /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
+    /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is
+    /// true for sculpt (so the wireframe + combined re-sync) and false for paint (color).
+    /// Merged across dabs in a frame.
+    terrain_region_dirty: Option<(Entity, [u32; 3], [u32; 3], bool)>,
     /// Monotonic id assigned to each new terrain node (stable across save/load).
     next_terrain_id: u32,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
@@ -4934,8 +4936,29 @@ impl Editor {
             }
         });
 
-        // A terrain node moved (gizmo/inspector/undo) → rebuild the combined field.
-        if !self.combined_dirty && self.terrains_moved() {
+        // Cheap MOVE path: a single terrain that only changed POSITION needs no rebuild
+        // or GPU re-upload — its voxels are identical, only the world-space box center
+        // shifts (the renderer reads that each frame). This is what made dragging a
+        // terrain lag (it used to re-clone + re-upload the whole volume every frame).
+        if !self.combined_dirty && self.terrains.len() == 1 && self.terrain_region_dirty.is_none() {
+            let e = *self.terrains.keys().next().unwrap();
+            let o = self.terrain_world_origin(e);
+            let in_sync = self.combined_origins.first().is_some_and(|(ce, co)| *ce == e && (*co - o).length() < 1e-6);
+            if !in_sync {
+                if let (Some(t), Some(combined)) = (self.terrains.get(&e), self.combined.as_mut()) {
+                    combined.baked.center = [
+                        t.baked.center[0] + o.x as f32,
+                        t.baked.center[1] + o.y as f32,
+                        t.baked.center[2] + o.z as f32,
+                    ];
+                    self.combined_origins = vec![(e, o)];
+                    self.terrain_wire_world.clear(); // wireframe follows the move
+                } else {
+                    self.combined_dirty = true; // combined not built yet → full path
+                }
+            }
+        } else if !self.combined_dirty && self.terrains_moved() {
+            // Multi-terrain (or count changed): a move re-blends the fields, so rebuild.
             self.combined_dirty = true;
         }
         // Rebuild the combined terrain (fold all nodes' fields) + re-upload to the GPU
@@ -4950,15 +4973,32 @@ impl Editor {
             self.combined_dirty = false;
             self.terrain_region_dirty = None; // the full upload supersedes any region
             self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
-        } else if let Some((e, mn, mx)) = self.terrain_region_dirty.take() {
-            // Fast paint path: upload only the dabbed voxel box. For a single terrain the
-            // GPU volume mirrors its field 1:1, so its baked data maps directly. (`combined`
-            // keeps the correct geometry — paint never touches distance — and is re-cloned
-            // on the next full rebuild.)
+        } else if let Some((e, mn, mx, geom)) = self.terrain_region_dirty.take() {
+            // Fast paint/sculpt path: upload only the dabbed voxel box. For a single
+            // terrain the GPU volume mirrors its field 1:1, so its baked data maps directly.
             if let (Some(gpu), Some(raymarch), Some(t)) =
                 (self.gpu.as_ref(), self.raymarch.as_mut(), self.terrains.get(&e))
             {
                 raymarch.set_volume_region(gpu, &t.baked, mn, mx);
+            }
+            // Keep `combined` (collision at Play + the wireframe) in sync by copying just
+            // the changed sub-box from the terrain — no full re-clone.
+            if let (Some(t), Some(combined)) = (self.terrains.get(&e), self.combined.as_mut()) {
+                if combined.baked.dims == t.baked.dims {
+                    let [w, h, d] = t.baked.dims;
+                    for z in mn[2]..mx[2].min(d) {
+                        for y in mn[1]..mx[1].min(h) {
+                            let row = ((z * h + y) * w) as usize;
+                            let a = row + mn[0] as usize;
+                            let b = row + mx[0].min(w) as usize;
+                            combined.baked.distance[a..b].copy_from_slice(&t.baked.distance[a..b]);
+                            combined.baked.color[a..b].copy_from_slice(&t.baked.color[a..b]);
+                        }
+                    }
+                }
+            }
+            if geom {
+                self.terrain_wire_world.clear(); // sculpt moved the surface
             }
         }
         // Re-upload the terrain texture palette when it changes. Each slot resolves
@@ -7768,36 +7808,39 @@ impl Editor {
             // Infinite terrain: grow the field outward when the brush nears an edge,
             // so the slab has no fixed bounds. (Skip for Paint — painting never
             // extends the shape.) Growth keeps voxel size constant.
-            if !matches!(brush.mode, floptle_field::Brush::Paint) {
-                terrain.ensure_contains(hit, brush.radius * 1.5);
-            }
             let is_paint = matches!(brush.mode, floptle_field::Brush::Paint);
-            match brush.mode {
+            // Growing the bounds reallocates the grid (dims change) → must take the full
+            // path. `resized` is checked below to decide partial vs full.
+            let resized = if !is_paint { terrain.ensure_contains(hit, brush.radius * 1.5) } else { false };
+            // Apply the brush; collect the voxel sub-box it actually changed (paint =
+            // its brush box; sculpt = the box of cells whose distance moved).
+            let region = match brush.mode {
                 floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
-                    // Paint a texture palette slot (stored as slot+1; 0 = untextured).
                     terrain.paint_texture(hit, brush.radius, brush.tex_slot as u8 + 1);
+                    Some(terrain.brush_range(hit, brush.radius))
                 }
                 floptle_field::Brush::Paint => {
-                    terrain.paint(hit, brush.radius, brush.strength, brush.color)
+                    terrain.paint(hit, brush.radius, brush.strength, brush.color);
+                    Some(terrain.brush_range(hit, brush.radius))
                 }
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
-            }
-            // Painting only edits color within the brush box (no geometry/bounds change),
-            // so on a single terrain we upload just that voxel sub-box to the GPU instead
-            // of re-cloning + re-uploading the whole field — that's the painting lag.
-            // Sculpt (CSG spreads beyond the brush) and multi-terrain take the full path.
-            let region = if is_paint { Some(terrain.brush_range(hit, brush.radius)) } else { None };
+            };
             self.stroke_dabbed = true; // mark this stroke as worth an undo step
-            match (region, self.terrains.len() == 1) {
-                (Some([mn, mx]), true) => {
+            // Fast path: a single terrain that didn't resize uploads only the dabbed box
+            // (no full re-clone + re-upload — that's the paint/sculpt lag). A resize, an
+            // empty change, or multiple terrains fall back to a full rebuild.
+            match region {
+                Some([mn, mx]) if self.terrains.len() == 1 && !resized => {
                     let hi = [mx[0] + 1, mx[1] + 1, mx[2] + 1];
+                    let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
                     self.terrain_region_dirty = Some(match self.terrain_region_dirty {
-                        Some((e, omn, omx)) if e == active => (
+                        Some((e, omn, omx, og)) if e == active => (
                             active,
                             [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
                             [omx[0].max(hi[0]), omx[1].max(hi[1]), omx[2].max(hi[2])],
+                            og || geom,
                         ),
-                        _ => (active, mn, hi),
+                        _ => (active, mn, hi, geom),
                     });
                 }
                 _ => self.combined_dirty = true,
