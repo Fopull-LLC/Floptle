@@ -3191,7 +3191,7 @@ impl<'a> EditorTabViewer<'a> {
         }
 
         // Camera frustums (active = bright green, others = dim) so cameras are visible.
-        if !self.camera_gizmos.is_empty() {
+        if !game && !self.camera_gizmos.is_empty() {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("camera_gizmos")))
@@ -3212,7 +3212,7 @@ impl<'a> EditorTabViewer<'a> {
 
         // Point-light gizmos (a warm cross + range ring) so unselected lights are
         // visible/placeable. Editor view only (the gather is gated on !game_view).
-        if !self.light_gizmos.is_empty() {
+        if !game && !self.light_gizmos.is_empty() {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("light_gizmos")))
@@ -3228,7 +3228,7 @@ impl<'a> EditorTabViewer<'a> {
         }
 
         // Rigidbody collider outlines (cyan) + collision-contact crosses (orange).
-        if !self.body_gizmos.is_empty() || !self.contact_gizmos.is_empty() {
+        if !game && (!self.body_gizmos.is_empty() || !self.contact_gizmos.is_empty()) {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("physics_gizmos")))
@@ -3248,7 +3248,7 @@ impl<'a> EditorTabViewer<'a> {
         }
 
         // Terrain collider wireframe (where the player can walk) — a soft yellow net.
-        if !self.terrain_wire.is_empty() {
+        if !game && !self.terrain_wire.is_empty() {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_wire")))
@@ -3262,7 +3262,7 @@ impl<'a> EditorTabViewer<'a> {
         }
 
         // Mesh collider wireframes (imported maps flagged walkable) — a cyan triangle net.
-        if !self.mesh_wire.is_empty() {
+        if !game && !self.mesh_wire.is_empty() {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("mesh_wire")))
@@ -5545,19 +5545,11 @@ impl Editor {
         // (cheap: cached by file mtime, selected node only) so editing a script surfaces
         // new tunables and drops removed ones live.
         self.sync_selected_script_params();
-        // Whether the Game view is the focused tab (precomputed before the GPU borrow):
-        // game input only feeds scripts here, never in the Scene view. When Scene + Game
-        // are split (both visible), input goes to whichever viewport the mouse is over, so
-        // navigating the Scene tab doesn't also drive the game.
-        let split_now = self.fullscreen_tab.is_none()
-            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
-        let game_focused = if split_now {
-            self.egui
-                .as_ref()
-                .is_some_and(|e| scene_hit(&e.ctx, self.cursor, self.game_rect))
-        } else {
-            self.game_view()
-        };
+        // Whether the Game viewport is focused (precomputed before the GPU borrow): game
+        // input only feeds scripts here. `game_view()` is pointer-aware in split view, so
+        // when both tabs show, input goes to whichever viewport the mouse is over and the
+        // Scene view stays fully interactive.
+        let game_focused = self.game_view();
 
         let (
             Some(gpu),
@@ -5588,9 +5580,9 @@ impl Editor {
         let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
-        // In split view, don't drive the editor (Scene) camera while the mouse is over the
-        // Game viewport — that input belongs to the game.
-        if !(split_now && game_focused) {
+        // Don't drive the editor (Scene) camera while the Game viewport is focused — that
+        // input belongs to the game (e.g. the mouse is over the Game view in split mode).
+        if !game_focused {
             self.camera.update(&self.input, dt);
         }
 
@@ -8283,15 +8275,26 @@ impl Editor {
         scene_hit(&eg.ctx, self.cursor, self.scene_rect)
     }
 
-    /// True when the Game tab is the focused viewport — it renders the active-camera
+    /// True when the Game viewport is the FOCUSED viewport — it renders the active-camera
     /// "as a build" view, so editor interactions (pick/select, sculpt, gizmos, editor
     /// keybinds + free-fly camera) are suppressed there; only the game's own inputs run.
+    /// When the Scene and Game tabs are split (both visible), focus follows the pointer:
+    /// the game is focused only while the mouse is over its viewport, so you can still
+    /// edit in the Scene view and the game only gets input when you're in it.
     fn game_view(&self) -> bool {
         match self.fullscreen_tab {
-            Some(EditorTab::Game) => true,
-            Some(_) => false,
-            None => self.dock_state.as_ref().is_some_and(game_tab_active),
+            Some(EditorTab::Game) => return true,
+            Some(_) => return false,
+            None => {}
         }
+        let Some(dock) = self.dock_state.as_ref() else { return false };
+        if scene_and_game_split(dock) {
+            return self
+                .egui
+                .as_ref()
+                .is_some_and(|e| scene_hit(&e.ctx, self.cursor, self.game_rect));
+        }
+        game_tab_active(dock)
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
