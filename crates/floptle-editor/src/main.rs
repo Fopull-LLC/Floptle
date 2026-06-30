@@ -181,6 +181,8 @@ struct EditorCmd {
     remove_rigidbody: Option<Entity>,
     /// Toggle the static MeshCollider marker on a Mesh node (`true` = add, `false` = remove).
     set_mesh_collider: Option<(Entity, bool)>,
+    /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
+    set_collidable: Option<(Entity, bool)>,
     /// Remove an entity's Material component (back to the default look).
     remove_material: Option<Entity>,
     /// Apply a named material preset to an entity.
@@ -2191,19 +2193,33 @@ impl<'a> EditorTabViewer<'a> {
                                 .selected_text(match rb.kind {
                                     BodyKind::Sphere => "Sphere",
                                     BodyKind::Capsule => "Capsule",
+                                    BodyKind::Box => "Box",
                                 })
                                 .show_ui(ui, |ui| {
                                     cmd.inspector_changed |=
                                         ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
                                     cmd.inspector_changed |=
                                         ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                    cmd.inspector_changed |=
+                                        ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
                                 });
                         });
-                        cmd.inspector_changed |=
-                            ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
-                        if rb.kind == BodyKind::Capsule {
+                        if rb.kind == BodyKind::Box {
+                            ui.label("half-extents");
+                            ui.horizontal(|ui| {
+                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
+                                        .changed();
+                                }
+                            });
+                        } else {
                             cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                                ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                            if rb.kind == BodyKind::Capsule {
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                            }
                         }
                         cmd.inspector_changed |=
                             ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
@@ -2236,15 +2252,32 @@ impl<'a> EditorTabViewer<'a> {
                     }
                 });
 
-                // ---- Static mesh collider (walkable map) — Mesh nodes only ----
-                if matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. })) {
-                    let mut on = world.get::<floptle_core::MeshCollider>(e).is_some();
+                // ---- Collidable (static collider, no rigidbody needed) ----
+                // The "collidable" switch: auto-shapes a static collider from the node's
+                // geometry (Cube → box, Sphere → sphere, Capsule → capsule, Mesh → its
+                // triangles). A primitive is collidable WITHOUT a dynamic rigidbody, just
+                // like a mesh — resize it by scaling the node.
+                let collidable_kind = match world.get::<Matter>(e) {
+                    Some(Matter::Mesh { .. }) => Some("triangle mesh"),
+                    Some(Matter::Primitive { shape, .. }) => Some(match shape {
+                        floptle_core::Shape::Cube => "box",
+                        floptle_core::Shape::Sphere => "sphere",
+                        floptle_core::Shape::Capsule => "capsule",
+                    }),
+                    _ => None,
+                };
+                if let Some(kind) = collidable_kind {
+                    // A legacy mesh-collider counts as collidable (old scenes load fine).
+                    let mut on = world.get::<floptle_core::Collidable>(e).is_some()
+                        || world.get::<floptle_core::MeshCollider>(e).is_some();
                     if ui
-                        .checkbox(&mut on, "▦ Mesh collider (walkable)")
-                        .on_hover_text("collide against this model's triangles on Play, so a character can walk on it")
+                        .checkbox(&mut on, "▦ Collidable")
+                        .on_hover_text(format!(
+                            "static collision auto-built from this node's geometry (a {kind}) on Play — walk on it / bump into it. No rigidbody needed; scale the node to resize the collider."
+                        ))
                         .changed()
                     {
-                        cmd.set_mesh_collider = Some((e, on));
+                        cmd.set_collidable = Some((e, on));
                         cmd.inspector_changed = true;
                     }
                 }
@@ -4211,6 +4244,43 @@ fn gravity_volume_lines(
     lines
 }
 
+/// Build a world-axis-aligned box wireframe (12 edges) centered at `center` with the
+/// given world half-extents — the outline of a `BodyKind::Box` collider (which the
+/// solver treats as axis-aligned).
+fn box_lines(
+    center: DVec3,
+    half: Vec3,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let hd = DVec3::new(half.x.max(0.01) as f64, half.y.max(0.01) as f64, half.z.max(0.01) as f64);
+    let signs = [
+        (-1.0, -1.0, -1.0), (1.0, -1.0, -1.0), (1.0, -1.0, 1.0), (-1.0, -1.0, 1.0), // bottom
+        (-1.0, 1.0, -1.0), (1.0, 1.0, -1.0), (1.0, 1.0, 1.0), (-1.0, 1.0, 1.0), // top
+    ];
+    let corners: Vec<Option<Vec2>> = signs
+        .iter()
+        .map(|&(sx, sy, sz)| {
+            project(center + DVec3::new(sx * hd.x, sy * hd.y, sz * hd.z), cam_world, vp, w, h)
+        })
+        .collect();
+    // bottom loop, top loop, and the four vertical edges connecting them.
+    let edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ];
+    let mut lines = Vec::new();
+    for &(a, b) in &edges {
+        if let (Some(pa), Some(pb)) = (corners[a], corners[b]) {
+            lines.push((pa, pb));
+        }
+    }
+    lines
+}
+
 /// Build a rigidbody collider outline: a 3-ring wireframe sphere, or a capsule (two
 /// end rings + side connectors + cap arcs). Y-up (the editor doesn't tilt the gizmo).
 fn rigidbody_lines(
@@ -5297,17 +5367,28 @@ impl Editor {
             let bodies: Vec<(Entity, floptle_core::RigidBody)> =
                 self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect();
             for (e, rb) in bodies {
-                let p = floptle_core::world_transform(&self.world, e).translation;
-                let lines = rigidbody_lines(
-                    p,
-                    rb.kind == floptle_core::BodyKind::Capsule,
-                    rb.radius,
-                    rb.height,
-                    cam.world_position,
-                    view_proj,
-                    gw,
-                    gh,
-                );
+                let wt = floptle_core::world_transform(&self.world, e);
+                let p = wt.translation;
+                let lines = if rb.kind == floptle_core::BodyKind::Box {
+                    let s = wt.scale;
+                    let half = Vec3::new(
+                        rb.half_extents[0] * s.x,
+                        rb.half_extents[1] * s.y,
+                        rb.half_extents[2] * s.z,
+                    );
+                    box_lines(p, half, cam.world_position, view_proj, gw, gh)
+                } else {
+                    rigidbody_lines(
+                        p,
+                        rb.kind == floptle_core::BodyKind::Capsule,
+                        rb.radius,
+                        rb.height,
+                        cam.world_position,
+                        view_proj,
+                        gw,
+                        gh,
+                    )
+                };
                 if !lines.is_empty() {
                     self.body_gizmos.push(lines);
                 }
@@ -6409,6 +6490,16 @@ impl Editor {
                 self.world.remove::<floptle_core::MeshCollider>(e);
             }
         }
+        if let Some((e, on)) = cmd.set_collidable {
+            self.record();
+            if on {
+                self.world.insert(e, floptle_core::Collidable);
+            } else {
+                // Clear both the new marker and any legacy mesh-collider marker.
+                self.world.remove::<floptle_core::Collidable>(e);
+                self.world.remove::<floptle_core::MeshCollider>(e);
+            }
+        }
         if let Some((e, name)) = cmd.apply_preset {
             if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
                 let mat = doc.to_material();
@@ -6836,35 +6927,58 @@ impl Editor {
         field
     }
 
-    /// Register a static triangle collider for every Mesh node flagged `MeshCollider`,
-    /// so an imported map is walkable. Re-imports the model to get CPU triangles (the
-    /// registry keeps only GPU handles) and bakes the node's world transform into them —
-    /// the same transform the renderer draws with, so the collider lines up with what
-    /// you see. Done once at Play; imports are cached by the OS, the cost is one-time.
-    fn add_mesh_colliders(&self, sim: &mut floptle_physics::Sim) {
-        let meshes: Vec<(Entity, String)> = self
-            .world
-            .query::<floptle_core::MeshCollider>()
-            .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
-                Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
-                _ => None,
-            })
-            .collect();
-        for (e, path) in meshes {
-            let Ok(model) = floptle_assets::gltf_import::import(std::path::Path::new(&path)) else {
-                eprintln!("mesh collider: failed to load {path}");
-                continue;
-            };
-            let wt = floptle_core::world_transform(&self.world, e);
-            let m = Mat4::from_scale_rotation_translation(wt.scale, wt.rotation, wt.translation.as_vec3());
-            let mut verts: Vec<Vec3> = Vec::new();
-            let mut indices: Vec<u32> = Vec::new();
-            for part in &model.parts {
-                let base = verts.len() as u32;
-                verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
-                indices.extend(part.mesh.indices.iter().map(|i| i + base));
+    /// Build every node's STATIC collider into the sim at Play. A node is a static
+    /// collider if it carries `Collidable` (the "collidable" switch) or the legacy
+    /// `MeshCollider` marker. The collider is auto-shaped from the node's `Matter`:
+    /// a Mesh bakes its world-space triangles; a Cube/Sphere/Capsule primitive becomes
+    /// a box/sphere/capsule sized to the primitive geometry × the node's scale (and
+    /// oriented by its rotation). These are environment colliders, not dynamic bodies.
+    fn add_static_colliders(&self, sim: &mut floptle_physics::Sim) {
+        // Union of Collidable + legacy MeshCollider entities (dedup; a node flagged both
+        // is added once).
+        let mut ents: Vec<Entity> = self.world.query::<floptle_core::Collidable>().map(|(e, _)| e).collect();
+        for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
+            if !ents.contains(&e) {
+                ents.push(e);
             }
-            sim.add_static_mesh(&verts, &indices);
+        }
+        for e in ents {
+            let wt = floptle_core::world_transform(&self.world, e);
+            let center = wt.translation.as_vec3();
+            let s = wt.scale;
+            match self.world.get::<Matter>(e) {
+                Some(Matter::Mesh { asset_path }) => {
+                    let path = asset_path.clone();
+                    let Ok(model) = floptle_assets::gltf_import::import(std::path::Path::new(&path)) else {
+                        eprintln!("collidable mesh: failed to load {path}");
+                        continue;
+                    };
+                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, center);
+                    let mut verts: Vec<Vec3> = Vec::new();
+                    let mut indices: Vec<u32> = Vec::new();
+                    for part in &model.parts {
+                        let base = verts.len() as u32;
+                        verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
+                        indices.extend(part.mesh.indices.iter().map(|i| i + base));
+                    }
+                    sim.add_static_mesh(&verts, &indices);
+                }
+                // Primitive geometry → matching analytic collider, sized to match the
+                // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
+                Some(Matter::Primitive { shape, .. }) => match shape {
+                    floptle_core::Shape::Cube => {
+                        sim.add_static_box(center, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation);
+                    }
+                    floptle_core::Shape::Sphere => {
+                        sim.add_static_sphere(center, 0.85 * s.max_element());
+                    }
+                    floptle_core::Shape::Capsule => {
+                        let up = wt.rotation * Vec3::Y;
+                        sim.add_static_capsule(center, up, 0.5 * s.y, 0.5 * s.x.max(s.z));
+                    }
+                },
+                _ => {}
+            }
         }
     }
 
@@ -6884,9 +6998,9 @@ impl Editor {
             // terrain (SDF collider) + the gravity field from GravityVolume nodes.
             let gravity = self.build_gravity_field();
             let mut sim = floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity);
-            // Add static mesh colliders (imported maps flagged "Mesh collider") so a
-            // character can walk on them, not just the terrain.
-            self.add_mesh_colliders(&mut sim);
+            // Add static colliders (any node flagged "Collidable", plus legacy mesh
+            // colliders) so a character can walk on / bump into them, not just terrain.
+            self.add_static_colliders(&mut sim);
             self.sim = Some(sim);
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
@@ -6930,6 +7044,7 @@ impl Editor {
         let rigidbody =
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
+        let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         Some(NodeDoc {
             name,
             transform,
@@ -6938,6 +7053,7 @@ impl Editor {
             material,
             rigidbody,
             mesh_collider,
+            collidable,
             parent: None,
         })
     }
@@ -6985,6 +7101,7 @@ impl Editor {
             material: None,
             rigidbody: None,
             mesh_collider: false,
+            collidable: false,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -7386,6 +7503,7 @@ impl Editor {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                collidable: false,
                 parent: None,
             };
             let e = self.spawn_node(&node);
@@ -8602,6 +8720,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         material: None,
         rigidbody: None,
         mesh_collider: false,
+        collidable: false,
         parent: None,
     }
 }
@@ -8629,6 +8748,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                collidable: false,
                 parent: None,
             },
             NodeDoc {
@@ -8639,6 +8759,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                collidable: false,
                 parent: None,
             },
             NodeDoc {
@@ -8649,6 +8770,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                collidable: false,
                 parent: None,
             },
             default_camera_node(),

@@ -34,6 +34,8 @@ pub struct Spin {
 pub enum BodyKind {
     Sphere,
     Capsule,
+    /// A box, sized by [`RigidBody::half_extents`].
+    Box,
 }
 
 /// Marks an entity as a dynamic physics body, centered on the entity's world
@@ -44,6 +46,8 @@ pub struct RigidBody {
     pub radius: f32,
     /// Total capsule height (ignored for a sphere).
     pub height: f32,
+    /// Half-extents for a `Box` body (ignored for sphere/capsule).
+    pub half_extents: [f32; 3],
     /// Bounciness 0..1 (0 = no bounce).
     pub restitution: f32,
     /// Surface friction 0..1 (0 = frictionless).
@@ -63,6 +67,7 @@ impl Default for RigidBody {
             kind: BodyKind::Sphere,
             radius: 0.5,
             height: 2.0,
+            half_extents: [0.5, 0.5, 0.5],
             restitution: 0.0,
             friction: 0.3,
             gravity: true,
@@ -77,6 +82,15 @@ impl Default for RigidBody {
 /// dynamic body; it's environment geometry (a level/map). Presence = collidable.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MeshCollider;
+
+/// Marks ANY node as a STATIC collider auto-shaped from its geometry — the "collidable"
+/// switch. At Play the editor builds the matching static collision shape sized to the
+/// node's `Matter` + world transform (Cube → box, Sphere → sphere, Capsule → capsule,
+/// Mesh → triangle mesh), so a primitive is collidable WITHOUT a dynamic rigidbody (just
+/// like a mesh collider). Resize/reshape it by scaling/rotating the node — the collider
+/// tracks the geometry. Presence = collidable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Collidable;
 
 /// A scene's lighting, held on a single mandatory "Lighting" node every scene
 /// carries: a directional key light plus flat ambient. These are plain fields a

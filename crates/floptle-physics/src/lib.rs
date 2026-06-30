@@ -91,6 +91,67 @@ impl CollisionShape for SphereShape {
     }
 }
 
+/// A solid oriented box (OBB) — a static collider matching a Cube primitive's geometry.
+/// `inv_rot` rotates a world point into the box's local frame; `half` are the local
+/// half-extents. Distance is the exact box SDF; the normal is a finite-difference of it
+/// (robust for any face/edge/corner, inside or out).
+pub struct BoxShape {
+    pub center: Vec3,
+    pub half: Vec3,
+    pub inv_rot: Quat,
+}
+
+impl BoxShape {
+    /// An oriented box centered at `center`, rotated by `rot`, with local half-extents `half`.
+    pub fn new(center: Vec3, half: Vec3, rot: Quat) -> Self {
+        Self { center, half: half.abs().max(Vec3::splat(1e-3)), inv_rot: rot.inverse() }
+    }
+}
+
+impl CollisionShape for BoxShape {
+    fn distance(&self, p: Vec3) -> f32 {
+        let l = self.inv_rot * (p - self.center);
+        let q = l.abs() - self.half;
+        q.max(Vec3::ZERO).length() + q.x.max(q.y.max(q.z)).min(0.0)
+    }
+    fn normal(&self, p: Vec3) -> Vec3 {
+        let e = 0.005;
+        let d = self.distance(p);
+        Vec3::new(
+            self.distance(p + Vec3::X * e) - d,
+            self.distance(p + Vec3::Y * e) - d,
+            self.distance(p + Vec3::Z * e) - d,
+        )
+        .try_normalize()
+        .unwrap_or(Vec3::Y)
+    }
+}
+
+/// A solid capsule (a segment `a`→`b` inflated by `radius`) — a static collider matching
+/// a Capsule primitive's geometry.
+pub struct CapsuleShape {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub radius: f32,
+}
+
+impl CapsuleShape {
+    fn closest(&self, p: Vec3) -> Vec3 {
+        let ab = self.b - self.a;
+        let t = ((p - self.a).dot(ab) / ab.dot(ab).max(1e-6)).clamp(0.0, 1.0);
+        self.a + ab * t
+    }
+}
+
+impl CollisionShape for CapsuleShape {
+    fn distance(&self, p: Vec3) -> f32 {
+        (p - self.closest(p)).length() - self.radius
+    }
+    fn normal(&self, p: Vec3) -> Vec3 {
+        (p - self.closest(p)).try_normalize().unwrap_or(Vec3::Y)
+    }
+}
+
 /// An SDF-terrain collider — collides against the **same baked field the renderer
 /// draws** (ADR-0012), in the terrain's local space. Owns a snapshot of the field so
 /// the physics step is independent of editor state.
@@ -300,6 +361,11 @@ pub enum BodyShape {
     /// A capsule: `radius` thick, with `half_height` from the center to each end-sphere
     /// center, aligned to the body's `up` (kept along −gravity, so it stands upright).
     Capsule { half_height: f32 },
+    /// A world-axis-aligned box with the given half-extents. Depenetrated by sampling its
+    /// 8 corners + center as points against the world (so a crate rests flat on a floor).
+    /// Not orientation-tracked in the solver — intended for crates/platforms under level
+    /// gravity, not free-tumbling rotation.
+    Box { half: Vec3 },
 }
 
 /// A dynamic body — a sphere or capsule integrated + depenetrated each step.
@@ -350,21 +416,47 @@ impl Body {
         Self { shape: BodyShape::Capsule { half_height: half }, ..Self::sphere(pos, radius) }
     }
 
+    /// A box body with the given world-axis half-extents (a crate / falling platform).
+    pub fn boxx(pos: Vec3, half: Vec3) -> Self {
+        let h = half.abs().max(Vec3::splat(1e-3));
+        Self { shape: BodyShape::Box { half: h }, radius: h.min_element(), ..Self::sphere(pos, h.min_element()) }
+    }
+
     /// Total standing height (tip to tip): `2·radius` for a sphere, the full capsule
-    /// length for a capsule.
+    /// length for a capsule, `2·half.y` for a box.
     fn height(&self) -> f32 {
         match self.shape {
             BodyShape::Sphere => 2.0 * self.radius,
             BodyShape::Capsule { half_height } => 2.0 * (half_height + self.radius),
+            BodyShape::Box { half } => 2.0 * half.y,
         }
     }
 
-    /// The collision sphere centers (1 for a sphere, 2 for a capsule's ends).
-    fn centers(&self) -> ([Vec3; 2], usize) {
+    /// The body's collision sample points + count + the sphere radius inflating each one:
+    /// 1 point (sphere), the 2 end-sphere centers (capsule), or the 8 corners + center
+    /// (box, sampled as zero-radius points). The depenetration loop pushes each point that
+    /// has sunk inside a collider back out along the collider normal.
+    fn sample_centers(&self) -> ([Vec3; 9], usize, f32) {
+        let mut a = [self.pos; 9];
         match self.shape {
-            BodyShape::Sphere => ([self.pos, self.pos], 1),
+            BodyShape::Sphere => (a, 1, self.radius),
             BodyShape::Capsule { half_height } => {
-                ([self.pos - self.up * half_height, self.pos + self.up * half_height], 2)
+                a[0] = self.pos - self.up * half_height;
+                a[1] = self.pos + self.up * half_height;
+                (a, 2, self.radius)
+            }
+            BodyShape::Box { half } => {
+                let mut n = 0;
+                for &sx in &[-1.0f32, 1.0] {
+                    for &sy in &[-1.0f32, 1.0] {
+                        for &sz in &[-1.0f32, 1.0] {
+                            a[n] = self.pos + Vec3::new(sx * half.x, sy * half.y, sz * half.z);
+                            n += 1;
+                        }
+                    }
+                }
+                a[8] = self.pos; // center, so a deeply-buried box still resolves
+                (a, 9, 0.0)
             }
         }
     }
@@ -502,8 +594,7 @@ impl PhysicsWorld {
             // each of the body's collision spheres (2 for a capsule).
             for _ in 0..2 {
                 for ci in 0..self.colliders.len() {
-                    let (centers, n_c) = self.bodies[bi].centers();
-                    let radius = self.bodies[bi].radius;
+                    let (centers, n_c, radius) = self.bodies[bi].sample_centers();
                     for &c in &centers[..n_c] {
                         let pen = radius - self.colliders[ci].distance(c);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
@@ -697,6 +788,11 @@ impl Sim {
             let mut b = match rb.kind {
                 BodyKind::Sphere => Body::sphere(pos, r),
                 BodyKind::Capsule => Body::capsule(pos, r, rb.height),
+                BodyKind::Box => {
+                    let s = wt.scale;
+                    let h = rb.half_extents;
+                    Body::boxx(pos, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z))
+                }
             };
             b.restitution = rb.restitution;
             b.friction = rb.friction;
@@ -715,6 +811,27 @@ impl Sim {
         if indices.len() >= 3 && !verts.is_empty() {
             self.world.add_collider(Box::new(TriMeshCollider::new(verts, indices)));
         }
+    }
+
+    /// Register a static oriented-box collider (the "collidable" switch on a Cube node).
+    pub fn add_static_box(&mut self, center: Vec3, half: Vec3, rot: Quat) {
+        self.world.add_collider(Box::new(BoxShape::new(center, half, rot)));
+    }
+
+    /// Register a static sphere collider (a collidable Sphere node).
+    pub fn add_static_sphere(&mut self, center: Vec3, radius: f32) {
+        self.world.add_collider(Box::new(SphereShape { center, radius: radius.max(1e-3) }));
+    }
+
+    /// Register a static capsule collider (a collidable Capsule node). `up` is the capsule
+    /// axis (world space); `half_height` is center-to-endcap-center; `radius` its thickness.
+    pub fn add_static_capsule(&mut self, center: Vec3, up: Vec3, half_height: f32, radius: f32) {
+        let u = up.try_normalize().unwrap_or(Vec3::Y);
+        self.world.add_collider(Box::new(CapsuleShape {
+            a: center - u * half_height,
+            b: center + u * half_height,
+            radius: radius.max(1e-3),
+        }));
     }
 
     /// Cast a ray against the world's colliders (terrain + meshes). See
@@ -866,6 +983,58 @@ mod tests {
         let body = w.bodies[b];
         assert!((body.pos.y - 0.5).abs() < 0.08, "rests on mesh floor, y={}", body.pos.y);
         assert!(body.grounded, "should be grounded on the mesh");
+    }
+
+    #[test]
+    fn box_shape_distance_and_normal() {
+        // An axis-aligned 1×1×1 box (half 0.5) centered at the origin.
+        let b = BoxShape::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
+        assert!((b.distance(Vec3::new(0.0, 1.0, 0.0)) - 0.5).abs() < 1e-3, "face dist");
+        assert!(b.distance(Vec3::ZERO) < 0.0, "inside is negative");
+        assert!(b.normal(Vec3::new(0.0, 1.0, 0.0)).y > 0.9, "top normal points up");
+        assert!(b.normal(Vec3::new(1.0, 0.0, 0.0)).x > 0.9, "side normal points out");
+        // A rotated box still measures from its own faces.
+        let r = BoxShape::new(Vec3::ZERO, Vec3::splat(0.5), Quat::from_rotation_y(0.5));
+        assert!(r.distance(Vec3::new(0.0, 2.0, 0.0)).is_finite());
+        assert!((r.distance(Vec3::new(0.0, 2.0, 0.0)) - 1.5).abs() < 1e-2, "y-face unaffected by yaw");
+    }
+
+    #[test]
+    fn box_body_rests_on_floor() {
+        // A box body dropped on a ground plane comes to rest with its base on the floor.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let bi = w.add_body(Body::boxx(Vec3::new(0.0, 4.0, 0.0), Vec3::new(0.6, 0.4, 0.6)));
+        simulate(&mut w, 3.0);
+        let body = w.bodies[bi];
+        assert!(body.pos.is_finite(), "box non-finite: {:?}", body.pos);
+        // Center should sit ~half.y above the floor (base resting at y≈0).
+        assert!((body.pos.y - 0.4).abs() < 0.12, "box rests on floor, y={}", body.pos.y);
+        // At rest its velocity has been damped to ~zero (it's not falling through).
+        assert!(body.vel.length() < 0.2, "box should be at rest, vel={:?}", body.vel);
+    }
+
+    #[test]
+    fn static_box_collider_stops_falling_sphere() {
+        // A sphere falls onto a static (collidable) box platform and rests on its top.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(BoxShape::new(Vec3::ZERO, Vec3::new(3.0, 0.5, 3.0), Quat::IDENTITY)));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 4.0, 0.0), 0.5));
+        simulate(&mut w, 3.0);
+        let body = w.bodies[bi];
+        assert!((body.pos.y - 1.0).abs() < 0.08, "rests on box top, y={}", body.pos.y);
+        assert!(body.grounded, "should be grounded on the box");
+    }
+
+    #[test]
+    fn static_capsule_collider_stops_falling_sphere() {
+        // A sphere falls onto a horizontal static capsule bar and rests on top.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(CapsuleShape { a: Vec3::new(-2.0, 0.0, 0.0), b: Vec3::new(2.0, 0.0, 0.0), radius: 0.5 }));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 4.0, 0.0), 0.5));
+        simulate(&mut w, 3.0);
+        let body = w.bodies[bi];
+        assert!((body.pos.y - 1.0).abs() < 0.08, "rests on capsule, y={}", body.pos.y);
     }
 
     #[test]
