@@ -1628,6 +1628,8 @@ impl IdeState {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
+    /// Double-clicking a tab toggles it into this slot (maximized full-window).
+    fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
     /// The engine Console (script logs / warnings / errors).
@@ -1697,6 +1699,14 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
 
     fn id(&mut self, tab: &mut EditorTab) -> egui::Id {
         egui::Id::new(("editor_tab", tab.title()))
+    }
+
+    // Double-click a tab to maximize it full-window; double-click again to restore.
+    fn on_tab_button(&mut self, tab: &mut EditorTab, response: &egui::Response) {
+        if response.double_clicked() {
+            *self.fullscreen_tab =
+                if *self.fullscreen_tab == Some(*tab) { None } else { Some(*tab) };
+        }
     }
 
     // Core panels can't be closed (no way to bring them back yet).
@@ -4558,6 +4568,9 @@ struct Editor {
     project_path_buf: String,
     /// Dockable panel layout (Hierarchy / Inspector / Assets / Scene / Scripting).
     dock_state: Option<egui_dock::DockState<EditorTab>>,
+    /// When set, that one tab is shown maximized full-window (double-click a tab to
+    /// toggle); the dock layout is bypassed until it's restored.
+    fullscreen_tab: Option<EditorTab>,
     /// The in-engine Scripting IDE (open files + Docs page).
     ide: IdeState,
     /// The asset selected in the browser (shown in the Inspector); `None` = a node.
@@ -5396,8 +5409,13 @@ impl Editor {
         // The Game dock tab being front = render from the active camera node; otherwise
         // (Scene tab) use the editor's free-fly camera. Works whether or not we're
         // playing, so you can frame the active camera's shot without entering play.
-        // (Inlined — self methods can't be called while gpu/egui are borrowed.)
-        let game_view = self.dock_state.as_ref().is_some_and(game_tab_active);
+        // (Inlined — self methods can't be called while gpu/egui are borrowed.) A
+        // fullscreened tab overrides which view is front.
+        let game_view = match self.fullscreen_tab {
+            Some(EditorTab::Game) => true,
+            Some(_) => false,
+            None => self.dock_state.as_ref().is_some_and(game_tab_active),
+        };
         let cam = {
             let active = if game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
@@ -5841,6 +5859,7 @@ impl Editor {
         let old_retro_h = self.project.retro_height;
         let ppp = ctx.pixels_per_point();
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
+        let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
         let selection = &mut self.selection;
         let collapsed = &mut self.collapsed;
@@ -6013,6 +6032,7 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                fullscreen_tab,
                 collapsed,
                 console,
                 preview: preview_view.clone(),
@@ -6058,9 +6078,41 @@ impl Editor {
                 ppp,
                 cmd: &mut cmd,
             };
-            egui_dock::DockArea::new(dock_state)
-                .style(egui_dock::Style::from_egui(ui.style()))
-                .show_inside(ui, &mut viewer);
+            // Fullscreen: one tab maximized over the whole window (double-click a tab to
+            // toggle). A slim header lets you restore (or press Esc); the dock layout is
+            // untouched underneath and comes back exactly as it was.
+            if let Some(ft) = *viewer.fullscreen_tab {
+                let mut exit = false;
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(format!("⛶ Restore  ·  {}", ft.title()))
+                        .on_hover_text("double-click a tab to toggle fullscreen · Esc to restore")
+                        .clicked()
+                    {
+                        exit = true;
+                    }
+                    ui.small("fullscreen — double-click a tab or press Esc to restore");
+                });
+                ui.separator();
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    exit = true;
+                }
+                // Scene/Game are transparent (the 3D shows through); every other tab
+                // needs an opaque fill so the surface render doesn't bleed behind it.
+                if !matches!(ft, EditorTab::Scene | EditorTab::Game) {
+                    let bg = ui.style().visuals.panel_fill;
+                    ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, bg);
+                }
+                let mut t = ft;
+                egui_dock::TabViewer::ui(&mut viewer, ui, &mut t);
+                if exit {
+                    *viewer.fullscreen_tab = None;
+                }
+            } else {
+                egui_dock::DockArea::new(dock_state)
+                    .style(egui_dock::Style::from_egui(ui.style()))
+                    .show_inside(ui, &mut viewer);
+            }
 
             // Viewport drop: spawn a model when an asset is released over the Scene
             // tab (panel drops — script-on-node — are consumed by those tabs first).
@@ -7778,7 +7830,11 @@ impl Editor {
     /// "as a build" view, so editor interactions (pick/select, sculpt, gizmos, editor
     /// keybinds + free-fly camera) are suppressed there; only the game's own inputs run.
     fn game_view(&self) -> bool {
-        self.dock_state.as_ref().is_some_and(game_tab_active)
+        match self.fullscreen_tab {
+            Some(EditorTab::Game) => true,
+            Some(_) => false,
+            None => self.dock_state.as_ref().is_some_and(game_tab_active),
+        }
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
