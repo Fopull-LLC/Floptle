@@ -39,10 +39,11 @@ The first-person recipe — no glue code:
 3. Drag **`scripts/character.lua`** onto it (drop it on the Inspector, or from Assets).
 
 > The Inspector is a **modular component stack**: a node shows only the components it
-> has, and **➕ Add Component** (a searchable, icon'd menu at the bottom) adds the rest —
-> Rigidbody, Collider, Material, a script, or a different **Type**. Start from **New ▸
-> 🗀 Empty** and build a node up from nothing. Each component has a ⎘ copy / 📋 paste
-> so you can clone its values (a tuned Transform, a script's params) onto another node.
+> has, and **➕ Add Component** (a searchable menu at the bottom that focuses for typing
+> the moment it opens) adds the rest — Rigidbody, Collider, Material, a script, or a
+> different **Type**. Start from **New ▸ 🗀 Empty** and build a node up from nothing.
+> Each component's **⋮** menu copies / pastes / removes it, so you can clone a
+> component's values (a tuned Transform, a script's params) onto another node.
 
 Press **F1** and switch to the **Game** tab. You *are* the capsule:
 
