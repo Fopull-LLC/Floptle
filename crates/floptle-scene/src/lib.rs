@@ -105,7 +105,11 @@ pub enum MatterDoc {
     Blob { scale: f32 },
     Mesh { asset_path: String },
     Empty,
-    Terrain,
+    Terrain {
+        /// Stable per-terrain id (legacy single-terrain scenes default to 0).
+        #[serde(default)]
+        id: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -123,7 +127,7 @@ impl From<&Matter> for MatterDoc {
             Matter::Blob { scale } => MatterDoc::Blob { scale: *scale },
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
-            Matter::Terrain => MatterDoc::Terrain,
+            Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
         }
     }
 }
@@ -137,7 +141,7 @@ impl MatterDoc {
             MatterDoc::Blob { scale } => Matter::Blob { scale: *scale },
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
-            MatterDoc::Terrain => Matter::Terrain,
+            MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
         }
     }
 }
@@ -240,7 +244,50 @@ pub fn load(path: &Path) -> Result<SceneDoc, SceneError> {
 
 /// Parse a scene from RON text.
 pub fn from_ron(text: &str) -> Result<SceneDoc, SceneError> {
-    ron::from_str(text).map_err(SceneError::Ron)
+    ron::from_str(&migrate_ron(text)).map_err(SceneError::Ron)
+}
+
+/// Rewrite legacy serialized forms so old scenes still load. Currently: the
+/// `Terrain` matter became a struct variant `Terrain(id: u32)`, so the old unit
+/// form (`matter: Terrain`, any whitespace) needs an explicit id. A bare `matter:
+/// Terrain` not already followed by `(` is rewritten to `Terrain(id: 0)`.
+fn migrate_ron(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut rest = text;
+    while let Some(i) = rest.find("matter:") {
+        out.push_str(&rest[..i + "matter:".len()]);
+        rest = &rest[i + "matter:".len()..];
+        let ws_end = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        out.push_str(&rest[..ws_end]); // preserve the whitespace as-is
+        rest = &rest[ws_end..];
+        if let Some(after) = rest.strip_prefix("Terrain") {
+            if !after.starts_with('(') {
+                out.push_str("Terrain(id: 0)");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+    #[test]
+    fn legacy_terrain_forms_migrate() {
+        for legacy in [
+            r#"(name:"s",nodes:[(name:"T",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter:Terrain)])"#,
+            "(name:\"s\",nodes:[(name:\"T\",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter: Terrain,)])",
+        ] {
+            let doc = from_ron(legacy).expect("legacy scene parses");
+            assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 0 }));
+        }
+        // a new-form scene with an id is untouched.
+        let newform = r#"(name:"s",nodes:[(name:"T",transform:(translation:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),scale:(1.0,1.0,1.0)),matter:Terrain(id:5))])"#;
+        let doc = from_ron(newform).expect("new scene parses");
+        assert!(matches!(doc.nodes[0].matter, MatterDoc::Terrain { id: 5 }));
+    }
 }
 
 /// Serialize a scene to a pretty RON file.
@@ -494,3 +541,5 @@ mod tests {
         assert!(matches!(cube.matter, MatterDoc::Primitive { shape: ShapeDoc::Cube, .. }));
     }
 }
+
+
