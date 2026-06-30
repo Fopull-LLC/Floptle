@@ -20,6 +20,7 @@ pub struct Parent(pub crate::ecs::Entity);
 pub enum Shape {
     Cube,
     Sphere,
+    Capsule,
 }
 
 /// How fast an entity spins about Y (radians/sec) — a tiny demo behavior.

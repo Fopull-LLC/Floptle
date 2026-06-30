@@ -16,7 +16,7 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Light, Material, Matter, Name, ScriptInst, Scripts, Shape, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
-    cube, instance_of, instance_of_mat, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input,
+    capsule, cube, instance_of, instance_of_mat, uv_sphere, FlyCamera, Globals, Gpu, Grid, Input,
     InstanceRaw, MaterialParams, MeshId, Outline, Projection, Raster, Raymarch, RaymarchGlobals,
     RenderCamera, Retro, TexId,
 };
@@ -915,6 +915,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
     match m {
         MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
         MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
+        MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
         MatterDoc::Blob { .. } => "Blob",
         MatterDoc::Mesh { .. } => "Mesh",
         MatterDoc::Empty => "Group",
@@ -926,6 +927,9 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
 }
 fn new_sphere() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.6, 0.9] }
+}
+fn new_capsule() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Capsule, color: [0.5, 0.85, 0.6] }
 }
 
 /// Map a top-row number key to its digit (1-9), else `None`.
@@ -1681,6 +1685,10 @@ impl<'a> EditorTabViewer<'a> {
             pick = Some(new_sphere());
             ui.close();
         }
+        if ui.button("⬭ Capsule").on_hover_text("a capsule primitive (ideal for a physics character body)").clicked() {
+            pick = Some(new_capsule());
+            ui.close();
+        }
         if ui.button("◑ Blob").clicked() {
             pick = Some(MatterDoc::Blob { scale: 1.0 });
             ui.close();
@@ -1923,6 +1931,7 @@ impl<'a> EditorTabViewer<'a> {
                                     .show_ui(ui, |ui| {
                                         cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
                                         cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                        cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
                                     });
                             });
                             ui.horizontal(|ui| {
@@ -4240,9 +4249,12 @@ impl ApplicationHandler for Editor {
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
         let gpu = Gpu::new(window.clone());
         let mut raster = Raster::new(&gpu);
+        // Registration order defines the Shape→MeshId mapping (Shape as usize):
+        // Cube=0, Sphere=1, Capsule=2.
         let cube_id = raster.register(&gpu, &cube(0.7), None);
         let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36), None);
-        self.mesh_ids = vec![cube_id, sphere_id];
+        let capsule_id = raster.register(&gpu, &capsule(0.5, 0.5, 16, 24), None);
+        self.mesh_ids = vec![cube_id, sphere_id, capsule_id];
         self.raymarch = Some(Raymarch::new(&gpu));
 
         // Seed the project folder structure + default assets, then load the scene,
@@ -5786,6 +5798,7 @@ impl Editor {
             let name = match &m {
                 MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
                 MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
+                MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
@@ -6950,6 +6963,9 @@ impl Editor {
                     match shape {
                         Shape::Cube => ray_aabb(ro_l, rd_l, 0.7),
                         Shape::Sphere => ray_sphere(ro_l, rd_l, Vec3::ZERO, 0.85),
+                        // capsule(0.5, 0.5): total Y half-extent radius+half = 1.0; a
+                        // bounding sphere of that radius contains it for picking.
+                        Shape::Capsule => ray_sphere(ro_l, rd_l, Vec3::ZERO, 1.0),
                     }
                 }
                 Matter::Blob { scale } => {

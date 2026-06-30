@@ -215,6 +215,7 @@ fn default_range() -> f32 {
 pub enum ShapeDoc {
     Cube,
     Sphere,
+    Capsule,
 }
 
 impl From<&Matter> for MatterDoc {
@@ -268,6 +269,7 @@ impl From<Shape> for ShapeDoc {
         match s {
             Shape::Cube => ShapeDoc::Cube,
             Shape::Sphere => ShapeDoc::Sphere,
+            Shape::Capsule => ShapeDoc::Capsule,
         }
     }
 }
@@ -276,6 +278,7 @@ impl From<ShapeDoc> for Shape {
         match s {
             ShapeDoc::Cube => Shape::Cube,
             ShapeDoc::Sphere => Shape::Sphere,
+            ShapeDoc::Capsule => Shape::Capsule,
         }
     }
 }
