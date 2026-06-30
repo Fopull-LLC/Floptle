@@ -4538,40 +4538,39 @@ impl Editor {
         self.light_gizmos.clear();
         if !game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-            let nodes: Vec<(Entity, Matter)> =
-                self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
-            for (e, m) in nodes {
+            // Only cameras and point lights get gizmos — gather the few Copy fields we
+            // need (no per-frame Matter clone over the whole world).
+            enum Giz {
+                Cam(f32, bool),
+                Light(f32),
+            }
+            let gizmos: Vec<(Entity, Giz)> = self
+                .world
+                .query::<Matter>()
+                .filter_map(|(e, m)| match m {
+                    Matter::Camera { fov_y, active } => Some((e, Giz::Cam(*fov_y, *active))),
+                    Matter::PointLight { range, .. } => Some((e, Giz::Light(*range))),
+                    _ => None,
+                })
+                .collect();
+            for (e, g) in gizmos {
                 let wt = floptle_core::world_transform(&self.world, e);
-                match m {
-                    Matter::Camera { fov_y, active } => {
+                match g {
+                    Giz::Cam(fov_y, active) => {
                         let lines = camera_frustum_lines(
-                            wt.translation,
-                            wt.rotation,
-                            fov_y,
-                            aspect,
-                            cam.world_position,
-                            view_proj,
-                            gw,
-                            gh,
+                            wt.translation, wt.rotation, fov_y, aspect, cam.world_position, view_proj, gw, gh,
                         );
                         if !lines.is_empty() {
                             self.camera_gizmos.push(CameraGizmo { lines, active });
                         }
                     }
-                    Matter::PointLight { range, .. } => {
-                        let lines = point_light_lines(
-                            wt.translation,
-                            range,
-                            cam.world_position,
-                            view_proj,
-                            gw,
-                            gh,
-                        );
+                    Giz::Light(range) => {
+                        let lines =
+                            point_light_lines(wt.translation, range, cam.world_position, view_proj, gw, gh);
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
                         }
                     }
-                    _ => {}
                 }
             }
         }
