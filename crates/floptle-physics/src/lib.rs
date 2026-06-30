@@ -113,8 +113,9 @@ pub enum GravitySource {
     /// Constant acceleration — most games, e.g. `(0, -9.81, 0)`.
     Uniform(Vec3),
     /// Constant-magnitude radial pull toward a point — a planet (Mario Galaxy):
-    /// stand anywhere on a sphere world and "down" is toward its center.
-    Point { center: Vec3, strength: f32 },
+    /// stand anywhere on a sphere world and "down" is toward its center. `radius`
+    /// bounds the gravity well (≤ 0 = unbounded), so multiple planets don't fight.
+    Point { center: Vec3, strength: f32, radius: f32 },
     /// Pull onto a collider's surface along `-∇f` — grounds you on fractal walls.
     SdfSurface { collider: usize, strength: f32 },
 }
@@ -138,8 +139,13 @@ impl GravityField {
         for s in &self.sources {
             a += match s {
                 GravitySource::Uniform(g) => *g,
-                GravitySource::Point { center, strength } => {
-                    (*center - p).try_normalize().unwrap_or(Vec3::ZERO) * *strength
+                GravitySource::Point { center, strength, radius } => {
+                    let to = *center - p;
+                    if *radius > 0.0 && to.length() > *radius {
+                        Vec3::ZERO
+                    } else {
+                        to.try_normalize().unwrap_or(Vec3::ZERO) * *strength
+                    }
                 }
                 GravitySource::SdfSurface { collider, strength } => colliders
                     .get(*collider)
@@ -572,7 +578,7 @@ mod tests {
         // center. Bodies dropped from different sides all land ON the surface — the
         // out-of-the-box Mario-Galaxy case.
         let mut g = GravityField::default();
-        g.sources.push(GravitySource::Point { center: Vec3::ZERO, strength: 12.0 });
+        g.sources.push(GravitySource::Point { center: Vec3::ZERO, strength: 12.0, radius: 0.0 });
         let mut w = PhysicsWorld::new(g);
         w.add_collider(Box::new(SphereShape { center: Vec3::ZERO, radius: 3.0 }));
         let top = w.add_body(Body::sphere(Vec3::new(0.0, 8.0, 0.0), 0.5));
@@ -639,7 +645,7 @@ mod tests {
         // the character from the north pole toward the +X equator, following the
         // curved surface, staying grounded and upright — Mario Galaxy on foot.
         let mut g = GravityField::default();
-        g.sources.push(GravitySource::Point { center: Vec3::ZERO, strength: 14.0 });
+        g.sources.push(GravitySource::Point { center: Vec3::ZERO, strength: 14.0, radius: 0.0 });
         let mut w = PhysicsWorld::new(g);
         w.add_collider(Box::new(SphereShape { center: Vec3::ZERO, radius: 5.0 }));
         let mut ch = Character::new(Vec3::new(0.0, 5.0, 0.0), 0.4, 1.6);

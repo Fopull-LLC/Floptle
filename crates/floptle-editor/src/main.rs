@@ -914,6 +914,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Terrain { .. } => "Terrain",
         MatterDoc::Camera { .. } => "Camera",
         MatterDoc::PointLight { .. } => "Point Light",
+        MatterDoc::GravityVolume { .. } => "Gravity Volume",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1692,6 +1693,10 @@ impl<'a> EditorTabViewer<'a> {
             pick = Some(MatterDoc::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 });
             ui.close();
         }
+        if ui.button("⬇ Gravity Volume").on_hover_text("physics gravity: Down (level) or Radial (planet)").clicked() {
+            pick = Some(MatterDoc::GravityVolume { radial: false, strength: 9.81, radius: 20.0 });
+            ui.close();
+        }
         if let Some(m) = pick {
             match parent {
                 Some(p) => self.cmd.add_parented = Some((m, p)),
@@ -1724,6 +1729,8 @@ impl<'a> EditorTabViewer<'a> {
             "Δ"
         } else if matches!(matter, Some(Matter::PointLight { .. })) {
             "●"
+        } else if matches!(matter, Some(Matter::GravityVolume { .. })) {
+            "⬇"
         } else if has_kids {
             "⏷"
         } else {
@@ -1980,6 +1987,33 @@ impl<'a> EditorTabViewer<'a> {
                                 ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
                             cmd.inspector_changed |=
                                 ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
+                        }
+                        Matter::GravityVolume { mode, strength, radius } => {
+                            use floptle_core::GravityMode;
+                            ui.label("gravity volume");
+                            ui.small("level physics gravity — Down (normal) or Radial (planet)");
+                            ui.horizontal(|ui| {
+                                let mut radial = *mode == GravityMode::Radial;
+                                if ui.selectable_label(!radial, "⬇ Down").clicked() {
+                                    radial = false;
+                                }
+                                if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
+                                    radial = true;
+                                }
+                                let new =
+                                    if radial { GravityMode::Radial } else { GravityMode::Down };
+                                if new != *mode {
+                                    *mode = new;
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(strength, 0.0..=60.0).text("strength")).changed();
+                            if *mode == GravityMode::Radial {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
+                                    .changed();
+                            }
                         }
                     }
                 }
@@ -3778,6 +3812,55 @@ fn point_light_lines(pos: DVec3, range: f32, cam_world: DVec3, vp: Mat4, w: f32,
     lines
 }
 
+/// Build a gravity-volume gizmo: a radial well is a 3-ring sphere wireframe at its
+/// `radius`; a Down volume is a downward arrow. Empty if it doesn't project.
+fn gravity_volume_lines(
+    pos: DVec3,
+    radial: bool,
+    radius: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let mut lines = Vec::new();
+    if radial {
+        let r = radius.clamp(0.2, 500.0) as f64;
+        let segs = 28;
+        for plane in 0..3 {
+            let ring = |a: f64| -> DVec3 {
+                let (c, s) = (a.cos() * r, a.sin() * r);
+                match plane {
+                    0 => DVec3::new(c, 0.0, s), // XZ (ground)
+                    1 => DVec3::new(c, s, 0.0), // XY
+                    _ => DVec3::new(0.0, c, s), // YZ
+                }
+            };
+            let mut prev = project(pos + ring(0.0), cam_world, vp, w, h);
+            for i in 1..=segs {
+                let p = project(pos + ring((i as f64 / segs as f64) * std::f64::consts::TAU), cam_world, vp, w, h);
+                if let (Some(pp), Some(cp)) = (prev, p) {
+                    lines.push((pp, cp));
+                }
+                prev = p;
+            }
+        }
+    } else {
+        let top = project(pos + DVec3::new(0.0, 1.0, 0.0), cam_world, vp, w, h);
+        let bot = project(pos + DVec3::new(0.0, -1.2, 0.0), cam_world, vp, w, h);
+        if let (Some(a), Some(b)) = (top, bot) {
+            lines.push((a, b));
+        }
+        for dx in [-0.35, 0.35] {
+            let head = project(pos + DVec3::new(dx, -0.55, 0.0), cam_world, vp, w, h);
+            if let (Some(a), Some(b)) = (bot, head) {
+                lines.push((a, b));
+            }
+        }
+    }
+    lines
+}
+
 /// Seconds an F-key focus glide takes to settle.
 const FOCUS_SECS: f32 = 0.35;
 
@@ -4615,6 +4698,7 @@ impl Editor {
             enum Giz {
                 Cam(f32, bool),
                 Light(f32),
+                Gravity(bool, f32), // radial?, radius
             }
             let gizmos: Vec<(Entity, Giz)> = self
                 .world
@@ -4622,6 +4706,9 @@ impl Editor {
                 .filter_map(|(e, m)| match m {
                     Matter::Camera { fov_y, active } => Some((e, Giz::Cam(*fov_y, *active))),
                     Matter::PointLight { range, .. } => Some((e, Giz::Light(*range))),
+                    Matter::GravityVolume { mode, radius, .. } => {
+                        Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -4639,6 +4726,14 @@ impl Editor {
                     Giz::Light(range) => {
                         let lines =
                             point_light_lines(wt.translation, range, cam.world_position, view_proj, gw, gh);
+                        if !lines.is_empty() {
+                            self.light_gizmos.push(lines);
+                        }
+                    }
+                    Giz::Gravity(radial, radius) => {
+                        let lines = gravity_volume_lines(
+                            wt.translation, radial, radius, cam.world_position, view_proj, gw, gh,
+                        );
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
                         }
@@ -4739,11 +4834,12 @@ impl Editor {
                         }
                     }
                 }
-                // group / terrain / camera / light render via other passes.
+                // group / terrain / camera / light / gravity render via other passes.
                 Matter::Empty
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
-                | Matter::PointLight { .. } => {}
+                | Matter::PointLight { .. }
+                | Matter::GravityVolume { .. } => {}
             }
         }
 
@@ -4828,7 +4924,8 @@ impl Editor {
                     Matter::Empty
                     | Matter::Terrain { .. }
                     | Matter::Camera { .. }
-                    | Matter::PointLight { .. } => {}
+                    | Matter::PointLight { .. }
+                    | Matter::GravityVolume { .. } => {}
                 }
             }
         }
@@ -5549,6 +5646,7 @@ impl Editor {
                 MatterDoc::Terrain { .. } => "Terrain",
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
+                MatterDoc::GravityVolume { .. } => "Gravity Volume",
             };
             self.add_node(name, m);
         }
@@ -5987,6 +6085,36 @@ impl Editor {
 
     /// Enter/leave play mode. Play snapshots the authored scene and runs scripts;
     /// Stop restores the authored scene so script-driven changes aren't persisted.
+    /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
+    /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
+    /// gravity well at the node. With no volumes, a default −Y 9.81 keeps normal games
+    /// working out of the box.
+    fn build_gravity_field(&self) -> floptle_physics::GravityField {
+        use floptle_core::{GravityMode, Matter};
+        let mut field = floptle_physics::GravityField::default();
+        for (e, m) in self.world.query::<Matter>() {
+            if let Matter::GravityVolume { mode, strength, radius } = m {
+                match mode {
+                    GravityMode::Down => field
+                        .sources
+                        .push(floptle_physics::GravitySource::Uniform(Vec3::new(0.0, -*strength, 0.0))),
+                    GravityMode::Radial => {
+                        let p = floptle_core::world_transform(&self.world, e).translation;
+                        field.sources.push(floptle_physics::GravitySource::Point {
+                            center: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                            strength: *strength,
+                            radius: *radius,
+                        });
+                    }
+                }
+            }
+        }
+        if field.sources.is_empty() {
+            field.sources.push(floptle_physics::GravitySource::Uniform(Vec3::new(0.0, -9.81, 0.0)));
+        }
+        field
+    }
+
     fn toggle_play(&mut self) {
         if self.playing {
             self.playing = false;
@@ -6000,13 +6128,9 @@ impl Editor {
             self.play_t = 0.0;
             self.paused = false;
             // Build the physics sim from the scene: RigidBody nodes + the combined
-            // terrain (SDF collider), under uniform gravity (gravity-volume nodes come
-            // in a later slice).
-            self.sim = Some(floptle_physics::Sim::build(
-                &self.world,
-                self.combined.as_ref(),
-                floptle_physics::GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
-            ));
+            // terrain (SDF collider) + the gravity field from GravityVolume nodes.
+            let gravity = self.build_gravity_field();
+            self.sim = Some(floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity));
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
             // Press Play → bring the Game tab to the front (active-camera view), so it's
@@ -6695,7 +6819,8 @@ impl Editor {
                 Matter::Empty
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
-                | Matter::PointLight { .. } => None,
+                | Matter::PointLight { .. }
+                | Matter::GravityVolume { .. } => None,
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
