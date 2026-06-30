@@ -70,6 +70,8 @@ pub struct InputSnapshot {
     pub keys_down: std::collections::HashSet<String>,
     /// Keys that went down THIS frame (edge).
     pub keys_pressed: std::collections::HashSet<String>,
+    /// Keys that went up THIS frame (edge).
+    pub keys_released: std::collections::HashSet<String>,
     pub mouse: (f32, f32),
     pub mouse_delta: (f32, f32),
     pub scroll: f32,
@@ -133,6 +135,46 @@ pub struct ScriptHost {
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<Box<dyn floptle_physics::CollisionShape>>>>,
+    /// The scene graph mirror the node handles read/write (synced each `run`).
+    scene: Rc<RefCell<SceneMirror>>,
+    /// Live per-(entity, script) environments, for script handles.
+    envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
+}
+
+/// A mirror of the scene graph the Lua node/script handles read and write, synced from
+/// the ECS at the start of each `run` and flushed back at the end. It decouples the Lua
+/// handles (which can persist across frames, e.g. a cached manager reference) from the
+/// `&mut World` borrow, and lets one script reach any other node by hierarchy or name.
+#[derive(Default)]
+struct SceneMirror {
+    /// Stable iteration order (entity index), for deterministic name lookups.
+    order: Vec<u32>,
+    names: HashMap<u32, String>,
+    parent: HashMap<u32, u32>,
+    children: HashMap<u32, Vec<u32>>,
+    /// Entity → the script kinds attached to it (for `node:getscript`).
+    scripts: HashMap<u32, Vec<String>>,
+    /// Live transforms (read/written by node handles; flushed to the ECS after `run`).
+    transforms: HashMap<u32, Transform>,
+    /// Entity index → its `Entity` (with generation), so handle-written transforms flush
+    /// back to the right ECS entity.
+    ents: HashMap<u32, Entity>,
+    /// Entities whose transform a handle wrote this frame (so we only flush those back —
+    /// the current node still flushes via the value-table path).
+    dirty: std::collections::HashSet<u32>,
+}
+
+/// The interior-mutable state the Lua handle closures share with the host: the scene
+/// mirror, the physics body bridges, and the per-(entity, script) environments.
+#[derive(Clone)]
+struct Shared {
+    scene: Rc<RefCell<SceneMirror>>,
+    bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
+    body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
+    body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// (entity index, script kind) → that instance's live Lua environment table, so a
+    /// script handle can read its state, call its methods, and read its params.
+    envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -222,6 +264,14 @@ impl ScriptHost {
                 "pressed",
                 lua.create_function(move |_, name: String| {
                     Ok(pressed.borrow().keys_pressed.contains(&name.to_lowercase()))
+                })
+                .ok(),
+            );
+            let released = input.clone();
+            let _ = t.set(
+                "released",
+                lua.create_function(move |_, name: String| {
+                    Ok(released.borrow().keys_released.contains(&name.to_lowercase()))
                 })
                 .ok(),
             );
@@ -316,6 +366,21 @@ impl ScriptHost {
                 let _ = lua.globals().set("raycast", f);
             }
         }
+
+        // The cross-node / cross-script reference layer: a scene-graph mirror plus Lua
+        // `node`/`script` handles and the `find`/`findScript` globals (see
+        // `install_handle_api`). Shared (interior-mutable) with the handle closures.
+        let shared = Shared {
+            scene: Rc::new(RefCell::new(SceneMirror::default())),
+            bodies: Rc::new(RefCell::new(HashMap::new())),
+            body_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_height_changes: Rc::new(RefCell::new(HashMap::new())),
+            envs: Rc::new(RefCell::new(HashMap::new())),
+        };
+        if let Err(e) = install_handle_api(&lua, &shared) {
+            eprintln!("[lua] failed to install the node/script reference API: {e}");
+        }
+
         Self {
             lua,
             sources: HashMap::new(),
@@ -323,10 +388,12 @@ impl ScriptHost {
             errors: Vec::new(),
             logs,
             input,
-            bodies: Rc::new(RefCell::new(HashMap::new())),
-            body_changes: Rc::new(RefCell::new(HashMap::new())),
-            body_height_changes: Rc::new(RefCell::new(HashMap::new())),
+            bodies: shared.bodies.clone(),
+            body_changes: shared.body_changes.clone(),
+            body_height_changes: shared.body_height_changes.clone(),
             colliders,
+            scene: shared.scene.clone(),
+            envs: shared.envs.clone(),
         }
     }
 
@@ -415,25 +482,48 @@ impl ScriptHost {
         for inst in self.instances.values_mut() {
             inst.seen = false;
         }
+        // Mirror the scene graph (names / parents / transforms / scripts) so node handles
+        // can traverse and reference any node this frame.
+        self.sync_scene(world);
 
         // Snapshot (entity, scripts) so we can mutate Transforms while iterating.
         let work: Vec<(Entity, Scripts)> =
             world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        // Pass 1: build/refresh every environment so cross-references (findScript, etc.)
+        // resolve regardless of which script ticks first.
         for (e, scripts) in &work {
-            let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
-            let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
-                    self.run_one(*e, &inst.kind, &inst.params, scripts_dir, &mut tr, dt, time);
-                    ran = true;
-                }
-            }
-            if ran {
-                if let Some(slot) = world.get_mut::<Transform>(*e) {
-                    *slot = tr;
+                    self.ensure_instance(*e, &inst.kind, scripts_dir);
                 }
             }
         }
+        // Pass 2: run each script's start/update.
+        for (e, scripts) in &work {
+            let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
+            let tr0 = tr; // frame-start, to detect a self-move via the `node` argument
+            let mut ran = false;
+            for inst in &scripts.0 {
+                if inst.enabled {
+                    self.tick_instance(*e, &inst.kind, &inst.params, &mut tr, dt, time);
+                    ran = true;
+                }
+            }
+            // Only write back when the script moved its OWN node via the `node` argument.
+            // If it didn't, leave the transform alone so a write from ANOTHER script's
+            // handle (which lands in the mirror) isn't clobbered by a no-op rewrite. A
+            // later script reading this node via a handle then sees the move this frame.
+            if ran && tr != tr0 {
+                if let Some(slot) = world.get_mut::<Transform>(*e) {
+                    *slot = tr;
+                }
+                let mut s = self.scene.borrow_mut();
+                s.transforms.insert(e.index(), tr);
+                s.dirty.remove(&e.index());
+            }
+        }
+        // Flush transforms that a handle wrote on OTHER nodes back to the ECS.
+        self.flush_scene(world);
 
         // Drop environments whose (node, script) no longer exists.
         let stale: Vec<(u32, String)> =
@@ -441,6 +531,49 @@ impl ScriptHost {
         for k in stale {
             if let Some(inst) = self.instances.remove(&k) {
                 let _ = self.lua.remove_registry_value(inst.env);
+            }
+            self.envs.borrow_mut().remove(&k);
+        }
+    }
+
+    /// Rebuild the scene-graph mirror the Lua handles read/write, from the live ECS.
+    fn sync_scene(&self, world: &World) {
+        let mut s = self.scene.borrow_mut();
+        s.order.clear();
+        s.names.clear();
+        s.parent.clear();
+        s.children.clear();
+        s.scripts.clear();
+        s.transforms.clear();
+        s.ents.clear();
+        s.dirty.clear();
+        for (e, tr) in world.query::<Transform>() {
+            let id = e.index();
+            s.order.push(id);
+            s.ents.insert(id, e);
+            s.transforms.insert(id, *tr);
+            if let Some(n) = world.get::<floptle_core::Name>(e) {
+                s.names.insert(id, n.0.clone());
+            }
+            if let Some(p) = world.get::<floptle_core::Parent>(e) {
+                let pid = p.0.index();
+                s.parent.insert(id, pid);
+                s.children.entry(pid).or_default().push(id);
+            }
+            if let Some(sc) = world.get::<Scripts>(e) {
+                s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
+            }
+        }
+    }
+
+    /// Write transforms that a node handle modified on OTHER nodes back to the ECS.
+    fn flush_scene(&self, world: &mut World) {
+        let s = self.scene.borrow();
+        for &id in &s.dirty {
+            if let (Some(&ent), Some(tr)) = (s.ents.get(&id), s.transforms.get(&id)) {
+                if let Some(slot) = world.get_mut::<Transform>(ent) {
+                    *slot = *tr;
+                }
             }
         }
     }
@@ -461,36 +594,31 @@ impl ScriptHost {
         out
     }
 
-    fn run_one(
-        &mut self,
-        e: Entity,
-        name: &str,
-        params: &[(String, f32)],
-        scripts_dir: &Path,
-        tr: &mut Transform,
-        dt: f32,
-        time: f32,
-    ) {
+    /// Make sure the `(entity, script)` environment is built (hot-reloading on change),
+    /// published to the shared env map, and carries its persistent `node` handle — so
+    /// cross-references (`findScript`, `node:getscript`, …) resolve no matter the run
+    /// order. Returns false if the script is missing or broken this frame. Done for EVERY
+    /// script before ANY `update`, so a manager is reachable even by a script that ticks
+    /// first.
+    fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
         let path = scripts_dir.join(format!("{name}.lua"));
         let Some(generation) = self.ensure_source(name, &path) else {
             self.record_error(name, format!("{name}: script not found ({})", path.display()));
-            return;
+            return false;
         };
-
         let key = (e.index(), name.to_string());
-        // (Re)build the environment if missing or out of date with the source.
         let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation);
         if needs_build {
             // Don't recompile a known-broken generation every frame; re-emit it.
             if let Some(err) = self.sources.get(name).and_then(|s| s.error.clone()) {
                 self.record_error(name, err);
-                return;
+                return false;
             }
             let src = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(err) => {
                     self.fail(name, format!("{name}: {err}"));
-                    return;
+                    return false;
                 }
             };
             match build_env(&self.lua, &src, name) {
@@ -507,24 +635,47 @@ impl ScriptHost {
                         }
                         Err(err) => {
                             self.fail(name, format!("{name}: {err}"));
-                            return;
+                            return false;
                         }
                     }
                 }
                 Err(err) => {
                     self.fail(name, format!("{name}: {err}"));
-                    return;
+                    return false;
                 }
             }
         }
-
-        // Fetch the (now current) environment and drive the lifecycle.
-        let Some(inst) = self.instances.get_mut(&key) else { return };
+        let Some(inst) = self.instances.get_mut(&key) else { return false };
         inst.seen = true;
-        let first = !inst.started;
-        inst.started = true;
-        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
+        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+        // A persistent `node` handle for this script's own entity, so methods called from
+        // OTHER scripts (which don't get the per-call `node` argument) can still reach it.
+        if let Ok(h) = new_node_handle(&self.lua, e.index()) {
+            let _ = env.set("node", h);
+        }
+        // Publish the live environment for other scripts' handles.
+        self.envs.borrow_mut().insert((e.index(), name.to_string()), env);
+        true
+    }
 
+    /// Run one already-ensured `(entity, script)` instance's lifecycle for this frame.
+    fn tick_instance(
+        &mut self,
+        e: Entity,
+        name: &str,
+        params: &[(String, f32)],
+        tr: &mut Transform,
+        dt: f32,
+        time: f32,
+    ) {
+        let key = (e.index(), name.to_string());
+        let (first, env) = {
+            let Some(inst) = self.instances.get_mut(&key) else { return };
+            let first = !inst.started;
+            inst.started = true;
+            let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
+            (first, env)
+        };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
         if let Err(err) = self.tick(&env, params, tr, dt, time, first, eid, body) {
@@ -549,7 +700,7 @@ impl ScriptHost {
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 
-        let node = node_table(&self.lua, tr, body)?;
+        let node = node_table(&self.lua, eid, tr, body)?;
         let pre = node_pre(tr);
         // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
         // still work for older scripts.
@@ -918,30 +1069,40 @@ fn params_table(lua: &Lua, env: &Table, params: &[(String, f32)]) -> mlua::Resul
     Ok(t)
 }
 
-fn node_table(lua: &Lua, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
+fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
     let (yaw, pitch, roll) = tr.rotation.to_euler(EulerRot::YXZ);
     let t = lua.create_table()?;
-    t.set("x", tr.translation.x)?;
-    t.set("y", tr.translation.y)?;
-    t.set("z", tr.translation.z)?;
-    t.set("scale_x", tr.scale.x as f64)?;
-    t.set("scale_y", tr.scale.y as f64)?;
-    t.set("scale_z", tr.scale.z as f64)?;
-    t.set("scale", tr.scale.x as f64)?; // uniform-scale shortcut
-    t.set("yaw", yaw as f64)?;
-    t.set("pitch", pitch as f64)?;
-    t.set("roll", roll as f64)?;
+    // Tag with the entity + the node metatable so `node.parent`, `node:getscript(...)`,
+    // `node:children()` etc. work. The transform fields below are direct table values, so
+    // they're read/written normally (the metatable only supplies the missing keys).
+    t.raw_set("__id", eid)?;
+    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_node_mt") {
+        t.set_metatable(Some(mt));
+    }
+    // raw_set so these stay DIRECT table fields (not routed through the node metatable's
+    // __newindex, which is for handles to other nodes) — the existing read-back path reads
+    // them directly after `update`.
+    t.raw_set("x", tr.translation.x)?;
+    t.raw_set("y", tr.translation.y)?;
+    t.raw_set("z", tr.translation.z)?;
+    t.raw_set("scale_x", tr.scale.x as f64)?;
+    t.raw_set("scale_y", tr.scale.y as f64)?;
+    t.raw_set("scale_z", tr.scale.z as f64)?;
+    t.raw_set("scale", tr.scale.x as f64)?; // uniform-scale shortcut
+    t.raw_set("yaw", yaw as f64)?;
+    t.raw_set("pitch", pitch as f64)?;
+    t.raw_set("roll", roll as f64)?;
     // Physics body fields (present only on rigidbody nodes): read grounded, read/write
     // the velocity. The engine reads vx/vy/vz back after `update` and applies them.
     if let Some(b) = body {
-        t.set("vx", b.vel[0] as f64)?;
-        t.set("vy", b.vel[1] as f64)?;
-        t.set("vz", b.vel[2] as f64)?;
-        t.set("up_x", b.up[0] as f64)?;
-        t.set("up_y", b.up[1] as f64)?;
-        t.set("up_z", b.up[2] as f64)?;
-        t.set("grounded", b.grounded)?;
-        t.set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
+        t.raw_set("vx", b.vel[0] as f64)?;
+        t.raw_set("vy", b.vel[1] as f64)?;
+        t.raw_set("vz", b.vel[2] as f64)?;
+        t.raw_set("up_x", b.up[0] as f64)?;
+        t.raw_set("up_y", b.up[1] as f64)?;
+        t.raw_set("up_z", b.up[2] as f64)?;
+        t.raw_set("grounded", b.grounded)?;
+        t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
     }
     Ok(t)
 }
@@ -989,6 +1150,446 @@ fn apply_node(t: &Table, tr: &mut Transform, pre: &NodePre) -> mlua::Result<()> 
     let roll: f64 = t.get("roll")?;
     if yaw != pre.yaw || pitch != pre.pitch || roll != pre.roll {
         tr.rotation = Quat::from_euler(EulerRot::YXZ, yaw as f32, pitch as f32, roll as f32);
+    }
+    Ok(())
+}
+
+/// Create a Lua **node handle** for entity index `e`: a table `{__id = e}` with the shared
+/// node metatable, so `h.x`, `h.parent`, `h:getscript("foo")`, etc. work for any node.
+fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_node_mt") {
+        t.set_metatable(Some(mt));
+    }
+    Ok(t)
+}
+
+/// Create a Lua **script handle** for script `name` on entity index `e`: a table
+/// `{__id, __script}` with the shared script metatable, so you can read/write its state,
+/// call its methods, and reach `.node` / `.params`.
+fn new_script_handle(lua: &Lua, e: u32, name: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+    t.raw_set("__script", name)?;
+    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_script_mt") {
+        t.set_metatable(Some(mt));
+    }
+    Ok(t)
+}
+
+fn as_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => Some(*n),
+        Value::Integer(n) => Some(*n as f64),
+        _ => None,
+    }
+}
+
+/// Install the cross-node / cross-script reference layer into the Lua state: the `node`
+/// and `script` metatables (transform/body access + hierarchy traversal + method/state
+/// access) and the `find` / `findAll` / `findScript` globals. The handle closures share
+/// the scene mirror + body bridges + env map via `shared`.
+fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
+    // ---- node metatable -------------------------------------------------------------
+    let node_mt = lua.create_table()?;
+    {
+        let scene = shared.scene.clone();
+        let bodies = shared.bodies.clone();
+        let body_changes = shared.body_changes.clone();
+        let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            // Transform reads.
+            {
+                let s = scene.borrow();
+                if let Some(tr) = s.transforms.get(&e) {
+                    match key.as_str() {
+                        "x" => return Ok(Value::Number(tr.translation.x)),
+                        "y" => return Ok(Value::Number(tr.translation.y)),
+                        "z" => return Ok(Value::Number(tr.translation.z)),
+                        "scale" | "scale_x" => return Ok(Value::Number(tr.scale.x as f64)),
+                        "scale_y" => return Ok(Value::Number(tr.scale.y as f64)),
+                        "scale_z" => return Ok(Value::Number(tr.scale.z as f64)),
+                        "yaw" | "pitch" | "roll" => {
+                            let (y, p, r) = tr.rotation.to_euler(EulerRot::YXZ);
+                            let v = match key.as_str() {
+                                "yaw" => y,
+                                "pitch" => p,
+                                _ => r,
+                            };
+                            return Ok(Value::Number(v as f64));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Identity / hierarchy fields.
+            match key.as_str() {
+                "id" => return Ok(Value::Integer(e as i64)),
+                "name" => {
+                    let n = scene.borrow().names.get(&e).cloned();
+                    return Ok(match n {
+                        Some(n) => Value::String(lua.create_string(&n)?),
+                        None => Value::Nil,
+                    });
+                }
+                "valid" => return Ok(Value::Boolean(scene.borrow().transforms.contains_key(&e))),
+                "parent" => {
+                    let p = scene.borrow().parent.get(&e).copied();
+                    return Ok(match p {
+                        Some(p) => Value::Table(new_node_handle(lua, p)?),
+                        None => Value::Nil,
+                    });
+                }
+                _ => {}
+            }
+            // Physics body fields.
+            match key.as_str() {
+                "vx" | "vy" | "vz" => {
+                    let vel = body_changes
+                        .borrow()
+                        .get(&e)
+                        .copied()
+                        .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
+                    return Ok(match vel {
+                        Some(v) => Value::Number(match key.as_str() {
+                            "vx" => v[0],
+                            "vy" => v[1],
+                            _ => v[2],
+                        } as f64),
+                        None => Value::Nil,
+                    });
+                }
+                "up_x" | "up_y" | "up_z" => {
+                    return Ok(match bodies.borrow().get(&e) {
+                        Some(b) => Value::Number(match key.as_str() {
+                            "up_x" => b.up[0],
+                            "up_y" => b.up[1],
+                            _ => b.up[2],
+                        } as f64),
+                        None => Value::Nil,
+                    });
+                }
+                "grounded" => {
+                    return Ok(Value::Boolean(
+                        bodies.borrow().get(&e).map(|b| b.grounded).unwrap_or(false),
+                    ));
+                }
+                "height" => {
+                    return Ok(match bodies.borrow().get(&e) {
+                        Some(b) => Value::Number(b.height as f64),
+                        None => Value::Nil,
+                    });
+                }
+                _ => {}
+            }
+            // Otherwise a method (children / getchild / getscript / find …) or nil.
+            let methods: Table = lua.named_registry_value("floptle_node_methods")?;
+            methods.get::<Value>(key)
+        })?;
+        node_mt.set("__index", idx)?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let bodies = shared.bodies.clone();
+        let body_changes = shared.body_changes.clone();
+        let body_height = shared.body_height_changes.clone();
+        let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+            let e: u32 = this.raw_get("__id")?;
+            // Transform writes.
+            {
+                let mut s = scene.borrow_mut();
+                if let Some(tr) = s.transforms.get_mut(&e) {
+                    let mut handled = true;
+                    match key.as_str() {
+                        "x" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.translation.x = n;
+                            }
+                        }
+                        "y" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.translation.y = n;
+                            }
+                        }
+                        "z" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.translation.z = n;
+                            }
+                        }
+                        "scale" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.scale = Vec3::splat(n as f32);
+                            }
+                        }
+                        "scale_x" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.scale.x = n as f32;
+                            }
+                        }
+                        "scale_y" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.scale.y = n as f32;
+                            }
+                        }
+                        "scale_z" => {
+                            if let Some(n) = as_num(&val) {
+                                tr.scale.z = n as f32;
+                            }
+                        }
+                        "yaw" | "pitch" | "roll" => {
+                            if let Some(n) = as_num(&val) {
+                                let (mut y, mut p, mut r) = tr.rotation.to_euler(EulerRot::YXZ);
+                                let changed = match key.as_str() {
+                                    "yaw" => n != y as f64,
+                                    "pitch" => n != p as f64,
+                                    _ => n != r as f64,
+                                };
+                                if changed {
+                                    match key.as_str() {
+                                        "yaw" => y = n as f32,
+                                        "pitch" => p = n as f32,
+                                        _ => r = n as f32,
+                                    }
+                                    tr.rotation = Quat::from_euler(EulerRot::YXZ, y, p, r);
+                                }
+                            }
+                        }
+                        _ => handled = false,
+                    }
+                    if handled {
+                        s.dirty.insert(e);
+                        return Ok(());
+                    }
+                }
+            }
+            // Physics body writes.
+            match key.as_str() {
+                "vx" | "vy" | "vz" => {
+                    if let Some(n) = as_num(&val) {
+                        let mut bc = body_changes.borrow_mut();
+                        let mut v = bc
+                            .get(&e)
+                            .copied()
+                            .or_else(|| bodies.borrow().get(&e).map(|b| b.vel))
+                            .unwrap_or([0.0; 3]);
+                        match key.as_str() {
+                            "vx" => v[0] = n as f32,
+                            "vy" => v[1] = n as f32,
+                            _ => v[2] = n as f32,
+                        }
+                        bc.insert(e, v);
+                    }
+                    return Ok(());
+                }
+                "height" => {
+                    if let Some(n) = as_num(&val) {
+                        body_height.borrow_mut().insert(e, n as f32);
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+            // Unknown key: stash it on the handle table (harmless; lets scripts tag nodes).
+            this.raw_set(key, val)?;
+            Ok(())
+        })?;
+        node_mt.set("__newindex", newidx)?;
+    }
+    lua.set_named_registry_value("floptle_node_mt", node_mt)?;
+
+    // ---- node methods (children / getchild / getparent / getscript / find) ----------
+    let methods = lua.create_table()?;
+    {
+        let scene = shared.scene.clone();
+        methods.set(
+            "children",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let kids = scene.borrow().children.get(&e).cloned().unwrap_or_default();
+                let arr = lua.create_table()?;
+                for (i, c) in kids.iter().enumerate() {
+                    arr.set(i + 1, new_node_handle(lua, *c)?)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let found = {
+                let s = scene.borrow();
+                s.children
+                    .get(&e)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .find(|c| s.names.get(c).map(|n| n == &name).unwrap_or(false))
+            };
+            Ok(match found {
+                Some(c) => Value::Table(new_node_handle(lua, c)?),
+                None => Value::Nil,
+            })
+        })?;
+        methods.set("child", f.clone())?;
+        methods.set("getchild", f)?;
+    }
+    {
+        let scene = shared.scene.clone();
+        methods.set(
+            "getparent",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let p = scene.borrow().parent.get(&e).copied();
+                Ok(match p {
+                    Some(p) => Value::Table(new_node_handle(lua, p)?),
+                    None => Value::Nil,
+                })
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let has = scene
+                .borrow()
+                .scripts
+                .get(&e)
+                .map(|v| v.iter().any(|k| k == &name))
+                .unwrap_or(false);
+            Ok(if has {
+                Value::Table(new_script_handle(lua, e, &name)?)
+            } else {
+                Value::Nil
+            })
+        })?;
+        methods.set("script", f.clone())?;
+        methods.set("getscript", f)?;
+    }
+    {
+        let scene = shared.scene.clone();
+        methods.set(
+            "find",
+            lua.create_function(move |lua, (this, name): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let found = {
+                    let s = scene.borrow();
+                    let mut stack: Vec<u32> =
+                        s.children.get(&e).cloned().unwrap_or_default();
+                    let mut hit = None;
+                    while let Some(c) = stack.pop() {
+                        if s.names.get(&c).map(|n| n == &name).unwrap_or(false) {
+                            hit = Some(c);
+                            break;
+                        }
+                        if let Some(cc) = s.children.get(&c) {
+                            stack.extend(cc.iter().copied());
+                        }
+                    }
+                    hit
+                };
+                Ok(match found {
+                    Some(c) => Value::Table(new_node_handle(lua, c)?),
+                    None => Value::Nil,
+                })
+            })?,
+        )?;
+    }
+    lua.set_named_registry_value("floptle_node_methods", methods)?;
+
+    // ---- script metatable -----------------------------------------------------------
+    let script_mt = lua.create_table()?;
+    {
+        let envs = shared.envs.clone();
+        let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let name: String = this.raw_get("__script")?;
+            match key.as_str() {
+                "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
+                "kind" | "name" => return Ok(Value::String(lua.create_string(&name)?)),
+                "valid" => {
+                    return Ok(Value::Boolean(envs.borrow().contains_key(&(e, name.clone()))));
+                }
+                _ => {}
+            }
+            let env = envs.borrow().get(&(e, name)).cloned();
+            match env {
+                Some(env) => env.get::<Value>(key),
+                None => Ok(Value::Nil),
+            }
+        })?;
+        script_mt.set("__index", idx)?;
+    }
+    {
+        let envs = shared.envs.clone();
+        let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+            let e: u32 = this.raw_get("__id")?;
+            let name: String = this.raw_get("__script")?;
+            let env = envs.borrow().get(&(e, name)).cloned();
+            if let Some(env) = env {
+                env.set(key, val)?;
+            }
+            Ok(())
+        })?;
+        script_mt.set("__newindex", newidx)?;
+    }
+    lua.set_named_registry_value("floptle_script_mt", script_mt)?;
+
+    // ---- globals: find / findAll / findScript ---------------------------------------
+    {
+        let scene = shared.scene.clone();
+        lua.globals().set(
+            "find",
+            lua.create_function(move |lua, name: String| {
+                let found = {
+                    let s = scene.borrow();
+                    s.order.iter().copied().find(|e| s.names.get(e).map(|n| n == &name).unwrap_or(false))
+                };
+                Ok(match found {
+                    Some(e) => Value::Table(new_node_handle(lua, e)?),
+                    None => Value::Nil,
+                })
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        lua.globals().set(
+            "findAll",
+            lua.create_function(move |lua, name: String| {
+                let ids: Vec<u32> = {
+                    let s = scene.borrow();
+                    s.order.iter().copied().filter(|e| s.names.get(e).map(|n| n == &name).unwrap_or(false)).collect()
+                };
+                let arr = lua.create_table()?;
+                for (i, e) in ids.iter().enumerate() {
+                    arr.set(i + 1, new_node_handle(lua, *e)?)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let f = lua.create_function(move |lua, kind: String| {
+            let found = {
+                let s = scene.borrow();
+                s.order
+                    .iter()
+                    .copied()
+                    .find(|e| s.scripts.get(e).map(|v| v.iter().any(|k| k == &kind)).unwrap_or(false))
+                    .map(|e| (e, kind.clone()))
+            };
+            Ok(match found {
+                Some((e, k)) => Value::Table(new_script_handle(lua, e, &k)?),
+                None => Value::Nil,
+            })
+        })?;
+        lua.globals().set("findScript", f.clone())?;
+        lua.globals().set("findScriptInScene", f)?;
     }
     Ok(())
 }
@@ -1269,5 +1870,120 @@ mod tests {
         assert!(t.translation.z >= 1.0, "w should move +z, z={}", t.translation.z);
         assert!(t.translation.y >= 5.0, "click should jump +y, y={}", t.translation.y);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    #[test]
+    fn input_released_edge() {
+        let dir = std::env::temp_dir().join("floptle_script_test_released");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "rel",
+            "function update(node, dt)\n  if input.released('e') then node.x = node.x + 1 end\nend\n",
+        );
+        let (mut world, e) = world_with_script("rel");
+        let mut host = ScriptHost::new();
+        // Release edge → +1.
+        let mut snap = InputSnapshot::default();
+        snap.keys_released.insert("e".into());
+        host.set_input(snap);
+        host.run(&mut world, &dir, 0.1, 0.0);
+        assert!((world.get::<Transform>(e).unwrap().translation.x - 1.0).abs() < 1e-6);
+        // No release → unchanged.
+        host.set_input(InputSnapshot::default());
+        host.run(&mut world, &dir, 0.1, 0.0);
+        assert!((world.get::<Transform>(e).unwrap().translation.x - 1.0).abs() < 1e-6);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    #[test]
+    fn node_hierarchy_traversal() {
+        let dir = std::env::temp_dir().join("floptle_script_test_hier");
+        let _ = std::fs::create_dir_all(&dir);
+        // A child reads its parent's x (+1) and finds a sibling by name.
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  local p = node.parent\n  if p then node.x = p.x + 1 end\nend\n",
+        );
+        let mut world = World::default();
+        let parent = world.spawn();
+        world.insert(
+            parent,
+            Transform::from_translation(floptle_core::math::DVec3::new(10.0, 0.0, 0.0)),
+        );
+        world.insert(parent, floptle_core::Name("Parent".into()));
+        let child = world.spawn();
+        world.insert(child, Transform::IDENTITY);
+        world.insert(child, floptle_core::Parent(parent));
+        world.insert(child, floptle_core::Name("Child".into()));
+        world.insert(
+            child,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "reader".into(),
+                enabled: true,
+                params: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        // child.x = parent.x + 1 = 11 (local transforms, like the `node` argument).
+        assert!(
+            (world.get::<Transform>(child).unwrap().translation.x - 11.0).abs() < 1e-6,
+            "child.x = {}",
+            world.get::<Transform>(child).unwrap().translation.x
+        );
+    }
+
+    #[test]
+    fn cross_script_reference_method_and_state() {
+        let dir = std::env::temp_dir().join("floptle_script_test_xref");
+        let _ = std::fs::create_dir_all(&dir);
+        // A manager holds state + a method; the method moves its own node via `node`.
+        write_script(
+            &dir,
+            "manager",
+            "score = 0\nfunction addScore(n)\n  score = score + n\n  node.x = score\nend\nfunction update(node, dt) end\n",
+        );
+        // A ticker finds the manager anywhere in the scene and calls its method.
+        write_script(
+            &dir,
+            "ticker",
+            "function update(node, dt)\n  local m = findScript('manager')\n  if m then m.addScore(5) end\nend\n",
+        );
+        let mut world = World::default();
+        let mgr = world.spawn();
+        world.insert(mgr, Transform::IDENTITY);
+        world.insert(mgr, floptle_core::Name("Manager".into()));
+        world.insert(
+            mgr,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "manager".into(),
+                enabled: true,
+                params: vec![],
+            }]),
+        );
+        let t = world.spawn();
+        world.insert(t, Transform::IDENTITY);
+        world.insert(
+            t,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "ticker".into(),
+                enabled: true,
+                params: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        for _ in 0..3 {
+            host.run(&mut world, &dir, 0.016, 0.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        // 3 frames × +5 = 15; the manager moved itself to x = score via its node handle.
+        assert!(
+            (world.get::<Transform>(mgr).unwrap().translation.x - 15.0).abs() < 1e-6,
+            "manager.x = {}",
+            world.get::<Transform>(mgr).unwrap().translation.x
+        );
     }
 }

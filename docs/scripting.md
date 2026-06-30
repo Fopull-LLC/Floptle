@@ -15,9 +15,10 @@ it up immediately.
 4. [`node` — the physics body](#4-node--the-physics-body)
 5. [`input` — keyboard & mouse](#5-input--keyboard--mouse)
 6. [Globals: `params`, `time`, `dt`, `log`](#6-globals-params-time-dt-log)
-7. [Recipe: a walkable first-person character](#7-recipe-a-walkable-first-person-character)
-8. [Bundled example scripts](#8-bundled-example-scripts)
-9. [Tips & gotchas](#9-tips--gotchas)
+7. [Referencing other nodes & scripts](#7-referencing-other-nodes--scripts)
+8. [Recipe: a walkable first-person character](#8-recipe-a-walkable-first-person-character)
+9. [Bundled example scripts](#9-bundled-example-scripts)
+10. [Tips & gotchas](#10-tips--gotchas)
 
 ---
 
@@ -102,7 +103,8 @@ Available while playing.
 | Call | Returns |
 |---|---|
 | `input.key("w")` | `true` while the key is held |
-| `input.pressed("space")` | `true` only on the frame it goes down (an edge) |
+| `input.pressed("space")` | `true` only on the frame it goes **down** (an edge) |
+| `input.released("space")` | `true` only on the frame it goes **up** (an edge) |
 | `input.axis("a", "d")` | `-1` / `0` / `1` from a negative/positive key pair |
 | `input.button(1)` | mouse button held (`0` left, `1` right, `2` middle) |
 | `input.clicked(1)` | mouse button pressed this frame (an edge) |
@@ -147,7 +149,88 @@ The full Lua standard library (`math`, `string`, `table`, …) is available.
 > `params.<key>`. Declaring `defaults` is what makes a value tweakable per-node in the
 > Inspector; if you don't override it there, `params.<key>` is just the default.
 
-## 7. Recipe: a walkable first-person character
+## 7. Referencing other nodes & scripts
+
+A script isn't limited to its own node. You can **walk the hierarchy**, **find any
+node or script in the scene**, and **call into another script** — read its state, set
+its values, invoke its methods. This is how you build systems that span many scripts:
+a single **manager** holding shared state, with other scripts handing data to it.
+
+### Reaching other nodes
+
+The `node` you're given (and any node you reach) is a **handle**. Handles share the
+same fields as your own `node` (`x/y/z`, `yaw/pitch/roll`, `scale`, and `vx/vy/vz`,
+`grounded`, … on rigidbody nodes), so you can read and write another node's transform
+the same way.
+
+| On a node handle | Returns |
+|---|---|
+| `node.name` | the node's name (string) |
+| `node.id` | a stable numeric id for this node |
+| `node.parent` | the parent node handle, or `nil` |
+| `node:getparent()` | same as `node.parent` |
+| `node:children()` | an array (`{1,2,…}`) of child handles |
+| `node:getchild("Gun")` | the first child named `Gun`, or `nil` |
+| `node:find("Muzzle")` | the first **descendant** (any depth) with that name, or `nil` |
+| `node:getscript("health")` | a **script handle** for that script on this node, or `nil` |
+
+Scene-wide lookups are globals:
+
+| Global | Returns |
+|---|---|
+| `find("Player")` | the first node in the scene with that name, or `nil` |
+| `findAll("Coin")` | an array of every node with that name |
+| `findScript("GameManager")` | a **script handle** for the first node anywhere running that script (the manager pattern), or `nil` |
+
+```lua
+-- A door that opens when the player is near it.
+function update(node, dt)
+  local player = find("Player")
+  if not player then return end
+  local dx, dz = player.x - node.x, player.z - node.z
+  if dx*dx + dz*dz < 9 then node.y = 3 else node.y = 0 end   -- raise / lower
+end
+```
+
+### Reaching other scripts
+
+A **script handle** (from `node:getscript(name)` or `findScript(kind)`) lets you talk
+to another script:
+
+| On a script handle | Meaning |
+|---|---|
+| `mgr.score` | read a variable the script declared (its state) |
+| `mgr.score = 10` | write that variable |
+| `mgr.addScore(5)` | **call a function** the script defines |
+| `mgr.params` | the script's `params` table (its tunables) |
+| `mgr.node` | the node the script is attached to (a node handle) |
+
+```lua
+-- scripts/manager.lua — shared state + an API for other scripts to call.
+score = 0
+function addScore(n)
+  score = score + n
+  log("score: " .. score)
+end
+
+-- scripts/coin.lua — on pickup, hand the points to the manager.
+function update(node, dt)
+  if picked_up then
+    local mgr = findScript("manager")
+    if mgr then mgr.addScore(10) end
+  end
+end
+```
+
+Inside a script's own functions, `node` always refers to **its** node (so a method
+called from elsewhere still acts on the right object), and `params` is its tunables.
+
+> **Notes.** Node handles expose a node's **local** transform (the same values as the
+> `node` argument). `findScript` returns the *first* matching script — perfect for a
+> single manager. Looking something up by name? Cache it in `start` and reuse it; a
+> handle stays valid across frames.
+
+## 8. Recipe: a walkable first-person character
 
 No glue code required:
 
@@ -182,7 +265,7 @@ function update(node, dt)
 end
 ```
 
-## 8. Bundled example scripts
+## 9. Bundled example scripts
 
 Every project ships these under `scripts/` — open one for a working start:
 
@@ -194,7 +277,7 @@ Every project ships these under `scripts/` — open one for a working start:
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |
 
-## 9. Tips & gotchas
+## 10. Tips & gotchas
 
 - **Run, then Play:** scripts only execute while the game is playing (F1). Stop
   restores the scene to its pre-Play state.
