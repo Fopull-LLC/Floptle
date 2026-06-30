@@ -32,9 +32,9 @@
 //! advanced on a fixed timestep with penetration resolution. Editor/ECS wiring,
 //! capsule character controllers, triggers, and mesh colliders are later slices.
 
-use floptle_core::math::{DVec3, Vec3};
+use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, RigidBody, World, world_transform};
+use floptle_core::{world_transform, BodyKind, Entity, RigidBody, World};
 use floptle_field::Terrain;
 
 /// Anything physics can query: a signed distance field with a surface normal.
@@ -151,23 +151,92 @@ impl GravityField {
     }
 }
 
-/// A dynamic body — a sphere collider integrated each step.
+/// The collision shape of a dynamic body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BodyShape {
+    /// A sphere of the body's `radius`.
+    Sphere,
+    /// A capsule: `radius` thick, with `half_height` from the center to each end-sphere
+    /// center, aligned to the body's `up` (kept along −gravity, so it stands upright).
+    Capsule { half_height: f32 },
+}
+
+/// A dynamic body — a sphere or capsule integrated + depenetrated each step.
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: Vec3,
     pub vel: Vec3,
     pub radius: f32,
+    pub shape: BodyShape,
+    /// Capsule axis, kept aligned to −gravity each step.
+    pub up: Vec3,
     /// Bounciness: 0 = no bounce, 1 = perfectly elastic.
     pub restitution: f32,
     /// Surface friction: 0 = frictionless ice, 1 = no sliding.
     pub friction: f32,
+    /// Freeze world-axis translation (x, y, z) — e.g. lock Z for a 2.5D game.
+    pub lock_pos: [bool; 3],
     /// Set each step when the body is resting on a surface that opposes gravity.
     pub grounded: bool,
+    /// The contact normal from the most recent resolved collision this step (telegraph).
+    pub contact: Option<Vec3>,
+    home: Vec3, // captured spawn position, restored on locked axes
 }
 
 impl Body {
     pub fn sphere(pos: Vec3, radius: f32) -> Self {
-        Self { pos, vel: Vec3::ZERO, radius, restitution: 0.0, friction: 0.3, grounded: false }
+        Self {
+            pos,
+            vel: Vec3::ZERO,
+            radius,
+            shape: BodyShape::Sphere,
+            up: Vec3::Y,
+            restitution: 0.0,
+            friction: 0.3,
+            lock_pos: [false; 3],
+            grounded: false,
+            contact: None,
+            home: pos,
+        }
+    }
+
+    /// A capsule body of total standing `height` (clamped to ≥ 2·radius).
+    pub fn capsule(pos: Vec3, radius: f32, height: f32) -> Self {
+        let half = (height.max(2.0 * radius) * 0.5 - radius).max(0.0);
+        Self { shape: BodyShape::Capsule { half_height: half }, ..Self::sphere(pos, radius) }
+    }
+
+    /// The collision sphere centers (1 for a sphere, 2 for a capsule's ends).
+    fn centers(&self) -> ([Vec3; 2], usize) {
+        match self.shape {
+            BodyShape::Sphere => ([self.pos, self.pos], 1),
+            BodyShape::Capsule { half_height } => {
+                ([self.pos - self.up * half_height, self.pos + self.up * half_height], 2)
+            }
+        }
+    }
+}
+
+/// A resolved contact this step — for collision telegraphing / events.
+#[derive(Clone, Copy, Debug)]
+pub struct Contact {
+    pub body: usize,
+    pub point: Vec3,
+    pub normal: Vec3,
+}
+
+fn axis(v: Vec3, i: usize) -> f32 {
+    match i {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+fn set_axis(v: &mut Vec3, i: usize, val: f32) {
+    match i {
+        0 => v.x = val,
+        1 => v.y = val,
+        _ => v.z = val,
     }
 }
 
@@ -178,11 +247,13 @@ pub struct PhysicsWorld {
     pub gravity: GravityField,
     pub colliders: Vec<Box<dyn CollisionShape>>,
     pub bodies: Vec<Body>,
+    /// Contacts resolved on the most recent `step` (cleared each step).
+    pub contacts: Vec<Contact>,
 }
 
 impl PhysicsWorld {
     pub fn new(gravity: GravityField) -> Self {
-        Self { gravity, colliders: Vec::new(), bodies: Vec::new() }
+        Self { gravity, colliders: Vec::new(), bodies: Vec::new(), contacts: Vec::new() }
     }
 
     pub fn add_collider(&mut self, shape: Box<dyn CollisionShape>) -> usize {
@@ -196,38 +267,62 @@ impl PhysicsWorld {
     }
 
     /// Advance the simulation by `dt` seconds. Call on a FIXED timestep (e.g. 1/120 s
-    /// via an accumulator) for stability, not the variable render delta.
+    /// via an accumulator) for stability, not the variable render delta. Field-indexed
+    /// throughout so the per-body collider/gravity/contact accesses stay borrow-clean.
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
-        for body in &mut self.bodies {
-            // Semi-implicit Euler: integrate gravity, then position.
-            let g = self.gravity.accel_at(body.pos, &self.colliders);
-            body.vel += g * dt;
-            body.pos += body.vel * dt;
-            body.grounded = false;
+        self.contacts.clear();
+        for bi in 0..self.bodies.len() {
+            // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
+            let g = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+            if g.length_squared() > 1e-10 {
+                self.bodies[bi].up = (-g).normalize();
+            }
+            self.bodies[bi].vel += g * dt;
+            let v = self.bodies[bi].vel;
+            self.bodies[bi].pos += v * dt;
+            self.bodies[bi].grounded = false;
+            self.bodies[bi].contact = None;
 
-            // Resolve penetration against every collider (a couple of relaxation
-            // passes so corners/overlaps settle).
+            // Resolve penetration against every collider (relaxation passes), sampling
+            // each of the body's collision spheres (2 for a capsule).
             for _ in 0..2 {
-                for shape in &self.colliders {
-                    let pen = body.radius - shape.distance(body.pos);
-                    if pen <= 0.0 {
-                        continue;
+                for ci in 0..self.colliders.len() {
+                    let (centers, n_c) = self.bodies[bi].centers();
+                    let radius = self.bodies[bi].radius;
+                    for &c in &centers[..n_c] {
+                        let pen = radius - self.colliders[ci].distance(c);
+                        if pen <= 0.0 {
+                            continue;
+                        }
+                        let n = self.colliders[ci].normal(c);
+                        self.bodies[bi].pos += n * pen; // push out to the surface
+                        let vn = self.bodies[bi].vel.dot(n);
+                        if vn < 0.0 {
+                            // Reflect the normal part by restitution, damp the
+                            // tangential part by friction.
+                            let fr = (1.0 - self.bodies[bi].friction).clamp(0.0, 1.0);
+                            let rest = self.bodies[bi].restitution;
+                            let vt = self.bodies[bi].vel - n * vn;
+                            self.bodies[bi].vel = vt * fr - n * vn * rest;
+                        }
+                        self.bodies[bi].contact = Some(n);
+                        // Grounded if this contact opposes gravity (a floor, not a wall).
+                        let gd = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+                        if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
+                            self.bodies[bi].grounded = true;
+                        }
+                        self.contacts.push(Contact { body: bi, point: c - n * radius, normal: n });
                     }
-                    let n = shape.normal(body.pos);
-                    body.pos += n * pen; // push out to the surface
-                    let vn = body.vel.dot(n);
-                    if vn < 0.0 {
-                        // Split into normal + tangential: reflect the normal part by
-                        // restitution, damp the tangential part by friction.
-                        let vt = body.vel - n * vn;
-                        body.vel = vt * (1.0 - body.friction).clamp(0.0, 1.0) - n * vn * body.restitution;
-                    }
-                    // Grounded if this contact opposes gravity (a floor, not a wall).
-                    let gd = self.gravity.accel_at(body.pos, &self.colliders);
-                    if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
-                        body.grounded = true;
-                    }
+                }
+            }
+
+            // Constraints: freeze the chosen world translation axes.
+            for i in 0..3 {
+                if self.bodies[bi].lock_pos[i] {
+                    let home = axis(self.bodies[bi].home, i);
+                    set_axis(&mut self.bodies[bi].pos, i, home);
+                    set_axis(&mut self.bodies[bi].vel, i, 0.0);
                 }
             }
         }
@@ -349,10 +444,18 @@ impl Character {
 /// from `RigidBody` entities + an SDF terrain collider, advances on a fixed-timestep
 /// accumulator decoupled from render fps, and writes resolved positions back to the
 /// entities' transforms.
+/// One body's link back to its ECS entity, plus its rotation constraint state.
+struct BodyLink {
+    entity: Entity,
+    body: usize,
+    lock_rot: [bool; 3],
+    /// Authored local rotation, restored on locked axes each writeback.
+    rot0: Quat,
+}
+
 pub struct Sim {
     pub world: PhysicsWorld,
-    /// Body entity ↔ index into `world.bodies`.
-    map: Vec<(Entity, usize)>,
+    map: Vec<BodyLink>,
     accum: f32,
     pub fixed_dt: f32,
 }
@@ -371,11 +474,19 @@ impl Sim {
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
-            let p = world_transform(ecs, e).translation;
-            let mut b = Body::sphere(Vec3::new(p.x as f32, p.y as f32, p.z as f32), rb.radius.max(0.01));
+            let wt = world_transform(ecs, e);
+            let p = wt.translation;
+            let pos = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+            let r = rb.radius.max(0.01);
+            let mut b = match rb.kind {
+                BodyKind::Sphere => Body::sphere(pos, r),
+                BodyKind::Capsule => Body::capsule(pos, r, rb.height),
+            };
             b.restitution = rb.restitution;
             b.friction = rb.friction;
-            map.push((e, world.add_body(b)));
+            b.lock_pos = rb.lock_pos;
+            let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+            map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
         Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0 }
     }
@@ -391,10 +502,21 @@ impl Sim {
             self.accum -= self.fixed_dt;
             iters += 1;
         }
-        for &(e, i) in &self.map {
-            let p = self.world.bodies[i].pos;
-            if let Some(t) = ecs.get_mut::<Transform>(e) {
+        for link in &self.map {
+            let p = self.world.bodies[link.body].pos;
+            if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
                 t.translation = DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+                // Rotation constraints: keep the authored angle on each locked axis.
+                if link.lock_rot.iter().any(|&l| l) {
+                    let (ay, ax, az) = t.rotation.to_euler(EulerRot::YXZ);
+                    let (by, bx, bz) = link.rot0.to_euler(EulerRot::YXZ);
+                    t.rotation = Quat::from_euler(
+                        EulerRot::YXZ,
+                        if link.lock_rot[1] { by } else { ay }, // Y axis
+                        if link.lock_rot[0] { bx } else { ax }, // X axis
+                        if link.lock_rot[2] { bz } else { az }, // Z axis
+                    );
+                }
             }
         }
     }
@@ -577,5 +699,45 @@ mod tests {
         }
         let y = ecs.get::<Transform>(e).unwrap().translation.y;
         assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
+    }
+
+    #[test]
+    fn capsule_settles_upright_on_ground() {
+        // A capsule (radius 0.4, height 2.0) rests with its foot on the floor: its
+        // center ends up at half_height + radius = 0.6 + 0.4 = 1.0.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let b = w.add_body(Body::capsule(Vec3::new(0.0, 5.0, 0.0), 0.4, 2.0));
+        simulate(&mut w, 3.0);
+        let body = w.bodies[b];
+        assert!((body.pos.y - 1.0).abs() < 0.08, "capsule center y {}", body.pos.y);
+        assert!(body.grounded, "capsule should be grounded");
+    }
+
+    #[test]
+    fn lock_pos_freezes_an_axis() {
+        // Lock X: a +X shove can't move the body off x=0, but it still falls in Y.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let mut body = Body::sphere(Vec3::new(0.0, 5.0, 0.0), 0.5);
+        body.lock_pos[0] = true;
+        body.vel = Vec3::new(8.0, 0.0, 0.0); // shove +X
+        let b = w.add_body(body);
+        simulate(&mut w, 2.0);
+        let body = w.bodies[b];
+        assert!(body.pos.x.abs() < 1e-3, "x should stay locked at 0, was {}", body.pos.x);
+        assert!((body.pos.y - 0.5).abs() < 0.05, "should still fall, y {}", body.pos.y);
+    }
+
+    #[test]
+    fn contacts_are_recorded() {
+        // A resting body produces a contact each step (for telegraphing/events).
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        w.add_body(Body::sphere(Vec3::new(0.0, 1.0, 0.0), 0.5));
+        simulate(&mut w, 1.0);
+        w.step(1.0 / 120.0); // one more step to capture the contact
+        assert!(!w.contacts.is_empty(), "a resting body should report a contact");
+        assert!(w.contacts[0].normal.y > 0.9, "ground contact normal up, {:?}", w.contacts[0].normal);
     }
 }

@@ -2027,12 +2027,43 @@ impl<'a> EditorTabViewer<'a> {
                 let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
                 egui::CollapsingHeader::new("◆ Rigidbody").default_open(has_rb).show(ui, |ui| {
                     if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
+                        use floptle_core::BodyKind;
+                        ui.horizontal(|ui| {
+                            ui.label("shape");
+                            egui::ComboBox::from_id_salt("rb-shape")
+                                .selected_text(match rb.kind {
+                                    BodyKind::Sphere => "Sphere",
+                                    BodyKind::Capsule => "Capsule",
+                                })
+                                .show_ui(ui, |ui| {
+                                    cmd.inspector_changed |=
+                                        ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
+                                    cmd.inspector_changed |=
+                                        ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                });
+                        });
                         cmd.inspector_changed |=
                             ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                        if rb.kind == BodyKind::Capsule {
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                        }
                         cmd.inspector_changed |=
                             ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
                         cmd.inspector_changed |=
                             ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                        ui.horizontal(|ui| {
+                            ui.label("freeze pos");
+                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("freeze rot");
+                            for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
+                            }
+                        });
                         if ui.button("🗑 Remove rigidbody").clicked() {
                             cmd.remove_rigidbody = Some(e);
                         }

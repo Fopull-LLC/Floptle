@@ -28,20 +28,42 @@ pub struct Spin {
     pub speed: f32,
 }
 
-/// Marks an entity as a dynamic physics body (a sphere of `radius`, centered on the
-/// entity's world translation). Read by `floptle-physics` to build the sim each Play.
+/// The collision shape of a [`RigidBody`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyKind {
+    Sphere,
+    Capsule,
+}
+
+/// Marks an entity as a dynamic physics body, centered on the entity's world
+/// translation. Read by `floptle-physics` to build the sim each Play.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidBody {
+    pub kind: BodyKind,
     pub radius: f32,
+    /// Total capsule height (ignored for a sphere).
+    pub height: f32,
     /// Bounciness 0..1 (0 = no bounce).
     pub restitution: f32,
     /// Surface friction 0..1 (0 = frictionless).
     pub friction: f32,
+    /// Freeze world-axis translation (x, y, z) — e.g. lock Z for a 2.5D game.
+    pub lock_pos: [bool; 3],
+    /// Freeze the entity's rotation about each axis (keeps a body upright during play).
+    pub lock_rot: [bool; 3],
 }
 
 impl Default for RigidBody {
     fn default() -> Self {
-        Self { radius: 0.5, restitution: 0.0, friction: 0.3 }
+        Self {
+            kind: BodyKind::Sphere,
+            radius: 0.5,
+            height: 2.0,
+            restitution: 0.0,
+            friction: 0.3,
+            lock_pos: [false; 3],
+            lock_rot: [false; 3],
+        }
     }
 }
 
