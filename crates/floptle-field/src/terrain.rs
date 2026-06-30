@@ -180,14 +180,18 @@ impl Terrain {
                     distance[ni] = if in_old {
                         old.distance[oi]
                     } else {
-                        // World position of this new cell → distance to the old bounds
-                        // box (air outside, so the field reads empty beyond the terrain).
+                        // Continue the field outward so the terrain ends cleanly. The
+                        // box distance gives a vertical cliff where the old edge was
+                        // SOLID; adding the old edge's air gap (`.max(0.0)`) keeps AIR
+                        // as air — without it, the field dips to ~0 at the old boundary
+                        // even up in the sky, and that thin near-zero "shell" is what
+                        // the raymarch speckled and the sculpt brush kept colliding with.
                         let wp = [
                             new_lo[0] + (nx as f32 + 0.5) * vs[0],
                             new_lo[1] + (ny as f32 + 0.5) * vs[1],
                             new_lo[2] + (nz as f32 + 0.5) * vs[2],
                         ];
-                        box_distance(wp, old.center, old.half_extent).max(0.5 * vs[1])
+                        box_distance(wp, old.center, old.half_extent) + old.distance[oi].max(0.0)
                     };
                 }
             }
