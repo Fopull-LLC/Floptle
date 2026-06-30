@@ -6046,7 +6046,17 @@ impl Editor {
             })
             .unwrap_or_default();
         let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
-        Some(NodeDoc { name, transform, matter: MatterDoc::from(matter), scripts, material, parent: None })
+        let rigidbody =
+            self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
+        Some(NodeDoc {
+            name,
+            transform,
+            matter: MatterDoc::from(matter),
+            scripts,
+            material,
+            rigidbody,
+            parent: None,
+        })
     }
     fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
         let e = self.world.spawn();
@@ -6068,6 +6078,9 @@ impl Editor {
         if let Some(m) = &node.material {
             self.world.insert(e, m.to_material());
         }
+        if let Some(rb) = &node.rigidbody {
+            self.world.insert(e, rb.to_rigidbody());
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -6084,6 +6097,7 @@ impl Editor {
             matter,
             scripts: Vec::new(),
             material: None,
+            rigidbody: None,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -6473,6 +6487,7 @@ impl Editor {
                 matter: MatterDoc::Mesh { asset_path: path.to_string() },
                 scripts: Vec::new(),
                 material: None,
+                rigidbody: None,
                 parent: None,
             };
             let e = self.spawn_node(&node);
@@ -7651,6 +7666,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             params: Vec::new(),
         }],
         material: None,
+        rigidbody: None,
         parent: None,
     }
 }
@@ -7676,6 +7692,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
                 scripts: Vec::new(),
                 material: None,
+                rigidbody: None,
                 parent: None,
             },
             NodeDoc {
@@ -7684,6 +7701,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
                 scripts: Vec::new(),
                 material: None,
+                rigidbody: None,
                 parent: None,
             },
             NodeDoc {
@@ -7692,6 +7710,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 matter: MatterDoc::Blob { scale: 1.0 },
                 scripts: Vec::new(),
                 material: None,
+                rigidbody: None,
                 parent: None,
             },
             default_camera_node(),
