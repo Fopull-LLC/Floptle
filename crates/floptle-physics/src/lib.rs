@@ -130,7 +130,8 @@ fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     }
     let vc = d1 * d4 - d3 * d2;
     if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        return a + ab * (d1 / (d1 - d3));
+        let den = d1 - d3;
+        return if den.abs() > 1e-12 { a + ab * (d1 / den) } else { a };
     }
     let cp = p - c;
     let d5 = ab.dot(cp);
@@ -140,14 +141,19 @@ fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     }
     let vb = d5 * d2 - d1 * d6;
     if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        return a + ac * (d2 / (d2 - d6));
+        let den = d2 - d6;
+        return if den.abs() > 1e-12 { a + ac * (d2 / den) } else { a };
     }
     let va = d3 * d6 - d5 * d4;
     if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return b + (c - b) * w;
+        let den = (d4 - d3) + (d5 - d6);
+        return if den.abs() > 1e-12 { b + (c - b) * ((d4 - d3) / den) } else { b };
     }
-    let denom = 1.0 / (va + vb + vc);
+    let sum = va + vb + vc;
+    if sum.abs() <= 1e-12 {
+        return a; // degenerate/zero-area triangle — any vertex is the closest point
+    }
+    let denom = 1.0 / sum;
     a + ab * (vb * denom) + ac * (vc * denom)
 }
 
@@ -163,9 +169,11 @@ pub struct TriMeshCollider {
 }
 
 impl TriMeshCollider {
-    /// One cell ≥ any plausible body radius, so a 3×3×3 cell block around a query point
-    /// is guaranteed to contain every triangle within that radius.
+    /// Spatial-hash cell size. The query searches `±SEARCH` cells, so a body up to
+    /// `CELL·SEARCH` units in radius is guaranteed to find every triangle within its
+    /// reach (5×5×5 block covers radii up to ~4 — far beyond any normal capsule).
     const CELL: f32 = 2.0;
+    const SEARCH: i32 = 2;
 
     pub fn new(verts: &[Vec3], indices: &[u32]) -> Self {
         let cell = Self::CELL;
@@ -175,6 +183,11 @@ impl TriMeshCollider {
         for tri in indices.chunks_exact(3) {
             let (a, b, c) =
                 (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
+            // Skip degenerate (zero-area) triangles — common in imported meshes and a
+            // source of NaNs in closest-point queries.
+            if (b - a).cross(c - a).length_squared() <= 1e-12 {
+                continue;
+            }
             let ti = tris.len() as u32;
             tris.push([a, b, c]);
             let lo = cell_coord(a.min(b).min(c), cell);
@@ -190,20 +203,22 @@ impl TriMeshCollider {
         Self { tris, cell, grid }
     }
 
-    /// Closest point on the mesh to `p` (and its squared distance), searching the 3×3×3
-    /// cell block around `p`. `None` if no triangle is within that block.
+    /// Closest point on the mesh to `p` (and its squared distance), searching the
+    /// ±`SEARCH` cell block around `p`. `None` if no triangle is within that block.
     fn nearest(&self, p: Vec3) -> Option<(Vec3, f32)> {
         let c = cell_coord(p, self.cell);
+        let s = Self::SEARCH;
         let mut best: Option<(Vec3, f32)> = None;
-        for cz in (c.2 - 1)..=(c.2 + 1) {
-            for cy in (c.1 - 1)..=(c.1 + 1) {
-                for cx in (c.0 - 1)..=(c.0 + 1) {
+        for cz in (c.2 - s)..=(c.2 + s) {
+            for cy in (c.1 - s)..=(c.1 + s) {
+                for cx in (c.0 - s)..=(c.0 + s) {
                     let Some(list) = self.grid.get(&(cx, cy, cz)) else { continue };
                     for &ti in list {
                         let t = self.tris[ti as usize];
                         let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
                         let d2 = (p - q).length_squared();
-                        if best.is_none_or(|(_, bd)| d2 < bd) {
+                        // Skip non-finite results defensively (degenerate input).
+                        if d2.is_finite() && best.is_none_or(|(_, bd)| d2 < bd) {
                             best = Some((q, d2));
                         }
                     }
@@ -427,7 +442,9 @@ impl PhysicsWorld {
                     let radius = self.bodies[bi].radius;
                     for &c in &centers[..n_c] {
                         let pen = radius - self.colliders[ci].distance(c);
-                        if pen <= 0.0 {
+                        // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
+                        // so a bad distance can never push the body to a non-finite pos.
+                        if !(pen > 0.0) {
                             continue;
                         }
                         let n = self.colliders[ci].normal(c);
@@ -744,6 +761,27 @@ mod tests {
         assert!(m.normal(Vec3::new(0.0, -1.0, 0.0)).y < -0.9);
         // Far away (beyond the search block): reported as no-collision.
         assert!(m.distance(Vec3::new(0.0, 50.0, 0.0)) > 100.0);
+    }
+
+    #[test]
+    fn degenerate_triangles_are_safe() {
+        // A mesh with zero-area triangles (coincident / collinear verts) must not produce
+        // NaN distances or corrupt a body resting on it.
+        let mut v = vec![Vec3::new(-5.0, 0.0, -5.0), Vec3::new(5.0, 0.0, -5.0), Vec3::new(5.0, 0.0, 5.0), Vec3::new(-5.0, 0.0, 5.0)];
+        let mut i = vec![0u32, 1, 2, 0, 2, 3];
+        // Append degenerate tris: a point (all coincident) and a sliver (collinear).
+        v.push(Vec3::new(1.0, 0.0, 1.0));
+        i.extend_from_slice(&[4, 4, 4]); // zero triangle
+        i.extend_from_slice(&[0, 1, 1]); // two coincident verts
+        let m = TriMeshCollider::new(&v, &i);
+        assert!(m.distance(Vec3::new(0.0, 1.0, 0.0)).is_finite());
+        assert!(m.normal(Vec3::new(0.0, 1.0, 0.0)).is_finite());
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(m));
+        let b = w.add_body(Body::sphere(Vec3::new(0.0, 4.0, 0.0), 0.5));
+        simulate(&mut w, 3.0);
+        assert!(w.bodies[b].pos.is_finite(), "body went non-finite: {:?}", w.bodies[b].pos);
+        assert!((w.bodies[b].pos.y - 0.5).abs() < 0.1, "y={}", w.bodies[b].pos.y);
     }
 
     #[test]
