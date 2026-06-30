@@ -228,6 +228,24 @@ pub enum MatterDoc {
         #[serde(default = "default_range")]
         radius: f32,
     },
+    /// The scene's environment background (solid color or equirect texture + tint).
+    Skybox {
+        #[serde(default = "sky_grey")]
+        color: [f32; 3],
+        #[serde(default = "default_sky_size")]
+        size: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        texture: Option<String>,
+        #[serde(default = "white3")]
+        tint: [f32; 3],
+    },
+}
+
+fn sky_grey() -> [f32; 3] {
+    [0.5, 0.5, 0.52]
+}
+fn default_sky_size() -> f32 {
+    500.0
 }
 
 fn default_gravity_strength() -> f32 {
@@ -268,6 +286,12 @@ impl From<&Matter> for MatterDoc {
                 strength: *strength,
                 radius: *radius,
             },
+            Matter::Skybox { color, size, texture, tint } => MatterDoc::Skybox {
+                color: *color,
+                size: *size,
+                texture: texture.clone(),
+                tint: *tint,
+            },
         }
     }
 }
@@ -290,6 +314,12 @@ impl MatterDoc {
                 mode: if *radial { GravityMode::Radial } else { GravityMode::Down },
                 strength: *strength,
                 radius: *radius,
+            },
+            MatterDoc::Skybox { color, size, texture, tint } => Matter::Skybox {
+                color: *color,
+                size: *size,
+                texture: texture.clone(),
+                tint: *tint,
             },
         }
     }
@@ -658,6 +688,16 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
     world.insert(light, doc.lighting.to_light());
+
+    // Every scene carries a Skybox node (the environment background). If the doc didn't
+    // include one (e.g. an older scene), spawn a default grey skybox so a scene always
+    // has an editable environment.
+    if !doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::Skybox { .. })) {
+        let sky = world.spawn();
+        world.insert(sky, Name("Skybox".into()));
+        world.insert(sky, Transform::IDENTITY);
+        world.insert(sky, Matter::default_skybox());
+    }
 }
 
 /// Snapshot every `Matter` entity (and the `Light` node) in `world` into a `SceneDoc`.
@@ -789,10 +829,16 @@ mod tests {
         let doc = demo();
         let mut world = World::new();
         spawn_into(&doc, &mut world);
-        // 4 matter nodes (cube, blob, lamp, eye) + the mandatory Lighting node
-        assert_eq!(world.len(), 5);
+        // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + the
+        // mandatory Lighting node.
+        assert_eq!(world.len(), 6);
         let snap = to_doc("demo", &world);
-        assert_eq!(snap.nodes.len(), 4);
+        // The 4 authored matter nodes plus the auto-added Skybox node.
+        assert_eq!(snap.nodes.len(), 5);
+        assert!(
+            snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::Skybox { .. })),
+            "a default Skybox node should be present"
+        );
         // non-default directional intensity survives
         assert_eq!(snap.lighting.intensity, 2.5);
         // the cube's authored translation survives the World round-trip

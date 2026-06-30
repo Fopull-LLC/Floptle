@@ -62,6 +62,14 @@ pub struct RaymarchGlobals {
     pub blob_params: [[f32; 4]; 16],
     /// rgb rim/fresnel color, a = unused.
     pub blob_rim: [[f32; 4]; 16],
+    /// Skybox: x = mode (0 = solid `bg`, 1 = equirect texture), y = size (unused by the
+    /// shader; the sky is at infinity), zw unused.
+    pub sky_params: [f32; 4],
+    /// Sky texture tint (rgb × the sampled texel), a = unused.
+    pub sky_tint: [f32; 4],
+    /// Inverse skybox rotation as 3 column vec4s (xyz = column, w pad): world ray dir →
+    /// sky-local dir before the equirect lookup, so a rotating node spins the sky.
+    pub sky_rot: [[f32; 4]; 3],
 }
 
 impl Default for RaymarchGlobals {
@@ -93,6 +101,9 @@ impl Default for RaymarchGlobals {
             blob_specular: [[1.0, 1.0, 1.0, 0.0]; 16],
             blob_params: [[16.0, 0.0, 0.0, 1.0]; 16],
             blob_rim: [[0.0; 4]; 16],
+            sky_params: [0.0; 4],
+            sky_tint: [1.0, 1.0, 1.0, 1.0],
+            sky_rot: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
         }
     }
 }
@@ -114,6 +125,8 @@ pub struct Raymarch {
     _dist_tex: wgpu::Texture,
     _color_tex: wgpu::Texture,
     terrain_tex: wgpu::Texture,
+    /// Equirectangular sky texture (1×1 white until a skybox texture is set).
+    sky_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
 }
 
@@ -163,11 +176,23 @@ impl Raymarch {
                     count: None,
                 },
                 // A REPEAT sampler for the terrain palette so triplanar textures tile
-                // (the volume sampler is ClampToEdge for the [0,1] 3D field).
+                // (the volume sampler is ClampToEdge for the [0,1] 3D field). The sky
+                // texture reuses it so an equirect sky wraps seamlessly.
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The equirectangular skybox texture (sampled for background pixels).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -275,9 +300,10 @@ impl Raymarch {
         };
         let (dist_tex, color_tex) = upload_volume(gpu, &empty);
         let terrain_tex = make_terrain_array(gpu, &[]);
+        let sky_tex = make_sky_texture(gpu, None);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler,
+            &tile_sampler, &sky_tex,
         );
 
         Self {
@@ -290,8 +316,26 @@ impl Raymarch {
             _dist_tex: dist_tex,
             _color_tex: color_tex,
             terrain_tex,
+            sky_tex,
             bind,
         }
+    }
+
+    /// Upload the equirectangular skybox texture (`None` resets to solid / white). The
+    /// runtime selects solid vs. texture and the tint/rotation via `RaymarchGlobals`.
+    pub fn set_sky_texture(&mut self, gpu: &Gpu, tex: Option<&TextureData>) {
+        self.sky_tex = make_sky_texture(gpu, tex);
+        self.bind = make_bind(
+            &gpu.device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &self._dist_tex,
+            &self._color_tex,
+            &self.sampler,
+            &self.terrain_tex,
+            &self.tile_sampler,
+            &self.sky_tex,
+        );
     }
 
     /// Upload the terrain texture palette (up to [`TERRAIN_SLOTS`] layers, each
@@ -308,6 +352,7 @@ impl Raymarch {
             &self.sampler,
             &self.terrain_tex,
             &self.tile_sampler,
+            &self.sky_tex,
         );
     }
 
@@ -335,6 +380,7 @@ impl Raymarch {
             &self.sampler,
             &self.terrain_tex,
             &self.tile_sampler,
+            &self.sky_tex,
         );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
@@ -500,6 +546,7 @@ fn make_bind(
     sampler: &wgpu::Sampler,
     terrain: &wgpu::Texture,
     tile_sampler: &wgpu::Sampler,
+    sky: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -507,6 +554,7 @@ fn make_bind(
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
+    let sky_view = sky.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raymarch"),
         layout,
@@ -517,8 +565,46 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(tile_sampler) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
         ],
     })
+}
+
+/// Upload an equirectangular sky texture (RGBA8 sRGB), or a 1×1 white texture when
+/// `tex` is `None` (the default / solid-color case).
+fn make_sky_texture(gpu: &Gpu, tex: Option<&TextureData>) -> wgpu::Texture {
+    let (w, h, pixels): (u32, u32, std::borrow::Cow<[u8]>) = match tex {
+        Some(t) if t.width >= 1 && t.height >= 1 => {
+            (t.width, t.height, std::borrow::Cow::Borrowed(t.pixels.as_slice()))
+        }
+        _ => (1, 1, std::borrow::Cow::Owned(vec![255u8, 255, 255, 255])),
+    };
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("skybox"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    texture
 }
 
 /// Create the terrain palette as a `TERRAIN_SLOTS`-layer 256² sRGB array. Provided
