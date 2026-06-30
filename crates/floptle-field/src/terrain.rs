@@ -507,8 +507,9 @@ impl Terrain {
         None
     }
 
-    /// The voxel index range (inclusive) covering the world AABB of a brush.
-    fn brush_range(&self, center: [f32; 3], radius: f32) -> [[u32; 3]; 2] {
+    /// The voxel index range (inclusive) covering the world AABB of a brush. Public so
+    /// the editor can upload just this sub-box to the GPU after a paint dab.
+    pub fn brush_range(&self, center: [f32; 3], radius: f32) -> [[u32; 3]; 2] {
         let [w, h, d] = self.baked.dims;
         let c = self.baked.center;
         let hf = self.baked.half_extent;

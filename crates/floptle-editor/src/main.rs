@@ -4068,6 +4068,10 @@ struct Editor {
     combined_origins: Vec<(Entity, DVec3)>,
     /// The combined field needs rebuilding + re-uploading (any add/edit/move/delete).
     combined_dirty: bool,
+    /// A paint dab on a single terrain only dirties a small voxel box — uploaded to the
+    /// GPU directly (no full re-clone + re-upload), so painting a big terrain stays
+    /// smooth. `(entity, min inclusive, max exclusive)`, merged across dabs in a frame.
+    terrain_region_dirty: Option<(Entity, [u32; 3], [u32; 3])>,
     /// Monotonic id assigned to each new terrain node (stable across save/load).
     next_terrain_id: u32,
     /// LMB held with the Sculpt tool — keep brushing on mouse motion.
@@ -4667,6 +4671,17 @@ impl Editor {
                 raymarch.set_volume(gpu, &combined.baked);
             }
             self.combined_dirty = false;
+            self.terrain_region_dirty = None; // the full upload supersedes any region
+        } else if let Some((e, mn, mx)) = self.terrain_region_dirty.take() {
+            // Fast paint path: upload only the dabbed voxel box. For a single terrain the
+            // GPU volume mirrors its field 1:1, so its baked data maps directly. (`combined`
+            // keeps the correct geometry — paint never touches distance — and is re-cloned
+            // on the next full rebuild.)
+            if let (Some(gpu), Some(raymarch), Some(t)) =
+                (self.gpu.as_ref(), self.raymarch.as_mut(), self.terrains.get(&e))
+            {
+                raymarch.set_volume_region(gpu, &t.baked, mn, mx);
+            }
         }
         // Re-upload the terrain texture palette when it changes. Each slot resolves
         // to a 256² layer (empty / unreadable slots become white so indices align).
@@ -7347,6 +7362,7 @@ impl Editor {
             if !matches!(brush.mode, floptle_field::Brush::Paint) {
                 terrain.ensure_contains(hit, brush.radius * 1.5);
             }
+            let is_paint = matches!(brush.mode, floptle_field::Brush::Paint);
             match brush.mode {
                 floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
                     // Paint a texture palette slot (stored as slot+1; 0 = untextured).
@@ -7357,8 +7373,26 @@ impl Editor {
                 }
                 m => terrain.sculpt(m, hit, brush.radius, brush.strength),
             }
-            self.combined_dirty = true;
+            // Painting only edits color within the brush box (no geometry/bounds change),
+            // so on a single terrain we upload just that voxel sub-box to the GPU instead
+            // of re-cloning + re-uploading the whole field — that's the painting lag.
+            // Sculpt (CSG spreads beyond the brush) and multi-terrain take the full path.
+            let region = if is_paint { Some(terrain.brush_range(hit, brush.radius)) } else { None };
             self.stroke_dabbed = true; // mark this stroke as worth an undo step
+            match (region, self.terrains.len() == 1) {
+                (Some([mn, mx]), true) => {
+                    let hi = [mx[0] + 1, mx[1] + 1, mx[2] + 1];
+                    self.terrain_region_dirty = Some(match self.terrain_region_dirty {
+                        Some((e, omn, omx)) if e == active => (
+                            active,
+                            [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
+                            [omx[0].max(hi[0]), omx[1].max(hi[1]), omx[2].max(hi[2])],
+                        ),
+                        _ => (active, mn, hi),
+                    });
+                }
+                _ => self.combined_dirty = true,
+            }
         }
     }
 
