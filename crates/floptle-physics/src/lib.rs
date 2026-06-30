@@ -508,6 +508,29 @@ impl Sim {
             self.accum -= self.fixed_dt;
             iters += 1;
         }
+        self.writeback_transforms(ecs);
+    }
+
+    /// Per body: (entity, velocity, up, grounded) — so the editor can expose it to
+    /// scripts (`up` is −gravity, for surface-relative movement on planets).
+    pub fn body_states(&self) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool)> + '_ {
+        self.map.iter().map(move |l| {
+            let b = &self.world.bodies[l.body];
+            (l.entity, b.vel, b.up, b.grounded)
+        })
+    }
+
+    /// Set a body's velocity by its entity index (scripts write velocity each frame).
+    pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                self.world.bodies[l.body].vel = vel;
+                return;
+            }
+        }
+    }
+
+    fn writeback_transforms(&self, ecs: &mut World) {
         for link in &self.map {
             let p = self.world.bodies[link.body].pos;
             if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
