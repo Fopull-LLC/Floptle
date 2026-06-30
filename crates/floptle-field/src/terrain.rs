@@ -258,6 +258,29 @@ impl Terrain {
         lerp(lerp(c00, c10, fy), lerp(c01, c11, fy), fz)
     }
 
+    /// Fill the WHOLE terrain's surface color with `color` (the RGB tint), leaving
+    /// the shape + texture slots — "fill terrain with this color".
+    pub fn fill_color(&mut self, color: [f32; 3]) {
+        let rgb = [
+            (color[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (color[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ];
+        for c in &mut self.baked.color {
+            c[0] = rgb[0];
+            c[1] = rgb[1];
+            c[2] = rgb[2];
+        }
+    }
+
+    /// Fill the WHOLE terrain with a texture palette `slot` (1-based; 0 = untextured)
+    /// — "fill terrain with this texture". Leaves the shape + RGB tint.
+    pub fn fill_texture(&mut self, slot: u8) {
+        for c in &mut self.baked.color {
+            c[3] = slot;
+        }
+    }
+
     /// Nearest-voxel color (RGBA8) at a local point; clamps to the grid outside the
     /// box. The alpha (painted texture slot) is taken from the nearest voxel, never
     /// interpolated, so slots stay crisp when combining terrains.
@@ -644,6 +667,18 @@ mod tests {
         let dims = t.baked.dims;
         assert!(!t.ensure_contains([0.0, 0.0, 0.0], 2.0));
         assert_eq!(t.baked.dims, dims);
+    }
+
+    #[test]
+    fn fill_sets_every_voxel() {
+        let mut t = Terrain::flat([8, 8, 8], [0.0; 3], [4.0, 4.0, 4.0], 0.0, [0.4, 0.7, 0.3]);
+        t.fill_color([1.0, 0.0, 0.0]);
+        assert!(t.baked.color.iter().all(|c| c[0] == 255 && c[1] == 0 && c[2] == 0));
+        t.fill_texture(3);
+        assert!(t.baked.color.iter().all(|c| c[3] == 3));
+        // fill_color leaves the slot (alpha) alone.
+        t.fill_color([0.0, 0.0, 1.0]);
+        assert!(t.baked.color.iter().all(|c| c[3] == 3 && c[2] == 255));
     }
 
     #[test]
