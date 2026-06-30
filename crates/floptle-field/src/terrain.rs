@@ -10,6 +10,22 @@
 use crate::mesh2sdf::BakedSdf;
 use crate::smin;
 
+/// Signed distance from point `p` to an axis-aligned box (`center` ± `half`): positive
+/// outside, negative inside. The standard analytic box SDF.
+fn box_distance(p: [f32; 3], center: [f32; 3], half: [f32; 3]) -> f32 {
+    let q = [
+        (p[0] - center[0]).abs() - half[0],
+        (p[1] - center[1]).abs() - half[1],
+        (p[2] - center[2]).abs() - half[2],
+    ];
+    let ox = q[0].max(0.0);
+    let oy = q[1].max(0.0);
+    let oz = q[2].max(0.0);
+    let outside = (ox * ox + oy * oy + oz * oz).sqrt();
+    let inside = q[0].max(q[1]).max(q[2]).min(0.0);
+    outside + inside
+}
+
 /// A sculptable terrain volume.
 #[derive(Clone, Debug)]
 pub struct Terrain {
@@ -66,12 +82,13 @@ impl Terrain {
     }
 
     /// Grow the grid (keeping voxel size constant) so a brush at local `point`
-    /// with `margin` stays comfortably inside the field — the "infinite terrain"
-    /// behavior: sculpting near an edge extends the slab outward instead of
-    /// clamping at a wall. New cells replicate the nearest existing edge voxel, so
-    /// flat ground stays flat and a slope simply continues. All three axes can
-    /// grow (horizontal reach + vertical headroom for tall features). Returns true
-    /// if the grid actually changed — the caller must re-upload to the GPU.
+    /// with `margin` stays comfortably inside the field — sculpting near an edge
+    /// extends the *bounds* outward so there's room to keep sculpting. The new area
+    /// is filled with AIR (not a copy of the edge voxel), so the existing terrain is
+    /// NOT dragged outward into flat land — it stays a finite shape and you can sculpt
+    /// isolated features (spires, islands, cliffs). Use [`fill_bounds`](Self::fill_bounds)
+    /// to deliberately lay flat ground across the bounds. All three axes can grow.
+    /// Returns true if the grid actually changed — the caller must re-upload to the GPU.
     pub fn ensure_contains(&mut self, point: [f32; 3], margin: f32) -> bool {
         // A generous per-axis cell cap so an endless drag can't exhaust memory.
         const MAX_DIM: u32 = 384;
@@ -112,8 +129,11 @@ impl Terrain {
         true
     }
 
-    /// Reallocate the grid with `add_lo`/`add_hi` extra cells per axis, copying old
-    /// cells into place and edge-clamping the new border cells. Voxel size is held
+    /// Reallocate the grid with `add_lo`/`add_hi` extra cells per axis. Old cells copy
+    /// across unchanged; new border cells are filled with AIR (the signed distance to
+    /// the OLD bounds box, which is positive outside it) so the terrain ends at a clean
+    /// edge rather than the ground being smeared outward. New cells inherit the nearest
+    /// edge COLOR so a cliff face is tinted like the terrain. Voxel size is held
     /// constant, so `center`/`half_extent` are recomputed from the new cell counts.
     fn grow(&mut self, add_lo: [u32; 3], add_hi: [u32; 3]) {
         let old = self.baked.clone();
@@ -130,29 +150,88 @@ impl Terrain {
             new_dims[2] as f32 * vs[2] * 0.5,
         ];
         // new_lo = old_lo - add_lo*vs ; new_center = new_lo + new_half
-        let new_center = [
-            (old.center[0] - old.half_extent[0]) - add_lo[0] as f32 * vs[0] + new_half[0],
-            (old.center[1] - old.half_extent[1]) - add_lo[1] as f32 * vs[1] + new_half[1],
-            (old.center[2] - old.half_extent[2]) - add_lo[2] as f32 * vs[2] + new_half[2],
+        let new_lo = [
+            (old.center[0] - old.half_extent[0]) - add_lo[0] as f32 * vs[0],
+            (old.center[1] - old.half_extent[1]) - add_lo[1] as f32 * vs[1],
+            (old.center[2] - old.half_extent[2]) - add_lo[2] as f32 * vs[2],
         ];
+        let new_center =
+            [new_lo[0] + new_half[0], new_lo[1] + new_half[1], new_lo[2] + new_half[2]];
         let n = (new_dims[0] * new_dims[1] * new_dims[2]) as usize;
         let mut distance = vec![0.0f32; n];
         let mut color = vec![[0u8; 4]; n];
         let clamp = |v: i64, hi: u32| v.clamp(0, hi as i64 - 1) as u32;
         for nz in 0..new_dims[2] {
-            let oz = clamp(nz as i64 - add_lo[2] as i64, od);
+            let iz = nz as i64 - add_lo[2] as i64;
             for ny in 0..new_dims[1] {
-                let oy = clamp(ny as i64 - add_lo[1] as i64, oh);
+                let iy = ny as i64 - add_lo[1] as i64;
                 for nx in 0..new_dims[0] {
-                    let ox = clamp(nx as i64 - add_lo[0] as i64, ow);
+                    let ix = nx as i64 - add_lo[0] as i64;
                     let ni = ((nz * new_dims[1] + ny) * new_dims[0] + nx) as usize;
-                    let oi = ((oz * oh + oy) * ow + ox) as usize;
-                    distance[ni] = old.distance[oi];
+                    // Color always edge-clamps so cliff faces keep the terrain's tint.
+                    let oi = ((clamp(iz, od) * oh + clamp(iy, oh)) * ow + clamp(ix, ow)) as usize;
                     color[ni] = old.color[oi];
+                    let in_old = ix >= 0
+                        && ix < ow as i64
+                        && iy >= 0
+                        && iy < oh as i64
+                        && iz >= 0
+                        && iz < od as i64;
+                    distance[ni] = if in_old {
+                        old.distance[oi]
+                    } else {
+                        // World position of this new cell → distance to the old bounds
+                        // box (air outside, so the field reads empty beyond the terrain).
+                        let wp = [
+                            new_lo[0] + (nx as f32 + 0.5) * vs[0],
+                            new_lo[1] + (ny as f32 + 0.5) * vs[1],
+                            new_lo[2] + (nz as f32 + 0.5) * vs[2],
+                        ];
+                        box_distance(wp, old.center, old.half_extent).max(0.5 * vs[1])
+                    };
                 }
             }
         }
         self.baked = BakedSdf { dims: new_dims, center: new_center, half_extent: new_half, distance, color };
+    }
+
+    /// Lay a flat slab of solid ground across the bounds, unioned with what's already
+    /// there: every voxel inside the box `[walls ± inset] × [floor_y, top_y]` is filled
+    /// solid (taller existing features survive; pits fill up to `top_y`). This is the
+    /// deliberate counterpart to edge-sculpt no longer auto-expanding the ground — pour
+    /// in flat land where you want it, sized by `inset` (margin from the X/Z walls) and
+    /// bounded vertically by `floor_y`..`top_y`. Filled cells take `color`.
+    pub fn fill_bounds(&mut self, top_y: f32, floor_y: f32, inset: f32, color: [f32; 3]) {
+        let b = &self.baked;
+        let (lo, hi) = ([b.center[0] - b.half_extent[0], b.center[2] - b.half_extent[2]],
+                        [b.center[0] + b.half_extent[0], b.center[2] + b.half_extent[2]]);
+        let cx = 0.5 * (lo[0] + hi[0]);
+        let cz = 0.5 * (lo[1] + hi[1]);
+        let hx = (0.5 * (hi[0] - lo[0]) - inset).max(0.0);
+        let hz = (0.5 * (hi[1] - lo[1]) - inset).max(0.0);
+        let top = top_y.max(floor_y);
+        let cy = 0.5 * (floor_y + top);
+        let hy = 0.5 * (top - floor_y).max(0.0);
+        let rgb = [(color[0] * 255.0) as u8, (color[1] * 255.0) as u8, (color[2] * 255.0) as u8];
+        let dims = self.baked.dims;
+        for iz in 0..dims[2] {
+            for iy in 0..dims[1] {
+                for ix in 0..dims[0] {
+                    let p = self.voxel_world(ix, iy, iz);
+                    let bd = box_distance([p[0], p[1], p[2]], [cx, cy, cz], [hx, hy, hz]);
+                    let i = self.idx(ix, iy, iz);
+                    if bd < self.baked.distance[i] {
+                        self.baked.distance[i] = bd;
+                    }
+                    if bd <= 0.0 {
+                        let c = &mut self.baked.color[i];
+                        c[0] = rgb[0];
+                        c[1] = rgb[1];
+                        c[2] = rgb[2];
+                    }
+                }
+            }
+        }
     }
 
     /// Serialize the field to a compact binary blob (saved alongside the scene).
@@ -647,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_contains_grows_and_preserves_surface() {
+    fn ensure_contains_grows_bounds_not_surface() {
         let mut t = Terrain::flat([32, 24, 32], [0.0, 0.0, 0.0], [16.0, 6.0, 16.0], 0.0, [0.4, 0.7, 0.3]);
         // Voxel size before growth — must stay constant after.
         let vs0 = 2.0 * t.baked.half_extent[0] / t.baked.dims[0] as f32;
@@ -659,14 +738,31 @@ mod tests {
         assert_eq!(t.baked.dims[1], before[1], "y unchanged (brush at surface)");
         let vs1 = 2.0 * t.baked.half_extent[0] / t.baked.dims[0] as f32;
         assert!((vs0 - vs1).abs() < 1e-4, "voxel size held constant");
-        // The far edge is now reachable, and the ground is still flat there.
         assert!(t.baked.center[0] + t.baked.half_extent[0] >= 40.0, "box reaches the brush");
-        assert!(t.sample([34.0, 2.0, 0.0]) > 0.0, "above ground still positive out there");
-        assert!(t.sample([34.0, -2.0, 0.0]) < 0.0, "below ground still negative out there");
+        // The ORIGINAL terrain (inside the old box) is preserved...
+        assert!(t.sample([10.0, 2.0, 0.0]) > 0.0, "above ground inside old box");
+        assert!(t.sample([10.0, -2.0, 0.0]) < 0.0, "below ground inside old box");
+        // ...but the NEW area is AIR, not extended flat land (the whole point: bounds
+        // grew, the surface did not follow). Below where ground used to be is now empty.
+        assert!(t.sample([34.0, -2.0, 0.0]) > 0.0, "new area is air below, not solid");
+        assert!(t.sample([34.0, 2.0, 0.0]) > 0.0, "new area is air above too");
         // Idempotent: a brush back inside the (now larger) box doesn't grow it.
         let dims = t.baked.dims;
         assert!(!t.ensure_contains([0.0, 0.0, 0.0], 2.0));
         assert_eq!(t.baked.dims, dims);
+    }
+
+    #[test]
+    fn fill_bounds_lays_flat_ground() {
+        // Start from an all-air field (ground far below the box), then fill up to y=0.
+        let mut t = Terrain::flat([24, 24, 24], [0.0; 3], [8.0, 8.0, 8.0], -100.0, [0.4, 0.7, 0.3]);
+        assert!(t.sample([0.0, -2.0, 0.0]) > 0.0, "starts as air");
+        t.fill_bounds(0.0, -8.0, 1.0, [0.5, 0.5, 0.5]);
+        // Inside the inset footprint: solid below y=0, air above.
+        assert!(t.sample([0.0, -2.0, 0.0]) < 0.0, "filled solid below top");
+        assert!(t.sample([0.0, 2.0, 0.0]) > 0.0, "air above the fill height");
+        // The inset keeps a margin from the walls: near the +X wall (x≈7.5) stays air.
+        assert!(t.sample([7.6, -2.0, 0.0]) > 0.0, "inset margin near the wall is air");
     }
 
     #[test]
