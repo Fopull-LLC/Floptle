@@ -1606,6 +1606,8 @@ struct EditorTabViewer<'a> {
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
     contact_gizmos: &'a [(Vec2, Vec2)],
     terrain_wire: &'a [(Vec2, Vec2)],
+    mesh_wire: &'a [(Vec2, Vec2)],
+    show_gizmos: &'a mut bool,
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -2842,6 +2844,20 @@ impl<'a> EditorTabViewer<'a> {
                 });
         }
 
+        // Gizmos master toggle — top-right of the viewport (editor view only). Off hides
+        // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
+        // selected node's.
+        if !game {
+            egui::Area::new(egui::Id::new("gizmo_toggle"))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.toggle_value(self.show_gizmos, "◈ Gizmos")
+                            .on_hover_text("show selection/collider/camera/light gizmos in the viewport");
+                    });
+                });
+        }
+
         // Resolution simulator: a centered device frame for the chosen aspect.
         if let Some(r) = self.aspect.ratio() {
             let avail = rect.shrink(10.0);
@@ -2963,6 +2979,20 @@ impl<'a> EditorTabViewer<'a> {
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
             let col = egui::Color32::from_rgba_unmultiplied(235, 225, 120, 130);
             for (a, b) in self.terrain_wire {
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(0.8, col));
+            }
+        }
+
+        // Mesh collider wireframes (imported maps flagged walkable) — a cyan triangle net.
+        if !self.mesh_wire.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("mesh_wire")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let col = egui::Color32::from_rgba_unmultiplied(120, 220, 220, 120);
+            for (a, b) in self.mesh_wire {
                 painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(0.8, col));
             }
         }
@@ -3810,6 +3840,7 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut editor = Editor::default();
+    editor.show_gizmos = true; // gizmos/overlays on by default (toggle in the viewport)
     event_loop.run_app(&mut editor).expect("run editor");
 }
 
@@ -3908,6 +3939,29 @@ fn camera_frustum_lines(
         }
     }
     lines
+}
+
+/// MODEL-LOCAL deduped triangle edges of an imported model — the mesh collider's
+/// wireframe. Edges are deduped per part (shared triangle edges collapse) and a global
+/// budget caps a dense map so the overlay stays a sane line count.
+fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::ImportedModel) -> Vec<(Vec3, Vec3)> {
+    const MAX_EDGES: usize = 6000;
+    let mut edges = Vec::new();
+    for part in &model.parts {
+        let vs = &part.mesh.vertices;
+        let mut seen = std::collections::HashSet::new();
+        for tri in part.mesh.indices.chunks_exact(3) {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                if seen.insert((a.min(b), a.max(b))) {
+                    edges.push((Vec3::from(vs[a as usize].pos), Vec3::from(vs[b as usize].pos)));
+                    if edges.len() >= MAX_EDGES {
+                        return edges;
+                    }
+                }
+            }
+        }
+    }
+    edges
 }
 
 /// World-space line segments tracing the terrain's collision iso-surface (where the SDF
@@ -4224,13 +4278,24 @@ struct Editor {
     body_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// Projected collision-contact crosses (telegraphed during Play).
     contact_gizmos: Vec<(Vec2, Vec2)>,
+    /// Master toggle for ALL viewport gizmos/overlays (a button at the viewport's top
+    /// right). Off = a clean view; the selected node's collider still hides too.
+    show_gizmos: bool,
     /// Show the terrain's collision surface as a wireframe overlay (View menu toggle).
     show_terrain_collider: bool,
+    /// Show EVERY mesh collider's wireframe (View menu). The selected mesh-collider node
+    /// always shows its wireframe regardless (as long as `show_gizmos` is on).
+    show_mesh_colliders: bool,
     /// Cached WORLD-space wireframe of the combined terrain's collision surface; rebuilt
     /// when the terrain changes (cleared on `combined_dirty`), projected each frame.
     terrain_wire_world: Vec<(Vec3, Vec3)>,
     /// This frame's projected terrain-collider wireframe segments (screen space).
     terrain_wire_gizmo: Vec<(Vec2, Vec2)>,
+    /// MODEL-LOCAL deduped triangle edges per mesh asset path (built once on demand),
+    /// transformed by each node's world matrix + projected per frame for collider wires.
+    mesh_wire_cache: HashMap<String, Vec<(Vec3, Vec3)>>,
+    /// This frame's projected mesh-collider wireframe segments (screen space).
+    mesh_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
@@ -5039,7 +5104,8 @@ impl Editor {
         self.body_gizmos.clear();
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
-        if !game_view {
+        self.mesh_wire_gizmo.clear();
+        if !game_view && self.show_gizmos {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             // Only cameras and point lights get gizmos — gather the few Copy fields we
             // need (no per-frame Matter clone over the whole world).
@@ -5140,6 +5206,40 @@ impl Editor {
                         project(wb, cam.world_position, view_proj, gw, gh),
                     ) {
                         self.terrain_wire_gizmo.push((pa, pb));
+                    }
+                }
+            }
+            // Mesh collider wireframes. Every flagged Mesh node when the global toggle is
+            // on, plus the SELECTED mesh-collider node always (so you can verify it).
+            let mesh_colliders: Vec<(Entity, String)> = self
+                .world
+                .query::<floptle_core::MeshCollider>()
+                .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
+                    Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
+                    _ => None,
+                })
+                .collect();
+            for (e, path) in mesh_colliders {
+                if !self.show_mesh_colliders && !self.selection.contains(&e) {
+                    continue;
+                }
+                if !self.mesh_wire_cache.contains_key(&path) {
+                    let edges = floptle_assets::gltf_import::import(std::path::Path::new(&path))
+                        .map(|m| mesh_collider_wire_local(&m))
+                        .unwrap_or_default();
+                    self.mesh_wire_cache.insert(path.clone(), edges);
+                }
+                let edges = &self.mesh_wire_cache[&path];
+                let wt = floptle_core::world_transform(&self.world, e);
+                let m = Mat4::from_scale_rotation_translation(wt.scale, wt.rotation, wt.translation.as_vec3());
+                for &(a, b) in edges {
+                    let wa = m.transform_point3(a).as_dvec3();
+                    let wb = m.transform_point3(b).as_dvec3();
+                    if let (Some(pa), Some(pb)) = (
+                        project(wa, cam.world_position, view_proj, gw, gh),
+                        project(wb, cam.world_position, view_proj, gw, gh),
+                    ) {
+                        self.mesh_wire_gizmo.push((pa, pb));
                     }
                 }
             }
@@ -5388,6 +5488,7 @@ impl Editor {
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
         let show_terrain_collider = &mut self.show_terrain_collider;
+        let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
         let pending_open_scene = &mut self.pending_open_scene;
@@ -5434,6 +5535,8 @@ impl Editor {
         let body_gizmos = self.body_gizmos.as_slice();
         let contact_gizmos = self.contact_gizmos.as_slice();
         let terrain_wire = self.terrain_wire_gizmo.as_slice();
+        let mesh_wire = self.mesh_wire_gizmo.as_slice();
+        let show_gizmos = &mut self.show_gizmos;
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -5500,6 +5603,8 @@ impl Editor {
                         ui.checkbox(&mut *show_material_editor, "Material Editor");
                         ui.checkbox(&mut *show_terrain_collider, "Terrain collider wireframe")
                             .on_hover_text("show the terrain's collision surface (what the player walks on)");
+                        ui.checkbox(&mut *show_mesh_colliders, "Mesh collider wireframes")
+                            .on_hover_text("show every walkable mesh collider (the selected one always shows)");
                         if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
                             ui.close();
@@ -5574,6 +5679,8 @@ impl Editor {
                 body_gizmos,
                 contact_gizmos,
                 terrain_wire,
+                mesh_wire,
+                show_gizmos,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
