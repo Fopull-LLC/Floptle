@@ -36,7 +36,7 @@ pub use camera::{FlyCamera, Input};
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
-pub use mesh::{cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
+pub use mesh::{capsule, cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use outline::Outline;
 pub use post::{PostSettings, PostStack};
 pub use raster::{

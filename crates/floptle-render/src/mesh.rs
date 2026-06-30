@@ -158,9 +158,69 @@ pub fn uv_sphere(radius: f32, rings: u32, sectors: u32) -> MeshData {
     MeshData { vertices, indices }
 }
 
+/// A capsule (a cylinder of length `2·half_height` capped by two hemispheres of
+/// `radius`) standing along Y. Built like [`uv_sphere`] but split into a top + bottom
+/// hemisphere offset by `±half_height`, with the equator rings duplicated so the rows
+/// between them form the cylinder wall. Smooth (position-derived) normals.
+pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshData {
+    use std::f32::consts::{FRAC_PI_2, TAU};
+    let hr = rings.max(2); // rings per hemisphere
+    let sectors = sectors.max(3);
+    let half = half_height.max(0.0);
+    // (phi, y-offset) per ring row: top hemisphere then bottom hemisphere; the two
+    // equator rows (phi = π/2) sit at +half and −half, forming the cylinder.
+    let mut rows: Vec<(f32, f32)> = Vec::with_capacity((2 * hr + 2) as usize);
+    for i in 0..=hr {
+        rows.push((FRAC_PI_2 * i as f32 / hr as f32, half));
+    }
+    for i in 0..=hr {
+        rows.push((FRAC_PI_2 + FRAC_PI_2 * i as f32 / hr as f32, -half));
+    }
+    let nrows = rows.len() as u32;
+    let mut vertices = Vec::with_capacity((nrows * (sectors + 1)) as usize);
+    for (ri, &(phi, yoff)) in rows.iter().enumerate() {
+        let (sp, cp) = phi.sin_cos();
+        for j in 0..=sectors {
+            let theta = TAU * j as f32 / sectors as f32;
+            let (st, ct) = theta.sin_cos();
+            let n = [sp * ct, cp, sp * st];
+            vertices.push(Vertex {
+                pos: [n[0] * radius, n[1] * radius + yoff, n[2] * radius],
+                normal: n,
+                uv: [j as f32 / sectors as f32, ri as f32 / (nrows - 1) as f32],
+            });
+        }
+    }
+    let stride = sectors + 1;
+    let mut indices = Vec::with_capacity(((nrows - 1) * sectors * 6) as usize);
+    for i in 0..(nrows - 1) {
+        for j in 0..sectors {
+            let a = i * stride + j;
+            let b = a + stride;
+            indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+        }
+    }
+    MeshData { vertices, indices }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capsule_is_well_formed() {
+        let m = capsule(0.5, 0.6, 8, 12);
+        assert!(!m.vertices.is_empty() && m.indices.len() % 3 == 0);
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
+        // total half-height along Y is radius + half_height
+        let max_y = m.vertices.iter().fold(f32::MIN, |a, v| a.max(v.pos[1]));
+        assert!((max_y - (0.5 + 0.6)).abs() < 1e-5, "top y {max_y}");
+        // normals are unit length
+        for v in &m.vertices {
+            let l = (v.normal[0].powi(2) + v.normal[1].powi(2) + v.normal[2].powi(2)).sqrt();
+            assert!((l - 1.0).abs() < 1e-4);
+        }
+    }
 
     #[test]
     fn cube_is_well_formed() {
