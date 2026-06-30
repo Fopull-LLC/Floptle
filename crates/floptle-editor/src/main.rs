@@ -1220,6 +1220,7 @@ enum EditorTab {
     Assets,
     Console,
     Scene,
+    Game,
     Scripting,
 }
 
@@ -1231,17 +1232,30 @@ impl EditorTab {
             EditorTab::Terrain => "Δ Terrain",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
-            EditorTab::Scene => "Scene",
+            EditorTab::Scene => "⌖ Scene",
+            EditorTab::Game => "⏵ Game",
             EditorTab::Scripting => "Scripting",
         }
     }
+}
+
+/// True when the Game tab is the front (active) tab of its dock leaf — i.e. the game
+/// (active-camera) view should drive the full-window 3D render this frame. (When
+/// false the editor free-fly camera renders, for the Scene tab.)
+fn game_tab_active(dock: &egui_dock::DockState<EditorTab>) -> bool {
+    dock.main_surface()
+        .iter()
+        .any(|n| n.get_leaf().and_then(|l| l.tabs.get(l.active.0)) == Some(&EditorTab::Game))
 }
 
 /// The default layout: Hierarchy left, Inspector right, Assets bottom, with the
 /// Scene + Scripting tabs filling the center. Users can drag/re-dock freely.
 fn default_dock() -> egui_dock::DockState<EditorTab> {
     use egui_dock::{DockState, NodeIndex};
-    let mut dock = DockState::new(vec![EditorTab::Scene, EditorTab::Scripting]);
+    // Scene (editor view), Game (active-camera view), and Scripting share the central
+    // leaf — only the front tab renders, and which of Scene/Game is front picks the
+    // camera. Scene first so the editor view is the default on launch.
+    let mut dock = DockState::new(vec![EditorTab::Scene, EditorTab::Game, EditorTab::Scripting]);
     let surface = dock.main_surface_mut();
     let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
     // Inspector + Terrain tabs share the right dock (Inspector shown first).
@@ -1479,6 +1493,8 @@ struct EditorTabViewer<'a> {
     texture_settings: &'a HashMap<String, TexSetting>,
     /// The selected camera's live POV preview (if a camera is selected).
     cam_preview: Option<egui::TextureId>,
+    /// Whether any camera holds play-mode authority (for the Game tab's warning).
+    has_active_camera: bool,
     /// Terrain dock-tab state.
     terrain_brush: &'a mut TerrainBrush,
     terrain_detail: &'a mut u32,
@@ -1532,9 +1548,9 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
         false
     }
 
-    // The Scene tab is transparent so the 3D render shows through it.
+    // The Scene + Game tabs are transparent so the 3D render shows through them.
     fn clear_background(&self, tab: &EditorTab) -> bool {
-        !matches!(tab, EditorTab::Scene)
+        !matches!(tab, EditorTab::Scene | EditorTab::Game)
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut EditorTab) {
@@ -1544,7 +1560,9 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Terrain => self.terrain_ui(ui),
             EditorTab::Assets => self.assets_ui(ui),
             EditorTab::Console => self.console_ui(ui),
-            EditorTab::Scene => self.scene_ui(ui),
+            // Scene = editor free-fly view (tools/gizmos); Game = active-camera view.
+            EditorTab::Scene => self.scene_ui(ui, false),
+            EditorTab::Game => self.scene_ui(ui, true),
             EditorTab::Scripting => self.scripting_ui(ui),
         }
     }
@@ -2545,38 +2563,55 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    fn scene_ui(&mut self, ui: &mut egui::Ui) {
+    fn scene_ui(&mut self, ui: &mut egui::Ui, game: bool) {
         // This tab's rect IS the 3D viewport; cache it for picking / gizmo gating.
         let rect = ui.max_rect();
         *self.scene_rect = Some(rect);
 
-        // Overlay toolbar: tools (left) + resolution simulator (right).
-        egui::Area::new(egui::Id::new("scene_toolbar"))
-            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Sculpt] {
-                            if ui.selectable_label(self.tool == t, t.label()).clicked() {
-                                self.cmd.set_tool = Some(t);
-                            }
-                        }
-                        ui.separator();
-                        egui::ComboBox::from_id_salt("aspect_mode")
-                            .selected_text(self.aspect.label())
-                            .show_ui(ui, |ui| {
-                                for m in AspectMode::ALL {
-                                    if ui.selectable_label(*self.aspect == m, m.label()).clicked() {
-                                        *self.aspect = m;
-                                    }
-                                }
-                            });
-                        if self.aspect.ratio().is_some() {
-                            ui.add(egui::Slider::new(self.zoom, 0.4..=1.0).text("fit").show_value(false));
-                        }
+        // The Game tab is the active-camera gameplay view — no editor tools/gizmos.
+        // Warn if there's no active camera (the render falls back to the editor view).
+        if game && !self.has_active_camera {
+            egui::Area::new(egui::Id::new("game_no_cam"))
+                .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(235, 200, 90),
+                            "Δ no active camera — using editor view",
+                        );
                     });
                 });
-            });
+        }
+
+        // Overlay toolbar: tools (left) + resolution simulator (right). Editor view only.
+        if !game {
+            egui::Area::new(egui::Id::new("scene_toolbar"))
+                .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Sculpt] {
+                                if ui.selectable_label(self.tool == t, t.label()).clicked() {
+                                    self.cmd.set_tool = Some(t);
+                                }
+                            }
+                            ui.separator();
+                            egui::ComboBox::from_id_salt("aspect_mode")
+                                .selected_text(self.aspect.label())
+                                .show_ui(ui, |ui| {
+                                    for m in AspectMode::ALL {
+                                        if ui.selectable_label(*self.aspect == m, m.label()).clicked() {
+                                            *self.aspect = m;
+                                        }
+                                    }
+                                });
+                            if self.aspect.ratio().is_some() {
+                                ui.add(egui::Slider::new(self.zoom, 0.4..=1.0).text("fit").show_value(false));
+                            }
+                        });
+                    });
+                });
+        }
 
         // Resolution simulator: a centered device frame for the chosen aspect.
         if let Some(r) = self.aspect.ratio() {
@@ -2601,8 +2636,8 @@ impl<'a> EditorTabViewer<'a> {
             painter.rect_stroke(frame, 2.0, egui::Stroke::new(1.5, egui::Color32::from_gray(180)), egui::StrokeKind::Inside);
         }
 
-        // The gizmo paints on a layer above the scene, clipped to this tab.
-        if let Some(g) = self.gizmo {
+        // The gizmo paints on a layer above the scene, clipped to this tab (editor only).
+        if let Some(g) = self.gizmo.filter(|_| !game) {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
@@ -2612,7 +2647,7 @@ impl<'a> EditorTabViewer<'a> {
 
         // Terrain brush telegraph: a ring at the surface + a normal line, so you can
         // see exactly where (and on what facing) a stroke will land.
-        if let Some(viz) = self.terrain_viz {
+        if let Some(viz) = self.terrain_viz.filter(|_| !game) {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_brush")))
@@ -3759,9 +3794,6 @@ struct Editor {
     mat_name_buf: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
-    /// In play mode: render the GAME view (from the active camera) vs the editor's
-    /// free-fly scene view. Toggled from the Scene toolbar while playing.
-    game_view: bool,
     /// Paused (in play mode): the script clock freezes.
     paused: bool,
     /// Accumulated play-mode seconds (advances only while playing and not paused).
@@ -4367,12 +4399,13 @@ impl Editor {
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
-        // In GAME view, render from the active camera node; otherwise use the editor's
-        // free-fly camera (the scene view). Game view works whether or not we're playing
-        // — so you can frame/preview the active camera's shot without entering play.
+        // The Game dock tab being front = render from the active camera node; otherwise
+        // (Scene tab) use the editor's free-fly camera. Works whether or not we're
+        // playing, so you can frame the active camera's shot without entering play.
         // (Inlined — self methods can't be called while gpu/egui are borrowed.)
+        let game_view = self.dock_state.as_ref().is_some_and(game_tab_active);
         let cam = {
-            let active = if self.game_view {
+            let active = if game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
                     matches!(m, Matter::Camera { active: true, .. }).then_some(e)
                 })
@@ -4400,7 +4433,7 @@ impl Editor {
         // Camera frustum gizmos so cameras are visible/placeable (hidden in the game
         // view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
-        if !self.game_view {
+        if !game_view {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             let cams: Vec<(Entity, f32, bool)> = self
                 .world
@@ -4661,7 +4694,6 @@ impl Editor {
         let project_root = self.project_root.as_path();
         let playing = self.playing;
         let paused = self.paused;
-        let game_view = &mut self.game_view;
         let has_active_camera =
             world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Camera { active: true, .. }));
         // The selected camera's POV preview texture (only when a camera is selected).
@@ -4770,20 +4802,8 @@ impl Editor {
                             cmd.toggle_pause = true;
                         }
                     }
-                    ui.separator();
-                    // Differentiate the gameplay view (active camera) from the editor
-                    // scene view (free-fly camera). Available out of play too, so you can
-                    // preview what the active camera sees without entering play mode.
-                    ui.label("view:");
-                    if ui.selectable_label(*game_view, "⏵ Game").on_hover_text("render from the active camera").clicked() {
-                        *game_view = true;
-                    }
-                    if ui.selectable_label(!*game_view, "⌖ Editor").on_hover_text("free-fly editor camera").clicked() {
-                        *game_view = false;
-                    }
-                    if *game_view && !has_active_camera {
-                        ui.colored_label(egui::Color32::from_rgb(235, 200, 90), "Δ no active camera — using editor view");
-                    }
+                    // The view is now chosen by the Scene / Game dock tabs (the editor
+                    // free-fly view vs the active-camera gameplay view), not a toggle here.
                 });
             });
 
@@ -4814,6 +4834,7 @@ impl Editor {
                 asset_tree,
                 texture_settings,
                 cam_preview,
+                has_active_camera,
                 terrain_brush,
                 terrain_detail,
                 terrain_textures,
@@ -5710,9 +5731,13 @@ impl Editor {
             self.paused = false;
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
-            // Press Play → show the GAME view (from the active camera), so it's clear
-            // you're testing the game, not the editor scene view.
-            self.game_view = true;
+            // Press Play → bring the Game tab to the front (active-camera view), so it's
+            // clear you're testing the game, not the editor scene view.
+            if let Some(dock) = self.dock_state.as_mut() {
+                if let Some(path) = dock.find_tab(&EditorTab::Game) {
+                    let _ = dock.set_active_tab(path);
+                }
+            }
             self.playing = true;
         }
     }
