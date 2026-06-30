@@ -4552,12 +4552,15 @@ impl ApplicationHandler for Editor {
                 // Don't trigger shortcuts/tools (or fly the camera) while typing
                 // into a field. `typing` is read live each event.
                 let typing = self.egui.as_ref().is_some_and(|e| e.ctx.egui_wants_keyboard_input());
+                // The Game view plays like a build: no editor free-fly camera, no editor
+                // shortcuts — only raw key state is tracked (below) for the game's scripts.
+                let game_view = self.game_view();
                 if let PhysicalKey::Code(code) = event.physical_key {
                     // Held movement keys. The bit is `pressed && !typing && !ctrl`:
                     // a RELEASE (pressed == false) always clears it, so a key can
                     // never stick on if the release lands while a field is focused
                     // (e.g. hold W, click into the IDE, release W). C moves DOWN.
-                    let mv = pressed && !typing;
+                    let mv = pressed && !typing && !game_view;
                     match code {
                         KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
                         KeyCode::KeyS => self.input.back = mv && !self.ctrl,
@@ -4580,35 +4583,45 @@ impl ApplicationHandler for Editor {
                     }
                     // Discrete commands fire on press only.
                     if pressed && !typing {
-                        if self.ctrl {
-                            match code {
-                                KeyCode::KeyZ => self.undo(),
-                                KeyCode::KeyY => self.redo(),
-                                KeyCode::KeyC => self.copy_selected(),
-                                KeyCode::KeyV => self.paste(),
-                                KeyCode::KeyD => self.duplicate_selected(),
-                                KeyCode::KeyA => self.select_all(),
-                                KeyCode::KeyS => self.save_all(),
-                                _ => {}
-                            }
-                        } else {
-                            match code {
-                                KeyCode::Escape => event_loop.exit(),
-                                KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
-                                KeyCode::KeyF => self.focus_selected(),
-                                KeyCode::KeyQ => self.selection.clear(), // unselect
-                                KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
-                                KeyCode::ArrowUp => self.step_selection(-1),
-                                KeyCode::ArrowDown => self.step_selection(1),
-                                KeyCode::Enter | KeyCode::NumpadEnter => self.toggle_folder_selected(),
-                                KeyCode::F1 => self.toggle_play(),
-                                KeyCode::F2 => self.toggle_pause(),
-                                _ => {
-                                    if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
-                                        self.set_tool(t);
+                        // Engine controls work in any view (Play/Pause/Quit).
+                        match code {
+                            KeyCode::Escape => event_loop.exit(),
+                            KeyCode::F1 => self.toggle_play(),
+                            KeyCode::F2 => self.toggle_pause(),
+                            // Everything else is an EDITOR shortcut — suppressed in the
+                            // Game view so it behaves like a real build.
+                            _ if !game_view => {
+                                if self.ctrl {
+                                    match code {
+                                        KeyCode::KeyZ => self.undo(),
+                                        KeyCode::KeyY => self.redo(),
+                                        KeyCode::KeyC => self.copy_selected(),
+                                        KeyCode::KeyV => self.paste(),
+                                        KeyCode::KeyD => self.duplicate_selected(),
+                                        KeyCode::KeyA => self.select_all(),
+                                        KeyCode::KeyS => self.save_all(),
+                                        _ => {}
+                                    }
+                                } else {
+                                    match code {
+                                        KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+                                        KeyCode::KeyF => self.focus_selected(),
+                                        KeyCode::KeyQ => self.selection.clear(), // unselect
+                                        KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
+                                        KeyCode::ArrowUp => self.step_selection(-1),
+                                        KeyCode::ArrowDown => self.step_selection(1),
+                                        KeyCode::Enter | KeyCode::NumpadEnter => {
+                                            self.toggle_folder_selected()
+                                        }
+                                        _ => {
+                                            if let Some(t) = digit_of(code).and_then(Tool::from_digit) {
+                                                self.set_tool(t);
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -4619,7 +4632,10 @@ impl ApplicationHandler for Editor {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(0, pressed);
                 if pressed {
-                    let over_scene = self.cursor_over_scene();
+                    // In the Game view a left click is a GAME input only — never an editor
+                    // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
+                    // over the scene for editor purposes.
+                    let over_scene = self.cursor_over_scene() && !self.game_view();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
                     if over_scene && self.tool == Tool::Sculpt {
                         // Sculpt tool: start a brush stroke on the terrain (applied
@@ -4689,6 +4705,10 @@ impl ApplicationHandler for Editor {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(1, pressed);
                 let over_scene = self.cursor_over_scene();
+                // In the Game view, RMB still grabs the cursor for mouse-look (the game
+                // reads the button + raw delta), but it drives no EDITOR camera and opens
+                // no context menu.
+                let editor = !self.game_view();
                 if pressed {
                     // Begin a possible look; if the cursor barely moves before release
                     // it's a click ⏵ open a context menu instead.
@@ -4696,7 +4716,9 @@ impl ApplicationHandler for Editor {
                     self.rmb_moved = 0.0;
                     self.context_menu = None;
                     if over_scene {
-                        self.input.looking = true;
+                        if editor {
+                            self.input.looking = true;
+                        }
                         if let Some(window) = self.window.as_ref() {
                             let _ = window
                                 .set_cursor_grab(CursorGrabMode::Confined)
@@ -4712,8 +4734,8 @@ impl ApplicationHandler for Editor {
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
                         window.set_cursor_visible(true);
                     }
-                    // A click (negligible motion) over the viewport ⏵ context menu.
-                    if was_looking && self.rmb_moved < 6.0 {
+                    // A click (negligible motion) over the viewport ⏵ context menu (editor only).
+                    if editor && was_looking && self.rmb_moved < 6.0 {
                         if let Some(p) = self.rmb_press {
                             self.cursor = Some(p);
                             let ppp = self
@@ -7183,6 +7205,13 @@ impl Editor {
     fn cursor_over_scene(&self) -> bool {
         let Some(eg) = self.egui.as_ref() else { return false };
         scene_hit(&eg.ctx, self.cursor, self.scene_rect)
+    }
+
+    /// True when the Game tab is the focused viewport — it renders the active-camera
+    /// "as a build" view, so editor interactions (pick/select, sculpt, gizmos, editor
+    /// keybinds + free-fly camera) are suppressed there; only the game's own inputs run.
+    fn game_view(&self) -> bool {
+        self.dock_state.as_ref().is_some_and(game_tab_active)
     }
 
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
