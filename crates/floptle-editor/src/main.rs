@@ -194,6 +194,10 @@ struct EditorCmd {
     terrain_palette_changed: bool,
     /// Focus (or open) the Terrain dock tab.
     focus_terrain: bool,
+    /// Open this scene file (double-clicked in Assets) — prompts on unsaved changes.
+    open_scene: Option<String>,
+    /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
+    do_open_scene: Option<(String, bool)>,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
     /// Create a new blank scene with this name (from Assets ⏵ New ⏵ Scene).
@@ -319,6 +323,12 @@ fn is_markdown(path: &str) -> bool {
 fn is_material(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.ends_with(".ron") && p.replace('\\', "/").contains("materials/")
+}
+
+/// A scene file (`scenes/<name>.ron`).
+fn is_scene(path: &str) -> bool {
+    let p = path.to_ascii_lowercase().replace('\\', "/");
+    p.ends_with(".ron") && p.contains("scenes/")
 }
 
 /// Shorten `name` to at most `max` chars (…-elided), for fixed-width grid tiles.
@@ -2244,8 +2254,12 @@ impl<'a> EditorTabViewer<'a> {
             *self.selected_asset = Some(path.to_string());
         }
         let openable = is_script(path) || is_markdown(path);
-        if resp.double_clicked() && openable {
-            self.cmd.open_script_pref = Some(path.to_string());
+        if resp.double_clicked() {
+            if is_scene(path) {
+                self.cmd.open_scene = Some(path.to_string());
+            } else if openable {
+                self.cmd.open_script_pref = Some(path.to_string());
+            }
         }
         let dir = Path::new(path).parent().map(|p| p.to_path_buf());
         resp.context_menu(|ui| {
@@ -2381,8 +2395,12 @@ impl<'a> EditorTabViewer<'a> {
                         *self.selected_asset = Some(path.clone());
                     }
                     let openable = script || is_markdown(path);
-                    if resp.double_clicked() && openable {
-                        self.cmd.open_script_pref = Some(path.clone());
+                    if resp.double_clicked() {
+                        if is_scene(path) {
+                            self.cmd.open_scene = Some(path.clone());
+                        } else if openable {
+                            self.cmd.open_script_pref = Some(path.clone());
+                        }
                     }
                     resp.context_menu(|ui| {
                         if openable && ui.button("🖊 Open in Scripting tab").clicked() {
@@ -3521,6 +3539,11 @@ struct Editor {
     rename_target: Option<(String, String)>,
     /// New-scene name buffer (Some = the prompt is open).
     new_scene_buf: Option<String>,
+    /// The scene has unsaved edits (drives the "save before opening?" prompt).
+    scene_dirty: bool,
+    /// A scene the user asked to open while there were unsaved changes — the
+    /// confirm modal is shown until they Save / Discard / Cancel.
+    pending_open_scene: Option<String>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -4284,6 +4307,7 @@ impl Editor {
         let show_grid_settings = &mut self.show_grid_settings;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
+        let pending_open_scene = &mut self.pending_open_scene;
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
         let terrain_textures = &mut self.terrain_textures;
@@ -4672,6 +4696,38 @@ impl Editor {
                 }
             }
 
+            // ---- open-scene unsaved-changes confirm ----
+            if let Some(path) = pending_open_scene.clone() {
+                let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let mut keep = true;
+                egui::Window::new("Unsaved changes")
+                    .open(&mut keep)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(320.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!("Open scene \"{name}\"?"));
+                        ui.label("The current scene has unsaved changes.");
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Save & open").clicked() {
+                                cmd.do_open_scene = Some((path.clone(), true));
+                                *pending_open_scene = None;
+                            }
+                            if ui.button("Discard & open").clicked() {
+                                cmd.do_open_scene = Some((path.clone(), false));
+                                *pending_open_scene = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                *pending_open_scene = None;
+                            }
+                        });
+                    });
+                if !keep {
+                    *pending_open_scene = None;
+                }
+            }
+
             // (Terrain tools live in the dockable Terrain tab now; the gizmo paints
             // inside the Scene tab, clipped to its rect.)
         });
@@ -4938,6 +4994,21 @@ impl Editor {
         if cmd.focus_terrain {
             self.focus_terrain();
         }
+        if let Some(path) = cmd.open_scene {
+            // Opening a scene replaces the world — prompt first if there are unsaved
+            // edits, otherwise switch immediately.
+            if self.scene_dirty {
+                self.pending_open_scene = Some(path);
+            } else {
+                self.open_scene_file(&path);
+            }
+        }
+        if let Some((path, save_first)) = cmd.do_open_scene {
+            if save_first {
+                self.save_all();
+            }
+            self.open_scene_file(&path);
+        }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
         }
@@ -5117,6 +5188,7 @@ impl Editor {
         while self.history.undo.len() > self.history.max {
             self.history.undo.remove(0);
         }
+        self.scene_dirty = true; // any undo-able edit (scene or terrain) is unsaved
     }
     /// Record the current scene as an undo point (call BEFORE a discrete edit).
     fn record(&mut self) {
@@ -6210,8 +6282,50 @@ impl Editor {
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
+        self.scene_dirty = false;
         self.asset_tree = build_assets(&self.project_root);
         println!("  new scene: {}", path.display());
+    }
+
+    /// Open an existing scene `.ron` (double-clicked in Assets). Resets the world to
+    /// it, loads its terrain + meshes. The caller handles unsaved-changes prompting.
+    fn open_scene_file(&mut self, path: &str) {
+        let p = Path::new(path);
+        let doc = match floptle_scene::load(p) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  open scene failed: {e}");
+                return;
+            }
+        };
+        self.playing = false;
+        self.paused = false;
+        self.play_snapshot = None;
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.scene_name = Self::scene_name_of(p);
+        self.adopt_terrain();
+        self.register_scene_meshes();
+        self.selection.clear();
+        self.selected_asset = None;
+        self.history = History::default();
+        self.scene_dirty = false;
+        println!("  opened scene: {}", p.display());
+    }
+
+    /// Register the GPU meshes for every imported model the current scene references.
+    fn register_scene_meshes(&mut self) {
+        let mesh_paths: Vec<String> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(_, m)| match m {
+                Matter::Mesh { asset_path } => Some(asset_path.clone()),
+                _ => None,
+            })
+            .collect();
+        for p in mesh_paths {
+            self.import_model(&p);
+        }
     }
 
     // ---- project paths (everything resolves against `project_root`) ----
@@ -6472,6 +6586,7 @@ impl Editor {
     /// dirty script open in the IDE (so "the script you're editing" is saved too).
     fn save_all(&mut self) {
         self.save_scene();
+        self.scene_dirty = false;
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
             eprintln!("  save project failed: {e}");
         }
