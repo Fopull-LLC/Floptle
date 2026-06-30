@@ -404,6 +404,56 @@ pub struct PhysicsWorld {
     pub contacts: Vec<Contact>,
 }
 
+/// A raycast result: the world hit point, the surface normal there, and the distance
+/// the ray travelled.
+#[derive(Clone, Copy, Debug)]
+pub struct RayHit {
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub distance: f32,
+}
+
+/// Sphere-trace a ray against a set of colliders (SDF terrain, triangle mesh, analytic).
+/// Returns the first surface within `max_dist`, or None. The step is CAPPED so a mesh
+/// collider's unsigned distance (which flattens to a large sentinel past its search reach)
+/// can't make the ray overshoot — at the cost of marching in ≤1-unit steps far from any
+/// surface (fine for the short rays games actually cast: ground checks, line-of-sight,
+/// shots). Range is bounded by the iteration budget (~512 units).
+pub fn raycast_colliders(
+    colliders: &[Box<dyn CollisionShape>],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+) -> Option<RayHit> {
+    let rd = dir.try_normalize()?;
+    let mut t = 0.0f32;
+    for _ in 0..512 {
+        if t > max_dist {
+            return None;
+        }
+        let p = origin + rd * t;
+        let mut dmin = f32::MAX;
+        let mut hit = 0usize;
+        for (i, c) in colliders.iter().enumerate() {
+            let d = c.distance(p);
+            if d < dmin {
+                dmin = d;
+                hit = i;
+            }
+        }
+        if !dmin.is_finite() {
+            t += 1.0;
+            continue;
+        }
+        if dmin < 0.02 {
+            let n = colliders[hit].normal(p);
+            return Some(RayHit { point: p.into(), normal: n.into(), distance: t });
+        }
+        t += dmin.clamp(0.02, 1.0); // cap so an unsigned mesh distance can't overshoot
+    }
+    None
+}
+
 impl PhysicsWorld {
     pub fn new(gravity: GravityField) -> Self {
         Self { gravity, colliders: Vec::new(), bodies: Vec::new(), contacts: Vec::new() }
@@ -412,6 +462,12 @@ impl PhysicsWorld {
     pub fn add_collider(&mut self, shape: Box<dyn CollisionShape>) -> usize {
         self.colliders.push(shape);
         self.colliders.len() - 1
+    }
+
+    /// Cast a ray against every collider; the first surface hit within `max_dist`, else
+    /// None. See [`raycast_colliders`].
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        raycast_colliders(&self.colliders, origin, dir, max_dist)
     }
 
     pub fn add_body(&mut self, body: Body) -> usize {
@@ -661,6 +717,12 @@ impl Sim {
         }
     }
 
+    /// Cast a ray against the world's colliders (terrain + meshes). See
+    /// [`PhysicsWorld::raycast`].
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        self.world.raycast(origin, dir, max_dist)
+    }
+
     /// Advance by a (variable) real frame delta via a fixed-timestep accumulator, then
     /// write body positions back to the entities' local transform translations.
     /// (Physics bodies are treated as root nodes; parented dynamic bodies are later.)
@@ -804,6 +866,25 @@ mod tests {
         let body = w.bodies[b];
         assert!((body.pos.y - 0.5).abs() < 0.08, "rests on mesh floor, y={}", body.pos.y);
         assert!(body.grounded, "should be grounded on the mesh");
+    }
+
+    #[test]
+    fn raycast_hits_ground_and_mesh() {
+        // Ray straight down from above a ground plane → hits near y=0 with an up normal.
+        let mut w = PhysicsWorld::new(GravityField::default());
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let hit = w.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, -1.0, 0.0), 20.0).expect("hit ground");
+        assert!(hit.point[1].abs() < 0.1, "ground y={}", hit.point[1]);
+        assert!(hit.normal[1] > 0.9, "up normal");
+        assert!((hit.distance - 5.0).abs() < 0.1, "dist={}", hit.distance);
+        // A ray that points away from everything misses.
+        assert!(w.raycast(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 1.0, 0.0), 20.0).is_none());
+        // Against a triangle-mesh floor too.
+        let (v, i) = floor_quad(0.0, 6.0);
+        let mut wm = PhysicsWorld::new(GravityField::default());
+        wm.add_collider(Box::new(TriMeshCollider::new(&v, &i)));
+        let h2 = wm.raycast(Vec3::new(0.0, 4.0, 0.0), Vec3::new(0.0, -1.0, 0.0), 20.0).expect("hit mesh");
+        assert!(h2.point[1].abs() < 0.2, "mesh hit y={}", h2.point[1]);
     }
 
     #[test]

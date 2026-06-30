@@ -130,6 +130,9 @@ pub struct ScriptHost {
     /// Capsule heights scripts wrote this frame (entity index → height), drained and
     /// applied to the sim — for crouching.
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
+    /// editor lends the sim's colliders before running scripts and takes them back after.
+    colliders: Rc<RefCell<Vec<Box<dyn floptle_physics::CollisionShape>>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -280,6 +283,39 @@ impl ScriptHost {
             );
             let _ = lua.globals().set("input", t);
         }
+        // `raycast(ox,oy,oz, dx,dy,dz, max)` against the world's colliders (terrain +
+        // mesh): returns a hit table {x,y,z, nx,ny,nz, distance} or nil. Use it for ground
+        // checks, line-of-sight, shooting.
+        let colliders: Rc<RefCell<Vec<Box<dyn floptle_physics::CollisionShape>>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let cols = colliders.clone();
+            type Args = (f64, f64, f64, f64, f64, f64, f64);
+            if let Ok(f) = lua.create_function(move |lua, (ox, oy, oz, dx, dy, dz, max): Args| {
+                let hit = floptle_physics::raycast_colliders(
+                    &cols.borrow(),
+                    glam::Vec3::new(ox as f32, oy as f32, oz as f32),
+                    glam::Vec3::new(dx as f32, dy as f32, dz as f32),
+                    max as f32,
+                );
+                match hit {
+                    Some(h) => {
+                        let t = lua.create_table()?;
+                        t.set("x", h.point[0] as f64)?;
+                        t.set("y", h.point[1] as f64)?;
+                        t.set("z", h.point[2] as f64)?;
+                        t.set("nx", h.normal[0] as f64)?;
+                        t.set("ny", h.normal[1] as f64)?;
+                        t.set("nz", h.normal[2] as f64)?;
+                        t.set("distance", h.distance as f64)?;
+                        Ok(Value::Table(t))
+                    }
+                    None => Ok(Value::Nil),
+                }
+            }) {
+                let _ = lua.globals().set("raycast", f);
+            }
+        }
         Self {
             lua,
             sources: HashMap::new(),
@@ -290,7 +326,21 @@ impl ScriptHost {
             bodies: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
+            colliders,
         }
+    }
+
+    /// Lend the sim's colliders to the script host for one frame so `raycast(...)` can see
+    /// them (the editor takes them back with [`take_colliders`](Self::take_colliders)
+    /// before stepping physics). Call before [`run`](Self::run).
+    pub fn set_colliders(&self, cols: Vec<Box<dyn floptle_physics::CollisionShape>>) {
+        *self.colliders.borrow_mut() = cols;
+    }
+
+    /// Reclaim the colliders lent via [`set_colliders`](Self::set_colliders). Call after
+    /// [`run`](Self::run), before stepping the sim.
+    pub fn take_colliders(&self) -> Vec<Box<dyn floptle_physics::CollisionShape>> {
+        std::mem::take(&mut self.colliders.borrow_mut())
     }
 
     /// Set the player input for the frame's scripts (call before [`run`](Self::run)).
@@ -1005,6 +1055,31 @@ mod tests {
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         let (yaw, _, _) = world.get::<Transform>(e).unwrap().rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "params.speed default not applied; yaw {yaw}");
+    }
+
+    #[test]
+    fn script_can_raycast() {
+        let dir = std::env::temp_dir().join("floptle_script_test_raycast");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "caster",
+            "function update(node, dt)\n  local h = raycast(0, 5, 0, 0, -1, 0, 20)\n  if h then node.y = h.y end\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_colliders(vec![Box::new(floptle_physics::Plane::ground(0.0))]);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let _ = host.take_colliders();
+        let y = world.get::<Transform>(e).unwrap().translation.y;
+        assert!(y.abs() < 0.1, "raycast should have set y to the ground (≈0), got {y}");
     }
 
     #[test]

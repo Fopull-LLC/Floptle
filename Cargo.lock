@@ -1017,6 +1017,8 @@ version = "0.0.0"
 dependencies = [
  "floptle-core",
  "floptle-input",
+ "floptle-physics",
+ "glam",
  "mlua",
 ]
 
