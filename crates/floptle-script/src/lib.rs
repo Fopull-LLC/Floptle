@@ -127,6 +127,9 @@ pub struct ScriptHost {
     /// Velocities scripts wrote this frame (entity index → new velocity), drained by
     /// the editor and applied to the physics sim.
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
+    /// Capsule heights scripts wrote this frame (entity index → height), drained and
+    /// applied to the sim — for crouching.
+    body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -137,11 +140,14 @@ pub struct BodyState {
     /// controller script move along the surface and jump correctly on any world.
     pub up: [f32; 3],
     pub grounded: bool,
+    /// Current capsule standing height — a controller reads it and writes `node.height`
+    /// to crouch (the engine resizes the capsule, feet planted).
+    pub height: f32,
 }
 
 impl Default for BodyState {
     fn default() -> Self {
-        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false }
+        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false, height: 2.0 }
     }
 }
 
@@ -283,6 +289,7 @@ impl ScriptHost {
             input,
             bodies: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_height_changes: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -301,6 +308,12 @@ impl ScriptHost {
     /// apply back to the physics sim. Call after [`run`](Self::run).
     pub fn take_body_changes(&self) -> HashMap<u32, [f32; 3]> {
         std::mem::take(&mut *self.body_changes.borrow_mut())
+    }
+
+    /// Drain the capsule heights scripts wrote this frame (entity index → height), for
+    /// the editor to apply to the sim (crouch). Call after [`run`](Self::run).
+    pub fn take_body_height_changes(&self) -> HashMap<u32, f32> {
+        std::mem::take(&mut *self.body_height_changes.borrow_mut())
     }
 
     /// Errors raised by the most recent [`run`](Self::run) (one per failing script).
@@ -498,12 +511,14 @@ impl ScriptHost {
         if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
             f.call::<()>((node.clone(), dt as f64))?;
         }
-        // Read back the (possibly script-modified) velocity for a physics body.
-        if body.is_some() {
+        // Read back the (possibly script-modified) velocity + height for a physics body.
+        if let Some(b) = body {
             let vx: f64 = node.get("vx").unwrap_or(0.0);
             let vy: f64 = node.get("vy").unwrap_or(0.0);
             let vz: f64 = node.get("vz").unwrap_or(0.0);
             self.body_changes.borrow_mut().insert(eid, [vx as f32, vy as f32, vz as f32]);
+            let h: f64 = node.get("height").unwrap_or(b.height as f64);
+            self.body_height_changes.borrow_mut().insert(eid, h as f32);
         }
         apply_node(&node, tr, &pre)
     }
@@ -867,6 +882,7 @@ fn node_table(lua: &Lua, tr: &Transform, body: Option<BodyState>) -> mlua::Resul
         t.set("up_y", b.up[1] as f64)?;
         t.set("up_z", b.up[2] as f64)?;
         t.set("grounded", b.grounded)?;
+        t.set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
     }
     Ok(t)
 }
@@ -1053,7 +1069,10 @@ mod tests {
         }]));
         let mut host = ScriptHost::new();
         let mut bodies = HashMap::new();
-        bodies.insert(e.index(), BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true });
+        bodies.insert(
+            e.index(),
+            BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0 },
+        );
         host.set_bodies(bodies);
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
