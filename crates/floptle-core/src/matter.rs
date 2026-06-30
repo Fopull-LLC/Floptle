@@ -92,6 +92,19 @@ pub struct MeshCollider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collidable;
 
+/// Whether a node's geometry is drawn. A node with **no** `Visible` component renders
+/// normally (visible is the default); attaching `Visible(false)` hides its mesh/shape
+/// (it still has a transform, physics, and children). Scripts toggle it with
+/// `node.visible = true/false` to show/hide visuals on the fly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Visible(pub bool);
+
+impl Default for Visible {
+    fn default() -> Self {
+        Visible(true)
+    }
+}
+
 /// A scene's lighting, held on a single mandatory "Lighting" node every scene
 /// carries: a directional key light plus flat ambient. These are plain fields a
 /// script can read and write to drive game-time light changes; the renderer turns

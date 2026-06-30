@@ -253,6 +253,8 @@ struct EditorCmd {
     set_matter: Option<(Entity, Matter)>,
     /// Import (GPU-load) a model so a freshly-assigned/swapped mesh path renders.
     import_model: Option<String>,
+    /// Show / hide a node's geometry (the `Visible` component).
+    set_visible: Option<(Entity, bool)>,
     /// Copy a component's current values onto the editor clipboard.
     copy_component: Option<ComponentClip>,
     /// Paste the editor clipboard onto this entity (the held clip decides the kind).
@@ -1688,6 +1690,7 @@ Reference files under Assets/ in code, and swap a node's components at runtime.
   • assets.getContents(\"models\")      array of EVERY file under a folder (recursive)
   • node.model                        a Mesh node's model — assign to SWAP it live
   • node.material = \"Gold\"             apply a material preset (a name, or a .ron path)
+  • node.visible = false               hide / show the node's geometry (true to show)
 
     -- equip a different model on a key press
     if input.pressed(\"e\") then node.model = assets.getFile(\"models/gold.glb\") end
@@ -2561,6 +2564,24 @@ impl<'a> EditorTabViewer<'a> {
                         }
                     }
                 });
+                // Visibility (geometry nodes) — hide the node's visual without deleting it.
+                if matches!(
+                    world.get::<Matter>(e),
+                    Some(Matter::Mesh { .. } | Matter::Primitive { .. } | Matter::Blob { .. })
+                ) {
+                    ui.indent("visible_toggle", |ui| {
+                        let mut vis =
+                            world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+                        if ui
+                            .checkbox(&mut vis, "👁 visible")
+                            .on_hover_text("uncheck to hide this node's geometry (scripts: node.visible = true/false)")
+                            .changed()
+                        {
+                            cmd.set_visible = Some((e, vis));
+                            cmd.inspector_changed = true;
+                        }
+                    });
+                }
 
                 // ===== Transform (always present) =====
                 ui.separator();
@@ -4595,6 +4616,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.height", insert: "node.height", doc: "Capsule standing height — write a smaller value to crouch (the engine resizes it, feet planted)." },
     ApiEntry { label: "node.model", insert: "node.model", doc: "A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile(\"models/x.glb\"))." },
     ApiEntry { label: "node.material", insert: "node.material", doc: "Apply a material — assign a preset name (\"Gold\") or an assets.getFile(\"materials/X.ron\")." },
+    ApiEntry { label: "node.visible", insert: "node.visible", doc: "Whether the node's geometry is drawn — set node.visible = false to hide it (true to show)." },
     ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
     ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
     ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
@@ -6547,6 +6569,11 @@ impl Editor {
             }
         }
         for (e, matter) in &ents {
+            // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
+            // Inspector can toggle this); they still keep transforms, physics, children.
+            if matches!(self.world.get::<floptle_core::Visible>(*e), Some(floptle_core::Visible(false))) {
+                continue;
+            }
             // World transform (composes any parent chain) — a parent carries children.
             let t = floptle_core::world_transform(&self.world, *e);
             // A node's Material (if any) overrides the look; else fall back to the
@@ -7594,6 +7621,10 @@ impl Editor {
         if let Some(path) = cmd.import_model {
             self.import_model(&path);
         }
+        if let Some((e, vis)) = cmd.set_visible {
+            self.record();
+            self.world.insert(e, floptle_core::Visible(vis));
+        }
         if let Some(clip) = cmd.copy_component {
             self.component_clip = Some(clip);
         }
@@ -8209,6 +8240,7 @@ impl Editor {
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
+        let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         Some(NodeDoc {
             name,
             transform,
@@ -8218,6 +8250,7 @@ impl Editor {
             rigidbody,
             mesh_collider,
             collidable,
+            visible,
             parent: None,
         })
     }
@@ -8247,6 +8280,12 @@ impl Editor {
         if node.mesh_collider {
             self.world.insert(e, floptle_core::MeshCollider);
         }
+        if node.collidable {
+            self.world.insert(e, floptle_core::Collidable);
+        }
+        if !node.visible {
+            self.world.insert(e, floptle_core::Visible(false));
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -8266,6 +8305,7 @@ impl Editor {
             rigidbody: None,
             mesh_collider: false,
             collidable: false,
+            visible: true,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -8543,6 +8583,9 @@ impl Editor {
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         for (ent, matter) in &ents {
+            if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
+                continue;
+            }
             let t = floptle_core::world_transform(&self.world, *ent);
             let mat = self.world.get::<Material>(*ent).cloned();
             let tex = mat
@@ -8769,6 +8812,7 @@ impl Editor {
                 rigidbody: None,
                 mesh_collider: false,
                 collidable: false,
+                visible: true,
                 parent: None,
             };
             let e = self.spawn_node(&node);
@@ -10053,6 +10097,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         rigidbody: None,
         mesh_collider: false,
         collidable: false,
+        visible: true,
         parent: None,
     }
 }
@@ -10081,6 +10126,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 rigidbody: None,
                 mesh_collider: false,
                 collidable: false,
+                visible: true,
                 parent: None,
             },
             NodeDoc {
@@ -10092,6 +10138,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 rigidbody: None,
                 mesh_collider: false,
                 collidable: false,
+                visible: true,
                 parent: None,
             },
             NodeDoc {
@@ -10103,6 +10150,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 rigidbody: None,
                 mesh_collider: false,
                 collidable: false,
+                visible: true,
                 parent: None,
             },
             default_camera_node(),

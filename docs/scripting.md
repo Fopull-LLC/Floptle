@@ -200,6 +200,16 @@ node.material = "Gold"                              -- a preset by name
 node.material = assets.getFile("materials/Rusty.ron")
 ```
 
+### `node.visible` — show / hide geometry
+
+Toggle whether a node's mesh/shape is drawn (it keeps its transform, physics, and
+children — only the visual is hidden). Also a checkbox in the Inspector (👁 visible).
+
+```lua
+node.visible = false                       -- hide it
+if input.pressed("h") then node.visible = not node.visible end
+```
+
 > These work through the **node handle** too, so a manager script can re-skin any node it
 > reaches: `find("Player"):getchild("Body").model = assets.getFile("models/hurt.glb")`.
 
