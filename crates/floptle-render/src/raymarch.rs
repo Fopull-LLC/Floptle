@@ -44,6 +44,7 @@ pub struct Raymarch {
     globals_buf: wgpu::Buffer,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    tile_sampler: wgpu::Sampler,
     _dist_tex: wgpu::Texture,
     _color_tex: wgpu::Texture,
     terrain_tex: wgpu::Texture,
@@ -93,6 +94,14 @@ impl Raymarch {
                         view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // A REPEAT sampler for the terrain palette so triplanar textures tile
+                // (the volume sampler is ClampToEdge for the [0,1] 3D field).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -178,6 +187,17 @@ impl Raymarch {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // Repeating sampler for the triplanar terrain palette, so textures TILE
+        // across the surface instead of stretching once over the whole terrain.
+        let tile_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raymarch-terrain-tile"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         // A 1³ "empty" volume so the bindings are valid before a mesh is baked.
         let empty = BakedSdf {
@@ -191,6 +211,7 @@ impl Raymarch {
         let terrain_tex = make_terrain_array(gpu, &[]);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
+            &tile_sampler,
         );
 
         Self {
@@ -199,6 +220,7 @@ impl Raymarch {
             globals_buf,
             bind_layout,
             sampler,
+            tile_sampler,
             _dist_tex: dist_tex,
             _color_tex: color_tex,
             terrain_tex,
@@ -219,6 +241,7 @@ impl Raymarch {
             &self._color_tex,
             &self.sampler,
             &self.terrain_tex,
+            &self.tile_sampler,
         );
     }
 
@@ -234,6 +257,7 @@ impl Raymarch {
             &color_tex,
             &self.sampler,
             &self.terrain_tex,
+            &self.tile_sampler,
         );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
@@ -338,6 +362,7 @@ fn make_bind(
     color: &wgpu::Texture,
     sampler: &wgpu::Sampler,
     terrain: &wgpu::Texture,
+    tile_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -354,6 +379,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(tile_sampler) },
         ],
     })
 }
