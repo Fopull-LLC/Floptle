@@ -34,7 +34,7 @@ use std::time::SystemTime;
 
 use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Material, Matter, Scripts, World};
+use floptle_core::{Entity, Material, Matter, Scripts, Visible, World};
 use mlua::{Function, Lua, RegistryKey, Table, Value, Variadic};
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -145,6 +145,8 @@ pub struct ScriptHost {
     /// Material refs scripts assigned this frame (entity index → preset name / asset path),
     /// resolved against `materials` and applied to the ECS in `run`.
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
+    visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -170,6 +172,9 @@ struct SceneMirror {
     transforms: HashMap<u32, Transform>,
     /// Mesh nodes' current model path (so a script can read `node.model`).
     models: HashMap<u32, String>,
+    /// Nodes that carry an explicit `Visible` component (so a script can read
+    /// `node.visible`; absent = visible by default).
+    visible: HashMap<u32, bool>,
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
@@ -193,6 +198,8 @@ struct Shared {
     model_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.material = ...` writes (entity index → preset name / asset path).
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
+    visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -447,6 +454,7 @@ impl ScriptHost {
             envs: Rc::new(RefCell::new(HashMap::new())),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
+            visible_changes: Rc::new(RefCell::new(HashMap::new())),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -467,6 +475,7 @@ impl ScriptHost {
             envs: shared.envs.clone(),
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
+            visible_changes: shared.visible_changes.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
         }
@@ -638,8 +647,14 @@ impl ScriptHost {
                     }
                 }
             }
+            for (eid, shown) in self.visible_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    world.insert(ent, Visible(*shown));
+                }
+            }
         }
         self.material_changes.borrow_mut().clear();
+        self.visible_changes.borrow_mut().clear();
 
         // Drop environments whose (node, script) no longer exists.
         let stale: Vec<(u32, String)> =
@@ -664,6 +679,7 @@ impl ScriptHost {
         s.ents.clear();
         s.dirty.clear();
         s.models.clear();
+        s.visible.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -671,6 +687,9 @@ impl ScriptHost {
             s.transforms.insert(id, *tr);
             if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) {
                 s.models.insert(id, asset_path.clone());
+            }
+            if let Some(v) = world.get::<Visible>(e) {
+                s.visible.insert(id, v.0);
             }
             if let Some(n) = world.get::<floptle_core::Name>(e) {
                 s.names.insert(id, n.0.clone());
@@ -1379,6 +1398,11 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                         None => Value::Nil,
                     });
                 }
+                // Whether the node's geometry is drawn (true unless explicitly hidden).
+                "visible" => {
+                    let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
+                    return Ok(Value::Boolean(v));
+                }
                 _ => {}
             }
             // Physics body fields.
@@ -1434,6 +1458,7 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
         let body_height = shared.body_height_changes.clone();
         let model_changes = shared.model_changes.clone();
         let material_changes = shared.material_changes.clone();
+        let visible_changes = shared.visible_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // Transform writes.
@@ -1542,6 +1567,12 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
                 "material" => {
                     if let Value::String(s) = &val {
                         material_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                    }
+                    return Ok(());
+                }
+                "visible" => {
+                    if let Value::Boolean(b) = val {
+                        visible_changes.borrow_mut().insert(e, b);
                     }
                     return Ok(());
                 }
@@ -2196,6 +2227,30 @@ mod tests {
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         let mat = world.get::<Material>(e).expect("material applied");
         assert_eq!(mat.color, [1.0, 0.84, 0.0]);
+    }
+
+    #[test]
+    fn script_toggles_visibility() {
+        // node.visible reads true by default; assigning false attaches Visible(false).
+        let dir = std::env::temp_dir().join("floptle_script_test_visible");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hide",
+            "function update(node, dt)\n  if node.visible then node.visible = false end\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "hide".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Visible>(e).copied(), Some(Visible(false)));
     }
 
     #[test]

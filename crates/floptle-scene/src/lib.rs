@@ -48,6 +48,10 @@ pub struct NodeDoc {
     /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub collidable: bool,
+    /// Whether the node's geometry is drawn (default true). See [`floptle_core::Visible`].
+    /// Only the rare hidden node serializes this.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub visible: bool,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +87,10 @@ pub struct RigidBodyDoc {
 
 fn true_bool() -> bool {
     true
+}
+/// `skip_serializing_if` predicate: omit a bool that's at its `true` default.
+fn is_true(b: &bool) -> bool {
+    *b
 }
 fn half_f32() -> f32 {
     0.5
@@ -675,6 +683,10 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if node.collidable {
             world.insert(e, floptle_core::Collidable);
         }
+        // Visible is the default; only attach the component for an explicitly hidden node.
+        if !node.visible {
+            world.insert(e, floptle_core::Visible(false));
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -720,6 +732,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
+        let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -730,6 +743,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             rigidbody,
             mesh_collider,
             collidable,
+            visible,
             parent,
         });
     }
@@ -777,6 +791,7 @@ mod tests {
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     collidable: true,    // exercise the collidable round-trip
+                    visible: false,      // exercise the visible round-trip
                     parent: None,
                 },
                 NodeDoc {
@@ -788,6 +803,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    visible: true,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -799,6 +815,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    visible: true,
                     parent: None,
                 },
                 NodeDoc {
@@ -810,6 +827,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    visible: true,
                     parent: None,
                 },
             ],
@@ -852,6 +870,7 @@ mod tests {
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
+        assert!(!cube.visible, "visible flag lost in round-trip");
         assert!(!rb.gravity, "rigidbody gravity flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
