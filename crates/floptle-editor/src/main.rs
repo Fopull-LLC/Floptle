@@ -1332,9 +1332,21 @@ impl EditorTab {
 /// (active-camera) view should drive the full-window 3D render this frame. (When
 /// false the editor free-fly camera renders, for the Scene tab.)
 fn game_tab_active(dock: &egui_dock::DockState<EditorTab>) -> bool {
+    tab_is_front(dock, EditorTab::Game)
+}
+
+/// True when `tab` is the front (active) tab of some dock leaf — i.e. it's actually
+/// visible (egui_dock only runs the active tab's `ui` per leaf).
+fn tab_is_front(dock: &egui_dock::DockState<EditorTab>, tab: EditorTab) -> bool {
     dock.main_surface()
         .iter()
-        .any(|n| n.get_leaf().and_then(|l| l.tabs.get(l.active.0)) == Some(&EditorTab::Game))
+        .any(|n| n.get_leaf().and_then(|l| l.tabs.get(l.active.0)) == Some(&tab))
+}
+
+/// True when BOTH the Scene and Game tabs are visible at once (split into separate
+/// leaves), so they must render independent camera views rather than sharing one.
+fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bool {
+    tab_is_front(dock, EditorTab::Scene) && tab_is_front(dock, EditorTab::Game)
 }
 
 /// The default layout: Hierarchy left, Inspector right, Assets bottom, with the
@@ -1758,6 +1770,13 @@ struct EditorTabViewer<'a> {
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
+    /// The Game tab's rect (captured each frame it draws), so the editor can size the
+    /// Game viewport target to it on the next frame.
+    game_rect: &'a mut Option<egui::Rect>,
+    /// When true the Scene + Game tabs are split, so the Game tab paints its own offscreen
+    /// render (`game_tex`) instead of being transparent over the surface.
+    game_split: bool,
+    game_tex: Option<egui::TextureId>,
     aspect: &'a mut AspectMode,
     zoom: &'a mut f32,
     scene_name: &'a str,
@@ -3043,9 +3062,20 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     fn scene_ui(&mut self, ui: &mut egui::Ui, game: bool) {
-        // This tab's rect IS the 3D viewport; cache it for picking / gizmo gating.
+        // This tab's rect IS the 3D viewport. The Scene tab caches it for picking / gizmo
+        // gating; the Game tab caches its own rect (so the editor can size the offscreen
+        // Game target to it) and, when split, paints that offscreen render over itself.
         let rect = ui.max_rect();
-        *self.scene_rect = Some(rect);
+        if game {
+            *self.game_rect = Some(rect);
+            if self.game_split {
+                if let Some(tex) = self.game_tex {
+                    egui::Image::new((tex, rect.size())).paint_at(ui, rect);
+                }
+            }
+        } else {
+            *self.scene_rect = Some(rect);
+        }
 
         // The Game tab is the active-camera gameplay view — no editor tools/gizmos.
         // Warn if there's no active camera (the render falls back to the editor view).
@@ -4858,6 +4888,14 @@ struct Editor {
     preview: Option<PreviewTarget>,
     /// Offscreen 16:9 target for the Inspector's selected-camera POV preview.
     cam_preview: Option<PreviewTarget>,
+    /// Offscreen target for the Game viewport, used ONLY when the Scene and Game tabs are
+    /// both visible (split) so each renders an independent camera view. Sized to the Game
+    /// tab; `game_vp_dims` tracks its pixel size so it's only rebuilt on resize.
+    game_vp: Option<PreviewTarget>,
+    game_vp_dims: (u32, u32),
+    /// The Game tab's screen rect (points), captured each frame it draws, used to size
+    /// `game_vp` on the next frame.
+    game_rect: Option<egui::Rect>,
     /// Preview orbit angle (radians), whether it auto-spins, and the zoom (camera
     /// distance multiplier — smaller = closer).
     preview_spin: f32,
@@ -5501,13 +5539,25 @@ impl Editor {
         // from its viewpoint into the 16:9 offscreen target (before the destructure).
         let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
         self.update_camera_preview(cam_elapsed);
+        // When Scene + Game are split, render the Game view into its own offscreen target.
+        self.update_game_viewport(cam_elapsed);
         // Keep the Inspector's script param list in sync with each script's `defaults`
         // (cheap: cached by file mtime, selected node only) so editing a script surfaces
         // new tunables and drops removed ones live.
         self.sync_selected_script_params();
         // Whether the Game view is the focused tab (precomputed before the GPU borrow):
-        // game input only feeds scripts here, never in the Scene view.
-        let game_focused = self.game_view();
+        // game input only feeds scripts here, never in the Scene view. When Scene + Game
+        // are split (both visible), input goes to whichever viewport the mouse is over, so
+        // navigating the Scene tab doesn't also drive the game.
+        let split_now = self.fullscreen_tab.is_none()
+            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
+        let game_focused = if split_now {
+            self.egui
+                .as_ref()
+                .is_some_and(|e| scene_hit(&e.ctx, self.cursor, self.game_rect))
+        } else {
+            self.game_view()
+        };
 
         let (
             Some(gpu),
@@ -5538,7 +5588,11 @@ impl Editor {
         let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
-        self.camera.update(&self.input, dt);
+        // In split view, don't drive the editor (Scene) camera while the mouse is over the
+        // Game viewport — that input belongs to the game.
+        if !(split_now && game_focused) {
+            self.camera.update(&self.input, dt);
+        }
 
         // FPS in the window title (smoothed, refreshed a few times a second).
         if dt > 0.0 {
@@ -5668,12 +5722,17 @@ impl Editor {
         // (Scene tab) use the editor's free-fly camera. Works whether or not we're
         // playing, so you can frame the active camera's shot without entering play.
         // (Inlined — self methods can't be called while gpu/egui are borrowed.) A
-        // fullscreened tab overrides which view is front.
-        let game_view = match self.fullscreen_tab {
-            Some(EditorTab::Game) => true,
-            Some(_) => false,
-            None => self.dock_state.as_ref().is_some_and(game_tab_active),
-        };
+        // fullscreened tab overrides which view is front. When Scene + Game are split,
+        // the SURFACE renders the editor view (for the transparent Scene tab) while the
+        // Game tab shows its own offscreen render (update_game_viewport).
+        let split_views = self.fullscreen_tab.is_none()
+            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
+        let game_view = !split_views
+            && match self.fullscreen_tab {
+                Some(EditorTab::Game) => true,
+                Some(_) => false,
+                None => self.dock_state.as_ref().is_some_and(game_tab_active),
+            };
         let cam = {
             let active = if game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
@@ -6198,6 +6257,10 @@ impl Editor {
             .copied()
             .filter(|&e| matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })))
             .and(self.cam_preview.as_ref().map(|p| p.tex_id));
+        // Split view: the Game tab paints its own offscreen render this frame.
+        let game_split = fullscreen_tab.is_none() && scene_and_game_split(dock_state);
+        let game_tex = self.game_vp.as_ref().map(|p| p.tex_id);
+        let game_rect = &mut self.game_rect;
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
         let show_material_editor = &mut self.show_material_editor;
@@ -6366,6 +6429,9 @@ impl Editor {
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
+                game_rect,
+                game_split,
+                game_tex,
                 aspect: aspect_mode,
                 zoom: viewport_zoom,
                 scene_name: &scene_name,
@@ -7811,7 +7877,25 @@ impl Editor {
             wt.rotation,
             Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
         );
-        let aspect = 16.0 / 9.0;
+        self.ensure_cam_preview_target();
+        let Some((cv, dv)) =
+            self.cam_preview.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
+        else {
+            return;
+        };
+        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed);
+    }
+
+    /// Render the whole scene from `cam` (at `aspect`) into offscreen color+depth views —
+    /// the shared body behind the Inspector camera preview and the split-view Game render.
+    fn render_world_into(
+        &mut self,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        cam: &RenderCamera,
+        aspect: f32,
+        elapsed: f32,
+    ) {
         let view_proj = cam.view_proj(aspect);
 
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
@@ -7926,21 +8010,100 @@ impl Editor {
             None
         };
 
-        self.ensure_cam_preview_target();
-        if let (Some(gpu), Some(raster), Some(raymarch), Some(prev)) = (
-            self.gpu.as_ref(),
-            self.raster.as_mut(),
-            self.raymarch.as_mut(),
-            self.cam_preview.as_ref(),
-        ) {
+        if let (Some(gpu), Some(raster), Some(raymarch)) =
+            (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
+        {
             let raster_clear = if let Some(rm) = rm {
-                raymarch.draw_into(gpu, &prev.color_view, &prev.depth_view, rm);
+                raymarch.draw_into(gpu, color, depth, rm);
                 None
             } else {
                 Some(clear.map(|c| c as f64))
             };
-            raster.draw_scene(gpu, &prev.color_view, &prev.depth_view, globals, &instances, raster_clear);
+            raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
         }
+    }
+
+    /// Lazily (re)create the Game viewport's offscreen target at `w`×`h` pixels, freeing
+    /// the previous egui texture registration on resize.
+    fn ensure_game_vp(&mut self, w: u32, h: u32) {
+        let (w, h) = (w.max(16), h.max(16));
+        if self.game_vp.is_some() && self.game_vp_dims == (w, h) {
+            return;
+        }
+        let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
+        if let Some(old) = self.game_vp.take() {
+            egui.renderer.free_texture(&old.tex_id);
+        }
+        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let color = make(
+            gpu.surface_format(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "game-vp-color",
+        );
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "game-vp-depth");
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let tex_id =
+            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
+        self.game_vp = Some(PreviewTarget { color_view, depth_view, tex_id });
+        self.game_vp_dims = (w, h);
+    }
+
+    /// When the Scene and Game tabs are both visible (split), render the active-camera
+    /// "game" view into its own offscreen target so the two viewports show independent
+    /// views instead of the same surface render. (In single-view, the surface path draws
+    /// whichever one view is shown — this is skipped.)
+    fn update_game_viewport(&mut self, elapsed: f32) {
+        let split = self.fullscreen_tab.is_none()
+            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
+        if !split {
+            return;
+        }
+        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
+        let (w, h) = match self.game_rect {
+            Some(r) => ((r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32),
+            None => (640, 360),
+        };
+        self.ensure_game_vp(w, h);
+        // The active gameplay camera, or the editor camera if the scene has none.
+        let cam = {
+            let active = self.world.query::<Matter>().find_map(|(e, m)| {
+                matches!(m, Matter::Camera { active: true, .. }).then_some(e)
+            });
+            match active {
+                Some(e) => {
+                    let fov_y = match self.world.get::<Matter>(e) {
+                        Some(Matter::Camera { fov_y, .. }) => *fov_y,
+                        _ => 60f32.to_radians(),
+                    };
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    RenderCamera::new(
+                        wt.translation,
+                        wt.rotation,
+                        Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+                    )
+                }
+                None => self.camera.render_camera(),
+            }
+        };
+        let aspect = w.max(1) as f32 / h.max(1) as f32;
+        let Some((cv, dv)) =
+            self.game_vp.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
+        else {
+            return;
+        };
+        self.render_world_into(&cv, &dv, &cam, aspect, elapsed);
     }
 
     /// What the Inspector should draw for the current selection's preview.
