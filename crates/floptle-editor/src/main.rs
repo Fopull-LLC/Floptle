@@ -194,6 +194,8 @@ struct EditorCmd {
     terrain_palette_changed: bool,
     /// Focus (or open) the Terrain dock tab.
     focus_terrain: bool,
+    /// Fill the whole target terrain with a color or texture slot.
+    fill_terrain: Option<TerrainFill>,
     /// Open this scene file (double-clicked in Assets) — prompts on unsaved changes.
     open_scene: Option<String>,
     /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
@@ -2077,6 +2079,14 @@ impl<'a> EditorTabViewer<'a> {
                 ui.label("paint:");
                 ui.selectable_value(&mut terrain_brush.tex_slot, -1, "Color");
             });
+            // Fill the whole terrain with the current paint target.
+            if terrain_brush.tex_slot < 0 {
+                if ui.button("▣ Fill terrain with this color").on_hover_text("fills the active terrain (or selected terrain node)").clicked() {
+                    cmd.fill_terrain = Some(TerrainFill::Color(terrain_brush.color));
+                }
+            } else if ui.button("▣ Fill terrain with this texture").clicked() {
+                cmd.fill_terrain = Some(TerrainFill::Texture(terrain_brush.tex_slot as u8 + 1));
+            }
             if terrain_brush.tex_slot < 0 {
                 ui.horizontal(|ui| {
                     ui.label("color");
@@ -3355,6 +3365,14 @@ struct TerrainBrush {
     color: [f32; 3],
     /// Paint target: -1 = flat color, else a terrain texture palette slot.
     tex_slot: i32,
+}
+
+/// A "fill the whole terrain" request from the Terrain tab.
+#[derive(Clone, Copy)]
+enum TerrainFill {
+    Color([f32; 3]),
+    /// A palette slot stored as slot+1 (0 = untextured).
+    Texture(u8),
 }
 
 impl Default for TerrainBrush {
@@ -5019,6 +5037,25 @@ impl Editor {
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
         }
+        if let Some(fill) = cmd.fill_terrain {
+            if let Some(e) = self.target_terrain() {
+                // Snapshot for undo (one step), then fill the whole field.
+                let id = match self.world.get::<Matter>(e) {
+                    Some(Matter::Terrain { id }) => *id,
+                    _ => 0,
+                };
+                if let Some(t) = self.terrains.get(&e) {
+                    self.push_history(Snapshot::Terrain(id, t.to_bytes()));
+                }
+                if let Some(t) = self.terrains.get_mut(&e) {
+                    match fill {
+                        TerrainFill::Color(c) => t.fill_color(c),
+                        TerrainFill::Texture(slot) => t.fill_texture(slot),
+                    }
+                    self.combined_dirty = true;
+                }
+            }
+        }
         if cmd.focus_terrain {
             self.focus_terrain();
         }
@@ -6185,6 +6222,25 @@ impl Editor {
     /// The world translation of a terrain node (places its field in world space).
     fn terrain_world_origin(&self, e: Entity) -> DVec3 {
         floptle_core::world_transform(&self.world, e).translation
+    }
+
+    /// Which terrain a whole-terrain op (Fill) targets: the selected terrain node, or
+    /// the one last sculpted, or — if there's exactly one — that terrain.
+    fn target_terrain(&self) -> Option<Entity> {
+        if let Some(&e) = self.selection.last() {
+            if self.terrains.contains_key(&e) {
+                return Some(e);
+            }
+        }
+        if let Some(e) = self.active_terrain {
+            if self.terrains.contains_key(&e) {
+                return Some(e);
+            }
+        }
+        if self.terrains.len() == 1 {
+            return self.terrains.keys().next().copied();
+        }
+        None
     }
 
     /// Fold every terrain field (each at its node's world translation) into one
