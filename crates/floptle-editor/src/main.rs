@@ -149,6 +149,65 @@ fn handle_for_axis(i: usize) -> Handle {
     [Handle::AxisX, Handle::AxisY, Handle::AxisZ][i]
 }
 
+/// A copied component's values, held on the editor clipboard so they can be pasted
+/// onto another component of the same kind (Inspector ⎘ copy / 📋 paste).
+#[derive(Clone)]
+enum ComponentClip {
+    Transform(Transform),
+    /// The node's "type" component (geometry / camera / light / …).
+    Matter(Matter),
+    Material(Box<Material>),
+    RigidBody(floptle_core::RigidBody),
+    /// A single attached script (its kind, enabled flag, and tuned params).
+    Script(floptle_core::ScriptInst),
+}
+
+impl ComponentClip {
+    /// A short human label for the clipboard's current contents.
+    fn label(&self) -> String {
+        match self {
+            ComponentClip::Transform(_) => "Transform".into(),
+            ComponentClip::Matter(_) => "Type".into(),
+            ComponentClip::Material(_) => "Material".into(),
+            ComponentClip::RigidBody(_) => "Rigidbody".into(),
+            ComponentClip::Script(s) => format!("Script: {}", s.kind),
+        }
+    }
+}
+
+/// A component section header row: bold title on the left, right-aligned action
+/// buttons (copy ⎘ always; paste 📋 when `can_paste`; remove 🗑 when `can_remove`).
+/// Returns `(copy, paste, remove)` — which button was clicked this frame.
+fn component_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    can_paste: bool,
+    can_remove: bool,
+) -> (bool, bool, bool) {
+    let mut copy = false;
+    let mut paste = false;
+    let mut remove = false;
+    ui.horizontal(|ui| {
+        ui.strong(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if can_remove
+                && ui.small_button("🗑").on_hover_text("remove this component").clicked()
+            {
+                remove = true;
+            }
+            if can_paste
+                && ui.small_button("📋").on_hover_text("paste copied values").clicked()
+            {
+                paste = true;
+            }
+            if ui.small_button("⎘").on_hover_text("copy this component's values").clicked() {
+                copy = true;
+            }
+        });
+    });
+    (copy, paste, remove)
+}
+
 /// Deferred editor commands raised by the UI inside `run_ui`, applied after the
 /// frame (so they can call `&mut self` methods the UI closure can't reach).
 #[derive(Default)]
@@ -183,6 +242,13 @@ struct EditorCmd {
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
     set_collidable: Option<(Entity, bool)>,
+    /// Change a node's "type" (its `Matter`) — geometry/camera/light/… are mutually
+    /// exclusive, so picking one in "Add Component" replaces the current type.
+    set_matter: Option<(Entity, Matter)>,
+    /// Copy a component's current values onto the editor clipboard.
+    copy_component: Option<ComponentClip>,
+    /// Paste the editor clipboard onto this entity (the held clip decides the kind).
+    paste_component: Option<Entity>,
     /// Remove an entity's Material component (back to the default look).
     remove_material: Option<Entity>,
     /// Apply a named material preset to an entity.
@@ -955,7 +1021,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
         MatterDoc::Blob { .. } => "Blob",
         MatterDoc::Mesh { .. } => "Mesh",
-        MatterDoc::Empty => "Group",
+        MatterDoc::Empty => "Empty",
         MatterDoc::Terrain { .. } => "Terrain",
         MatterDoc::Camera { .. } => "Camera",
         MatterDoc::PointLight { .. } => "Point Light",
@@ -968,6 +1034,58 @@ fn new_sphere() -> MatterDoc {
 }
 fn new_capsule() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Capsule, color: [0.5, 0.85, 0.6] }
+}
+
+/// A short human label for a node's runtime `Matter` "type".
+fn matter_kind_label(m: &Matter) -> &'static str {
+    match m {
+        Matter::Primitive { shape: Shape::Cube, .. } => "Cube",
+        Matter::Primitive { shape: Shape::Sphere, .. } => "Sphere",
+        Matter::Primitive { shape: Shape::Capsule, .. } => "Capsule",
+        Matter::Blob { .. } => "Blob",
+        Matter::Mesh { .. } => "Mesh",
+        Matter::Empty => "Empty",
+        Matter::Terrain { .. } => "Terrain",
+        Matter::Camera { .. } => "Camera",
+        Matter::PointLight { .. } => "Point Light",
+        Matter::GravityVolume { .. } => "Gravity Volume",
+        Matter::Skybox { .. } => "Skybox",
+    }
+}
+
+/// The little glyph shown beside a node's type in the Inspector header.
+fn matter_icon(m: &Matter) -> &'static str {
+    match m {
+        Matter::Primitive { shape: Shape::Cube, .. } => "■",
+        Matter::Primitive { shape: Shape::Sphere, .. } => "○",
+        Matter::Primitive { shape: Shape::Capsule, .. } => "⬭",
+        Matter::Blob { .. } => "◑",
+        Matter::Mesh { .. } => "✦",
+        Matter::Empty => "🗀",
+        Matter::Terrain { .. } => "Δ",
+        Matter::Camera { .. } => "⌖",
+        Matter::PointLight { .. } => "●",
+        Matter::GravityVolume { .. } => "⬇",
+        Matter::Skybox { .. } => "◐",
+    }
+}
+
+/// The set of node "types" the Inspector's Add Component menu can switch a node to
+/// (icon-labeled). Mutually exclusive — picking one replaces the node's current
+/// `Matter`. Terrain (a special SDF field) and Mesh (needs an asset) are omitted.
+fn type_catalog() -> Vec<(&'static str, Matter)> {
+    use floptle_core::GravityMode;
+    vec![
+        ("■  Cube", Matter::Primitive { shape: Shape::Cube, color: [0.8, 0.5, 0.4] }),
+        ("○  Sphere", Matter::Primitive { shape: Shape::Sphere, color: [0.4, 0.6, 0.9] }),
+        ("⬭  Capsule", Matter::Primitive { shape: Shape::Capsule, color: [0.5, 0.85, 0.6] }),
+        ("◑  Blob", Matter::Blob { scale: 1.0 }),
+        ("🗀  Empty", Matter::Empty),
+        ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),
+        ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
+        ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
+        ("◐  Skybox", Matter::default_skybox()),
+    ]
 }
 
 /// Map a top-row number key to its digit (1-9), else `None`.
@@ -1767,6 +1885,10 @@ struct EditorTabViewer<'a> {
     entity_names: &'a [(Entity, String)],
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
+    /// The component clipboard (read-only here; copy/paste route through `cmd`).
+    component_clip: &'a Option<ComponentClip>,
+    /// Search text for the Inspector's "➕ Add Component" menu.
+    add_component_filter: &'a mut String,
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
@@ -1941,7 +2063,11 @@ impl<'a> EditorTabViewer<'a> {
             pick = Some(MatterDoc::Blob { scale: 1.0 });
             ui.close();
         }
-        if ui.button("🗀 Folder").on_hover_text("an empty group to organize / parent nodes").clicked() {
+        if ui
+            .button("🗀 Empty")
+            .on_hover_text("a blank node — just a transform. Build it up with the Inspector's ➕ Add Component (also groups / parents children).")
+            .clicked()
+        {
             pick = Some(MatterDoc::Empty);
             ui.close();
         }
@@ -2175,6 +2301,30 @@ impl<'a> EditorTabViewer<'a> {
                         cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
                     });
                 }
+                // The component clipboard (read-only); copy/paste route through `cmd`.
+                let clip = self.component_clip.as_ref();
+
+                // ===== Type — the node's primary kind (mutually exclusive). =====
+                {
+                    let (icon, label, is_terrain) = match world.get::<Matter>(e) {
+                        Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
+                        None => ("◈", "Type", false),
+                    };
+                    let (copy, paste, _) = component_header(
+                        ui,
+                        &format!("{icon} {label}"),
+                        !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
+                        false,
+                    );
+                    if copy && !is_terrain {
+                        if let Some(m) = world.get::<Matter>(e) {
+                            cmd.copy_component = Some(ComponentClip::Matter(m.clone()));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                }
                 if let Some(m) = world.get_mut::<Matter>(e) {
                     match m {
                         Matter::Primitive { shape, color } => {
@@ -2342,12 +2492,79 @@ impl<'a> EditorTabViewer<'a> {
                     }
                 }
 
-                // ---- Material (surface look) ----
+                // ===== Transform (always present) =====
                 ui.separator();
-                let has_mat = world.get::<Material>(e).is_some();
-                let mut tex_list = Vec::new();
-                collect_texture_paths(self.asset_tree, &mut tex_list);
-                egui::CollapsingHeader::new("◑ Material").default_open(has_mat).show(ui, |ui| {
+                {
+                    let (copy, paste, _) = component_header(
+                        ui,
+                        "✛ Transform",
+                        matches!(clip, Some(ComponentClip::Transform(_))),
+                        false,
+                    );
+                    if copy {
+                        if let Some(t) = world.get::<Transform>(e) {
+                            cmd.copy_component = Some(ComponentClip::Transform(*t));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                }
+                if let Some(t) = world.get_mut::<Transform>(e) {
+                    ui.label("translation");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
+                    });
+                    ui.label("rotation (deg)");
+                    let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                    let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                    let mut rot_changed = false;
+                    ui.horizontal(|ui| {
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                    });
+                    if rot_changed {
+                        t.rotation = Quat::from_euler(
+                            EulerRot::YXZ,
+                            deg[0].to_radians(),
+                            deg[1].to_radians(),
+                            deg[2].to_radians(),
+                        );
+                        cmd.inspector_changed = true;
+                    }
+                    ui.label("scale");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                    });
+                }
+
+                // ===== Material (only when the node has one) =====
+                if world.get::<Material>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "◑ Material",
+                        matches!(clip, Some(ComponentClip::Material(_))),
+                        true,
+                    );
+                    if copy {
+                        if let Some(mat) = world.get::<Material>(e) {
+                            cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_material = Some(e);
+                    }
+                    let mut tex_list = Vec::new();
+                    collect_texture_paths(self.asset_tree, &mut tex_list);
                     if let Some(mat) = world.get_mut::<Material>(e) {
                         let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
                         cmd.inspector_changed |= res.changed;
@@ -2361,29 +2578,29 @@ impl<'a> EditorTabViewer<'a> {
                         if ui.button("⛶ Open in Material Editor").clicked() {
                             *self.show_material_editor = true;
                         }
-                    } else {
-                        ui.small("Default look. Add a material to customize emissive, specular, rim, unlit shading…");
-                        ui.horizontal(|ui| {
-                            if ui.button("✚ Add material").clicked() {
-                                cmd.add_material = Some(e);
-                            }
-                            if !self.materials.is_empty() {
-                                ui.menu_button("Apply preset", |ui| {
-                                    for (name, _) in self.materials {
-                                        if ui.button(name).clicked() {
-                                            cmd.apply_preset = Some((e, name.clone()));
-                                            ui.close();
-                                        }
-                                    }
-                                });
-                            }
-                        });
                     }
-                });
+                }
 
-                // ---- Physics (Rigidbody) ----
-                let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
-                egui::CollapsingHeader::new("◆ Rigidbody").default_open(has_rb).show(ui, |ui| {
+                // ===== Rigidbody (only when the node has one) =====
+                if world.get::<floptle_core::RigidBody>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "◆ Rigidbody",
+                        matches!(clip, Some(ComponentClip::RigidBody(_))),
+                        true,
+                    );
+                    if copy {
+                        if let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
+                            cmd.copy_component = Some(ComponentClip::RigidBody(*rb));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_rigidbody = Some(e);
+                    }
                     if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
                         use floptle_core::BodyKind;
                         ui.horizontal(|ui| {
@@ -2440,103 +2657,83 @@ impl<'a> EditorTabViewer<'a> {
                                 cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
                             }
                         });
-                        if ui.button("🗑 Remove rigidbody").clicked() {
-                            cmd.remove_rigidbody = Some(e);
-                        }
-                    } else {
-                        ui.small("A dynamic physics body — falls under gravity and collides with the terrain on Play.");
-                        if ui.button("✚ Add rigidbody").clicked() {
-                            cmd.add_rigidbody = Some(e);
-                        }
                     }
-                });
+                }
 
-                // ---- Collidable (static collider, no rigidbody needed) ----
-                // The "collidable" switch: auto-shapes a static collider from the node's
-                // geometry (Cube → box, Sphere → sphere, Capsule → capsule, Mesh → its
-                // triangles). A primitive is collidable WITHOUT a dynamic rigidbody, just
-                // like a mesh — resize it by scaling the node.
-                let collidable_kind = match world.get::<Matter>(e) {
-                    Some(Matter::Mesh { .. }) => Some("triangle mesh"),
-                    Some(Matter::Primitive { shape, .. }) => Some(match shape {
-                        floptle_core::Shape::Cube => "box",
-                        floptle_core::Shape::Sphere => "sphere",
-                        floptle_core::Shape::Capsule => "capsule",
-                    }),
-                    _ => None,
-                };
-                if let Some(kind) = collidable_kind {
-                    // A legacy mesh-collider counts as collidable (old scenes load fine).
-                    let mut on = world.get::<floptle_core::Collidable>(e).is_some()
+                // ===== Collider (static collision; only when the node has one) =====
+                // Auto-shaped from the node's geometry (Cube → box, Sphere → sphere,
+                // Capsule → capsule, Mesh → its triangles). A legacy MeshCollider counts.
+                {
+                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
                         || world.get::<floptle_core::MeshCollider>(e).is_some();
-                    if ui
-                        .checkbox(&mut on, "▦ Collidable")
-                        .on_hover_text(format!(
-                            "static collision auto-built from this node's geometry (a {kind}) on Play — walk on it / bump into it. No rigidbody needed; scale the node to resize the collider."
-                        ))
-                        .changed()
-                    {
-                        cmd.set_collidable = Some((e, on));
-                        cmd.inspector_changed = true;
+                    if has_collidable {
+                        let kind = match world.get::<Matter>(e) {
+                            Some(Matter::Mesh { .. }) => "triangle mesh",
+                            Some(Matter::Primitive { shape, .. }) => match shape {
+                                floptle_core::Shape::Cube => "box",
+                                floptle_core::Shape::Sphere => "sphere",
+                                floptle_core::Shape::Capsule => "capsule",
+                            },
+                            _ => "mesh",
+                        };
+                        ui.separator();
+                        let (_, _, remove) = component_header(ui, "▦ Collider", false, true);
+                        ui.small(format!(
+                            "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
+                        ));
+                        if remove {
+                            cmd.set_collidable = Some((e, false));
+                            cmd.inspector_changed = true;
+                        }
                     }
                 }
 
-                if let Some(t) = world.get_mut::<Transform>(e) {
-                    ui.label("translation");
-                    ui.horizontal(|ui| {
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
-                    });
-                    ui.label("rotation (deg)");
-                    let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
-                    let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
-                    let mut rot_changed = false;
-                    ui.horizontal(|ui| {
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
-                        rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
-                    });
-                    if rot_changed {
-                        t.rotation = Quat::from_euler(
-                            EulerRot::YXZ,
-                            deg[0].to_radians(),
-                            deg[1].to_radians(),
-                            deg[2].to_radians(),
-                        );
-                        cmd.inspector_changed = true;
-                    }
-                    ui.label("scale");
-                    ui.horizontal(|ui| {
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
-                    });
-                }
-                // ---- Scripting ----
+                // ===== Scripts =====
                 ui.separator();
-                egui::CollapsingHeader::new("Scripting")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        // A clear drop target: drag a script here to attach it.
-                        let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
-                            egui::Frame::group(ui.style()),
-                            |ui| {
-                                ui.set_min_height(20.0);
-                                ui.small("⏷  drop a script here to attach");
-                            },
-                        );
-                        if let Some(p) = dropped {
-                            if is_script(&p.path) {
-                                cmd.drop_script_on = Some((p.path.clone(), e));
-                            }
+                // Always-available drop target: drag a script here to attach it.
+                {
+                    let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
+                        egui::Frame::group(ui.style()),
+                        |ui| {
+                            ui.set_min_height(18.0);
+                            ui.small("⚙  drop a script here to attach (or use ➕ Add Component)");
+                        },
+                    );
+                    if let Some(p) = dropped {
+                        if is_script(&p.path) {
+                            cmd.drop_script_on = Some((p.path.clone(), e));
                         }
-                        let mut remove: Option<usize> = None;
-                        if let Some(scr) = world.get_mut::<Scripts>(e) {
-                            for (i, inst) in scr.0.iter_mut().enumerate() {
-                                ui.horizontal(|ui| {
-                                    cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
-                                    ui.strong(&inst.kind);
+                    }
+                }
+                if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
+                    ui.horizontal(|ui| {
+                        ui.strong("⚙ Scripts");
+                        if matches!(clip, Some(ComponentClip::Script(_))) {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .small_button("📋")
+                                    .on_hover_text("paste copied script (adds it, or updates a matching one)")
+                                    .clicked()
+                                {
+                                    cmd.paste_component = Some(e);
+                                }
+                            });
+                        }
+                    });
+                    let mut remove: Option<usize> = None;
+                    let mut copy_idx: Option<usize> = None;
+                    if let Some(scr) = world.get_mut::<Scripts>(e) {
+                        for (i, inst) in scr.0.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
+                                ui.strong(&inst.kind);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("🗑").on_hover_text("remove").clicked() {
+                                        remove = Some(i);
+                                    }
+                                    if ui.small_button("⎘").on_hover_text("copy this script's values").clicked() {
+                                        copy_idx = Some(i);
+                                    }
                                     if ui.small_button("🖊").on_hover_text("edit script").clicked() {
                                         let p = self
                                             .project_root
@@ -2544,40 +2741,156 @@ impl<'a> EditorTabViewer<'a> {
                                             .join(format!("{}.lua", inst.kind));
                                         cmd.open_script_pref = Some(p.to_string_lossy().to_string());
                                     }
-                                    if ui.small_button("×").on_hover_text("remove").clicked() {
-                                        remove = Some(i);
-                                    }
                                 });
-                                for (k, v) in inst.params.iter_mut() {
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
-                                        .changed();
-                                }
-                                ui.add_space(4.0);
+                            });
+                            for (k, v) in inst.params.iter_mut() {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
+                                    .changed();
                             }
-                            if let Some(i) = remove {
-                                scr.0.remove(i);
-                                cmd.inspector_changed = true;
-                            }
-                        } else {
-                            ui.small("(no scripts — add one or drag from Assets)");
+                            ui.add_space(4.0);
                         }
-                        ui.menu_button("+ Add Script", |ui| {
-                            let mut names = Vec::new();
-                            collect_script_names(self.asset_tree, &mut names);
-                            if names.is_empty() {
-                                ui.small("no .lua scripts yet — make one in Assets");
+                        if let Some(i) = copy_idx {
+                            cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
+                        }
+                        if let Some(i) = remove {
+                            scr.0.remove(i);
+                            cmd.inspector_changed = true;
+                        }
+                    }
+                }
+
+                // ===== ➕ Add Component (searchable, icon'd) =====
+                ui.separator();
+                ui.add_space(2.0);
+                ui.menu_button("➕  Add Component", |ui| {
+                    ui.set_min_width(232.0);
+                    let filter = &mut *self.add_component_filter;
+                    ui.add(
+                        egui::TextEdit::singleline(filter)
+                            .hint_text("🔍 search components…")
+                            .desired_width(212.0),
+                    );
+                    let f = filter.trim().to_lowercase();
+                    let hit = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
+
+                    // What the node already has decides what's offered.
+                    let cur = world.get::<Matter>(e);
+                    let is_terrain = matches!(cur, Some(Matter::Terrain { .. }));
+                    let has_mat = world.get::<Material>(e).is_some();
+                    let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
+                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
+                        || world.get::<floptle_core::MeshCollider>(e).is_some();
+                    let collider_kind = match cur {
+                        Some(Matter::Mesh { .. }) => Some("triangle mesh"),
+                        Some(Matter::Primitive { shape, .. }) => Some(match shape {
+                            floptle_core::Shape::Cube => "box",
+                            floptle_core::Shape::Sphere => "sphere",
+                            floptle_core::Shape::Capsule => "capsule",
+                        }),
+                        _ => None,
+                    };
+                    let cur_kind = cur.map(matter_kind_label);
+
+                    // One catalog of (category, label, action) — built from current state.
+                    enum Add {
+                        Rb,
+                        Coll,
+                        Mat,
+                        Preset(String),
+                        Script(String),
+                        Type(Matter),
+                    }
+                    let mut items: Vec<(&str, String, Add)> = Vec::new();
+                    if !has_rb {
+                        items.push(("Physics", "◆  Rigidbody".into(), Add::Rb));
+                    }
+                    if !has_collidable {
+                        if let Some(k) = collider_kind {
+                            items.push(("Physics", format!("▦  Collider ({k})"), Add::Coll));
+                        }
+                    }
+                    if !has_mat {
+                        items.push(("Rendering", "◑  Material".into(), Add::Mat));
+                    }
+                    for (name, _) in self.materials {
+                        items.push(("Rendering", format!("◑  {name}  (preset)"), Add::Preset(name.clone())));
+                    }
+                    // Scripts not already attached.
+                    let attached: std::collections::HashSet<String> = world
+                        .get::<Scripts>(e)
+                        .map(|s| s.0.iter().map(|i| i.kind.clone()).collect())
+                        .unwrap_or_default();
+                    let mut snames = Vec::new();
+                    collect_script_names(self.asset_tree, &mut snames);
+                    for n in snames {
+                        if !attached.contains(&n) {
+                            items.push(("Scripts", format!("⚙  {n}"), Add::Script(n)));
+                        }
+                    }
+                    // Type switch (mutually exclusive). Terrain is special — leave it be.
+                    if !is_terrain {
+                        for (lbl, mt) in type_catalog() {
+                            if cur_kind != Some(matter_kind_label(&mt)) {
+                                items.push(("Type — replaces current", lbl.to_string(), Add::Type(mt)));
                             }
-                            for n in names {
-                                if ui.button(&n).clicked() {
-                                    // Routed through a command so params can be seeded
-                                    // from the script's `defaults` (needs the Lua host).
-                                    cmd.attach_named = Some((n, e));
+                        }
+                    }
+
+                    let mut picked = false;
+                    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                        // Paste the clipboard onto a component the node doesn't have yet.
+                        if let Some(c) = clip {
+                            let can = match c {
+                                ComponentClip::Material(_) => !has_mat,
+                                ComponentClip::RigidBody(_) => !has_rb,
+                                ComponentClip::Script(_) => true,
+                                ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
+                            };
+                            if can {
+                                let lbl = format!("📋  Paste {}", c.label());
+                                if hit(&lbl) && ui.button(lbl).clicked() {
+                                    cmd.paste_component = Some(e);
+                                    picked = true;
                                     ui.close();
                                 }
                             }
-                        });
+                        }
+                        let mut shown = false;
+                        for cat in ["Physics", "Rendering", "Scripts", "Type — replaces current"] {
+                            if !items.iter().any(|(c, l, _)| *c == cat && hit(l)) {
+                                continue;
+                            }
+                            ui.add_space(4.0);
+                            ui.weak(cat);
+                            for (c, l, a) in &items {
+                                if *c != cat || !hit(l) {
+                                    continue;
+                                }
+                                shown = true;
+                                if ui.button(l).clicked() {
+                                    match a {
+                                        Add::Rb => cmd.add_rigidbody = Some(e),
+                                        Add::Coll => cmd.set_collidable = Some((e, true)),
+                                        Add::Mat => cmd.add_material = Some(e),
+                                        Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
+                                        Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
+                                        Add::Type(mt) => cmd.set_matter = Some((e, mt.clone())),
+                                    }
+                                    picked = true;
+                                    ui.close();
+                                }
+                            }
+                        }
+                        if !shown && !f.is_empty() {
+                            ui.weak("no matching components");
+                        }
                     });
+                    // Reset the search for next open once something's been added.
+                    if picked {
+                        filter.clear();
+                    }
+                });
             }
             Some(_) => {
                 ui.label("(no editable properties)");
@@ -4999,6 +5312,11 @@ struct Editor {
     show_material_editor: bool,
     /// Scratch buffer for the "save material" name field.
     mat_name_buf: String,
+    /// The component clipboard — values copied from one component, pasteable onto
+    /// another of the same kind (Inspector ⎘ / 📋).
+    component_clip: Option<ComponentClip>,
+    /// Search text for the Inspector's "➕ Add Component" menu.
+    add_component_filter: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
     /// The editor chrome's default panel/window/extreme bg colors, captured once so play
@@ -6308,6 +6626,8 @@ impl Editor {
         let game_rect = &mut self.game_rect;
         let materials = &self.materials;
         let mat_name_buf = &mut self.mat_name_buf;
+        let component_clip = &self.component_clip;
+        let add_component_filter = &mut self.add_component_filter;
         let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
         let script_errors = self.script_errors.as_slice();
@@ -6445,6 +6765,8 @@ impl Editor {
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
+                component_clip,
+                add_component_filter,
                 show_material_editor,
                 asset_tree,
                 texture_settings,
@@ -7061,10 +7383,12 @@ impl Editor {
         if let Some(e) = cmd.add_rigidbody {
             self.record();
             self.world.insert(e, floptle_core::RigidBody::default());
+            self.rebuild_sim();
         }
         if let Some(e) = cmd.remove_rigidbody {
             self.record();
             self.world.remove::<floptle_core::RigidBody>(e);
+            self.rebuild_sim();
         }
         if let Some((e, on)) = cmd.set_mesh_collider {
             self.record();
@@ -7073,6 +7397,7 @@ impl Editor {
             } else {
                 self.world.remove::<floptle_core::MeshCollider>(e);
             }
+            self.rebuild_sim();
         }
         if let Some((e, on)) = cmd.set_collidable {
             self.record();
@@ -7083,6 +7408,22 @@ impl Editor {
                 self.world.remove::<floptle_core::Collidable>(e);
                 self.world.remove::<floptle_core::MeshCollider>(e);
             }
+            self.rebuild_sim();
+        }
+        if let Some((e, mt)) = cmd.set_matter {
+            // Switch the node's "type" (mutually-exclusive components). Terrain owns an
+            // out-of-ECS SDF field, so never morph one through here.
+            if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+                self.record();
+                self.world.insert(e, mt);
+                self.rebuild_sim();
+            }
+        }
+        if let Some(clip) = cmd.copy_component {
+            self.component_clip = Some(clip);
+        }
+        if let Some(e) = cmd.paste_component {
+            self.paste_onto(e);
         }
         if let Some((e, name)) = cmd.apply_preset {
             if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
@@ -7563,6 +7904,70 @@ impl Editor {
                 },
                 _ => {}
             }
+        }
+    }
+
+    /// Rebuild the live physics sim from the current scene. A no-op unless playing —
+    /// called after a physics component (rigidbody / collider / type) changes mid-Play
+    /// so the edit takes effect immediately. Bodies re-seed at their current transforms.
+    fn rebuild_sim(&mut self) {
+        if !self.playing {
+            return;
+        }
+        let gravity = self.build_gravity_field();
+        let mut sim = floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity);
+        self.add_static_colliders(&mut sim);
+        self.sim = Some(sim);
+    }
+
+    /// Paste the component clipboard onto `e` (the held clip decides the kind). Adds
+    /// the component if missing, else overwrites its values; scripts add-or-update by
+    /// name. Pasting a "type" (Matter) never morphs a Terrain node (its field is
+    /// out-of-ECS).
+    fn paste_onto(&mut self, e: Entity) {
+        let Some(clip) = self.component_clip.clone() else { return };
+        if !self.world.is_alive(e) {
+            return;
+        }
+        self.record();
+        let mut physics = false;
+        match clip {
+            ComponentClip::Transform(t) => {
+                if let Some(cur) = self.world.get_mut::<Transform>(e) {
+                    *cur = t;
+                }
+            }
+            ComponentClip::Matter(m) => {
+                if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+                    self.world.insert(e, m);
+                    physics = true;
+                }
+            }
+            ComponentClip::Material(m) => {
+                self.world.insert(e, *m);
+            }
+            ComponentClip::RigidBody(rb) => {
+                self.world.insert(e, rb);
+                physics = true;
+            }
+            ComponentClip::Script(si) => {
+                let scripts = match self.world.get_mut::<Scripts>(e) {
+                    Some(s) => s,
+                    None => {
+                        self.world.insert(e, Scripts::default());
+                        self.world.get_mut::<Scripts>(e).unwrap()
+                    }
+                };
+                if let Some(existing) = scripts.0.iter_mut().find(|i| i.kind == si.kind) {
+                    existing.params = si.params;
+                    existing.enabled = si.enabled;
+                } else {
+                    scripts.0.push(si);
+                }
+            }
+        }
+        if physics {
+            self.rebuild_sim();
         }
     }
 

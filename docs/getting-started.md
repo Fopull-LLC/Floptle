@@ -35,8 +35,14 @@ full reference on each piece see [scripting.md](./scripting.md) and
 The first-person recipe — no glue code:
 
 1. **New ▸ ⌖ Camera**; in the Inspector mark it **active**.
-2. Inspector ▸ **◆ Rigidbody** → shape **Capsule**.
-3. Drag **`scripts/character.lua`** onto it (Inspector ▸ Scripting, or drop from Assets).
+2. Inspector ▸ **➕ Add Component → ◆ Rigidbody**, then set shape **Capsule**.
+3. Drag **`scripts/character.lua`** onto it (drop it on the Inspector, or from Assets).
+
+> The Inspector is a **modular component stack**: a node shows only the components it
+> has, and **➕ Add Component** (a searchable, icon'd menu at the bottom) adds the rest —
+> Rigidbody, Collider, Material, a script, or a different **Type**. Start from **New ▸
+> 🗀 Empty** and build a node up from nothing. Each component has a ⎘ copy / 📋 paste
+> so you can clone its values (a tuned Transform, a script's params) onto another node.
 
 Press **F1** and switch to the **Game** tab. You *are* the capsule:
 
@@ -57,7 +63,7 @@ floating object that still collides and can be script-driven.
 ## 5. Walk on an imported model
 
 1. Drop a `.glb`/`.gltf` into `models/` and add it (it imports automatically).
-2. Select the mesh node → Inspector ▸ check **▦ Mesh collider (walkable)**.
+2. Select the mesh node → Inspector ▸ **➕ Add Component → ▦ Collider**.
 3. Play — the character collides with the model's triangles, not just the terrain.
    Toggle **View ▸ Mesh collider wireframes** to see them.
 
