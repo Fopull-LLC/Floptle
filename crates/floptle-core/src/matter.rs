@@ -48,6 +48,9 @@ pub struct RigidBody {
     pub restitution: f32,
     /// Surface friction 0..1 (0 = frictionless).
     pub friction: f32,
+    /// Whether the scene's gravity field pulls on this body (false = floats; it still
+    /// collides and can be driven by a script).
+    pub gravity: bool,
     /// Freeze world-axis translation (x, y, z) — e.g. lock Z for a 2.5D game.
     pub lock_pos: [bool; 3],
     /// Freeze the entity's rotation about each axis (keeps a body upright during play).
@@ -62,6 +65,7 @@ impl Default for RigidBody {
             height: 2.0,
             restitution: 0.0,
             friction: 0.3,
+            gravity: true,
             lock_pos: [false; 3],
             lock_rot: [false; 3],
         }

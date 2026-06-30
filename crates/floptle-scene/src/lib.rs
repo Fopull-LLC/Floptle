@@ -64,12 +64,17 @@ pub struct RigidBodyDoc {
     pub restitution: f32,
     #[serde(default = "frict_f32")]
     pub friction: f32,
+    #[serde(default = "true_bool")]
+    pub gravity: bool,
     #[serde(default)]
     pub lock_pos: [bool; 3],
     #[serde(default)]
     pub lock_rot: [bool; 3],
 }
 
+fn true_bool() -> bool {
+    true
+}
 fn half_f32() -> f32 {
     0.5
 }
@@ -88,6 +93,7 @@ impl RigidBodyDoc {
             height: self.height,
             restitution: self.restitution,
             friction: self.friction,
+            gravity: self.gravity,
             lock_pos: self.lock_pos,
             lock_rot: self.lock_rot,
         }
@@ -99,6 +105,7 @@ impl RigidBodyDoc {
             height: rb.height,
             restitution: rb.restitution,
             friction: rb.friction,
+            gravity: rb.gravity,
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
         }
@@ -696,6 +703,7 @@ mod tests {
                         height: 2.4,
                         restitution: 0.2,
                         friction: 0.5,
+                        gravity: false, // exercise the gravity-flag round-trip
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
                     }),
@@ -765,6 +773,7 @@ mod tests {
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
+        assert!(!rb.gravity, "rigidbody gravity flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(

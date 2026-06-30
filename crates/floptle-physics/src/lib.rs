@@ -315,6 +315,8 @@ pub struct Body {
     pub restitution: f32,
     /// Surface friction: 0 = frictionless ice, 1 = no sliding.
     pub friction: f32,
+    /// Whether the gravity field pulls on this body (false = floats, still collides).
+    pub use_gravity: bool,
     /// Freeze world-axis translation (x, y, z) — e.g. lock Z for a 2.5D game.
     pub lock_pos: [bool; 3],
     /// Set each step when the body is resting on a surface that opposes gravity.
@@ -334,6 +336,7 @@ impl Body {
             up: Vec3::Y,
             restitution: 0.0,
             friction: 0.3,
+            use_gravity: true,
             lock_pos: [false; 3],
             grounded: false,
             contact: None,
@@ -424,7 +427,12 @@ impl PhysicsWorld {
         self.contacts.clear();
         for bi in 0..self.bodies.len() {
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
-            let g = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+            // A body with `use_gravity = false` isn't pulled (and keeps its up vector).
+            let g = if self.bodies[bi].use_gravity {
+                self.gravity.accel_at(self.bodies[bi].pos, &self.colliders)
+            } else {
+                Vec3::ZERO
+            };
             if g.length_squared() > 1e-10 {
                 self.bodies[bi].up = (-g).normalize();
             }
@@ -636,6 +644,7 @@ impl Sim {
             };
             b.restitution = rb.restitution;
             b.friction = rb.friction;
+            b.use_gravity = rb.gravity;
             b.lock_pos = rb.lock_pos;
             let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
@@ -795,6 +804,25 @@ mod tests {
         let body = w.bodies[b];
         assert!((body.pos.y - 0.5).abs() < 0.08, "rests on mesh floor, y={}", body.pos.y);
         assert!(body.grounded, "should be grounded on the mesh");
+    }
+
+    #[test]
+    fn body_without_gravity_floats() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let mut b = Body::sphere(Vec3::new(0.0, 5.0, 0.0), 0.5);
+        b.use_gravity = false;
+        let bi = w.add_body(b);
+        simulate(&mut w, 2.0);
+        assert!((w.bodies[bi].pos.y - 5.0).abs() < 1e-3, "should float, y={}", w.bodies[bi].pos.y);
+    }
+
+    #[test]
+    fn empty_gravity_field_is_zero_g() {
+        // No sources → no pull (a space/zero-g world).
+        let mut w = PhysicsWorld::new(GravityField::default());
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 5.0, 0.0), 0.5));
+        simulate(&mut w, 2.0);
+        assert!((w.bodies[bi].pos.y - 5.0).abs() < 1e-3, "zero-g drift, y={}", w.bodies[bi].pos.y);
     }
 
     #[test]
