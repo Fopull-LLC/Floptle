@@ -276,6 +276,26 @@ fn is_model(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     p.ends_with(".glb") || p.ends_with(".gltf")
 }
+
+/// Lowercase name for a key, for the script `input` API (`input.key("w")`).
+fn key_name(code: KeyCode) -> Option<&'static str> {
+    use KeyCode::*;
+    Some(match code {
+        KeyA => "a", KeyB => "b", KeyC => "c", KeyD => "d", KeyE => "e", KeyF => "f",
+        KeyG => "g", KeyH => "h", KeyI => "i", KeyJ => "j", KeyK => "k", KeyL => "l",
+        KeyM => "m", KeyN => "n", KeyO => "o", KeyP => "p", KeyQ => "q", KeyR => "r",
+        KeyS => "s", KeyT => "t", KeyU => "u", KeyV => "v", KeyW => "w", KeyX => "x",
+        KeyY => "y", KeyZ => "z",
+        Digit0 => "0", Digit1 => "1", Digit2 => "2", Digit3 => "3", Digit4 => "4",
+        Digit5 => "5", Digit6 => "6", Digit7 => "7", Digit8 => "8", Digit9 => "9",
+        Space => "space", Enter | NumpadEnter => "enter", Escape => "escape", Tab => "tab",
+        Backspace => "backspace", Delete => "delete",
+        ShiftLeft | ShiftRight => "shift", ControlLeft | ControlRight => "ctrl",
+        AltLeft | AltRight => "alt",
+        ArrowLeft => "left", ArrowRight => "right", ArrowUp => "up", ArrowDown => "down",
+        _ => return None,
+    })
+}
 fn is_script(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".lua")
 }
@@ -686,11 +706,45 @@ function start(node) end
 ---@param node Node
 ---@param dt number Seconds since the last frame.
 function update(node, dt) end
+
+---Player input (play mode) — poll the keyboard + mouse to make games interactive.
+---@class Input
+input = {}
+---True while `name` is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab.
+---@param name string
+---@return boolean
+function input.key(name) end
+---True only on the frame `name` goes down (a key-press edge).
+---@param name string
+---@return boolean
+function input.pressed(name) end
+---A -1/0/1 axis from a negative/positive key pair, e.g. input.axis(\"a\", \"d\").
+---@param neg string
+---@param pos string
+---@return number
+function input.axis(neg, pos) end
+---The cursor position in pixels: `local x, y = input.mouse()`.
+---@return number, number
+function input.mouse() end
+---Mouse movement since last frame: `local dx, dy = input.mouse_delta()`.
+---@return number, number
+function input.mouse_delta() end
+---Mouse wheel delta this frame.
+---@return number
+function input.scroll() end
+---True while a mouse button is held (0 left, 1 right, 2 middle).
+---@param i integer
+---@return boolean
+function input.button(i) end
+---True only on the frame a mouse button goes down.
+---@param i integer
+---@return boolean
+function input.clicked(i) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\"]\n}\n";
+const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\"]\n}\n";
 
 /// Write the Lua language-server support files into a project (annotations always
 /// refreshed; `.luarc.json` only if absent, so a user's own config is preserved).
@@ -3048,8 +3102,8 @@ const LUA_KEYWORDS: &[&str] = &[
 
 /// Identifiers highlighted as engine/builtin API (teal).
 const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "defaults", "log", "start", "update", "math", "string",
-    "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
+    "node", "params", "time", "dt", "defaults", "log", "start", "update", "input", "math",
+    "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
 ];
 
 /// One completion / docs entry for the in-engine IDE.
@@ -3080,6 +3134,15 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
     ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
     ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
+    ApiEntry { label: "input", insert: "input", doc: "Player input (play mode). input.key/pressed/axis/mouse/button — make interactive games." },
+    ApiEntry { label: "input.key", insert: "input.key(", doc: "input.key(\"w\") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab." },
+    ApiEntry { label: "input.pressed", insert: "input.pressed(", doc: "input.pressed(\"space\") — true only on the frame the key goes down (an edge)." },
+    ApiEntry { label: "input.axis", insert: "input.axis(", doc: "input.axis(\"a\", \"d\") — returns -1/0/1 from a negative/positive key pair (e.g. strafing)." },
+    ApiEntry { label: "input.mouse", insert: "input.mouse(", doc: "local x, y = input.mouse() — cursor position in pixels." },
+    ApiEntry { label: "input.mouse_delta", insert: "input.mouse_delta(", doc: "local dx, dy = input.mouse_delta() — mouse movement since last frame." },
+    ApiEntry { label: "input.button", insert: "input.button(", doc: "input.button(0) — true while a mouse button is held (0 left, 1 right, 2 middle)." },
+    ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
+    ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
     ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
     ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
     ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
@@ -3369,6 +3432,14 @@ struct Editor {
     collapsed: std::collections::HashSet<Entity>,
     /// The engine Console: captured script logs/warnings/errors + its view filters.
     console: ConsoleState,
+    /// Player-input state fed to scripts (the Lua `input` API), accumulated from
+    /// window events. Edge sets + deltas are cleared each frame after scripts run.
+    input_keys: std::collections::HashSet<String>,
+    input_keys_pressed: std::collections::HashSet<String>,
+    input_buttons: [bool; 3],
+    input_buttons_pressed: [bool; 3],
+    input_mouse_delta: (f32, f32),
+    input_scroll: f32,
     /// Offscreen target for the Inspector's spinning model / material preview.
     preview: Option<PreviewTarget>,
     /// Preview orbit angle (radians), whether it auto-spins, and the zoom (camera
@@ -3652,6 +3723,17 @@ impl ApplicationHandler for Editor {
                         KeyCode::KeyC => self.input.down = mv && !self.ctrl,
                         _ => {}
                     }
+                    // Track raw key state for the script `input` API (works in play
+                    // mode regardless of which panel has focus).
+                    if let Some(name) = key_name(code) {
+                        if pressed {
+                            if self.input_keys.insert(name.to_string()) {
+                                self.input_keys_pressed.insert(name.to_string());
+                            }
+                        } else {
+                            self.input_keys.remove(name);
+                        }
+                    }
                     // Discrete commands fire on press only.
                     if pressed && !typing {
                         if self.ctrl {
@@ -3691,6 +3773,7 @@ impl ApplicationHandler for Editor {
                 // Gated geometrically: `cursor_over_scene()` is true only over the bare
                 // viewport, so a press on a panel/toolbar falls through to egui untouched.
                 let pressed = state == ElementState::Pressed;
+                self.track_mouse_button(0, pressed);
                 if pressed {
                     let over_scene = self.cursor_over_scene();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
@@ -3749,8 +3832,18 @@ impl ApplicationHandler for Editor {
                     }
                 }
             }
+            WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
+                self.track_mouse_button(2, state == ElementState::Pressed);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.input_scroll += match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let pressed = state == ElementState::Pressed;
+                self.track_mouse_button(1, pressed);
                 let over_scene = self.cursor_over_scene();
                 if pressed {
                     // Begin a possible look; if the cursor barely moves before release
@@ -3804,6 +3897,9 @@ impl ApplicationHandler for Editor {
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
+            // Accumulate raw mouse delta for the script `input` API.
+            self.input_mouse_delta.0 += delta.0 as f32;
+            self.input_mouse_delta.1 += delta.1 as f32;
             // Priority: RMB-look > grabbed gizmo handle. (Free dragging an object now
             // requires the Move tool's center handle — no more accidental moves.)
             if self.input.looking {
@@ -3966,11 +4062,27 @@ impl Editor {
             // Direct field access (not the `scripts_dir()` method) so we don't take
             // a whole-`self` borrow while gpu/egui are mutably borrowed here.
             let dir = self.project_root.join("scripts");
+            // Feed the player input to scripts (the Lua `input` API). Inlined with
+            // direct field access since gpu/egui are mutably borrowed here.
+            self.script_host.set_input(floptle_script::InputSnapshot {
+                keys_down: self.input_keys.clone(),
+                keys_pressed: self.input_keys_pressed.clone(),
+                mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
+                mouse_delta: self.input_mouse_delta,
+                scroll: self.input_scroll,
+                buttons_down: self.input_buttons,
+                buttons_pressed: self.input_buttons_pressed,
+            });
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }
+        // Clear per-frame input edges after scripts consumed them.
+        self.input_keys_pressed.clear();
+        self.input_buttons_pressed = [false; 3];
+        self.input_mouse_delta = (0.0, 0.0);
+        self.input_scroll = 0.0;
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
             self.console.push(l.level, l.msg, l.source);
@@ -5503,6 +5615,16 @@ impl Editor {
             None => order.len() - 1,
         };
         self.select_single(order[next]);
+    }
+
+    /// Track a mouse button for the script `input` API (edge + held).
+    fn track_mouse_button(&mut self, i: usize, pressed: bool) {
+        if i < 3 {
+            if pressed && !self.input_buttons[i] {
+                self.input_buttons_pressed[i] = true;
+            }
+            self.input_buttons[i] = pressed;
+        }
     }
 
     /// Toggle the selected folder's open/closed state in the Hierarchy (Enter key).
