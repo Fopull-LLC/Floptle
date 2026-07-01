@@ -34,7 +34,7 @@ use std::time::SystemTime;
 
 use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{Entity, Material, Matter, Scripts, Visible, World};
+use floptle_core::{Entity, Material, Matter, RigidBody, Scripts, Visible, World};
 use mlua::{Function, Lua, RegistryKey, Table, Value, Variadic};
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -147,12 +147,18 @@ pub struct ScriptHost {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
+    component_changes: Rc<RefCell<HashMap<(u32, String, String), f64>>>,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
     /// The project root, so `assets.getFile` / `assets.getContents` can resolve paths the
     /// dev writes relative to it (the `Assets/` folder). Set by the editor each frame.
     project_root: Rc<RefCell<PathBuf>>,
+    /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
+    /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
+    /// change this frame. The editor drains it after `run` and applies it to the window.
+    mouse_lock: Rc<RefCell<Option<bool>>>,
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from
@@ -175,6 +181,10 @@ struct SceneMirror {
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
+    /// entity → component name → (field → value): the numeric fields scripts can read via
+    /// `node:getcomponent("PointLight"/"RigidBody")`. Synced each run for read-back; writes
+    /// go through `Shared::component_changes` and are flushed to the ECS after `run`.
+    components: HashMap<u32, HashMap<String, HashMap<String, f64>>>,
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
@@ -200,6 +210,9 @@ struct Shared {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
+    /// flushed to the ECS after `run` (and read back the same frame).
+    component_changes: Rc<RefCell<HashMap<(u32, String, String), f64>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -275,6 +288,8 @@ impl ScriptHost {
         // The `input` global: a table of functions reading this frame's input
         // snapshot (so games can poll the keyboard/mouse).
         let input: Rc<RefCell<InputSnapshot>> = Rc::new(RefCell::new(InputSnapshot::default()));
+        // Mouse-lock request channel (drained by the editor each frame). See the field docs.
+        let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
         if let Ok(t) = lua.create_table() {
             let held = input.clone();
             let _ = t.set(
@@ -353,6 +368,36 @@ impl ScriptHost {
                         v += 1.0;
                     }
                     Ok(v)
+                })
+                .ok(),
+            );
+            // Mouse capture: lock the cursor to the window and hide it (for FPS / free-look
+            // mouselook without holding a button), or release it back to the desktop.
+            let ml_lock = mouse_lock.clone();
+            let _ = t.set(
+                "lockMouse",
+                lua.create_function(move |_, ()| {
+                    *ml_lock.borrow_mut() = Some(true);
+                    Ok(())
+                })
+                .ok(),
+            );
+            let ml_unlock = mouse_lock.clone();
+            let _ = t.set(
+                "unlockMouse",
+                lua.create_function(move |_, ()| {
+                    *ml_unlock.borrow_mut() = Some(false);
+                    Ok(())
+                })
+                .ok(),
+            );
+            // Explicit form: `input.setMouseLocked(true/false)`.
+            let ml_set = mouse_lock.clone();
+            let _ = t.set(
+                "setMouseLocked",
+                lua.create_function(move |_, locked: bool| {
+                    *ml_set.borrow_mut() = Some(locked);
+                    Ok(())
                 })
                 .ok(),
             );
@@ -455,6 +500,7 @@ impl ScriptHost {
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
+            component_changes: Rc::new(RefCell::new(HashMap::new())),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -476,9 +522,17 @@ impl ScriptHost {
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
+            component_changes: shared.component_changes.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
+            mouse_lock,
         }
+    }
+
+    /// Drain a pending `input.lockMouse()` / `input.unlockMouse()` request from this frame:
+    /// `Some(true)` = lock (grab + hide cursor), `Some(false)` = unlock, `None` = unchanged.
+    pub fn take_mouse_lock(&self) -> Option<bool> {
+        self.mouse_lock.borrow_mut().take()
     }
 
     /// Lend the sim's colliders to the script host for one frame so `raycast(...)` can see
@@ -652,9 +706,16 @@ impl ScriptHost {
                     world.insert(ent, Visible(*shown));
                 }
             }
+            // Apply node:getcomponent(...) field writes back to the ECS.
+            for ((eid, comp, field), val) in self.component_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    apply_component_field(world, ent, comp, field, *val);
+                }
+            }
         }
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
+        self.component_changes.borrow_mut().clear();
 
         // Drop environments whose (node, script) no longer exists.
         let stale: Vec<(u32, String)> =
@@ -680,6 +741,7 @@ impl ScriptHost {
         s.dirty.clear();
         s.models.clear();
         s.visible.clear();
+        s.components.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -687,6 +749,11 @@ impl ScriptHost {
             s.transforms.insert(id, *tr);
             if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) {
                 s.models.insert(id, asset_path.clone());
+            }
+            // Mirror the numeric fields scripts can reach via node:getcomponent(...).
+            let comps = mirror_components(world, e);
+            if !comps.is_empty() {
+                s.components.insert(id, comps);
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
@@ -1304,6 +1371,19 @@ fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// Create a Lua **component handle** for component `comp` on entity index `e`: a table
+/// `{__id, __comp}` with the shared component metatable, so `h.field` reads and
+/// `h.field = value` records a write (flushed to the ECS after the frame).
+fn new_component_handle(lua: &Lua, e: u32, comp: &str) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+    t.raw_set("__comp", comp.to_string())?;
+    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_component_mt") {
+        t.set_metatable(Some(mt));
+    }
+    Ok(t)
+}
+
 /// Create a Lua **script handle** for script `name` on entity index `e`: a table
 /// `{__id, __script}` with the shared script metatable, so you can read/write its state,
 /// call its methods, and reach `.node` / `.params`.
@@ -1332,6 +1412,70 @@ fn material_key(refstr: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| refstr.to_string())
+}
+
+/// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
+/// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
+/// more components / fields.
+fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
+    let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    if let Some(Matter::PointLight { color, intensity, range }) = world.get::<Matter>(e) {
+        out.insert(
+            "PointLight".to_string(),
+            HashMap::from([
+                ("intensity".to_string(), *intensity as f64),
+                ("range".to_string(), *range as f64),
+                ("r".to_string(), color[0] as f64),
+                ("g".to_string(), color[1] as f64),
+                ("b".to_string(), color[2] as f64),
+            ]),
+        );
+    }
+    if let Some(rb) = world.get::<RigidBody>(e) {
+        out.insert(
+            "RigidBody".to_string(),
+            HashMap::from([
+                ("friction".to_string(), rb.friction as f64),
+                ("restitution".to_string(), rb.restitution as f64),
+                ("gravity".to_string(), if rb.gravity { 1.0 } else { 0.0 }),
+                ("radius".to_string(), rb.radius as f64),
+                ("height".to_string(), rb.height as f64),
+            ]),
+        );
+    }
+    out
+}
+
+/// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
+/// [`mirror_components`]). Unknown component/field names are ignored.
+fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
+    match comp {
+        "PointLight" => {
+            if let Some(Matter::PointLight { color, intensity, range }) = world.get_mut::<Matter>(ent) {
+                match field {
+                    "intensity" => *intensity = val as f32,
+                    "range" => *range = val as f32,
+                    "r" => color[0] = val as f32,
+                    "g" => color[1] = val as f32,
+                    "b" => color[2] = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        "RigidBody" => {
+            if let Some(rb) = world.get_mut::<RigidBody>(ent) {
+                match field {
+                    "friction" => rb.friction = val as f32,
+                    "restitution" => rb.restitution = val as f32,
+                    "gravity" => rb.gravity = val != 0.0,
+                    "radius" => rb.radius = val as f32,
+                    "height" => rb.height = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Install the cross-node / cross-script reference layer into the Lua state: the `node`
@@ -1586,6 +1730,59 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
     }
     lua.set_named_registry_value("floptle_node_mt", node_mt)?;
 
+    // ---- component handle metatable (node:getcomponent) -----------------------------
+    // A component handle reads its numeric fields from the mirror (or this frame's pending
+    // writes) and records assignments; the writes are flushed to the ECS after `run`.
+    {
+        let comp_mt = lua.create_table()?;
+        {
+            let scene = shared.scene.clone();
+            let changes = shared.component_changes.clone();
+            let idx = lua.create_function(move |_, (this, key): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                if let Some(v) = changes.borrow().get(&(e, comp.clone(), key.clone())) {
+                    return Ok(Value::Number(*v));
+                }
+                let s = scene.borrow();
+                if let Some(v) =
+                    s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
+                {
+                    return Ok(Value::Number(*v));
+                }
+                Ok(Value::Nil)
+            })?;
+            comp_mt.set("__index", idx)?;
+        }
+        {
+            let changes = shared.component_changes.clone();
+            let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let comp: String = this.raw_get("__comp")?;
+                let n = match val {
+                    Value::Number(n) => n,
+                    Value::Integer(n) => n as f64,
+                    Value::Boolean(b) => {
+                        if b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "component field '{key}' must be a number"
+                        )))
+                    }
+                };
+                changes.borrow_mut().insert((e, comp, key), n);
+                Ok(())
+            })?;
+            comp_mt.set("__newindex", newidx)?;
+        }
+        lua.set_named_registry_value("floptle_component_mt", comp_mt)?;
+    }
+
     // ---- node methods (children / getchild / getparent / getscript / find) ----------
     let methods = lua.create_table()?;
     {
@@ -1656,6 +1853,24 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
         })?;
         methods.set("script", f.clone())?;
         methods.set("getscript", f)?;
+    }
+    // node:getcomponent("PointLight" | "RigidBody") → a component handle whose numeric
+    // fields you can read + assign (writes flush to the ECS after the frame), or nil if the
+    // node has no such component.
+    {
+        let scene = shared.scene.clone();
+        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let has =
+                scene.borrow().components.get(&e).map(|c| c.contains_key(&name)).unwrap_or(false);
+            Ok(if has {
+                Value::Table(new_component_handle(lua, e, &name)?)
+            } else {
+                Value::Nil
+            })
+        })?;
+        methods.set("component", f.clone())?;
+        methods.set("getcomponent", f)?;
     }
     {
         let scene = shared.scene.clone();
@@ -2227,6 +2442,36 @@ mod tests {
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         let mat = world.get::<Material>(e).expect("material applied");
         assert_eq!(mat.color, [1.0, 0.84, 0.0]);
+    }
+
+    #[test]
+    fn script_reads_and_writes_a_component_field() {
+        // node:getcomponent("PointLight") reads the light's live fields, and assigning one
+        // flushes back to the ECS the same frame.
+        let dir = std::env::temp_dir().join("floptle_script_test_component");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "oscillate",
+            "function update(node, dt)\n  local l = node:getcomponent(\"PointLight\")\n  if l then l.intensity = l.intensity + 1.0 end\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::PointLight { color: [1.0, 1.0, 1.0], intensity: 2.0, range: 10.0 });
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        match world.get::<Matter>(e).unwrap() {
+            Matter::PointLight { intensity, .. } => {
+                assert!((*intensity - 3.0).abs() < 1e-4, "intensity became {intensity}, expected 3.0")
+            }
+            other => panic!("expected point light, got {other:?}"),
+        }
     }
 
     #[test]
