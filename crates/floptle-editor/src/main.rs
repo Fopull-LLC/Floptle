@@ -326,6 +326,14 @@ struct EditorCmd {
     set_external_editor: Option<String>,
     /// Persist the "prefer external editor" toggle.
     set_prefer_external: Option<bool>,
+    /// Persist the play-mode tint preference: (enabled, additive RGB offset).
+    set_play_tint: Option<(bool, [u8; 3])>,
+    /// Persist the grid settings (any Grid Settings control changed).
+    save_grid: bool,
+    /// Select + persist the engine chrome theme (index into `ENGINE_THEMES`).
+    set_engine_theme: Option<usize>,
+    /// Select + persist the code-editor theme (index into `CODE_THEMES`).
+    set_code_theme: Option<usize>,
     /// Open the rename modal for this asset (absolute path).
     rename_asset: Option<String>,
     /// Commit a rename from the modal: (current path, new file/folder name).
@@ -359,7 +367,7 @@ impl Default for GridConfig {
             color: [0.45, 0.45, 0.58],
             alpha: 0.32,
             snap: false,
-            y_offset: 0.0,
+            y_offset: DEFAULT_GRID_Y_OFFSET,
         }
     }
 }
@@ -646,6 +654,123 @@ fn save_prefer_external(v: bool) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(p, if v { "1" } else { "0" });
+    }
+}
+
+/// The default play-mode chrome tint: a small, even additive RGB nudge (brighten).
+const DEFAULT_PLAY_TINT: [u8; 3] = [9, 9, 9];
+
+fn play_tint_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("play_tint"))
+}
+
+/// The play-mode editor tint preference: `(enabled, additive RGB offset)`.
+/// File format is one line: `enabled r g b` (e.g. `1 10 18 30`).
+fn load_play_tint() -> (bool, [u8; 3]) {
+    let parsed = play_tint_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| {
+            let nums: Vec<&str> = s.split_whitespace().collect();
+            if nums.len() == 4 {
+                Some((
+                    nums[0] == "1",
+                    [
+                        nums[1].parse().ok()?,
+                        nums[2].parse().ok()?,
+                        nums[3].parse().ok()?,
+                    ],
+                ))
+            } else {
+                None
+            }
+        });
+    parsed.unwrap_or((true, DEFAULT_PLAY_TINT))
+}
+
+fn save_play_tint(enabled: bool, tint: [u8; 3]) {
+    if let Some(p) = play_tint_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let on = if enabled { 1 } else { 0 };
+        let _ = std::fs::write(p, format!("{on} {} {} {}", tint[0], tint[1], tint[2]));
+    }
+}
+
+/// The default grid `y_offset` — the grid sits this far below the camera by default (a
+/// little lower than eye level, nearer the floor). Persisted, so a user's value sticks.
+const DEFAULT_GRID_Y_OFFSET: f32 = 2.0;
+
+fn grid_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("grid"))
+}
+
+/// Load the persisted grid settings (all fields), falling back to defaults per-field so a
+/// short/old file still loads. Format is one whitespace-separated line:
+/// `show size extent r g b alpha snap y_offset`.
+fn load_grid() -> GridConfig {
+    let mut g = GridConfig::default();
+    if let Some(s) = grid_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        let f: Vec<&str> = s.split_whitespace().collect();
+        if f.len() >= 9 {
+            g.show = f[0] == "1";
+            if let Ok(v) = f[1].parse() { g.size = v; }
+            if let Ok(v) = f[2].parse() { g.extent = v; }
+            if let (Ok(r), Ok(gc), Ok(b)) = (f[3].parse(), f[4].parse(), f[5].parse()) {
+                g.color = [r, gc, b];
+            }
+            if let Ok(v) = f[6].parse() { g.alpha = v; }
+            g.snap = f[7] == "1";
+            if let Ok(v) = f[8].parse() { g.y_offset = v; }
+        }
+    }
+    g
+}
+
+fn save_grid(g: &GridConfig) {
+    if let Some(p) = grid_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(
+            p,
+            format!(
+                "{} {} {} {} {} {} {} {} {}",
+                if g.show { 1 } else { 0 },
+                g.size,
+                g.extent,
+                g.color[0],
+                g.color[1],
+                g.color[2],
+                g.alpha,
+                if g.snap { 1 } else { 0 },
+                g.y_offset,
+            ),
+        );
+    }
+}
+
+fn engine_theme_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("engine_theme"))
+}
+fn code_theme_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("code_theme"))
+}
+
+/// A persisted theme index, clamped to a valid entry (0 if unset/out of range).
+fn load_theme_index(path: Option<PathBuf>, count: usize) -> usize {
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&i| i < count)
+        .unwrap_or(0)
+}
+
+fn save_theme_index(path: Option<PathBuf>, idx: usize) {
+    if let Some(p) = path {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, idx.to_string());
     }
 }
 
@@ -1813,9 +1938,14 @@ struct IdeState {
     find_open: bool,
     find_query: String,
     find_focus: bool,
+    /// The previous frame's find query, so we can jump to the first match as you type.
+    find_last: String,
     /// "Find all references" results (most recent search) + the word searched.
     refs: Vec<RefHit>,
     refs_word: String,
+    /// The identifier captured at the last right-click, so the context menu stays stable
+    /// while it's open (the live hover position moves onto the menu and would flicker).
+    rc_word: Option<String>,
 }
 
 /// One "find all references" result: the file, its display name, the 1-based line, and
@@ -1836,8 +1966,10 @@ impl Default for IdeState {
             find_open: false,
             find_query: String::new(),
             find_focus: false,
+            find_last: String::new(),
             refs: Vec::new(),
             refs_word: String::new(),
+            rc_word: None,
         }
     }
 }
@@ -1890,6 +2022,44 @@ fn collect_word_hits(path: &str, name: &str, text: &str, word: &str, out: &mut V
             }
         }
     }
+}
+
+/// The 1-based line where `word` is *defined* in Lua source (a function or assignment),
+/// or None. Heuristic — good enough for go-to-definition in a scripting IDE.
+fn find_definition_line(text: &str, word: &str) -> Option<usize> {
+    if word.is_empty() {
+        return None;
+    }
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim_start();
+        let starts = [
+            format!("function {word}("),
+            format!("function {word} "),
+            format!("local function {word}("),
+            format!("local function {word} "),
+            format!("local {word} ="),
+            format!("local {word}="),
+        ];
+        if starts.iter().any(|p| line.starts_with(p.as_str())) {
+            return Some(n + 1);
+        }
+        // `function Table.word(` / `function Table:word(`
+        if line.starts_with("function ")
+            && (line.contains(&format!(".{word}(")) || line.contains(&format!(":{word}(")))
+        {
+            return Some(n + 1);
+        }
+        // Global assignment `word = ...` at line start (whole identifier, not `==`).
+        if let Some(rest) = line.strip_prefix(word) {
+            let rest = rest.trim_start();
+            if let Some(after) = rest.strip_prefix('=') {
+                if !after.starts_with('=') {
+                    return Some(n + 1);
+                }
+            }
+        }
+    }
+    None
 }
 
 impl IdeState {
@@ -1985,6 +2155,8 @@ struct EditorTabViewer<'a> {
     zoom: &'a mut f32,
     scene_name: &'a str,
     ppp: f32,
+    /// The selected code-editor theme index (into `CODE_THEMES`) for the Scripting tab.
+    code_theme: usize,
     cmd: &'a mut EditorCmd,
 }
 
@@ -2778,6 +2950,9 @@ impl<'a> EditorTabViewer<'a> {
                         ui.small(format!(
                             "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
                         ));
+                        if world.get::<floptle_core::RigidBody>(e).is_some() {
+                            ui.small("⚠ This node also has a Rigidbody, so on Play it's a dynamic body (it falls / gets moved) and this static Collider is ignored. To make it a solid obstacle the player bumps into, remove the Rigidbody so it becomes static world geometry (the solver has no body-vs-body pass, so two dynamic bodies pass through each other).");
+                        }
                         if remove {
                             cmd.set_collidable = Some((e, false));
                             cmd.inspector_changed = true;
@@ -4019,17 +4194,18 @@ impl<'a> EditorTabViewer<'a> {
                         .horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
                             if let Some((name, line)) = src {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("{name}:{line}"))
-                                            .monospace()
-                                            .weak(),
-                                    )
-                                    .selectable(true),
-                                );
+                                // The file:line is a link — a single click jumps to that
+                                // exact line in the editor.
+                                if ui
+                                    .link(egui::RichText::new(format!("{name}:{line}")).monospace())
+                                    .on_hover_text("click to open this line in the editor")
+                                    .clicked()
+                                {
+                                    jump = Some(((*name).clone(), *line));
+                                }
                             }
                             // Selectable so you can drag-select + copy a line; a
-                            // double-click still jumps to its source.
+                            // double-click on the row still jumps to its source too.
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(format!("{icon} {msg}")).color(color).monospace(),
@@ -4054,7 +4230,7 @@ impl<'a> EditorTabViewer<'a> {
                             jump = Some(((*name).clone(), *line));
                         }
                     }
-                    resp.on_hover_text("double-click to open the source");
+                    resp.on_hover_text("click the file:line to open the source (or double-click the row)");
                 }
             });
 
@@ -4096,6 +4272,64 @@ impl<'a> EditorTabViewer<'a> {
         }
         self.ide.refs = hits;
         self.ide.refs_word = word.to_string();
+    }
+
+    /// Jump to where `word` is defined: the active file first, then the other open files,
+    /// then the project's scripts on disk. Falls back to "find all references" if no
+    /// definition is found (so Ctrl+B / the menu item always does something useful).
+    fn goto_definition(&mut self, word: &str) {
+        let active = self.ide.active.filter(|&a| a < self.ide.open.len());
+        if let Some(a) = active {
+            if let Some(line) = find_definition_line(&self.ide.open[a].text, word) {
+                self.ide.goto = Some(line);
+                return;
+            }
+        }
+        // Other already-open files.
+        let others: Vec<(String, String)> = self
+            .ide
+            .open
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| Some(*idx) != active)
+            .map(|(_, f)| (f.path.clone(), f.text.clone()))
+            .collect();
+        for (path, text) in others {
+            if let Some(line) = find_definition_line(&text, word) {
+                if self.ide.open_file(&path) {
+                    self.ide.goto = Some(line);
+                }
+                return;
+            }
+        }
+        // Scripts on disk that aren't open yet.
+        let open_paths: std::collections::HashSet<String> =
+            self.ide.open.iter().map(|f| f.path.clone()).collect();
+        let dir = self.project_root.join("scripts");
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let mut files: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("lua"))
+                .collect();
+            files.sort();
+            for p in files {
+                let ps = p.to_string_lossy().to_string();
+                if open_paths.contains(&ps) {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    if let Some(line) = find_definition_line(&text, word) {
+                        if self.ide.open_file(&ps) {
+                            self.ide.goto = Some(line);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        // No definition found — show references so Ctrl+B still helps.
+        self.gather_references(word);
     }
 
     fn scripting_ui(&mut self, ui: &mut egui::Ui) {
@@ -4210,6 +4444,9 @@ impl<'a> EditorTabViewer<'a> {
                 if self.ide.find_open {
                     let text = self.ide.open[i].text.clone();
                     let ranges = find_ranges(&text, &self.ide.find_query);
+                    // Jump to the first match as you type (live search).
+                    let live = self.ide.find_query != self.ide.find_last;
+                    self.ide.find_last = self.ide.find_query.clone();
                     let (mut do_next, mut do_prev, mut close) = (false, false, false);
                     ui.horizontal(|ui| {
                         ui.label("🔍");
@@ -4235,17 +4472,20 @@ impl<'a> EditorTabViewer<'a> {
                         if ui.button("✕").on_hover_text("close (Esc)").clicked() { close = true; }
                     });
                     if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) { close = true; }
-                    if (do_next || do_prev) && !ranges.is_empty() {
+                    if (do_next || do_prev || live) && !ranges.is_empty() {
                         let cur = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
                             .and_then(|s| s.cursor.char_range())
                             .map(|r| r.primary.index.0)
                             .unwrap_or(0);
                         let char_starts: Vec<usize> =
                             ranges.iter().map(|&(a, _)| text[..a].chars().count()).collect();
-                        let idx = if do_next {
-                            char_starts.iter().position(|&a| a > cur).unwrap_or(0)
-                        } else {
+                        let idx = if do_prev {
                             char_starts.iter().rposition(|&a| a < cur).unwrap_or(char_starts.len() - 1)
+                        } else if live {
+                            // Live: the first match at or after the caret (don't skip one under it).
+                            char_starts.iter().position(|&a| a >= cur).unwrap_or(0)
+                        } else {
+                            char_starts.iter().position(|&a| a > cur).unwrap_or(0)
                         };
                         let (bs, be) = ranges[idx];
                         let cs = text[..bs].chars().count();
@@ -4267,13 +4507,81 @@ impl<'a> EditorTabViewer<'a> {
                 let is_lua = self.ide.open[i].path.ends_with(".lua");
                 let font = egui::FontId::monospace(13.0);
                 let lfont = font.clone();
+                let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
                 let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
                     // No wrap (code editor) — logical lines == rows, so the gutter aligns.
-                    let mut job =
-                        if is_lua { lua_highlight(buf.as_str(), lfont.clone()) } else { plain_job(buf.as_str(), lfont.clone()) };
+                    let mut job = if is_lua {
+                        lua_highlight(buf.as_str(), lfont.clone(), &theme)
+                    } else {
+                        plain_job(buf.as_str(), lfont.clone(), &theme)
+                    };
                     job.wrap.max_width = f32::INFINITY;
                     ui.fonts_mut(|f| f.layout_job(job))
                 };
+                // Whole-line editing shortcuts, intercepted BEFORE the editor consumes the
+                // keys (so they don't type/copy the selection instead). Needs editor focus.
+                if ui.memory(|m| m.has_focus(editor_id)) {
+                    let cursor = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                        .and_then(|s| s.cursor.char_range());
+                    let empty_sel = cursor.map(|r| r.primary.index == r.secondary.index).unwrap_or(true);
+                    let caret = cursor.map(|r| r.primary.index.0).unwrap_or(0);
+                    // Ctrl+C with no selection → copy the whole current line.
+                    if empty_sel && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::C)) {
+                        ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
+                    }
+                    // Ctrl+X with no selection → cut the whole current line.
+                    if empty_sel && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::X)) {
+                        let clip = line_edit::line_with_newline(&self.ide.open[i].text, caret);
+                        ui.ctx().copy_text(clip);
+                        let new_caret = {
+                            let text = &mut self.ide.open[i].text;
+                            let (s, _e, next) = line_edit::line_bytes(text, caret);
+                            text.replace_range(s..next, "");
+                            line_edit::char_of_byte(text, s)
+                        };
+                        self.ide.open[i].dirty = true;
+                        set_ide_caret(ui.ctx(), editor_id, new_caret);
+                    }
+                    // Ctrl+D → duplicate the current line below.
+                    if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
+                        let text = &mut self.ide.open[i].text;
+                        let (s, e, next) = line_edit::line_bytes(text, caret);
+                        let content = text[s..e].to_string();
+                        if next > e {
+                            text.insert_str(next, &format!("{content}\n"));
+                        } else {
+                            text.insert_str(e, &format!("\n{content}"));
+                        }
+                        self.ide.open[i].dirty = true;
+                    }
+                    // Ctrl+/ → toggle a line comment (Lua files).
+                    if is_lua && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::Slash)) {
+                        let text = &mut self.ide.open[i].text;
+                        let (s, e, _next) = line_edit::line_bytes(text, caret);
+                        let line = &text[s..e];
+                        let indent = line.len() - line.trim_start().len();
+                        let trimmed = line.trim_start();
+                        let at = s + indent;
+                        if trimmed.starts_with("-- ") {
+                            text.replace_range(at..at + 3, "");
+                        } else if trimmed.starts_with("--") {
+                            text.replace_range(at..at + 2, "");
+                        } else {
+                            text.insert_str(at, "-- ");
+                        }
+                        self.ide.open[i].dirty = true;
+                    }
+                    // Ctrl+B → go to the definition of the identifier under the caret.
+                    if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::B)) {
+                        let mut w = word_at(&self.ide.open[i].text, caret);
+                        if w.is_empty() && caret > 0 {
+                            w = word_at(&self.ide.open[i].text, caret - 1);
+                        }
+                        if !w.is_empty() {
+                            self.goto_definition(&w);
+                        }
+                    }
+                }
                 // Tab accepts the top completion: if the popup was open last frame,
                 // eat Tab *before* the editor runs so it doesn't shift focus instead.
                 let ac_id = egui::Id::new(("ide_ac_open", editor_id));
@@ -4291,8 +4599,10 @@ impl<'a> EditorTabViewer<'a> {
                                 s
                             });
                             ui.add(egui::Label::new(
-                                egui::RichText::new(nums).font(font.clone()).color(egui::Color32::from_gray(100)),
+                                egui::RichText::new(nums).font(font.clone()).color(theme.gutter32()),
                             ));
+                            // The code editor's background follows the selected editor theme.
+                            ui.style_mut().visuals.extreme_bg_color = theme.bg32();
                             egui::TextEdit::multiline(&mut self.ide.open[i].text)
                                 .id(editor_id)
                                 .code_editor()
@@ -4307,27 +4617,79 @@ impl<'a> EditorTabViewer<'a> {
                 if output.response.response.changed() {
                     self.ide.open[i].dirty = true;
                 }
-                // Right-click an identifier → "Find all references". The word is taken
-                // from the pointer position over the code (via the galley).
-                let rc_word = output
-                    .response
-                    .response
-                    .hover_pos()
-                    .map(|p| {
-                        let cc = output.galley.cursor_from_pos(p - output.galley_pos);
-                        word_at(&self.ide.open[i].text, cc.index.0)
-                    })
-                    .filter(|w| !w.is_empty());
+                // Current-line + find-match highlights (a subtle wash on top; the low alpha
+                // keeps text readable). Monospace, un-wrapped rows → the column math is exact.
+                {
+                    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+                    if output.response.response.has_focus() {
+                        if let Some(cr) = output.cursor_range {
+                            let caret = cr.primary.index.0;
+                            let row = self.ide.open[i].text.chars().take(caret).filter(|&c| c == '\n').count();
+                            if let Some(r) = output.galley.rows.get(row) {
+                                let rr = r.rect();
+                                let clip = ui.clip_rect();
+                                let rect = egui::Rect::from_min_max(
+                                    egui::pos2(clip.left(), output.galley_pos.y + rr.top()),
+                                    egui::pos2(clip.right(), output.galley_pos.y + rr.bottom()),
+                                );
+                                ui.painter().rect_filled(rect, 0.0, theme.cur_line32());
+                            }
+                        }
+                    }
+                    if self.ide.find_open && !self.ide.find_query.is_empty() {
+                        let hl = egui::Color32::from_rgba_unmultiplied(255, 210, 0, 55);
+                        let text = &self.ide.open[i].text;
+                        for (bs, be) in find_ranges(text, &self.ide.find_query) {
+                            let line = text[..bs].matches('\n').count();
+                            let line_start = text[..bs].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                            let col = text[line_start..bs].chars().count();
+                            let len = text[bs..be].chars().count();
+                            if let Some(r) = output.galley.rows.get(line) {
+                                let rr = r.rect();
+                                let x0 = output.galley_pos.x + rr.left() + col as f32 * char_w;
+                                let x1 = x0 + len as f32 * char_w;
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(x0, output.galley_pos.y + rr.top()),
+                                        egui::pos2(x1, output.galley_pos.y + rr.bottom()),
+                                    ),
+                                    2.0,
+                                    hl,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Right-click an identifier → Go to definition / Find all references. Capture
+                // the word at the moment of the click (from the pointer position over the
+                // code) and hold it: reading the LIVE hover each frame flickers, because once
+                // the menu opens the pointer sits over the menu, not the word.
+                if output.response.response.secondary_clicked() {
+                    self.ide.rc_word = output
+                        .response
+                        .response
+                        .hover_pos()
+                        .map(|p| {
+                            let cc = output.galley.cursor_from_pos(p - output.galley_pos);
+                            word_at(&self.ide.open[i].text, cc.index.0)
+                        })
+                        .filter(|w| !w.is_empty());
+                }
+                let rc_word = self.ide.rc_word.clone();
                 output.response.response.context_menu(|ui| {
                     match &rc_word {
                         Some(w) => {
+                            if ui.button(format!("⧉ Go to definition of \"{w}\"  (Ctrl+B)")).clicked() {
+                                self.goto_definition(w);
+                                ui.close();
+                            }
                             if ui.button(format!("🔎 Find all references to \"{w}\"")).clicked() {
                                 self.gather_references(w);
                                 ui.close();
                             }
                         }
                         None => {
-                            ui.label("right-click a word to find its references");
+                            ui.label("right-click a word for its definition / references");
                         }
                     }
                 });
@@ -4630,6 +4992,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.button", insert: "input.button(", doc: "input.button(0) — true while a mouse button is held (0 left, 1 right, 2 middle)." },
     ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
+    ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — grab the cursor to the window and hide it (for FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
+    ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
+    ApiEntry { label: "input.setMouseLocked", insert: "input.setMouseLocked(", doc: "input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle)." },
     ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
@@ -4646,6 +5011,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
+    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(\"PointLight\") — a component handle whose numeric fields you can read AND assign at runtime, or nil if absent. PointLight: intensity, range, r, g, b. RigidBody: friction, restitution, gravity (0/1), radius, height. e.g. light.intensity = 2 * (0.5 + 0.5 * math.sin(time))." },
     ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
     ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
     ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
@@ -4664,14 +5030,178 @@ const LUA_API: &[ApiEntry] = &[
 
 /// Build a colored layout for Lua source (keywords, strings, numbers, comments,
 /// engine API). A simple single-pass tokenizer — good enough for an in-engine IDE.
-fn lua_highlight(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
+/// A code-editor color theme: the syntax token colors plus the editor background, gutter
+/// and current-line highlight. Colors are raw RGB(A) so the presets can be `const`.
+#[derive(Clone, Copy)]
+struct CodeTheme {
+    name: &'static str,
+    bg: [u8; 3],
+    gutter: [u8; 3],
+    kw: [u8; 3],
+    api: [u8; 3],
+    string: [u8; 3],
+    num: [u8; 3],
+    comment: [u8; 3],
+    text: [u8; 3],
+    /// Current-line highlight (RGBA; alpha is the wash strength).
+    cur_line: [u8; 4],
+}
+
+impl CodeTheme {
+    fn bg32(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(self.bg[0], self.bg[1], self.bg[2])
+    }
+    fn gutter32(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(self.gutter[0], self.gutter[1], self.gutter[2])
+    }
+    fn text32(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(self.text[0], self.text[1], self.text[2])
+    }
+    fn cur_line32(&self) -> egui::Color32 {
+        let [r, g, b, a] = self.cur_line;
+        egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+    }
+}
+
+/// The selectable code-editor themes (Preferences → Editor theme). Index 0 is the default.
+const CODE_THEMES: &[CodeTheme] = &[
+    CodeTheme {
+        name: "Floptle Dark",
+        bg: [30, 30, 30],
+        gutter: [100, 100, 100],
+        kw: [86, 156, 214],
+        api: [78, 201, 176],
+        string: [206, 145, 120],
+        num: [181, 206, 168],
+        comment: [106, 153, 85],
+        text: [212, 212, 212],
+        cur_line: [255, 255, 255, 14],
+    },
+    CodeTheme {
+        name: "Monokai",
+        bg: [39, 40, 34],
+        gutter: [120, 120, 110],
+        kw: [249, 38, 114],
+        api: [102, 217, 239],
+        string: [230, 219, 116],
+        num: [174, 129, 255],
+        comment: [117, 113, 94],
+        text: [248, 248, 242],
+        cur_line: [255, 255, 255, 16],
+    },
+    CodeTheme {
+        name: "Dracula",
+        bg: [40, 42, 54],
+        gutter: [98, 114, 164],
+        kw: [255, 121, 198],
+        api: [139, 233, 253],
+        string: [241, 250, 140],
+        num: [189, 147, 249],
+        comment: [98, 114, 164],
+        text: [248, 248, 242],
+        cur_line: [255, 255, 255, 16],
+    },
+    CodeTheme {
+        name: "Solarized Dark",
+        bg: [0, 43, 54],
+        gutter: [88, 110, 117],
+        kw: [133, 153, 0],
+        api: [42, 161, 152],
+        string: [42, 161, 152],
+        num: [211, 54, 130],
+        comment: [88, 110, 117],
+        text: [147, 161, 161],
+        cur_line: [255, 255, 255, 14],
+    },
+    CodeTheme {
+        name: "GitHub Light",
+        bg: [255, 255, 255],
+        gutter: [160, 160, 160],
+        kw: [215, 58, 73],
+        api: [0, 92, 197],
+        string: [3, 47, 98],
+        num: [0, 92, 197],
+        comment: [106, 115, 125],
+        text: [36, 41, 46],
+        cur_line: [0, 0, 0, 14],
+    },
+];
+
+/// An editor/engine chrome theme (Preferences → Engine theme). Built on egui's dark/light
+/// base, then key surfaces are overridden. Index 0 is the default (egui dark).
+#[derive(Clone, Copy)]
+struct EngineTheme {
+    name: &'static str,
+    dark: bool,
+    /// Override panel/window/extreme backgrounds; `None` keeps the egui base value.
+    panel: Option<[u8; 3]>,
+    window: Option<[u8; 3]>,
+    extreme: Option<[u8; 3]>,
+    /// Selection / hyperlink accent.
+    accent: Option<[u8; 3]>,
+}
+
+const ENGINE_THEMES: &[EngineTheme] = &[
+    EngineTheme { name: "Floptle Dark", dark: true, panel: None, window: None, extreme: None, accent: None },
+    EngineTheme {
+        name: "Midnight",
+        dark: true,
+        panel: Some([18, 20, 30]),
+        window: Some([22, 25, 37]),
+        extreme: Some([12, 13, 20]),
+        accent: Some([90, 130, 245]),
+    },
+    EngineTheme {
+        name: "Slate",
+        dark: true,
+        panel: Some([38, 42, 50]),
+        window: Some([44, 49, 58]),
+        extreme: Some([28, 31, 37]),
+        accent: Some([120, 160, 200]),
+    },
+    EngineTheme {
+        name: "Carbon (OLED)",
+        dark: true,
+        panel: Some([8, 8, 8]),
+        window: Some([14, 14, 14]),
+        extreme: Some([0, 0, 0]),
+        accent: Some([0, 200, 160]),
+    },
+    EngineTheme { name: "Light", dark: false, panel: None, window: None, extreme: None, accent: None },
+];
+
+impl EngineTheme {
+    /// The egui visuals for this theme (base + overrides).
+    fn visuals(&self) -> egui::Visuals {
+        let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        let c = |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        if let Some(p) = self.panel {
+            v.panel_fill = c(p);
+        }
+        if let Some(w) = self.window {
+            v.window_fill = c(w);
+            v.widgets.noninteractive.bg_fill = c(w);
+        }
+        if let Some(e) = self.extreme {
+            v.extreme_bg_color = c(e);
+        }
+        if let Some(a) = self.accent {
+            v.selection.bg_fill = c(a).gamma_multiply(0.55);
+            v.hyperlink_color = c(a);
+        }
+        v
+    }
+}
+
+fn lua_highlight(text: &str, font: egui::FontId, theme: &CodeTheme) -> egui::text::LayoutJob {
     use egui::Color32;
-    let c_kw = Color32::from_rgb(86, 156, 214);
-    let c_api = Color32::from_rgb(78, 201, 176);
-    let c_str = Color32::from_rgb(206, 145, 120);
-    let c_num = Color32::from_rgb(181, 206, 168);
-    let c_com = Color32::from_rgb(106, 153, 85);
-    let c_def = Color32::from_rgb(212, 212, 212);
+    let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let c_kw = rgb(theme.kw);
+    let c_api = rgb(theme.api);
+    let c_str = rgb(theme.string);
+    let c_num = rgb(theme.num);
+    let c_com = rgb(theme.comment);
+    let c_def = rgb(theme.text);
 
     let mut job = egui::text::LayoutJob::default();
     let mut push = |s: &str, color: Color32| {
@@ -4738,14 +5268,49 @@ fn lua_highlight(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
 }
 
 /// A plain monospace layout (no highlighting) — used for non-Lua files (Markdown).
-fn plain_job(text: &str, font: egui::FontId) -> egui::text::LayoutJob {
+fn plain_job(text: &str, font: egui::FontId, theme: &CodeTheme) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.append(
         text,
         0.0,
-        egui::text::TextFormat { font_id: font, color: egui::Color32::from_gray(212), ..Default::default() },
+        egui::text::TextFormat { font_id: font, color: theme.text32(), ..Default::default() },
     );
     job
+}
+
+/// Helpers for whole-line editing (Ctrl+C / Ctrl+X / Ctrl+D on the current line).
+mod line_edit {
+    /// The byte range of the line containing char index `char_idx`, plus the byte index
+    /// where the next line starts (== content end when there's no trailing newline).
+    /// Returns `(line_start, content_end, next_line_start)`.
+    pub fn line_bytes(text: &str, char_idx: usize) -> (usize, usize, usize) {
+        let byte_idx = text.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(text.len());
+        let line_start = text[..byte_idx].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let content_end = text[line_start..].find('\n').map(|p| line_start + p).unwrap_or(text.len());
+        let next_line_start = if content_end < text.len() { content_end + 1 } else { text.len() };
+        (line_start, content_end, next_line_start)
+    }
+
+    /// The current line's text with a trailing newline (what Ctrl+C / Ctrl+X put on the
+    /// clipboard, so pasting re-inserts a whole line).
+    pub fn line_with_newline(text: &str, char_idx: usize) -> String {
+        let (s, e, _) = line_bytes(text, char_idx);
+        format!("{}\n", &text[s..e])
+    }
+
+    /// Number of chars before byte offset `b` (to place the caret after an edit).
+    pub fn char_of_byte(text: &str, b: usize) -> usize {
+        text[..b.min(text.len())].chars().count()
+    }
+}
+
+/// Move the in-engine editor's caret to a char index (collapsed selection).
+fn set_ide_caret(ctx: &egui::Context, id: egui::Id, char_idx: usize) {
+    if let Some(mut st) = egui::text_edit::TextEditState::load(ctx, id) {
+        let c = egui::text::CCursor::new(char_idx);
+        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
+        st.store(ctx, id);
+    }
 }
 
 /// The token (run of identifier/`.` chars) ending at `cursor_char`, plus its start
@@ -5378,6 +5943,8 @@ struct Editor {
     project_root: PathBuf,
     /// Whether the Project Settings window is open.
     show_project_settings: bool,
+    /// Whether the Preferences (user-wide editor settings) window is open.
+    show_preferences: bool,
     /// Whether the New/Open Project window is open, + its path text field.
     show_project_mgr: bool,
     project_path_buf: String,
@@ -5412,6 +5979,10 @@ struct Editor {
     input_buttons_pressed: [bool; 3],
     input_mouse_delta: (f32, f32),
     input_scroll: f32,
+    /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
+    /// free-look. While set, the RMB-release handler won't release the grab, and Stop
+    /// releases it. Reset when play ends.
+    script_mouse_lock: bool,
     /// Offscreen target for the Inspector's spinning model / material preview.
     preview: Option<PreviewTarget>,
     /// Offscreen 16:9 target for the Inspector's selected-camera POV preview.
@@ -5483,9 +6054,6 @@ struct Editor {
     add_component_filter: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
-    /// The editor chrome's default panel/window/extreme bg colors, captured once so play
-    /// mode can tint them (and untint cleanly on stop). `None` until the first frame.
-    chrome_bg: Option<(egui::Color32, egui::Color32, egui::Color32)>,
     /// The physics sim while playing (built on Play, dropped on Stop).
     sim: Option<floptle_physics::Sim>,
     /// Paused (in play mode): the script clock freezes.
@@ -5506,6 +6074,14 @@ struct Editor {
     external_editor: String,
     /// Prefer the external editor over the in-engine IDE for opening scripts.
     prefer_external_editor: bool,
+    /// Whether to tint the editor chrome while in play mode (a user preference).
+    play_tint_enabled: bool,
+    /// Additive RGB offset applied to the chrome bg in play mode (a user preference).
+    play_tint: [u8; 3],
+    /// Selected engine (chrome) theme — index into `ENGINE_THEMES` (a user preference).
+    engine_theme: usize,
+    /// Selected code-editor theme — index into `CODE_THEMES` (a user preference).
+    code_theme: usize,
     /// Smoothed frames-per-second + a throttle so the window title isn't rewritten
     /// every frame.
     fps: f32,
@@ -5593,6 +6169,12 @@ impl ApplicationHandler for Editor {
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
         self.prefer_external_editor = load_prefer_external();
+        let (tint_on, tint_rgb) = load_play_tint();
+        self.play_tint_enabled = tint_on;
+        self.play_tint = tint_rgb;
+        self.grid = load_grid();
+        self.engine_theme = load_theme_index(engine_theme_path(), ENGINE_THEMES.len());
+        self.code_theme = load_theme_index(code_theme_path(), CODE_THEMES.len());
         self.preview_spinning = true;
         self.preview_zoom = 1.0;
         self.assets_grid_dir = self.project_root.clone();
@@ -5894,9 +6476,12 @@ impl ApplicationHandler for Editor {
                 } else {
                     let was_looking = self.input.looking;
                     self.input.looking = false;
-                    if let Some(window) = self.window.as_ref() {
-                        let _ = window.set_cursor_grab(CursorGrabMode::None);
-                        window.set_cursor_visible(true);
+                    // Don't release the grab if a script is holding the mouse locked.
+                    if !self.script_mouse_lock {
+                        if let Some(window) = self.window.as_ref() {
+                            let _ = window.set_cursor_grab(CursorGrabMode::None);
+                            window.set_cursor_visible(true);
+                        }
                     }
                     // A click (negligible motion) over the viewport ⏵ context menu (editor only).
                     if editor && was_looking && self.rmb_moved < 6.0 {
@@ -6224,6 +6809,22 @@ impl Editor {
             );
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
+            // Apply any mouse lock/unlock a script requested this frame (grab + hide the
+            // cursor for free-look, or release it). The state persists until changed/Stop.
+            if let Some(want) = self.script_host.take_mouse_lock() {
+                self.script_mouse_lock = want;
+                if let Some(window) = self.window.as_ref() {
+                    if want {
+                        let _ = window
+                            .set_cursor_grab(CursorGrabMode::Confined)
+                            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
+                        window.set_cursor_visible(false);
+                    } else {
+                        let _ = window.set_cursor_grab(CursorGrabMode::None);
+                        window.set_cursor_visible(true);
+                    }
+                }
+            }
             // GPU-load any models a script swapped via `node.model` (the Matter is already
             // updated by run; we re-import here so the new mesh renders THIS frame). Inlined
             // with the in-scope `gpu`/`raster` borrows — `self.import_model` can't run while
@@ -6247,6 +6848,9 @@ impl Editor {
             // Apply script velocity writes, then advance physics (writes transforms back).
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
+                // Live Inspector edits: re-read RigidBody tunables (friction, restitution,
+                // gravity, pos/rot locks) into the running bodies each frame — no teleport.
+                sim.sync_dynamic_params(&self.world);
                 for (eid, v) in self.script_host.take_body_changes() {
                     sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                 }
@@ -6435,12 +7039,20 @@ impl Editor {
                     }
                 }
             }
-            // Mesh collider wireframes. Every flagged Mesh node when the global toggle is
-            // on, plus the SELECTED mesh-collider node always (so you can verify it).
-            let mesh_colliders: Vec<(Entity, String)> = self
-                .world
-                .query::<floptle_core::MeshCollider>()
-                .filter_map(|(e, _)| match self.world.get::<Matter>(e) {
+            // Mesh collider wireframes. Every Mesh node flagged Collidable OR (legacy)
+            // MeshCollider when the global toggle is on, plus the SELECTED one always (so
+            // you can verify it). Both markers build a static triangle-mesh collider, so
+            // both must draw the wireframe (union; dedup a node flagged both).
+            let mut collider_ents: Vec<Entity> =
+                self.world.query::<floptle_core::Collidable>().map(|(e, _)| e).collect();
+            for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
+                if !collider_ents.contains(&e) {
+                    collider_ents.push(e);
+                }
+            }
+            let mesh_colliders: Vec<(Entity, String)> = collider_ents
+                .into_iter()
+                .filter_map(|e| match self.world.get::<Matter>(e) {
                     Some(Matter::Mesh { asset_path }) => Some((e, asset_path.clone())),
                     _ => None,
                 })
@@ -6742,27 +7354,26 @@ impl Editor {
         // ---- build the egui UI (mutating the World) ----
         let raw_input = egui.state.take_egui_input(&window);
         let ctx = egui.ctx.clone();
-        // Play-mode telegraph: tint the editor chrome a little cooler/brighter while
-        // playing, so you never mistake play mode for edit mode (and lose edits on Stop).
-        if self.chrome_bg.is_none() {
-            let style = ctx.style_of(egui::Theme::Dark);
-            let v = &style.visuals;
-            self.chrome_bg = Some((v.panel_fill, v.window_fill, v.extreme_bg_color));
-        }
-        if let Some((pf, wf, ex)) = self.chrome_bg {
-            let playing = self.playing;
-            let tint = |c: egui::Color32| {
-                egui::Color32::from_rgb(
-                    (c.r() as u16 + 10).min(255) as u8,
-                    (c.g() as u16 + 18).min(255) as u8,
-                    (c.b() as u16 + 30).min(255) as u8,
-                )
-            };
-            ctx.all_styles_mut(|s| {
-                s.visuals.panel_fill = if playing { tint(pf) } else { pf };
-                s.visuals.window_fill = if playing { tint(wf) } else { wf };
-                s.visuals.extreme_bg_color = if playing { tint(ex) } else { ex };
-            });
+        // Apply the selected engine (chrome) theme, then a play-mode tint on top so you
+        // never mistake play mode for edit mode (and lose edits on Stop). Reapplied each
+        // frame so switching the theme in Preferences takes effect immediately.
+        {
+            let theme = ENGINE_THEMES[self.engine_theme.min(ENGINE_THEMES.len() - 1)];
+            let mut vis = theme.visuals();
+            if self.playing && self.play_tint_enabled {
+                let [tr, tg, tb] = self.play_tint;
+                let tint = |c: egui::Color32| {
+                    egui::Color32::from_rgb(
+                        (c.r() as u16 + tr as u16).min(255) as u8,
+                        (c.g() as u16 + tg as u16).min(255) as u8,
+                        (c.b() as u16 + tb as u16).min(255) as u8,
+                    )
+                };
+                vis.panel_fill = tint(vis.panel_fill);
+                vis.window_fill = tint(vis.window_fill);
+                vis.extreme_bg_color = tint(vis.extreme_bg_color);
+            }
+            ctx.all_styles_mut(|s| s.visuals = vis.clone());
         }
         // Every named entity, Matter nodes and the Lighting node alike.
         let entity_names: Vec<(Entity, String)> =
@@ -6800,6 +7411,12 @@ impl Editor {
         });
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
+        let show_preferences = &mut self.show_preferences;
+        let play_tint_enabled = &mut self.play_tint_enabled;
+        let play_tint = &mut self.play_tint;
+        // Current theme selections (changes are routed through `cmd`, then saved + applied).
+        let engine_theme = self.engine_theme;
+        let code_theme = self.code_theme;
         let asset_tree = &self.asset_tree;
         let texture_settings = &self.texture_settings;
         let assets_grid = &mut self.assets_grid;
@@ -6887,6 +7504,10 @@ impl Editor {
                             *show_project_settings = true;
                             ui.close();
                         }
+                        if ui.button("Preferences…").clicked() {
+                            *show_preferences = true;
+                            ui.close();
+                        }
                     });
                     ui.menu_button("Add", |ui| {
                         if ui.button("Cube").clicked() { cmd.add = Some(new_cube()); ui.close(); }
@@ -6911,12 +7532,6 @@ impl Editor {
                             .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
                         if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
-                            ui.close();
-                        }
-                    });
-                    ui.menu_button("Project", |ui| {
-                        if ui.button("Settings…").clicked() {
-                            *show_project_settings = true;
                             ui.close();
                         }
                     });
@@ -6998,6 +7613,7 @@ impl Editor {
                 zoom: viewport_zoom,
                 scene_name: &scene_name,
                 ppp,
+                code_theme,
                 cmd: &mut cmd,
             };
             // Fullscreen: one tab maximized over the whole window (double-click a tab to
@@ -7100,8 +7716,14 @@ impl Editor {
 
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
+                });
 
-                    ui.add_space(10.0);
+            // ---- preferences window (user-wide editor settings) ----
+            egui::Window::new("Preferences")
+                .open(show_preferences)
+                .resizable(false)
+                .default_width(320.0)
+                .show(ui.ctx(), |ui| {
                     ui.label("External editor — \"Open in IDE\"");
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -7122,6 +7744,69 @@ impl Editor {
                     {
                         cmd.set_prefer_external = Some(*prefer_external);
                     }
+
+                    ui.add_space(12.0);
+                    ui.label("Play-mode tint");
+                    ui.separator();
+                    let mut tint_changed = ui
+                        .checkbox(play_tint_enabled, "Tint the editor while playing")
+                        .on_hover_text("Tints the editor chrome while in play mode so you never mistake it for edit mode (and lose edits on Stop).")
+                        .changed();
+                    ui.add_enabled_ui(*play_tint_enabled, |ui| {
+                        // The stored value is an additive RGB offset, so editing it as a color
+                        // reads naturally: black = no tint, brighter = a stronger nudge.
+                        let mut col =
+                            egui::Color32::from_rgb(play_tint[0], play_tint[1], play_tint[2]);
+                        ui.horizontal(|ui| {
+                            ui.label("tint amount");
+                            if ui.color_edit_button_srgba(&mut col).changed() {
+                                *play_tint = [col.r(), col.g(), col.b()];
+                                tint_changed = true;
+                            }
+                        });
+                        ui.small("Color added to the editor background while playing (black = no tint).");
+                        if ui.button("Reset to default").clicked() {
+                            *play_tint = DEFAULT_PLAY_TINT;
+                            tint_changed = true;
+                        }
+                    });
+                    if tint_changed {
+                        cmd.set_play_tint = Some((*play_tint_enabled, *play_tint));
+                    }
+
+                    ui.add_space(12.0);
+                    ui.label("Themes");
+                    ui.separator();
+                    // Engine (chrome) theme.
+                    ui.horizontal(|ui| {
+                        ui.label("Engine theme");
+                        let cur = engine_theme.min(ENGINE_THEMES.len() - 1);
+                        egui::ComboBox::from_id_salt("engine_theme_combo")
+                            .selected_text(ENGINE_THEMES[cur].name)
+                            .show_ui(ui, |ui| {
+                                for (i, t) in ENGINE_THEMES.iter().enumerate() {
+                                    if ui.selectable_label(i == cur, t.name).clicked() {
+                                        cmd.set_engine_theme = Some(i);
+                                    }
+                                }
+                            });
+                    });
+                    ui.small("Recolors the editor windows, panels and menus.");
+                    // Code-editor theme.
+                    ui.horizontal(|ui| {
+                        ui.label("Editor theme");
+                        let cur = code_theme.min(CODE_THEMES.len() - 1);
+                        egui::ComboBox::from_id_salt("code_theme_combo")
+                            .selected_text(CODE_THEMES[cur].name)
+                            .show_ui(ui, |ui| {
+                                for (i, t) in CODE_THEMES.iter().enumerate() {
+                                    if ui.selectable_label(i == cur, t.name).clicked() {
+                                        cmd.set_code_theme = Some(i);
+                                    }
+                                }
+                            });
+                    });
+                    ui.small("Syntax colors + background of the in-engine script editor.");
                 });
 
             // ---- grid settings window ----
@@ -7130,20 +7815,33 @@ impl Editor {
                 .resizable(false)
                 .default_width(240.0)
                 .show(ui.ctx(), |ui| {
-                    ui.checkbox(&mut grid.show, "show grid");
-                    ui.checkbox(&mut grid.snap, "snap objects to grid");
-                    ui.add(egui::Slider::new(&mut grid.size, 0.1..=10.0).text("cell size"));
-                    ui.add(egui::Slider::new(&mut grid.extent, 4..=120).text("extent (cells)"));
-                    ui.add(
-                        egui::Slider::new(&mut grid.y_offset, 0.0..=50.0)
-                            .text("drop below camera")
-                            .suffix(" m"),
-                    );
-                    ui.add(egui::Slider::new(&mut grid.alpha, 0.0..=1.0).text("opacity"));
+                    let mut changed = false;
+                    changed |= ui.checkbox(&mut grid.show, "show grid").changed();
+                    changed |= ui.checkbox(&mut grid.snap, "snap objects to grid").changed();
+                    changed |= ui.add(egui::Slider::new(&mut grid.size, 0.1..=10.0).text("cell size")).changed();
+                    changed |= ui.add(egui::Slider::new(&mut grid.extent, 4..=120).text("extent (cells)")).changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut grid.y_offset, 0.0..=50.0)
+                                .text("drop below camera")
+                                .suffix(" m"),
+                        )
+                        .on_hover_text("How far below the camera the grid floor sits. Your value is saved between sessions.")
+                        .changed();
+                    changed |= ui.add(egui::Slider::new(&mut grid.alpha, 0.0..=1.0).text("opacity")).changed();
                     ui.horizontal(|ui| {
                         ui.label("color");
-                        ui.color_edit_button_rgb(&mut grid.color);
+                        changed |= ui.color_edit_button_rgb(&mut grid.color).changed();
                     });
+                    if ui.small_button("Reset to defaults").clicked() {
+                        *grid = GridConfig::default();
+                        changed = true;
+                    }
+                    // Persist the grid settings whenever a control changes (so they don't
+                    // reset every launch).
+                    if changed {
+                        cmd.save_grid = true;
+                    }
                 });
 
             // ---- viewport context menu (RMB click on an object / empty space) ----
@@ -7226,16 +7924,32 @@ impl Editor {
             if let Some((path, buf)) = rename_target.as_mut() {
                 let mut open = true;
                 let mut close = false;
-                egui::Window::new("Rename asset")
+                let ext = Path::new(path.as_str())
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!(".{e}"))
+                    .unwrap_or_default();
+                egui::Window::new("Name file")
                     .open(&mut open)
                     .resizable(false)
                     .collapsible(false)
                     .default_width(320.0)
                     .show(ui.ctx(), |ui| {
                         ui.small(path.as_str());
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(buf).desired_width(280.0).hint_text("new name"),
-                        );
+                        // Edit just the base name; the extension rides along as a suffix.
+                        let edit = ui
+                            .horizontal(|ui| {
+                                let e = ui.add(
+                                    egui::TextEdit::singleline(buf)
+                                        .desired_width(240.0)
+                                        .hint_text("name"),
+                                );
+                                if !ext.is_empty() {
+                                    ui.monospace(&ext);
+                                }
+                                e
+                            })
+                            .inner;
                         edit.request_focus();
                         let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.horizontal(|ui| {
@@ -7555,6 +8269,22 @@ impl Editor {
             save_prefer_external(v);
             self.prefer_external_editor = v;
         }
+        if let Some((en, tint)) = cmd.set_play_tint {
+            save_play_tint(en, tint);
+            self.play_tint_enabled = en;
+            self.play_tint = tint;
+        }
+        if cmd.save_grid {
+            save_grid(&self.grid);
+        }
+        if let Some(i) = cmd.set_engine_theme {
+            self.engine_theme = i;
+            save_theme_index(engine_theme_path(), i);
+        }
+        if let Some(i) = cmd.set_code_theme {
+            self.code_theme = i;
+            save_theme_index(code_theme_path(), i);
+        }
         if let Some((name, doc)) = cmd.save_material {
             let dir = self.materials_dir();
             let _ = floptle_scene::save_material(&name, &doc, &dir);
@@ -7758,11 +8488,14 @@ impl Editor {
             self.new_script(&dir);
         }
         if let Some(path) = cmd.rename_asset {
-            // Seed the rename modal with the current file/folder name.
-            let name = Path::new(&path)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+            // Seed the rename modal with the current base name (the extension is shown as a
+            // fixed suffix in the modal, so you edit just the name).
+            let p = Path::new(&path);
+            let name = if p.is_dir() {
+                p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            } else {
+                p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            };
             self.rename_target = Some((path, name));
         }
         if let Some((from, to)) = cmd.do_rename {
@@ -8066,10 +8799,18 @@ impl Editor {
     /// oriented by its rotation). These are environment colliders, not dynamic bodies.
     fn add_static_colliders(&self, sim: &mut floptle_physics::Sim) {
         // Union of Collidable + legacy MeshCollider entities (dedup; a node flagged both
-        // is added once).
-        let mut ents: Vec<Entity> = self.world.query::<floptle_core::Collidable>().map(|(e, _)| e).collect();
+        // is added once). A node with a RigidBody is a *dynamic* body (Sim::build made it
+        // one) — skip it here so its dynamic body doesn't fight a static collider sitting at
+        // the same spot (which would freeze/eject it). Collidable = static world geometry
+        // only when there's no RigidBody.
+        let mut ents: Vec<Entity> = self
+            .world
+            .query::<floptle_core::Collidable>()
+            .map(|(e, _)| e)
+            .filter(|e| self.world.get::<floptle_core::RigidBody>(*e).is_none())
+            .collect();
         for (e, _) in self.world.query::<floptle_core::MeshCollider>() {
-            if !ents.contains(&e) {
+            if !ents.contains(&e) && self.world.get::<floptle_core::RigidBody>(e).is_none() {
                 ents.push(e);
             }
         }
@@ -8182,6 +8923,14 @@ impl Editor {
             self.playing = false;
             self.paused = false;
             self.sim = None; // drop the physics sim; restore reverts moved transforms
+            // Release any script-held mouse lock so you're not stuck grabbed after Stop.
+            if self.script_mouse_lock {
+                self.script_mouse_lock = false;
+                if let Some(window) = self.window.as_ref() {
+                    let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    window.set_cursor_visible(true);
+                }
+            }
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
@@ -9832,17 +10581,29 @@ impl Editor {
         if let Some(dock) = self.dock_state.as_mut() {
             focus_scripting_tab(dock);
         }
-        self.selected_asset = Some(p);
+        self.selected_asset = Some(p.clone());
+        // Immediately prompt for the name: open the naming modal with an empty field (the
+        // ".lua" suffix is fixed), so you just type a name and press Enter. Cancel keeps the
+        // default "script.lua".
+        self.rename_target = Some((p, String::new()));
     }
 
-    /// Rename a file/folder to `new_name` within its current parent directory.
+    /// Rename a file/folder to `new_name` within its current parent directory. If the
+    /// typed name has no extension, the original file's extension is kept (so naming a new
+    /// `.lua` script "player" yields "player.lua", and a rename can't drop the extension).
     fn rename_asset(&mut self, from: &str, new_name: &str) {
-        let new_name = new_name.trim();
-        if new_name.is_empty() {
+        let typed = new_name.trim();
+        if typed.is_empty() {
             return;
         }
         let src = PathBuf::from(from);
-        let dst = src.parent().unwrap_or(Path::new(".")).join(new_name);
+        let final_name = match src.extension().and_then(|e| e.to_str()) {
+            Some(ext) if !src.is_dir() && Path::new(typed).extension().is_none() => {
+                format!("{typed}.{ext}")
+            }
+            _ => typed.to_string(),
+        };
+        let dst = src.parent().unwrap_or(Path::new(".")).join(&final_name);
         if dst == src {
             return;
         }
@@ -9859,7 +10620,7 @@ impl Editor {
         for f in &mut self.ide.open {
             if f.path == from {
                 f.path = dst_str.clone();
-                f.name = new_name.to_string();
+                f.name = final_name.clone();
             }
         }
         if self.selected_asset.as_deref() == Some(from) {

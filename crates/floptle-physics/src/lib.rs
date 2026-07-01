@@ -777,7 +777,13 @@ impl Sim {
             world.add_collider(Box::new(SdfTerrain { terrain: t.clone() }));
         }
         let mut map = Vec::new();
-        // Collect first (immutable borrow of the ECS) then build the bodies.
+        // Collect first (immutable borrow of the ECS) then build the bodies. A `RigidBody`
+        // ALWAYS becomes a dynamic body — that's what makes it fall/move. If the node is
+        // *also* flagged `Collidable`/`MeshCollider`, that marker is ignored here (and the
+        // editor skips adding a static collider for it), so the dynamic body never fights a
+        // static shape sitting on top of it. `Collidable` means "static world geometry" only
+        // when there is NO RigidBody; the solver has no body-vs-body pass, so to make one
+        // object a solid obstacle the player bumps into, make it Collidable with no RigidBody.
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
@@ -870,6 +876,24 @@ impl Sim {
             if l.entity.index() == eid {
                 self.world.bodies[l.body].vel = vel;
                 return;
+            }
+        }
+    }
+
+    /// Re-read each dynamic body's tunable RigidBody params from the ECS (friction,
+    /// restitution, gravity on/off, position/rotation locks), WITHOUT touching position or
+    /// velocity. Lets the Inspector edit these live while playing (no teleport/reset). Shape
+    /// changes (kind/radius/height) still need a full rebuild.
+    pub fn sync_dynamic_params(&mut self, ecs: &World) {
+        for i in 0..self.map.len() {
+            let (ent, bidx) = (self.map[i].entity, self.map[i].body);
+            if let Some(rb) = ecs.get::<RigidBody>(ent) {
+                self.map[i].lock_rot = rb.lock_rot;
+                let b = &mut self.world.bodies[bidx];
+                b.restitution = rb.restitution;
+                b.friction = rb.friction;
+                b.use_gravity = rb.gravity;
+                b.lock_pos = rb.lock_pos;
             }
         }
     }
@@ -1239,6 +1263,28 @@ mod tests {
         }
         let y = ecs.get::<Transform>(e).unwrap().translation.y;
         assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
+    }
+
+    #[test]
+    fn rigidbody_wins_over_collidable_so_it_still_falls() {
+        // A node flagged BOTH RigidBody and Collidable is a DYNAMIC body — the RigidBody
+        // wins, so build() makes it a body and it falls under gravity. (The editor skips
+        // adding a static collider for it so its dynamic body doesn't fight a static shape.)
+        // This is the canonical character setup: a player capsule with a Rigidbody + a
+        // Collider must not freeze in the air.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+        ecs.insert(e, floptle_core::Collidable);
+
+        let mut sim = Sim::build(&ecs, None, GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        assert_eq!(sim.world.bodies.len(), 1, "a RigidBody node must become a dynamic body");
+        for _ in 0..120 {
+            sim.advance(&mut ecs, 1.0 / 60.0);
+        }
+        let y = ecs.get::<Transform>(e).unwrap().translation.y;
+        assert!(y < 4.0, "a RigidBody node must fall under gravity, got y={y}");
     }
 
     #[test]
