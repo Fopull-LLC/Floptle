@@ -12,8 +12,8 @@ use std::path::Path;
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{
-    BodyKind, GravityMode, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts, Shape,
-    World,
+    AoMode, BodyKind, GravityMode, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts,
+    Shape, World,
 };
 use serde::{Deserialize, Serialize};
 
@@ -258,6 +258,68 @@ pub enum MatterDoc {
         #[serde(default = "white3")]
         tint: [f32; 3],
     },
+    /// The scene's post-processing chain (a mandatory node — self-healed on load).
+    PostProcess {
+        #[serde(default = "on")]
+        enabled: bool,
+        #[serde(default)]
+        bloom: bool,
+        #[serde(default = "default_bloom_threshold")]
+        bloom_threshold: f32,
+        #[serde(default = "default_bloom_intensity")]
+        bloom_intensity: f32,
+        #[serde(default)]
+        vignette: bool,
+        #[serde(default = "default_vignette_strength")]
+        vignette_strength: f32,
+        #[serde(default = "default_vignette_radius")]
+        vignette_radius: f32,
+        #[serde(default)]
+        ao: AoModeDoc,
+        #[serde(default = "default_ao_strength")]
+        ao_strength: f32,
+        #[serde(default = "default_ao_radius")]
+        ao_radius: f32,
+    },
+}
+
+/// Serializable [`AoMode`] (how the PostProcess node computes ambient occlusion).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AoModeDoc {
+    Off,
+    #[default]
+    ScreenSpace,
+    Sdf,
+}
+
+impl AoModeDoc {
+    pub fn to_mode(self) -> AoMode {
+        match self {
+            AoModeDoc::Off => AoMode::Off,
+            AoModeDoc::ScreenSpace => AoMode::ScreenSpace,
+            AoModeDoc::Sdf => AoMode::Sdf,
+        }
+    }
+}
+
+impl From<AoMode> for AoModeDoc {
+    fn from(m: AoMode) -> Self {
+        match m {
+            AoMode::Off => AoModeDoc::Off,
+            AoMode::ScreenSpace => AoModeDoc::ScreenSpace,
+            AoMode::Sdf => AoModeDoc::Sdf,
+        }
+    }
+}
+
+fn on() -> bool {
+    true
+}
+fn default_ao_strength() -> f32 {
+    0.7
+}
+fn default_ao_radius() -> f32 {
+    0.5
 }
 
 fn sky_grey() -> [f32; 3] {
@@ -311,6 +373,29 @@ impl From<&Matter> for MatterDoc {
                 texture: texture.clone(),
                 tint: *tint,
             },
+            Matter::PostProcess {
+                enabled,
+                bloom,
+                bloom_threshold,
+                bloom_intensity,
+                vignette,
+                vignette_strength,
+                vignette_radius,
+                ao,
+                ao_strength,
+                ao_radius,
+            } => MatterDoc::PostProcess {
+                enabled: *enabled,
+                bloom: *bloom,
+                bloom_threshold: *bloom_threshold,
+                bloom_intensity: *bloom_intensity,
+                vignette: *vignette,
+                vignette_strength: *vignette_strength,
+                vignette_radius: *vignette_radius,
+                ao: (*ao).into(),
+                ao_strength: *ao_strength,
+                ao_radius: *ao_radius,
+            },
         }
     }
 }
@@ -339,6 +424,29 @@ impl MatterDoc {
                 size: *size,
                 texture: texture.clone(),
                 tint: *tint,
+            },
+            MatterDoc::PostProcess {
+                enabled,
+                bloom,
+                bloom_threshold,
+                bloom_intensity,
+                vignette,
+                vignette_strength,
+                vignette_radius,
+                ao,
+                ao_strength,
+                ao_radius,
+            } => Matter::PostProcess {
+                enabled: *enabled,
+                bloom: *bloom,
+                bloom_threshold: *bloom_threshold,
+                bloom_intensity: *bloom_intensity,
+                vignette: *vignette,
+                vignette_strength: *vignette_strength,
+                vignette_radius: *vignette_radius,
+                ao: ao.to_mode(),
+                ao_strength: *ao_strength,
+                ao_radius: *ao_radius,
             },
         }
     }
@@ -399,23 +507,27 @@ impl LightDoc {
 
 /// Project-wide render settings — the PS1/PS2-style knobs that apply to every
 /// scene. Saved to `project.ron`, edited in the editor's Project Settings.
+///
+/// Post-processing moved to the per-scene `PostProcess` node ([`MatterDoc::PostProcess`]);
+/// the `bloom`/`vignette` fields below are **legacy** — still read so an old
+/// `project.ron`'s look can be migrated onto a scene's node, but never written back.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct ProjectConfigDoc {
     pub retro: bool,
     pub retro_height: u32,
     pub matter: bool,
-    // Post-processing (serde defaults so old project.ron files still load).
-    #[serde(default)]
+    // Legacy post-processing (pre-PostProcess-node projects) — deserialize only.
+    #[serde(default, skip_serializing)]
     pub bloom: bool,
-    #[serde(default = "default_bloom_threshold")]
+    #[serde(default = "default_bloom_threshold", skip_serializing)]
     pub bloom_threshold: f32,
-    #[serde(default = "default_bloom_intensity")]
+    #[serde(default = "default_bloom_intensity", skip_serializing)]
     pub bloom_intensity: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub vignette: bool,
-    #[serde(default = "default_vignette_strength")]
+    #[serde(default = "default_vignette_strength", skip_serializing)]
     pub vignette_strength: f32,
-    #[serde(default = "default_vignette_radius")]
+    #[serde(default = "default_vignette_radius", skip_serializing)]
     pub vignette_radius: f32,
 }
 
@@ -735,6 +847,17 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         world.insert(gravity, Transform::IDENTITY);
         world.insert(gravity, Matter::GravityVolume { mode: GravityMode::Down, strength: 10.0, radius: 20.0 });
     }
+
+    // Every scene carries a PostProcess node — post-processing is tuned per scene,
+    // not per project. If the doc predates the node, spawn the default chain (AO on,
+    // bloom/vignette off); the editor migrates legacy project-wide bloom/vignette
+    // settings onto it right after load.
+    if !doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })) {
+        let post = world.spawn();
+        world.insert(post, Name("Post Processing".into()));
+        world.insert(post, Transform::IDENTITY);
+        world.insert(post, Matter::default_post_process());
+    }
 }
 
 /// Snapshot every `Matter` entity (and the `Light` node) in `world` into a `SceneDoc`.
@@ -880,11 +1003,13 @@ mod tests {
         let mut world = World::new();
         spawn_into(&doc, &mut world);
         // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + an
-        // auto-spawned GravityVolume + the mandatory Lighting node.
-        assert_eq!(world.len(), 7);
+        // auto-spawned GravityVolume + an auto-spawned PostProcess node + the
+        // mandatory Lighting node.
+        assert_eq!(world.len(), 8);
         let snap = to_doc("demo", &world);
-        // The 4 authored matter nodes plus the auto-added Skybox + GravityVolume nodes.
-        assert_eq!(snap.nodes.len(), 6);
+        // The 4 authored matter nodes plus the auto-added Skybox + GravityVolume +
+        // PostProcess nodes.
+        assert_eq!(snap.nodes.len(), 7);
         assert!(
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::Skybox { .. })),
             "a default Skybox node should be present"
@@ -892,6 +1017,10 @@ mod tests {
         assert!(
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })),
             "a default GravityVolume node should be present"
+        );
+        assert!(
+            snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })),
+            "a default PostProcess node should be present"
         );
         // non-default directional intensity survives
         assert_eq!(snap.lighting.intensity, 2.5);
@@ -917,6 +1046,38 @@ mod tests {
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(eye.matter, MatterDoc::Camera { fov_y: 1.0, active: true });
+    }
+
+    #[test]
+    fn post_process_settings_round_trip() {
+        // An authored PostProcess node survives World → RON → World unchanged,
+        // and the self-heal does NOT add a second one.
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Name("Post Processing".into()));
+        world.insert(e, Transform::IDENTITY);
+        let authored = Matter::PostProcess {
+            enabled: false,
+            bloom: true,
+            bloom_threshold: 0.15,
+            bloom_intensity: 1.1,
+            vignette: true,
+            vignette_strength: 0.56,
+            vignette_radius: 0.45,
+            ao: AoMode::Sdf,
+            ao_strength: 0.9,
+            ao_radius: 1.25,
+        };
+        world.insert(e, authored.clone());
+
+        let text = to_ron(&to_doc("post", &world)).unwrap();
+        let mut world2 = World::new();
+        spawn_into(&from_ron(&text).unwrap(), &mut world2);
+
+        let posts: Vec<_> =
+            world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::PostProcess { .. })).collect();
+        assert_eq!(posts.len(), 1, "self-heal must not duplicate an authored PostProcess node");
+        assert_eq!(*posts[0].1, authored);
     }
 }
 

@@ -78,6 +78,11 @@ pub struct RaymarchGlobals {
     /// Inverse skybox rotation as 3 column vec4s (xyz = column, w pad): world ray dir →
     /// sky-local dir before the equirect lookup, so a rotating node spins the sky.
     pub sky_rot: [[f32; 4]; 3],
+    /// SDF ("true") ambient occlusion, from the scene's PostProcess node when its
+    /// AO mode is `Sdf`: x = on (0/1), y = strength (0..1), z = radius (world
+    /// units), w unused. Occlusion is sampled from the real distance field along
+    /// the surface normal — it shades SDF matter only (meshes aren't in the field).
+    pub ao_params: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -114,6 +119,7 @@ impl Default for RaymarchGlobals {
             sky_params: [0.0; 4],
             sky_tint: [1.0, 1.0, 1.0, 1.0],
             sky_rot: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+            ao_params: [0.0, 0.7, 0.5, 0.0],
         }
     }
 }

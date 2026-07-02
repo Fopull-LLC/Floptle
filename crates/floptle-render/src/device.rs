@@ -144,7 +144,7 @@ impl Gpu {
 
     /// Build a depth target sized to the surface. Recreated on every resize so it
     /// can never desync from the swapchain (a size mismatch is a hard validation
-    /// error at draw time).
+    /// error at draw time). `TEXTURE_BINDING` so post passes (SSAO) can sample it.
     fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
@@ -153,7 +153,7 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Self::DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

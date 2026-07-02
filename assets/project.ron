@@ -2,10 +2,4 @@
     retro: true,
     retro_height: 415,
     matter: true,
-    bloom: true,
-    bloom_threshold: 0.15,
-    bloom_intensity: 1.1,
-    vignette: true,
-    vignette_strength: 0.56,
-    vignette_radius: 0.45,
 )
