@@ -1179,6 +1179,7 @@ fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::PointLight { .. } => "Point Light",
         MatterDoc::GravityVolume { .. } => "Gravity Volume",
         MatterDoc::Skybox { .. } => "Skybox",
+        MatterDoc::PostProcess { .. } => "Post Processing",
     }
 }
 fn new_sphere() -> MatterDoc {
@@ -1202,6 +1203,7 @@ fn matter_kind_label(m: &Matter) -> &'static str {
         Matter::PointLight { .. } => "Point Light",
         Matter::GravityVolume { .. } => "Gravity Volume",
         Matter::Skybox { .. } => "Skybox",
+        Matter::PostProcess { .. } => "Post Processing",
     }
 }
 
@@ -1219,12 +1221,14 @@ fn matter_icon(m: &Matter) -> &'static str {
         Matter::PointLight { .. } => "●",
         Matter::GravityVolume { .. } => "⬇",
         Matter::Skybox { .. } => "◐",
+        Matter::PostProcess { .. } => "✨",
     }
 }
 
 /// The set of node "types" the Inspector's Add Component menu can switch a node to
 /// (icon-labeled). Mutually exclusive — picking one replaces the node's current
-/// `Matter`. Terrain (a special SDF field) and Mesh (needs an asset) are omitted.
+/// `Matter`. Terrain (a special SDF field) and Mesh (needs an asset) are omitted,
+/// as is PostProcess (the mandatory per-scene node — every scene already has one).
 fn type_catalog() -> Vec<(&'static str, Matter)> {
     use floptle_core::GravityMode;
     vec![
@@ -1808,6 +1812,8 @@ impl<'a> EditorTabViewer<'a> {
             "⬇"
         } else if matches!(matter, Some(Matter::Skybox { .. })) {
             "◐"
+        } else if matches!(matter, Some(Matter::PostProcess { .. })) {
+            "✨"
         } else if has_kids {
             "⏷"
         } else {
@@ -2199,6 +2205,81 @@ impl<'a> EditorTabViewer<'a> {
                                 cmd.inspector_changed |= ui
                                     .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
                                     .changed();
+                            }
+                            Matter::PostProcess {
+                                enabled,
+                                bloom,
+                                bloom_threshold,
+                                bloom_intensity,
+                                vignette,
+                                vignette_strength,
+                                vignette_radius,
+                                ao,
+                                ao_strength,
+                                ao_radius,
+                            } => {
+                                use floptle_core::AoMode;
+                                ui.label("post processing");
+                                ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
+                                cmd.inspector_changed |= ui
+                                    .checkbox(enabled, "enabled")
+                                    .on_hover_text("master switch for the whole chain")
+                                    .changed();
+                                ui.add_enabled_ui(*enabled, |ui| {
+                                    ui.separator();
+                                    ui.label("Ambient occlusion");
+                                    ui.horizontal(|ui| {
+                                        let mut m = *ao;
+                                        if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
+                                            m = AoMode::Off;
+                                        }
+                                        if ui
+                                            .selectable_label(m == AoMode::ScreenSpace, "Screen space")
+                                            .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
+                                            .clicked()
+                                        {
+                                            m = AoMode::ScreenSpace;
+                                        }
+                                        if ui
+                                            .selectable_label(m == AoMode::Sdf, "SDF (true)")
+                                            .on_hover_text("samples the real distance field — no screen-space artifacts, but only shades SDF matter (terrain/blobs), not meshes")
+                                            .clicked()
+                                        {
+                                            m = AoMode::Sdf;
+                                        }
+                                        if m != *ao {
+                                            *ao = m;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                    if *ao != AoMode::Off {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(ao_strength, 0.0..=1.0).text("strength"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true).text("radius (m)"))
+                                            .changed();
+                                    }
+                                    ui.separator();
+                                    cmd.inspector_changed |= ui.checkbox(bloom, "Bloom").changed();
+                                    if *bloom {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(bloom_threshold, 0.0..=2.0).text("threshold"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(bloom_intensity, 0.0..=2.0).text("intensity"))
+                                            .changed();
+                                    }
+                                    cmd.inspector_changed |= ui.checkbox(vignette, "Vignette").changed();
+                                    if *vignette {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(vignette_strength, 0.0..=1.0).text("strength"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(vignette_radius, 0.3..=1.0).text("radius"))
+                                            .changed();
+                                    }
+                                });
                             }
                         }
                     }
@@ -4125,6 +4206,59 @@ fn skybox_uniforms(
     }
 }
 
+/// Resolve the scene's PostProcess node for the renderer: the PostStack settings
+/// (bloom / vignette / SSAO) plus the raymarch SDF-AO params `[on, strength,
+/// radius, _]`. A disabled chain — or a node deleted mid-session — turns
+/// everything off (it self-heals back on the next scene load).
+fn post_process_uniforms(world: &floptle_core::World) -> (floptle_render::PostSettings, [f32; 4]) {
+    use floptle_core::AoMode;
+    let off = floptle_render::PostSettings {
+        bloom: false,
+        bloom_threshold: 1.0,
+        bloom_intensity: 0.7,
+        vignette: false,
+        vignette_strength: 0.5,
+        vignette_radius: 0.7,
+        ssao: false,
+        ssao_strength: 0.7,
+        ssao_radius: 0.5,
+    };
+    for (_, m) in world.query::<Matter>() {
+        if let Matter::PostProcess {
+            enabled,
+            bloom,
+            bloom_threshold,
+            bloom_intensity,
+            vignette,
+            vignette_strength,
+            vignette_radius,
+            ao,
+            ao_strength,
+            ao_radius,
+        } = m
+        {
+            if !enabled {
+                return (off, [0.0; 4]);
+            }
+            let s = floptle_render::PostSettings {
+                bloom: *bloom,
+                bloom_threshold: *bloom_threshold,
+                bloom_intensity: *bloom_intensity,
+                vignette: *vignette,
+                vignette_strength: *vignette_strength,
+                vignette_radius: *vignette_radius,
+                ssao: *ao == AoMode::ScreenSpace,
+                ssao_strength: *ao_strength,
+                ssao_radius: *ao_radius,
+            };
+            let ao_p =
+                if *ao == AoMode::Sdf { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };
+            return (s, ao_p);
+        }
+    }
+    (off, [0.0; 4])
+}
+
 /// Build a world-axis-aligned box wireframe (12 edges) centered at `center` with the
 /// given world half-extents — the outline of a `BodyKind::Box` collider (which the
 /// solver treats as axis-aligned).
@@ -4450,6 +4584,9 @@ struct Editor {
     /// tab; `game_vp_dims` tracks its pixel size so it's only rebuilt on resize.
     game_vp: Option<PreviewTarget>,
     game_vp_dims: (u32, u32),
+    /// The split Game viewport's own PostStack (sized with `game_vp`), so the scene's
+    /// PostProcess node applies there exactly like in the full-window view.
+    game_post: Option<floptle_render::PostStack>,
     /// The Game tab's screen rect (points), captured each frame it draws, used to size
     /// `game_vp` on the next frame.
     game_rect: Option<egui::Rect>,
@@ -4673,6 +4810,7 @@ impl ApplicationHandler for Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.migrate_legacy_post(&doc);
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
         self.anim.rescan(&self.project_root);
@@ -5886,13 +6024,14 @@ impl Editor {
                         }
                     }
                 }
-                // group / terrain / camera / light / gravity / skybox render elsewhere.
+                // group / terrain / camera / light / gravity / skybox / post render elsewhere.
                 Matter::Empty
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
-                | Matter::Skybox { .. } => {}
+                | Matter::Skybox { .. }
+                | Matter::PostProcess { .. } => {}
             }
         }
 
@@ -5922,6 +6061,9 @@ impl Editor {
                 .map(material_params)
                 .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
         };
+        // The scene's PostProcess node drives the whole post chain (per scene, not
+        // per project): PostStack settings + the raymarch SDF-AO params.
+        let (post_settings, rm_ao_params) = post_process_uniforms(&self.world);
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
@@ -5963,6 +6105,7 @@ impl Editor {
                 sky_params,
                 sky_tint,
                 sky_rot,
+                ao_params: rm_ao_params,
             }
         };
 
@@ -6019,7 +6162,8 @@ impl Editor {
                     | Matter::Camera { .. }
                     | Matter::PointLight { .. }
                     | Matter::GravityVolume { .. }
-                    | Matter::Skybox { .. } => {}
+                    | Matter::Skybox { .. }
+                    | Matter::PostProcess { .. } => {}
                 }
             }
         }
@@ -6405,30 +6549,7 @@ impl Editor {
                     }
 
                     ui.add_space(8.0);
-                    ui.label("Post-processing");
-                    ui.separator();
-                    if ui.checkbox(&mut project.bloom, "Bloom").changed() {
-                        want_save_project = true;
-                    }
-                    if project.bloom {
-                        want_save_project |= ui
-                            .add(egui::Slider::new(&mut project.bloom_threshold, 0.0..=2.0).text("threshold"))
-                            .changed();
-                        want_save_project |= ui
-                            .add(egui::Slider::new(&mut project.bloom_intensity, 0.0..=2.0).text("intensity"))
-                            .changed();
-                    }
-                    if ui.checkbox(&mut project.vignette, "Vignette").changed() {
-                        want_save_project = true;
-                    }
-                    if project.vignette {
-                        want_save_project |= ui
-                            .add(egui::Slider::new(&mut project.vignette_strength, 0.0..=1.0).text("strength"))
-                            .changed();
-                        want_save_project |= ui
-                            .add(egui::Slider::new(&mut project.vignette_radius, 0.3..=1.0).text("radius"))
-                            .changed();
-                    }
+                    ui.small("Post-processing (bloom, vignette, ambient occlusion) moved to each scene's ✨ Post Processing node — select it in the Hierarchy.");
 
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
@@ -6911,16 +7032,9 @@ impl Editor {
             retro.resize(gpu, self.project.retro_height.max(80));
         }
 
-        // Post-processing (bloom/vignette) runs at full frame res after the scene is
-        // composited (and after any retro downsample), before the outline + egui.
-        let post_settings = floptle_render::PostSettings {
-            bloom: self.project.bloom,
-            bloom_threshold: self.project.bloom_threshold,
-            bloom_intensity: self.project.bloom_intensity,
-            vignette: self.project.vignette,
-            vignette_strength: self.project.vignette_strength,
-            vignette_radius: self.project.vignette_radius,
-        };
+        // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
+        // gathered above) runs at full frame res after the scene is composited (and
+        // after any retro downsample), before the outline + egui.
         let post_on = post_settings.any();
 
         // ---- draw: scene into the retro target, blit, then egui on top ----
@@ -6967,7 +7081,16 @@ impl Editor {
                     }
                 }
                 if post_on {
-                    post.run(gpu, &post_settings, &frame.view);
+                    // SSAO reads whichever depth the scene was rendered with — the
+                    // low-res retro depth in retro mode (AO goes chunky with the
+                    // pixels, which fits the look) or the full-res shared depth.
+                    let proj = cam.proj_matrix(aspect);
+                    let ssao_frame = floptle_render::SsaoFrame {
+                        depth: if self.project.retro { retro.depth_view() } else { gpu.depth_view() },
+                        proj: proj.to_cols_array_2d(),
+                        inv_proj: proj.inverse().to_cols_array_2d(),
+                    };
+                    post.run(gpu, &post_settings, Some(&ssao_frame), &frame.view);
                 }
 
                 // Selection outline: mask the selected object's silhouette (full
@@ -7108,6 +7231,7 @@ impl Editor {
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
                 MatterDoc::Skybox { .. } => "Skybox",
+                MatterDoc::PostProcess { .. } => "Post Processing",
             };
             self.add_node(name, m);
         }
@@ -7227,8 +7351,13 @@ impl Editor {
         }
         if let Some((e, mt)) = cmd.set_matter {
             // Switch the node's "type" (mutually-exclusive components). Terrain owns an
-            // out-of-ECS SDF field, so never morph one through here.
-            if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+            // out-of-ECS SDF field, so never morph one through here — and the mandatory
+            // PostProcess node keeps its type (nothing else may become one either).
+            if !matches!(
+                self.world.get::<Matter>(e),
+                Some(Matter::Terrain { .. } | Matter::PostProcess { .. })
+            ) && !matches!(mt, Matter::PostProcess { .. })
+            {
                 // Becoming a Mesh: GPU-load the model so it renders this frame.
                 if let Matter::Mesh { asset_path } = &mt {
                     self.import_model(&asset_path.clone());
@@ -7665,6 +7794,44 @@ impl Editor {
             self.editing = true;
         }
     }
+    /// One-time migration: a scene from before the PostProcess node inherits the
+    /// legacy project-wide bloom/vignette settings (old `project.ron` fields) onto
+    /// its self-healed node, so an old project keeps the look it was tuned for.
+    /// Scenes that already carry a PostProcess node are left alone, as are legacy
+    /// projects that never enabled an effect (the healed default — AO on — stands).
+    fn migrate_legacy_post(&mut self, doc: &SceneDoc) {
+        if doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })) {
+            return;
+        }
+        let p = self.project;
+        if !(p.bloom || p.vignette) {
+            return;
+        }
+        let node = self
+            .world
+            .query::<Matter>()
+            .find_map(|(e, m)| matches!(m, Matter::PostProcess { .. }).then_some(e));
+        if let Some(e) = node {
+            if let Some(Matter::PostProcess {
+                bloom,
+                bloom_threshold,
+                bloom_intensity,
+                vignette,
+                vignette_strength,
+                vignette_radius,
+                ..
+            }) = self.world.get_mut::<Matter>(e)
+            {
+                *bloom = p.bloom;
+                *bloom_threshold = p.bloom_threshold;
+                *bloom_intensity = p.bloom_intensity;
+                *vignette = p.vignette;
+                *vignette_strength = p.vignette_strength;
+                *vignette_radius = p.vignette_radius;
+            }
+        }
+    }
+
     fn restore(&mut self, doc: SceneDoc) {
         // Entities are respawned below — drop animator runtimes keyed by the old ones.
         self.anim.clear_instances();
@@ -7889,7 +8056,15 @@ impl Editor {
                 }
             }
             ComponentClip::Matter(m) => {
-                if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. })) {
+                // Terrain keeps its type (out-of-ECS field). The PostProcess node only
+                // accepts PostProcess values (that's how settings copy between scenes),
+                // and no other node may be turned into one by paste.
+                let target_is_post =
+                    matches!(self.world.get::<Matter>(e), Some(Matter::PostProcess { .. }));
+                let clip_is_post = matches!(m, Matter::PostProcess { .. });
+                if !matches!(self.world.get::<Matter>(e), Some(Matter::Terrain { .. }))
+                    && target_is_post == clip_is_post
+                {
                     self.world.insert(e, m);
                     physics = true;
                 }
@@ -8482,6 +8657,9 @@ impl Editor {
 
         let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
         let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
+        // SDF AO from the scene's PostProcess node shades SDF matter in offscreen
+        // views too (previews + the split Game viewport).
+        let (_, rm_ao_params) = post_process_uniforms(&self.world);
         let terrain_mat = self.terrain_material();
         let show_blobs = self.project.matter && !blobs.is_empty();
         let rm = if show_blobs || !self.terrains.is_empty() {
@@ -8526,6 +8704,7 @@ impl Editor {
                 sky_params,
                 sky_tint,
                 sky_rot,
+                ao_params: rm_ao_params,
             };
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
             Some(g)
@@ -8575,12 +8754,22 @@ impl Editor {
             "game-vp-color",
         );
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "game-vp-depth");
+        // TEXTURE_BINDING so the viewport's SSAO pass can sample its depth.
+        let depth = make(
+            Gpu::DEPTH_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "game-vp-depth",
+        );
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let tex_id =
             egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
         self.game_vp = Some(PreviewTarget { color_view, depth_view, tex_id });
         self.game_vp_dims = (w, h);
+        // The viewport's own post chain, sized to match.
+        match self.game_post.as_mut() {
+            Some(p) => p.resize(gpu, w, h),
+            None => self.game_post = Some(floptle_render::PostStack::new(gpu, w, h)),
+        }
     }
 
     /// When the Scene and Game tabs are both visible (split), render the active-camera
@@ -8626,7 +8815,25 @@ impl Editor {
         else {
             return;
         };
-        self.render_world_into(&cv, &dv, &cam, aspect, elapsed);
+        // The scene's PostProcess node applies here too: render into the viewport's
+        // own PostStack input, then run the chain (SSAO reads this viewport's depth)
+        // into the egui-registered color target.
+        let (post_settings, _) = post_process_uniforms(&self.world);
+        if post_settings.any() && self.game_post.is_some() {
+            let input = self.game_post.as_ref().map(|p| p.input_view().clone()).unwrap();
+            self.render_world_into(&input, &dv, &cam, aspect, elapsed);
+            if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
+                let proj = cam.proj_matrix(aspect);
+                let ssao_frame = floptle_render::SsaoFrame {
+                    depth: &dv,
+                    proj: proj.to_cols_array_2d(),
+                    inv_proj: proj.inverse().to_cols_array_2d(),
+                };
+                post.run(gpu, &post_settings, Some(&ssao_frame), &cv);
+            }
+        } else {
+            self.render_world_into(&cv, &dv, &cam, aspect, elapsed);
+        }
     }
 
     /// What the Inspector should draw for the current selection's preview.
@@ -8750,7 +8957,18 @@ impl Editor {
         }
     }
     fn delete_selected(&mut self) {
-        let targets = self.selected_matter();
+        let mut targets = self.selected_matter();
+        // The PostProcess node is mandatory — every scene has exactly one. Disable
+        // the chain with its `enabled` switch instead of deleting the node.
+        let n = targets.len();
+        targets.retain(|&e| !matches!(self.world.get::<Matter>(e), Some(Matter::PostProcess { .. })));
+        if targets.len() != n {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "Post Processing is a mandatory scene node and can't be deleted — untick 'enabled' on it to turn post-processing off".into(),
+                None,
+            );
+        }
         if targets.is_empty() {
             return;
         }
@@ -8768,9 +8986,16 @@ impl Editor {
         self.grabbed = None;
         self.drag = None;
     }
+    /// Selected entities minus the PostProcess node — a scene has exactly one, so
+    /// copy/duplicate never clone it (copy its VALUES via the Type header instead).
+    fn selected_matter_duplicable(&self) -> Vec<Entity> {
+        let mut v = self.selected_matter();
+        v.retain(|&e| !matches!(self.world.get::<Matter>(e), Some(Matter::PostProcess { .. })));
+        v
+    }
     fn copy_selected(&mut self) {
         let nodes: Vec<NodeDoc> =
-            self.selected_matter().iter().filter_map(|&e| self.node_of(e)).collect();
+            self.selected_matter_duplicable().iter().filter_map(|&e| self.node_of(e)).collect();
         if !nodes.is_empty() {
             self.clipboard = nodes;
         }
@@ -8795,7 +9020,7 @@ impl Editor {
     }
     fn duplicate_selected(&mut self) {
         let nodes: Vec<NodeDoc> =
-            self.selected_matter().iter().filter_map(|&e| self.node_of(e)).collect();
+            self.selected_matter_duplicable().iter().filter_map(|&e| self.node_of(e)).collect();
         self.spawn_offset(nodes);
     }
 
@@ -8954,7 +9179,8 @@ impl Editor {
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
-                | Matter::Skybox { .. } => None,
+                | Matter::Skybox { .. }
+                | Matter::PostProcess { .. } => None,
             };
             if let Some(th) = hit {
                 if best.is_none_or(|(_, bt)| th < bt) {
@@ -9603,6 +9829,7 @@ impl Editor {
         self.play_snapshot = None;
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.migrate_legacy_post(&doc);
         self.scene_name = Self::scene_name_of(p);
         self.adopt_terrain();
         self.register_scene_meshes();
@@ -9814,6 +10041,7 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.migrate_legacy_post(&doc);
         self.materials = self.load_materials();
         self.asset_tree = build_assets(&self.project_root);
         self.load_texture_settings();

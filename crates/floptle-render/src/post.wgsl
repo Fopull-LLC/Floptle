@@ -1,10 +1,14 @@
 // Post-processing passes (full-screen triangle), shared by the PostStack chain:
-// bright-pass → separable Gaussian blur → additive composite (bloom), then a radial
-// vignette. Sampling an sRGB texture decodes to linear and writing an sRGB target
+// SSAO multiply (the AO factor itself is computed in ssao.wgsl) → bright-pass →
+// separable Gaussian blur → additive composite (bloom), then a radial vignette.
+// Sampling an sRGB texture decodes to linear and writing an sRGB target
 // re-encodes, so the math here is in linear light (correct for thresholding/blur).
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
+// Second texture slot for fs_ssao_apply: the blurred half-res AO factor.
+@group(1) @binding(0) var ao_tex: texture_2d<f32>;
+@group(1) @binding(1) var ao_samp: sampler;
 struct P {
     a: vec4<f32>, // xy = texel (1/size of src), z = bloom_threshold, w = bloom_intensity
     b: vec4<f32>, // x = vignette_strength, y = vignette_radius, zw = blur_dir (texels)
@@ -64,6 +68,15 @@ fn fs_blur(in: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(textureSample(tex, samp, in.uv).rgb * p.a.w, 1.0);
+}
+
+// SSAO apply: multiply the scene by the blurred AO factor (linear light — the
+// upsample from half-res is smoothed by the linear sampler).
+@fragment
+fn fs_ssao_apply(in: VsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(tex, samp, in.uv).rgb;
+    let ao = textureSample(ao_tex, ao_samp, in.uv).r;
+    return vec4<f32>(c * ao, 1.0);
 }
 
 // Vignette: radial darkening toward the corners (last pass).

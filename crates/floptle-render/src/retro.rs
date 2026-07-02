@@ -193,7 +193,10 @@ fn make_targets(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: Gpu::DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // TEXTURE_BINDING so SSAO can sample the low-res depth in retro mode
+        // (post runs full-res AFTER the retro upscale; nearest-neighbor blocks map
+        // 1:1 onto low-res depth texels, so AO just goes chunky with the pixels).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());

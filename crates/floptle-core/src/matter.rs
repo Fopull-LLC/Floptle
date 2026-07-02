@@ -177,6 +177,25 @@ pub enum Matter {
     /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by
     /// `tint`. The node's transform rotation orients the sky (a script can spin it).
     Skybox { color: [f32; 3], size: f32, texture: Option<String>, tint: [f32; 3] },
+    /// The scene's post-processing chain — a mandatory scene node (self-healed on
+    /// load, like the Skybox), so every scene tunes its own look. `enabled` gates
+    /// the whole chain; each effect then has its own switch and knobs. `ao` picks
+    /// how ambient occlusion is computed (screen-space by default; SDF samples the
+    /// real distance field). The node's transform is unused.
+    PostProcess {
+        enabled: bool,
+        bloom: bool,
+        bloom_threshold: f32,
+        bloom_intensity: f32,
+        vignette: bool,
+        vignette_strength: f32,
+        vignette_radius: f32,
+        ao: AoMode,
+        /// How dark full occlusion gets (0 = off, 1 = black creases).
+        ao_strength: f32,
+        /// Occlusion reach in world units.
+        ao_radius: f32,
+    },
 }
 
 impl Matter {
@@ -184,6 +203,38 @@ impl Matter {
     pub fn default_skybox() -> Self {
         Matter::Skybox { color: [0.5, 0.5, 0.52], size: 500.0, texture: None, tint: [1.0, 1.0, 1.0] }
     }
+
+    /// The default post-processing node: chain on, screen-space ambient occlusion
+    /// at a gentle strength, bloom and vignette off (matching the old project-wide
+    /// defaults).
+    pub fn default_post_process() -> Self {
+        Matter::PostProcess {
+            enabled: true,
+            bloom: false,
+            bloom_threshold: 1.0,
+            bloom_intensity: 0.7,
+            vignette: false,
+            vignette_strength: 0.5,
+            vignette_radius: 0.7,
+            ao: AoMode::ScreenSpace,
+            ao_strength: 0.7,
+            ao_radius: 0.5,
+        }
+    }
+}
+
+/// How a [`Matter::PostProcess`] node computes ambient occlusion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AoMode {
+    /// No ambient occlusion.
+    Off,
+    /// Screen-space AO (SSAO): a post pass over the depth buffer. Cheap, and it
+    /// darkens everything on screen — meshes and SDF matter alike. The default.
+    ScreenSpace,
+    /// Geometric AO sampled from the actual SDF field along the surface normal —
+    /// "true" occlusion with no screen-space artifacts, but it only shades SDF
+    /// matter (terrain/blobs); plain meshes are not occluded by it.
+    Sdf,
 }
 
 /// How a [`Matter::GravityVolume`] pulls bodies.

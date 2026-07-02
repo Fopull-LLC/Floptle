@@ -73,8 +73,11 @@ fn main() {
         vignette: true,
         vignette_strength: 0.6,
         vignette_radius: 0.6,
+        ssao: false,
+        ssao_strength: 0.0,
+        ssao_radius: 0.5,
     };
-    post.run(&gpu, &settings, &color_view);
+    post.run(&gpu, &settings, None, &color_view);
 
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out} — bloom + vignette over 3 emissive spheres");

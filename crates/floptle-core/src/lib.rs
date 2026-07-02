@@ -36,7 +36,7 @@ pub mod transform;
 pub use ecs::{Entity, World};
 pub use material::Material;
 pub use matter::{
-    world_transform, AnimController, BodyKind, Collidable, GravityMode, Light, Matter,
+    world_transform, AnimController, AoMode, BodyKind, Collidable, GravityMode, Light, Matter,
     MeshCollider, Name, Parent, RigidBody, Shape, Spin, Visible,
 };
 pub use script::{ScriptInst, Scripts};

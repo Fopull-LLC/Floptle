@@ -43,6 +43,7 @@ struct Globals {
     sky_rot0: vec4<f32>,                 // inverse skybox rotation, column 0 (xyz)
     sky_rot1: vec4<f32>,                 // column 1
     sky_rot2: vec4<f32>,                 // column 2
+    ao_params: vec4<f32>,                // SDF AO: x on, y strength, z radius (world)
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
@@ -439,6 +440,25 @@ fn calc_normal(p: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// SDF ("true") ambient occlusion: step outward along the normal and measure how
+// much the fused field (volumes + blobs) pinches in versus open space — iq's
+// exponentially-weighted AO. Because it reads the real distance field it shades
+// creases, overhangs and contact points regardless of the camera, with none of
+// SSAO's screen-space artifacts. Driven by the scene PostProcess node's `Sdf` AO
+// mode (ao_params: y = strength, z = radius in world units).
+fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let radius = max(G.ao_params.z, 1e-3);
+    var occ = 0.0;
+    var sca = 1.0;
+    for (var i = 1; i <= 5; i = i + 1) {
+        let h = radius * f32(i) / 5.0;
+        occ = occ + (h - map(p + n * h).d) * sca;
+        sca = sca * 0.6;
+    }
+    let ao = clamp(1.0 - 1.5 * occ / radius, 0.0, 1.0);
+    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0));
+}
+
 struct FsOut {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
@@ -539,6 +559,12 @@ fn fs(in: VOut) -> FsOut {
             let diff = max(dot(n, l), 0.0);
             // The terrain palette texture (if painted) modulates the per-voxel tint.
             let albedo = terrain_albedo(p, n, m.col);
+            // SDF AO (PostProcess node, `Sdf` mode): darkens all received light
+            // below, but never emissive — a glowing surface stays glowing.
+            var occ = 1.0;
+            if (G.ao_params.x > 0.5) {
+                occ = sdf_ao(p, n);
+            }
             var col: vec3<f32>;
             if (inside_volume_box_eps(p, 0.06)) {
                 // TERRAIN: shade with its Material using the SAME model as the raster
@@ -559,7 +585,7 @@ fn fs(in: VOut) -> FsOut {
                     let spec = pow(max(dot(n, h), 0.0), shininess) * G.terrain_specular.a * select(0.0, 1.0, diff > 0.0);
                     col = col + G.terrain_specular.rgb * spec * G.light_color.rgb;
                     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * G.terrain_params.y;
-                    col = col + G.terrain_rim.rgb * rim_f + emissive;
+                    col = (col + G.terrain_rim.rgb * rim_f) * occ + emissive;
                 }
             } else {
                 // BLOB: shade with the hit blob's Material (same lighting model as the
@@ -581,7 +607,7 @@ fn fs(in: VOut) -> FsOut {
                     let spec = pow(max(dot(n, h), 0.0), shininess) * G.blob_specular[bi].a * select(0.0, 1.0, diff > 0.0);
                     col = col + G.blob_specular[bi].rgb * spec * G.light_color.rgb;
                     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * bpar.y;
-                    col = col + G.blob_rim[bi].rgb * rim_f + emissive;
+                    col = (col + G.blob_rim[bi].rgb * rim_f) * occ + emissive;
                 }
             }
             out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
