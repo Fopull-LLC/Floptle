@@ -138,7 +138,7 @@ fn march_bound() -> f32 {
     var maxc = 0.0;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         reach = max(reach, length(G.vol_half[i].xyz));
         maxc = max(maxc, length(G.vol_center[i].xyz));
     }
@@ -188,7 +188,9 @@ fn volumes(p: vec3<f32>) -> VolFold {
     var any = false;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        // Skip absent slots AND shadow-only occluder bakes (w = 2) — those exist
+        // for `light_vis` alone; the drawn field must not contain them.
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let v = volume_at(i, p);
         if (!any) {
             m = v;

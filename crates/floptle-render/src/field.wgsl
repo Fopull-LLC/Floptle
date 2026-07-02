@@ -24,7 +24,7 @@ struct Globals {
     params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
     // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
     // 3D atlas (no combined-grid resolution spread — ADR-0015 / multi-volume terrain).
-    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = present
+    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w: 0 absent, 1 render, 2 shadow-only
     vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
     vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
     vol_dims: array<vec4<f32>, 16>,   // xyz voxel dims of this volume (renderer-patched)
@@ -140,7 +140,7 @@ fn union_edge(p: vec3<f32>) -> f32 {
     var e = -1e9;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < 0.0) {
             e = max(e, box_edge(i, p));
@@ -155,7 +155,7 @@ fn union_edge(p: vec3<f32>) -> f32 {
 fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < e) { return true; }
     }
@@ -169,7 +169,7 @@ fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
     var bd = 1e9;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < e) {
             let d = volume_d(i, p);
@@ -187,7 +187,7 @@ fn volumes_d(p: vec3<f32>) -> VolFoldD {
     var any = false;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let v = volume_d(i, p);
         if (!any) {
             d = v;
@@ -254,6 +254,37 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
     return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0));
 }
 
+// SHADOW-ONLY occluder volumes (vol_center.w = 2): baked static level meshes that
+// cast sun shadows with their true silhouette (dark interiors!) but are never
+// drawn — the raster pass renders the actual triangles. Folded into the shadow
+// march only; the render/AO field (`map_d`) skips them.
+fn shadow_volumes_d(p: vec3<f32>) -> f32 {
+    var d = 1e9;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 1.5) { continue; }
+        d = min(d, volume_d(i, p));
+    }
+    return d;
+}
+
+// The voxel size of the shadow-only volume containing `p` (0 when none) — the
+// shadow-ray lift must clear the occluder bake's own fattened sheet, or a mesh
+// standing in its bake would blanket self-shadow.
+fn shadow_vol_eps(p: vec3<f32>) -> f32 {
+    var h = 0.0;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 1.5) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < 0.08) {
+            let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+            h = max(h, max(voxel.x, max(voxel.y, voxel.z)));
+        }
+    }
+    return h;
+}
+
 // Rotate `v` by the CONJUGATE (inverse, for unit quats) of quaternion `q` —
 // world → box-local for the oriented box proxy.
 fn quat_unrotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -295,7 +326,7 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // ray hugs that noisy shell for a long stretch and grazing walls stripe —
     // boost the lift there, but leave ordinary sun angles alone so contact
     // shadows stay tight.
-    let base = max(0.03, field_eps(p) * 1.6);
+    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
     let lift = base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0);
     let ro = p + n * lift;
     // A proxy containing the start point is the caster this fragment belongs to
@@ -317,7 +348,7 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let pen_t0 = base * 3.0;
     for (var s = 0; s < 64; s = s + 1) {
         let q = ro + l * t;
-        var d = map_d(q);
+        var d = min(map_d(q), shadow_volumes_d(q));
         for (var i = 0u; i < pc; i = i + 1u) {
             if ((skip & (1u << i)) == 0u) {
                 d = min(d, prox_d(i, q));

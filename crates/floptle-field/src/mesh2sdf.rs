@@ -132,6 +132,153 @@ pub fn bake(
     }
 }
 
+/// Bake `positions`/`indices` into a shadow-OCCLUDER volume: an **unsigned,
+/// conservative** distance-to-surface field, fast enough to run at scene load for
+/// whole level meshes (where [`bake`]'s exact signed brute force would take
+/// minutes). Surfaces are voxelized with exact point-to-triangle distances, the
+/// rest of the grid is filled by a two-pass 26-neighbour chamfer transform, and
+/// the result is scaled slightly under (chamfer over-estimates Euclidean by up to
+/// ~8%, and sphere tracing must never overshoot) then fattened by half a voxel so
+/// thin walls read as a watertight sheet to a crossing shadow ray. The interior
+/// of the fattened sheet is negative; everything else is a safe lower bound.
+///
+/// Color is left white — occluder volumes are never drawn, only marched by
+/// `light_vis` (the sun-shadow ray). Voxels are cubic; `res` sets the voxel count
+/// along the mesh's LONGEST axis (other axes scale down proportionally).
+pub fn bake_occluder(positions: &[[f32; 3]], indices: &[u32], res: u32) -> BakedSdf {
+    let res = res.max(4);
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for p in positions {
+        let v = Vec3::from(*p);
+        min = min.min(v);
+        max = max.max(v);
+    }
+    if !min.x.is_finite() {
+        // no vertices — a 1³ "nothing" volume (all far)
+        return BakedSdf {
+            dims: [1, 1, 1],
+            center: [0.0; 3],
+            half_extent: [1.0; 3],
+            distance: vec![1.0e9],
+            color: vec![[255; 4]],
+        };
+    }
+    let center = (min + max) * 0.5;
+    let extent = (max - min) * 0.5;
+    let voxel = (extent * 2.0).max_element().max(1e-4) / res as f32;
+    const PAD: u32 = 2; // voxels of air on every face, so edge reads stay valid
+    let dims = [
+        ((extent.x * 2.0 / voxel).ceil() as u32 + 2 * PAD).max(4),
+        ((extent.y * 2.0 / voxel).ceil() as u32 + 2 * PAD).max(4),
+        ((extent.z * 2.0 / voxel).ceil() as u32 + 2 * PAD).max(4),
+    ];
+    let half = Vec3::new(
+        dims[0] as f32 * voxel * 0.5,
+        dims[1] as f32 * voxel * 0.5,
+        dims[2] as f32 * voxel * 0.5,
+    );
+    let origin = center - half + Vec3::splat(voxel * 0.5); // voxel-center grid
+
+    let n = (dims[0] * dims[1] * dims[2]) as usize;
+    let mut dist = vec![f32::INFINITY; n];
+    let idx = |i: u32, j: u32, k: u32| ((k * dims[1] + j) * dims[0] + i) as usize;
+
+    // Seed: exact point-to-triangle distance, but only for voxels near each
+    // triangle (its AABB ± 1 voxel) — O(surface area), not O(volume × tris).
+    for t in indices.chunks_exact(3) {
+        let a = Vec3::from(positions[t[0] as usize]);
+        let b = Vec3::from(positions[t[1] as usize]);
+        let c = Vec3::from(positions[t[2] as usize]);
+        let tmin = ((a.min(b).min(c) - origin) / voxel).floor() - Vec3::ONE;
+        let tmax = ((a.max(b).max(c) - origin) / voxel).ceil() + Vec3::ONE;
+        let (i0, j0, k0) = (
+            (tmin.x.max(0.0)) as u32,
+            (tmin.y.max(0.0)) as u32,
+            (tmin.z.max(0.0)) as u32,
+        );
+        let (i1, j1, k1) = (
+            (tmax.x as u32).min(dims[0] - 1),
+            (tmax.y as u32).min(dims[1] - 1),
+            (tmax.z as u32).min(dims[2] - 1),
+        );
+        for k in k0..=k1 {
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let p = origin + Vec3::new(i as f32, j as f32, k as f32) * voxel;
+                    let (cp, _, _, _) = closest_point_on_triangle(p, a, b, c);
+                    let d = (p - cp).length();
+                    let cell = &mut dist[idx(i, j, k)];
+                    if d < *cell {
+                        *cell = d;
+                    }
+                }
+            }
+        }
+    }
+
+    // Chamfer distance transform: forward + backward sweeps over the 26-neighbour
+    // half-masks propagate the seeded surface distances through the whole grid.
+    let w = [voxel, voxel * 1.41421356, voxel * 1.73205081];
+    let mut mask: Vec<([i32; 3], f32)> = Vec::with_capacity(13);
+    for dk in -1i32..=1 {
+        for dj in -1i32..=1 {
+            for di in -1i32..=1 {
+                // strictly "earlier" neighbours in scan order form the forward mask
+                if dk < 0 || (dk == 0 && (dj < 0 || (dj == 0 && di < 0))) {
+                    let m = (di.abs() + dj.abs() + dk.abs()) as usize;
+                    mask.push(([di, dj, dk], w[m - 1]));
+                }
+            }
+        }
+    }
+    let (dx, dy, dz) = (dims[0] as i32, dims[1] as i32, dims[2] as i32);
+    let relax = |dist: &mut [f32], i: i32, j: i32, k: i32, flip: bool| {
+        let at = ((k * dy + j) * dx + i) as usize;
+        let mut best = dist[at];
+        for &([di, dj, dk], wgt) in &mask {
+            let (ni, nj, nk) = if flip { (i - di, j - dj, k - dk) } else { (i + di, j + dj, k + dk) };
+            if ni < 0 || nj < 0 || nk < 0 || ni >= dx || nj >= dy || nk >= dz {
+                continue;
+            }
+            let v = dist[((nk * dy + nj) * dx + ni) as usize] + wgt;
+            if v < best {
+                best = v;
+            }
+        }
+        dist[at] = best;
+    };
+    for k in 0..dz {
+        for j in 0..dy {
+            for i in 0..dx {
+                relax(&mut dist, i, j, k, false);
+            }
+        }
+    }
+    for k in (0..dz).rev() {
+        for j in (0..dy).rev() {
+            for i in (0..dx).rev() {
+                relax(&mut dist, i, j, k, true);
+            }
+        }
+    }
+
+    // Conservative scale (sphere tracing must never overshoot the chamfer's slight
+    // over-estimate) + half-voxel fatten (the sheet gets a real negative interior,
+    // so rays crossing between voxel centers still register a hard hit).
+    for d in dist.iter_mut() {
+        *d = *d * 0.92 - 0.5 * voxel;
+    }
+
+    BakedSdf {
+        dims,
+        center: center.to_array(),
+        half_extent: half.to_array(),
+        distance: dist,
+        color: vec![[255; 4]; n],
+    }
+}
+
 struct Tri {
     a: Vec3,
     b: Vec3,
@@ -289,6 +436,39 @@ mod tests {
         // a point well outside (+x) is positive
         let doo = sample(Vec3::new(1.6, 0.0, 0.0));
         assert!(doo > 0.0, "outside point should be positive, got {doo}");
+    }
+
+    #[test]
+    fn occluder_bake_blocks_rays_through_the_shell() {
+        let (pos, idx, _) = unit_cube();
+        let baked = bake_occluder(&pos, &idx, 32);
+        // dims follow the (cubic) AABB + padding
+        assert!(baked.dims.iter().all(|&d| d >= 32 && d <= 40), "dims {:?}", baked.dims);
+        let [dx, dy, dz] = baked.dims;
+        let half = Vec3::from(baked.half_extent);
+        let center = Vec3::from(baked.center);
+        let voxel = half.x * 2.0 / dx as f32;
+        let sample = |p: Vec3| {
+            let g = ((p - center + half) / voxel - Vec3::splat(0.5)).round();
+            let (i, j, k) = (
+                (g.x as i32).clamp(0, dx as i32 - 1) as u32,
+                (g.y as i32).clamp(0, dy as i32 - 1) as u32,
+                (g.z as i32).clamp(0, dz as i32 - 1) as u32,
+            );
+            baked.distance[((k * dy + j) * dx + i) as usize]
+        };
+        // ON the cube's +X face: inside the fattened sheet → negative (a shadow ray
+        // crossing here must register a hard hit)
+        let on_face = sample(Vec3::new(1.0, 0.0, 0.0));
+        assert!(on_face <= 0.0, "surface sheet should be negative, got {on_face}");
+        // a grid corner (well off the surface) is a safe positive lower bound
+        let far = sample(center + half - Vec3::splat(voxel));
+        assert!(far > 0.0, "far corner should be positive, got {far}");
+        // ...and never OVER-estimates the true distance (sphere tracing safety):
+        // true distance from that corner to the cube is ~|corner| - cube reach
+        let corner = center + half - Vec3::splat(voxel);
+        let true_d = (corner - Vec3::new(1.0, 1.0, 1.0)).length().min(corner.length() - 1.0);
+        assert!(far <= true_d + voxel, "occluder distance must stay conservative ({far} vs {true_d})");
     }
 
     #[test]

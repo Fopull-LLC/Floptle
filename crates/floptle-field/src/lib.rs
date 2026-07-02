@@ -28,7 +28,7 @@
 pub mod mesh2sdf;
 pub mod terrain;
 
-pub use mesh2sdf::{bake, BakedSdf, TexRef};
+pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
 pub use terrain::{Brush, Terrain};
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
