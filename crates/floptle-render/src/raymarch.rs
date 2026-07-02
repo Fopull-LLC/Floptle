@@ -24,12 +24,20 @@ pub struct RaymarchGlobals {
     pub bg: [f32; 4],
     /// Unused legacy field (blobs now live in `blobs`).
     pub center: [f32; 4],
-    /// x = time, y = blob count.
+    /// x = time, y = blob count, z = blob↔volume blend radius k,
+    /// w = uploaded volume count (patched by the renderer at draw time).
     pub params: [f32; 4],
-    /// Baked volume: xyz camera-relative box center, w = present (1.0/0.0).
-    pub vol_center: [f32; 4],
-    /// xyz half-extent, w = blend radius k.
-    pub vol_half: [f32; 4],
+    /// Up to [`MAX_VOLUMES`] baked volumes: each xyz camera-relative box center,
+    /// w = present (1.0/0.0). Every terrain volume renders at its OWN native
+    /// resolution — no shared combined grid (ADR-0015 / multi-volume terrain).
+    pub vol_center: [[f32; 4]; 16],
+    /// Per volume: xyz half-extent, w = volume↔volume fuse blend radius k.
+    pub vol_half: [[f32; 4]; 16],
+    /// Per volume: xyz voxel offset inside the shared 3D atlas (renderer-patched
+    /// at draw time from the uploaded layout — callers leave this zeroed).
+    pub vol_atlas: [[f32; 4]; 16],
+    /// Per volume: xyz voxel dimensions (renderer-patched at draw time).
+    pub vol_dims: [[f32; 4]; 16],
     /// Terrain surface material (mirrors the raster `MaterialParams`) so terrain shades
     /// with the same lighting model as the meshes instead of a hardcoded look. Ignored
     /// by blobs. `terrain_tint`: rgb tint (× painted albedo), a = unused.
@@ -85,8 +93,10 @@ impl Default for RaymarchGlobals {
             bg: [0.0; 4],
             center: [0.0; 4],
             params: [0.0; 4],
-            vol_center: [0.0; 4],
-            vol_half: [1.0, 1.0, 1.0, 0.5],
+            vol_center: [[0.0; 4]; 16],
+            vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
+            vol_atlas: [[0.0; 4]; 16],
+            vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
             terrain_tint: [1.0, 1.0, 1.0, 1.0],
             terrain_emissive: [0.0; 4],
             terrain_specular: [1.0, 1.0, 1.0, 0.0],
@@ -111,6 +121,10 @@ impl Default for RaymarchGlobals {
 /// Max blobs the raymarch shader folds together in one pass.
 pub const MAX_BLOBS: usize = 16;
 
+/// Max baked volumes (terrains / mesh bakes) folded together in one pass. Each keeps
+/// its native voxel resolution inside a shared 3D atlas.
+pub const MAX_VOLUMES: usize = 16;
+
 /// Max placeable point lights accumulated in one pass (raster + raymarch).
 pub const MAX_POINT_LIGHTS: usize = 16;
 
@@ -124,6 +138,10 @@ pub struct Raymarch {
     tile_sampler: wgpu::Sampler,
     _dist_tex: wgpu::Texture,
     _color_tex: wgpu::Texture,
+    /// Atlas layout: each uploaded volume's (voxel offset, voxel dims) inside the
+    /// shared 3D textures. Patched into the globals at draw time so callers only
+    /// provide world data (`vol_center`/`vol_half`).
+    slots: Vec<([u32; 3], [u32; 3])>,
     terrain_tex: wgpu::Texture,
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
@@ -290,7 +308,7 @@ impl Raymarch {
             ..Default::default()
         });
 
-        // A 1³ "empty" volume so the bindings are valid before a mesh is baked.
+        // A 1³ "empty" atlas so the bindings are valid before any volume is baked.
         let empty = BakedSdf {
             dims: [1, 1, 1],
             center: [0.0; 3],
@@ -298,7 +316,8 @@ impl Raymarch {
             distance: vec![1.0e9],
             color: vec![[255, 255, 255, 255]],
         };
-        let (dist_tex, color_tex) = upload_volume(gpu, &empty);
+        let (dist_tex, color_tex) = alloc_volume_textures(gpu, [1, 1, 1]);
+        write_volume_data(gpu, &dist_tex, &color_tex, &empty, [0, 0, 0]);
         let terrain_tex = make_terrain_array(gpu, &[]);
         let sky_tex = make_sky_texture(gpu, None);
         let bind = make_bind(
@@ -315,6 +334,7 @@ impl Raymarch {
             tile_sampler,
             _dist_tex: dist_tex,
             _color_tex: color_tex,
+            slots: Vec::new(),
             terrain_tex,
             sky_tex,
             bind,
@@ -356,21 +376,57 @@ impl Raymarch {
         );
     }
 
-    /// Upload a baked mesh as the volume matter (replaces any previous one). The
-    /// runtime still drives `vol_center`/`vol_half`/present via `RaymarchGlobals`.
-    ///
-    /// Fast path: when the grid dimensions are unchanged (e.g. sculpting/painting a
-    /// fixed-detail terrain), the existing GPU textures are reused and only their
-    /// data is re-written — no texture allocation or bind-group rebuild, which is
-    /// what made per-stroke editing lag.
+    /// Upload a single baked volume (replaces all previous ones) — the common case
+    /// for probes / the runtime demo. See [`set_volumes`](Self::set_volumes).
     pub fn set_volume(&mut self, gpu: &Gpu, baked: &BakedSdf) {
-        let [w, h, d] = baked.dims;
-        let cur = self._dist_tex.size();
-        if cur.width == w && cur.height == h && cur.depth_or_array_layers == d {
-            write_volume_data(gpu, &self._dist_tex, &self._color_tex, baked);
-            return;
+        self.set_volumes(gpu, &[baked]);
+    }
+
+    /// Upload a set of baked volumes into one shared 3D atlas, EACH at its native
+    /// voxel resolution — far-apart terrains no longer share a coarse combined grid
+    /// (the old resolution-spread limit). Volumes stack along the atlas Z axis; the
+    /// per-slot offsets/dims are patched into the globals at draw time. Returns how
+    /// many volumes were accepted (the rest exceeded the device's 3D-texture limit —
+    /// callers should surface that instead of silently dropping content).
+    ///
+    /// Fast path: a single volume with unchanged dims rewrites the existing texture
+    /// data in place (no allocation / bind-group rebuild — keeps sculpting smooth).
+    pub fn set_volumes(&mut self, gpu: &Gpu, volumes: &[&BakedSdf]) -> usize {
+        let limit = gpu.device.limits().max_texture_dimension_3d;
+        // Accept volumes until the Z stack or the XY footprint would exceed the limit.
+        let mut accepted = Vec::new();
+        let (mut aw, mut ah, mut ad) = (1u32, 1u32, 0u32);
+        for &b in volumes.iter().take(MAX_VOLUMES) {
+            let [w, h, d] = b.dims;
+            if w.max(aw) > limit || h.max(ah) > limit || ad + d > limit {
+                break;
+            }
+            aw = aw.max(w);
+            ah = ah.max(h);
+            accepted.push((b, [0u32, 0, ad]));
+            ad += d;
         }
-        let (dist_tex, color_tex) = upload_volume(gpu, baked);
+        ad = ad.max(1);
+
+        // Single unchanged-dims volume: rewrite in place (per-stroke editing path).
+        if let [(b, _)] = accepted[..] {
+            let cur = self._dist_tex.size();
+            if self.slots.len() == 1
+                && cur.width == b.dims[0]
+                && cur.height == b.dims[1]
+                && cur.depth_or_array_layers == b.dims[2]
+            {
+                write_volume_data(gpu, &self._dist_tex, &self._color_tex, b, [0, 0, 0]);
+                return 1;
+            }
+        }
+
+        let (dist_tex, color_tex) = alloc_volume_textures(gpu, [aw, ah, ad]);
+        self.slots.clear();
+        for (b, origin) in &accepted {
+            write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
+            self.slots.push((*origin, b.dims));
+        }
         self.bind = make_bind(
             &gpu.device,
             &self.bind_layout,
@@ -384,19 +440,26 @@ impl Raymarch {
         );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
+        accepted.len()
     }
 
-    /// Upload only the sub-box `[min, max)` (voxel coords) of `baked` into the existing
-    /// 3D textures — the fast path for a brush dab, so painting/editing a huge terrain
-    /// doesn't re-convert and re-upload the whole volume every frame. `baked.dims` MUST
-    /// match the current textures (caller falls back to [`set_volume`] on a resize).
-    pub fn set_volume_region(&mut self, gpu: &Gpu, baked: &BakedSdf, min: [u32; 3], max: [u32; 3]) {
-        let [w, h, d] = baked.dims;
-        let cur = self._dist_tex.size();
-        if cur.width != w || cur.height != h || cur.depth_or_array_layers != d {
-            self.set_volume(gpu, baked); // dims changed — full path (reallocates)
-            return;
+    /// Upload only the sub-box `[min, max)` (voxel coords) of `baked` into atlas slot
+    /// `slot` — the fast path for a brush dab, so painting/editing a huge terrain
+    /// doesn't re-convert and re-upload the whole volume every frame. `baked.dims`
+    /// MUST match the slot's dims (caller falls back to [`set_volumes`] on a resize).
+    pub fn set_volume_region(
+        &mut self,
+        gpu: &Gpu,
+        slot: usize,
+        baked: &BakedSdf,
+        min: [u32; 3],
+        max: [u32; 3],
+    ) {
+        let Some(&(off, dims)) = self.slots.get(slot) else { return };
+        if dims != baked.dims {
+            return; // resized since upload — the caller's dirty flag takes the full path
         }
+        let [w, h, d] = baked.dims;
         let x0 = min[0].min(w);
         let y0 = min[1].min(h);
         let z0 = min[2].min(d);
@@ -420,7 +483,7 @@ impl Raymarch {
                 }
             }
         }
-        let origin = wgpu::Origin3d { x: x0, y: y0, z: z0 };
+        let origin = wgpu::Origin3d { x: off[0] + x0, y: off[1] + y0, z: off[2] + z0 };
         let extent = wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: rd };
         gpu.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -446,14 +509,25 @@ impl Raymarch {
         );
     }
 
+    /// Fill the renderer-owned globals fields: each slot's atlas offset + dims, and
+    /// the uploaded volume count (`params.w`). Callers only provide world data.
+    fn patch_globals(&self, globals: &mut RaymarchGlobals) {
+        for (i, &(off, dims)) in self.slots.iter().enumerate().take(MAX_VOLUMES) {
+            globals.vol_atlas[i] = [off[0] as f32, off[1] as f32, off[2] as f32, 0.0];
+            globals.vol_dims[i] = [dims[0] as f32, dims[1] as f32, dims[2] as f32, 0.0];
+        }
+        globals.params[3] = self.slots.len() as f32;
+    }
+
     /// Clear `color`/`depth` and draw the SDF matter into them (with true depth).
     pub fn draw_into(
         &self,
         gpu: &Gpu,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        globals: RaymarchGlobals,
+        mut globals: RaymarchGlobals,
     ) {
+        self.patch_globals(&mut globals);
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let mut encoder = gpu
@@ -492,7 +566,8 @@ impl Raymarch {
 
     /// Render the SDF matter's silhouette as 1.0 into a single-channel mask (clearing
     /// it first) — the selection-outline source for the blob.
-    pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, globals: RaymarchGlobals) {
+    pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, mut globals: RaymarchGlobals) {
+        self.patch_globals(&mut globals);
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let mut encoder = gpu
@@ -655,10 +730,9 @@ fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
     tex
 }
 
-/// Create the distance (R16Float) + color (Rgba8Unorm) 3D textures from a bake.
-fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) {
-    let [w, h, d] = baked.dims;
-    let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: d };
+/// Allocate the distance (R16Float) + color (Rgba8Unorm) 3D atlas textures.
+fn alloc_volume_textures(gpu: &Gpu, dims: [u32; 3]) -> (wgpu::Texture, wgpu::Texture) {
+    let size = wgpu::Extent3d { width: dims[0], height: dims[1], depth_or_array_layers: dims[2] };
     let dist = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sdf-distance"),
         size,
@@ -679,21 +753,27 @@ fn upload_volume(gpu: &Gpu, baked: &BakedSdf) -> (wgpu::Texture, wgpu::Texture) 
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    write_volume_data(gpu, &dist, &color, baked);
     (dist, color)
 }
 
-/// Write a bake's distance + color into already-allocated 3D textures (same dims).
-/// This is the cheap per-edit path — no allocation, no bind-group rebuild.
-fn write_volume_data(gpu: &Gpu, dist: &wgpu::Texture, color: &wgpu::Texture, baked: &BakedSdf) {
+/// Write a bake's distance + color into the atlas textures at voxel `origin`.
+/// This is also the cheap per-edit path — no allocation, no bind-group rebuild.
+fn write_volume_data(
+    gpu: &Gpu,
+    dist: &wgpu::Texture,
+    color: &wgpu::Texture,
+    baked: &BakedSdf,
+    origin: [u32; 3],
+) {
     let [w, h, d] = baked.dims;
     let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: d };
+    let origin = wgpu::Origin3d { x: origin[0], y: origin[1], z: origin[2] };
     let dist_f16: Vec<u16> = baked.distance.iter().map(|&v| f32_to_f16(v)).collect();
     gpu.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: dist,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin,
             aspect: wgpu::TextureAspect::All,
         },
         bytemuck::cast_slice(&dist_f16),
@@ -704,7 +784,7 @@ fn write_volume_data(gpu: &Gpu, dist: &wgpu::Texture, color: &wgpu::Texture, bak
         wgpu::TexelCopyTextureInfo {
             texture: color,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin,
             aspect: wgpu::TextureAspect::All,
         },
         bytemuck::cast_slice(&baked.color),

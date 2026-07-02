@@ -15,9 +15,13 @@ struct Globals {
     ambient: vec4<f32>,
     bg: vec4<f32>,
     center: vec4<f32>,      // (unused legacy field; blobs now live in `blobs`)
-    params: vec4<f32>,      // x = time, y = blob count
-    vol_center: vec4<f32>,  // baked volume: xyz camera-relative box center, w = present
-    vol_half: vec4<f32>,    // xyz half-extent, w = blend radius k
+    params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
+    // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
+    // 3D atlas (no combined-grid resolution spread — ADR-0015 / multi-volume terrain).
+    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = present
+    vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
+    vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
+    vol_dims: array<vec4<f32>, 16>,   // xyz voxel dims of this volume (renderer-patched)
     // Terrain surface material (same model as the raster meshes). Ignored by blobs.
     terrain_tint: vec4<f32>,     // rgb tint (× painted albedo), a unused
     terrain_emissive: vec4<f32>, // rgb, a = strength
@@ -172,11 +176,17 @@ fn nearest_blob(p: vec3<f32>) -> i32 {
     return bi;
 }
 
-// March bound from all blobs + the volume box (replaces the old single-blob reach).
+// March bound from all blobs + every volume box (replaces the old single-blob reach).
 fn march_bound() -> f32 {
     let count = min(u32(G.params.y), 16u);
-    var reach = length(G.vol_half.xyz);
-    var maxc = length(G.vol_center.xyz);
+    var reach = 0.0;
+    var maxc = 0.0;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; }
+        reach = max(reach, length(G.vol_half[i].xyz));
+        maxc = max(maxc, length(G.vol_center[i].xyz));
+    }
     for (var i = 0u; i < count; i = i + 1u) {
         reach = max(reach, G.blobs[i].w);
         maxc = max(maxc, length(G.blobs[i].xyz));
@@ -184,72 +194,162 @@ fn march_bound() -> f32 {
     return reach * 60.0 + maxc + 100.0;
 }
 
-// The baked mesh volume: a box SDF outside (to march toward), the sampled mesh
-// distance + albedo inside.
-fn volume(p: vec3<f32>) -> Matter {
-    if (G.vol_center.w < 0.5) {
-        return Matter(1e9, vec3<f32>(1.0)); // no volume bound
+// Distance from `p` INWARD from volume `i`'s side/bottom faces (positive inside;
+// the top face never tapers — it's the ground surface).
+fn box_edge(i: u32, p: vec3<f32>) -> f32 {
+    let vh = G.vol_half[i].xyz;
+    let rel = p - G.vol_center[i].xyz;
+    return min(min(vh.x - abs(rel.x), vh.z - abs(rel.z)), rel.y + vh.y);
+}
+
+// Edge distance to the UNION of all present volume boxes at `p` — the max of the
+// containing boxes' individual edge distances. This is what makes seams seamless:
+// near volume A's face but deep inside overlapping volume B, the union edge is B's
+// (large), so no taper; on a face no neighbor continues past, it's small → taper.
+// A single isolated volume reduces exactly to its own edge (the original look).
+fn union_edge(p: vec3<f32>) -> f32 {
+    var e = -1e9;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < 0.0) {
+            e = max(e, box_edge(i, p));
+        }
     }
-    let rel = p - G.vol_center.xyz;
-    let q = abs(rel) - G.vol_half.xyz;
+    return e;
+}
+
+// One baked volume, RAW (untapered): a box SDF outside (to march toward), the
+// sampled distance + albedo inside, read from this volume's slot of the shared 3D
+// atlas at its NATIVE voxel resolution. The slab-edge taper is applied ONCE, after
+// the fold (see `volumes`) — tapering before the smin would bulge/crease the
+// under-slope at seams.
+fn volume_at(i: u32, p: vec3<f32>) -> Matter {
+    let vh = G.vol_half[i].xyz;
+    let rel = p - G.vol_center[i].xyz;
+    let q = abs(rel) - vh;
     let box_d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
     if (box_d > 0.0) {
-        // Outside the brick: step toward it, but never report the box face itself as
-        // a surface — keep the step above the hit threshold so the ray crosses into
-        // the volume, where the real (sampled) SDF takes over. (Without this, a
-        // volume whose matter doesn't fill its box renders the box as a shell.)
-        return Matter(max(box_d, 0.08), vec3<f32>(1.0));
+        // Outside the brick: CONTINUE the field, exactly like `Terrain::sample` —
+        // box distance PLUS the clamped edge sample's air gap. A constant floor here
+        // would read as "surface just outside the box" to the smin fuse and raise a
+        // bright ridge along the face wherever another volume overlaps (the same
+        // near-zero-shell lesson as the CPU combine). The 0.08 floor is still kept
+        // so a ray never crawls on (or reports) the box face itself — it jumps
+        // across into the volume, where the real sampled SDF takes over.
+        let euvw = atlas_uvw(i, rel);
+        let ed = textureSampleLevel(dist_tex, vol_samp, euvw, 0.0).r;
+        let ecol = textureSampleLevel(color_tex, vol_samp, euvw, 0.0).rgb;
+        return Matter(max(box_d + max(ed, 0.0), 0.08), ecol);
     }
-    let local = clamp(rel / (2.0 * G.vol_half.xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    let d = textureSampleLevel(dist_tex, vol_samp, local, 0.0).r;
-    let col = textureSampleLevel(color_tex, vol_samp, local, 0.0).rgb;
-    // Taper the finite slab's SIDE + BOTTOM faces up to air, so a terrain that fills
-    // its box doesn't render as hard dirt walls / a visible shell — the surface
-    // slopes off gently to meet the air at the edges (a gentle slope avoids the
-    // grazing-angle aliasing a steep rounded lip would cause). The TOP ground
-    // surface is untouched.
-    let margin = 2.0;
-    let edge = min(min(G.vol_half.x - abs(rel.x), G.vol_half.z - abs(rel.z)), rel.y + G.vol_half.y);
-    return Matter(max(d, margin - edge), col);
+    let uvw = atlas_uvw(i, rel);
+    let d = textureSampleLevel(dist_tex, vol_samp, uvw, 0.0).r;
+    let col = textureSampleLevel(color_tex, vol_samp, uvw, 0.0).rgb;
+    return Matter(d, col);
 }
 
-// True when `p` is inside the volume box expanded by `e` — used to reject false hits
-// on the box's bounding faces (the box-approach distance is never a real surface),
-// while a small `e` still admits genuine terrain hits sitting right at a face.
+// Map a box-relative position to atlas texture coords for volume `i`. The voxel
+// coordinate is clamped half a voxel inside the slot — the per-volume equivalent of
+// ClampToEdge, which also stops trilinear taps bleeding into the neighbouring slot.
+fn atlas_uvw(i: u32, rel: vec3<f32>) -> vec3<f32> {
+    let dims = G.vol_dims[i].xyz;
+    let frac = clamp(rel / (2.0 * G.vol_half[i].xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    let vox = clamp(frac * dims, vec3<f32>(0.5), dims - 0.5);
+    return (G.vol_atlas[i].xyz + vox) / vec3<f32>(textureDimensions(dist_tex));
+}
+
+// Every present volume folded together with smin (the SAME polynomial fuse the old
+// CPU combine used, so overlapping terrains still melt into one seamless surface).
+// `any` is false when no volume contributed — the caller must NOT smin the sentinel
+// against a blob (f32 cancellation collapses the field; see `map`).
+struct VolFold { m: Matter, any: bool };
+fn volumes(p: vec3<f32>) -> VolFold {
+    var m = Matter(1e9, vec3<f32>(1.0));
+    var any = false;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; }
+        let v = volume_at(i, p);
+        if (!any) {
+            m = v;
+            any = true;
+        } else {
+            m = smin_matter(m, v, max(G.vol_half[i].w, 0.0001));
+        }
+    }
+    // Taper the finite slabs' SIDE + BOTTOM faces up to air — applied ONCE to the
+    // folded field, measured against the UNION of the volume boxes, so a terrain
+    // doesn't render as hard dirt walls / a shell at its outer faces, while interior
+    // seams (faces a neighbor continues through) stay perfectly seamless. The TOP
+    // ground surface is untouched. (This mirrors what the old CPU combine + single-
+    // volume taper produced, including for one isolated volume.)
+    let uedge = union_edge(p);
+    if (any && uedge > -1e8) {
+        m.d = max(m.d, 2.0 - uedge);
+    }
+    return VolFold(m, any);
+}
+
+// True when `p` is inside ANY volume's box expanded by `e` — used to reject false
+// hits on the boxes' bounding faces (the box-approach distance is never a real
+// surface), while a small `e` still admits genuine terrain hits right at a face.
 fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
-    let q = abs(p - G.vol_center.xyz) - G.vol_half.xyz;
-    return max(q.x, max(q.y, q.z)) < e;
-}
-fn inside_volume_box(p: vec3<f32>) -> bool {
-    return inside_volume_box_eps(p, 0.0);
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < e) { return true; }
+    }
+    return false;
 }
 
-// A threshold-crossing is a REAL surface (not the shell) when there is no volume,
-// or we are strictly inside the volume box, or an analytic blob is the matter here.
-// The box test must stay STRICT: outside the brick `volume()` returns a constant
-// floor (the box-approach step), and at a far camera the distance-relaxed `thr` grows
-// past that floor — any slack here would accept the box face itself and re-draw the
-// shell. Genuine terrain hits are inside the box; the grazing-gap fill below only
-// records/accepts points inside the box, so it needs no slack here.
+// The volume containing `p` (smallest sampled distance among boxes it's inside,
+// expanded by `e`) — for per-volume voxel size / texture-slot decisions. −1 = none.
+fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
+    var best = -1;
+    var bd = 1e9;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < e) {
+            let d = volume_at(i, p).d;
+            if (d < bd) { bd = d; best = i32(i); }
+        }
+    }
+    return best;
+}
+
+// A threshold-crossing is a REAL surface (not the shell) when there are no volumes,
+// or we are strictly inside some volume's box, or an analytic blob is the matter
+// here. The box test must stay STRICT: outside the bricks `volumes()` returns a
+// constant floor (the box-approach step), and at a far camera the distance-relaxed
+// `thr` grows past that floor — any slack here would accept a box face itself and
+// re-draw the shell. Genuine terrain hits are inside a box; the grazing-gap fill
+// below only records/accepts points inside a box, so it needs no slack here.
 fn real_surface(p: vec3<f32>, thr: f32) -> bool {
-    if (G.vol_center.w < 0.5) { return true; }
-    if (inside_volume_box(p)) { return true; }
+    if (G.params.w < 0.5) { return true; }
+    if (inside_volume_box_eps(p, 0.0)) { return true; }
     return G.params.y >= 0.5 && analytic(p).d < thr;
 }
 
 // The whole field: every piece of matter folded together with smin.
 fn map(p: vec3<f32>) -> Matter {
     let a = analytic(p);
-    // No baked volume bound → return the blob directly. Blending against the
-    // "absent" sentinel (1e9) is not just wasteful: f32 `mix(1e9, d, 1.0)` is
-    // evaluated as `1e9 + 1.0*(d - 1e9)`, and `d - 1e9` loses `d` entirely, so the
-    // field would collapse to ~0 everywhere — a surface at the camera, every ray a
-    // false hit. (This was the "glitchy giant sphere".)
-    if (G.vol_center.w < 0.5) {
+    let v = volumes(p);
+    // Fold only the parts that exist. Blending against an "absent" sentinel (1e9)
+    // is not just wasteful: f32 `mix(1e9, d, 1.0)` is evaluated as
+    // `1e9 + 1.0*(d - 1e9)`, and `d - 1e9` loses `d` entirely, so the field would
+    // collapse to ~0 everywhere — a surface at the camera, every ray a false hit.
+    // (This was the "glitchy giant sphere".)
+    if (!v.any) {
         return a;
     }
-    let v = volume(p);
-    return smin_matter(a, v, max(G.vol_half.w, 0.0001));
+    if (u32(G.params.y) == 0u) {
+        return v.m;
+    }
+    return smin_matter(a, v.m, max(G.params.z, 0.0001));
 }
 
 // Triplanar-sample a terrain palette layer at a box-relative position (world-stable,
@@ -279,32 +379,31 @@ fn terrain_slot_color(slot: i32, rel: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) 
 // two neighbouring slots by that fraction instead of snapping (round()), which gives a
 // smooth crossfade between textures instead of a hard, jarring seam.
 fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
-    if (G.vol_center.w < 0.5) {
-        return tint;
+    // The DOMINANT volume at p (nearest surface) provides the painted slot — same
+    // rule as the old CPU combine ("slot from the nearer surface, never blended").
+    let ci = containing_volume(p, 0.0);
+    if (ci < 0) {
+        return tint; // not inside any terrain box
     }
-    let rel = p - G.vol_center.xyz;
-    let q = abs(rel) - G.vol_half.xyz;
-    if (max(q.x, max(q.y, q.z)) > 0.0) {
-        return tint; // not inside the terrain box
-    }
-    let inv = 1.0 / (2.0 * G.vol_half.xyz);
-    let local = clamp(rel * inv + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    let i = u32(ci);
+    let rel = p - G.vol_center[i].xyz;
     // The slot only transitions over ONE voxel, so a single linear tap gives a narrow
     // seam. Average a few taps in the surface PLANE (so we widen along the ground, not
     // into it) → a soft, several-voxel crossfade. `a` is the 1-based slot (0 = untextured).
-    let voxel = 2.0 * G.vol_half.xyz / max(vec3<f32>(textureDimensions(color_tex)), vec3<f32>(1.0));
     var t1 = cross(n, vec3<f32>(0.0, 1.0, 0.0));
     if (dot(t1, t1) < 0.01) { t1 = cross(n, vec3<f32>(1.0, 0.0, 0.0)); }
     t1 = normalize(t1);
     let t2 = normalize(cross(n, t1));
-    let o1 = t1 * voxel * 1.5 * inv;
-    let o2 = t2 * voxel * 1.5 * inv;
+    // Offsets of 1.5 voxels along each tangent, expressed in world units per axis.
+    let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+    let o1 = t1 * voxel * 1.5;
+    let o2 = t2 * voxel * 1.5;
     let a = (
-        textureSampleLevel(color_tex, vol_samp, local, 0.0).a
-        + textureSampleLevel(color_tex, vol_samp, clamp(local + o1, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
-        + textureSampleLevel(color_tex, vol_samp, clamp(local - o1, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
-        + textureSampleLevel(color_tex, vol_samp, clamp(local + o2, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
-        + textureSampleLevel(color_tex, vol_samp, clamp(local - o2, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a
+        textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel + o1), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel - o1), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel + o2), 0.0).a
+        + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel - o2), 0.0).a
     ) * (255.0 / 5.0);
     if (a < 0.5) {
         return tint; // fully untextured here
@@ -322,8 +421,10 @@ fn calc_normal(p: vec3<f32>) -> vec3<f32> {
     // of reporting a single cell's facet (the grain). Analytic blobs have a continuous
     // gradient and want a small epsilon for crisp edges.
     var h = 0.012;
-    if (G.vol_center.w >= 0.5 && inside_volume_box_eps(p, 0.08)) {
-        let voxel = 2.0 * G.vol_half.xyz / max(vec3<f32>(textureDimensions(dist_tex)), vec3<f32>(1.0));
+    let ci = containing_volume(p, 0.08);
+    if (ci >= 0) {
+        let i = u32(ci);
+        let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
         h = clamp(max(voxel.x, max(voxel.y, voxel.z)), 0.02, 1.0);
     }
     // Tetrahedron offsets: 4 taps, isotropic (no axis-aligned facet bias), cheaper
@@ -439,7 +540,7 @@ fn fs(in: VOut) -> FsOut {
             // The terrain palette texture (if painted) modulates the per-voxel tint.
             let albedo = terrain_albedo(p, n, m.col);
             var col: vec3<f32>;
-            if (G.vol_center.w >= 0.5 && inside_volume_box_eps(p, 0.06)) {
+            if (inside_volume_box_eps(p, 0.06)) {
                 // TERRAIN: shade with its Material using the SAME model as the raster
                 // meshes (ambient×mul + diffuse, Blinn-Phong specular, rim, emissive,
                 // unlit), so terrain sits consistently next to everything else instead

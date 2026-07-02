@@ -1,0 +1,1935 @@
+//! Animation editor UI: the model-asset animations panel (Inspector), the
+//! AnimationController component section, the **Animation Controller graph
+//! window** (states as draggable nodes, transitions as arrows with editable
+//! fades), and the **Animating tab** (dopesheet timeline: scrub, preview,
+//! record, keys, events).
+//!
+//! All persistent UI state lives in [`AnimUiState`] (one field on `Editor`,
+//! borrowed into `EditorTabViewer`); asset mutations edit a working copy and
+//! save on pointer-release (drags coalesce into one disk write).
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2 as EVec2};
+use floptle_anim::TransformTRS;
+use floptle_core::{AnimController, Entity, Matter, Name};
+use floptle_scene::{
+    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4,
+    AnimTransitionDoc, ANIM_CLIP_EXT,
+};
+
+use crate::anim;
+use crate::{AssetPayload, EditorCmd, EditorTabViewer};
+
+/// Persistent animation-UI state (a field on `Editor`).
+pub struct AnimUiState {
+    // ---- Inspector: model asset panel ----
+    /// Cached animation names per model path (cheap glTF header probe).
+    pub probes: HashMap<String, Vec<String>>,
+
+    // ---- Controller graph tab ----
+    /// Controller asset key being edited.
+    pub graph_key: Option<String>,
+    /// Working copy (edits land here; saved on release).
+    pub graph_doc: Option<AnimControllerDoc>,
+    pub graph_dirty: bool,
+    pub graph_layer: usize,
+    pub sel_state: Option<String>,
+    pub sel_trans: Option<(String, String)>,
+    /// In-progress transition drag (from state name).
+    pub drag_from: Option<String>,
+    pub graph_pan: EVec2,
+    /// New-controller name prompt buffer (`Some` = prompt open).
+    pub new_ctl_buf: Option<String>,
+    /// Attach the newly created controller to this node (Add Component flow).
+    pub new_ctl_attach: Option<Entity>,
+    /// Folder (project-relative) the new controller is created in.
+    pub new_ctl_dir: Option<String>,
+    /// Focus the open name prompt once (not every frame — that eats Escape).
+    pub focus_prompt: bool,
+    /// Layer index awaiting delete confirmation in the graph window.
+    pub confirm_delete_layer: Option<usize>,
+
+    // ---- Animating tab ----
+    /// The bound node (must carry a controller or a rigged mesh).
+    pub target: Option<Entity>,
+    /// Selected state name in the target's controller.
+    pub sel_anim: Option<String>,
+    /// Working copy of the selected state's clip doc (key, doc).
+    pub clip_doc: Option<(String, AnimClipDoc)>,
+    pub clip_dirty: bool,
+    pub playhead: f32,
+    pub preview_playing: bool,
+    pub record: bool,
+    /// Timeline zoom (pixels per second).
+    pub zoom: f32,
+    /// Key-snap grid (frames/sec); 0 = off.
+    pub snap_fps: f32,
+    pub sel_event: Option<usize>,
+    /// The Animating tab drew last frame (gates the render-loop preview).
+    pub tab_visible: bool,
+    /// In-flight key drag: (channel, original time, previewed time). The doc
+    /// is only retimed on release, so egui ids stay stable through the drag.
+    pub key_drag: Option<(usize, f32, f32)>,
+    /// Pre-record transforms of the target subtree — restored when ● Record
+    /// turns off, so recording authors the CLIP, never the scene.
+    pub record_restore: Vec<(Entity, floptle_core::Transform)>,
+    /// Last-seen local TRS of the target's descendants (record-mode diffing).
+    pub last_scene_local: HashMap<Entity, TransformTRS>,
+    /// New-animation name prompt buffer (`Some` = prompt open).
+    pub new_anim_buf: Option<String>,
+}
+
+impl Default for AnimUiState {
+    fn default() -> Self {
+        Self {
+            probes: HashMap::new(),
+            graph_key: None,
+            graph_doc: None,
+            graph_dirty: false,
+            graph_layer: 0,
+            sel_state: None,
+            sel_trans: None,
+            drag_from: None,
+            graph_pan: EVec2::ZERO,
+            new_ctl_buf: None,
+            new_ctl_attach: None,
+            new_ctl_dir: None,
+            focus_prompt: false,
+            confirm_delete_layer: None,
+            target: None,
+            sel_anim: None,
+            clip_doc: None,
+            clip_dirty: false,
+            playhead: 0.0,
+            preview_playing: false,
+            record: false,
+            zoom: 120.0,
+            snap_fps: 0.0,
+            sel_event: None,
+            tab_visible: false,
+            key_drag: None,
+            record_restore: Vec::new(),
+            last_scene_local: HashMap::new(),
+            new_anim_buf: None,
+        }
+    }
+}
+
+/// `path` is a baked animation clip asset.
+pub fn is_anim_clip(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".anim.ron")
+}
+
+/// `path` is an animation controller asset.
+pub fn is_anim_ctl(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".actl.ron")
+}
+
+const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
+const KEY_COLOR: Color32 = Color32::from_rgb(235, 200, 90);
+const EVENT_COLOR: Color32 = Color32::from_rgb(240, 140, 150);
+const PLAYHEAD: Color32 = Color32::from_rgb(240, 90, 90);
+
+impl EditorTabViewer<'_> {
+    // =========================================================================
+    // Inspector: selected MODEL asset — list packaged animations + extract.
+    // =========================================================================
+    pub fn model_asset_anim_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        let names = self
+            .anim_ui
+            .probes
+            .entry(path.to_string())
+            .or_insert_with(|| floptle_assets::probe_animations(Path::new(path)))
+            .clone();
+        if names.is_empty() {
+            ui.small("no animations in this model");
+            return;
+        }
+        ui.separator();
+        ui.strong(format!("▶ Animations ({})", names.len()));
+        for n in &names {
+            ui.label(format!("   ▷ {n}"));
+        }
+        // Which clips are already extracted?
+        let stem = Path::new(path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let extracted = names
+            .iter()
+            .filter(|n| {
+                let safe: String = n
+                    .chars()
+                    .map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c })
+                    .collect();
+                self.anim.clip(&format!("animations/{stem}/{safe}")).is_some()
+            })
+            .count();
+        if extracted == names.len() {
+            ui.small(format!("all extracted → animations/{stem}/"));
+        }
+        if ui
+            .button("⬇ Extract animations")
+            .on_hover_text(format!(
+                "bake each clip to its own .anim.ron under animations/{stem}/ — standalone \
+                 files you can organize freely, add to controllers, and put events on"
+            ))
+            .clicked()
+        {
+            self.cmd.extract_anims = Some(path.to_string());
+        }
+    }
+
+    // =========================================================================
+    // Inspector: selected CLIP asset — summary + events hint.
+    // =========================================================================
+    pub fn clip_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        let key = anim::asset_key(Path::new(path), self.project_root, ANIM_CLIP_EXT);
+        ui.label("animation clip");
+        if let Some(doc) = self.anim.clip(&key) {
+            ui.small(format!(
+                "{} · {:.2}s · {} channel(s) · {} event(s)",
+                doc.name,
+                doc.duration,
+                doc.channels.len(),
+                doc.events.len()
+            ));
+            if !doc.source_model.is_empty() {
+                ui.small(format!("from {}", doc.source_model));
+            }
+            ui.small("add it to a controller (drag into the graph window), then edit keys/events in the Animating tab");
+        } else {
+            ui.small("(unreadable clip file)");
+        }
+    }
+
+    // =========================================================================
+    // Inspector: selected CONTROLLER asset.
+    // =========================================================================
+    pub fn ctl_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        let key = anim::asset_key(Path::new(path), self.project_root, floptle_scene::ANIM_CTL_EXT);
+        ui.label("animation controller");
+        if let Some(doc) = self.anim.controller(&key) {
+            let states: usize = doc.layers.iter().map(|l| l.states.len()).sum();
+            ui.small(format!("{} layer(s) · {states} state(s)", doc.layers.len()));
+        }
+        if ui.button("◉ Open in graph editor").clicked() {
+            self.cmd.open_anim_graph = Some(key);
+        }
+    }
+
+}
+
+// =============================================================================
+// Inspector: the Animation Controller COMPONENT section on a node. A free
+// function (not a viewer method) so the Inspector can call it while its own
+// `world`/`cmd` reborrows are live.
+// =============================================================================
+pub fn anim_component_ui(
+    ui: &mut egui::Ui,
+    e: Entity,
+    world: &floptle_core::World,
+    anim: &anim::AnimSystem,
+    anim_ui: &mut AnimUiState,
+    cmd: &mut EditorCmd,
+) {
+    let Some(key) = world.get::<AnimController>(e).map(|c| c.asset.clone()) else {
+        return;
+    };
+    let (_, _, remove) = crate::component_header(ui, "▶ Animation Controller", false, true);
+    if remove {
+        cmd.set_anim_controller = Some((e, None));
+        return;
+    }
+    ui.indent("anim_ctl_props", |ui| {
+        let missing = anim.controller(&key).is_none();
+        ui.horizontal(|ui| {
+            ui.label("controller");
+            let label = if missing { format!("⚠ {key}") } else { key.clone() };
+            egui::ComboBox::from_id_salt("anim-ctl-pick")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for (k, _) in anim.controllers.iter() {
+                        if ui.selectable_label(*k == key, k).clicked() && *k != key {
+                            cmd.set_anim_controller = Some((e, Some(k.clone())));
+                        }
+                    }
+                });
+        });
+        if missing {
+            ui.colored_label(
+                Color32::from_rgb(230, 160, 80),
+                "controller asset not found — pick another or create one",
+            );
+        }
+        ui.horizontal(|ui| {
+            if ui.button("◉ Edit graph").clicked() {
+                cmd.open_anim_graph = Some(key.clone());
+            }
+            if ui
+                .button("✎ Animate")
+                .on_hover_text("open the Animating timeline bound to this node")
+                .clicked()
+            {
+                anim_ui.target = Some(e);
+                cmd.focus_animating = true;
+            }
+        });
+        if let Some(doc) = anim.controller(&key) {
+            let states: usize = doc.layers.iter().map(|l| l.states.len()).sum();
+            ui.small(format!(
+                "{} layer(s) · {states} state(s) · default fade {:.2}s{}",
+                doc.layers.len(),
+                doc.default_fade,
+                doc.sample_fps.map(|f| format!(" · stepped {f:.0} fps")).unwrap_or_default()
+            ));
+        }
+    });
+    ui.add_space(4.0);
+}
+
+impl EditorTabViewer<'_> {
+
+    // =========================================================================
+    // The Animation Controller graph tab (dockable — resize/move it freely).
+    // =========================================================================
+    pub fn anim_graph_tab_ui(&mut self, ui: &mut egui::Ui) {
+        // Sync the working copy with the selected key.
+        if self.anim_ui.graph_doc.is_none() {
+            if let Some(key) = self.anim_ui.graph_key.clone() {
+                self.anim_ui.graph_doc = self.anim.controller(&key).cloned();
+            }
+        }
+        self.anim_graph_ui(ui);
+    }
+
+    fn flush_graph(&mut self, force: bool) {
+        if self.anim_ui.graph_dirty
+            && (force || !self.pointer_down)
+        {
+            if let (Some(key), Some(doc)) = (&self.anim_ui.graph_key, &self.anim_ui.graph_doc) {
+                self.anim.save_controller(self.project_root, key, doc);
+            }
+            self.anim_ui.graph_dirty = false;
+        }
+    }
+
+    fn anim_graph_ui(&mut self, ui: &mut egui::Ui) {
+        let st = &mut *self.anim_ui;
+        // ---- header: controller pick / create + controller-wide knobs ----
+        ui.horizontal(|ui| {
+            ui.label("controller");
+            let cur = st.graph_key.clone().unwrap_or_else(|| "(pick)".into());
+            egui::ComboBox::from_id_salt("graph-ctl")
+                .selected_text(cur.clone())
+                .show_ui(ui, |ui| {
+                    let keys: Vec<String> =
+                        self.anim.controllers.iter().map(|(k, _)| k.clone()).collect();
+                    for k in keys {
+                        if ui.selectable_label(Some(&k) == st.graph_key.as_ref(), &k).clicked() {
+                            st.graph_key = Some(k.clone());
+                            st.graph_doc = self.anim.controller(&k).cloned();
+                            st.graph_dirty = false;
+                            st.graph_layer = 0;
+                            st.sel_state = None;
+                            st.sel_trans = None;
+                        }
+                    }
+                });
+            if ui.button("✚ New…").clicked() {
+                st.new_ctl_buf = Some(String::new());
+                st.focus_prompt = true;
+            }
+            if let Some(doc) = st.graph_doc.as_mut() {
+                ui.separator();
+                ui.label("default fade");
+                if ui
+                    .add(egui::DragValue::new(&mut doc.default_fade).speed(0.01).range(0.0..=5.0).suffix("s"))
+                    .changed()
+                {
+                    st.graph_dirty = true;
+                }
+                let mut stepped = doc.sample_fps.is_some();
+                if ui
+                    .checkbox(&mut stepped, "stepped")
+                    .on_hover_text("retro choppy playback: sample every animation on a fixed frame grid (states can override with their own fps)")
+                    .changed()
+                {
+                    doc.sample_fps = if stepped { Some(12.0) } else { None };
+                    st.graph_dirty = true;
+                }
+                if let Some(fps) = doc.sample_fps.as_mut() {
+                    if ui.add(egui::DragValue::new(fps).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
+                        st.graph_dirty = true;
+                    }
+                }
+            }
+        });
+        // New-controller prompt.
+        if let Some(buf) = st.new_ctl_buf.as_mut() {
+            let mut done = false;
+            let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            ui.horizontal(|ui| {
+                ui.label("name");
+                let resp = ui.text_edit_singleline(buf);
+                if st.focus_prompt {
+                    resp.request_focus();
+                    st.focus_prompt = false;
+                }
+                if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Create").clicked()
+                {
+                    done = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if let Some(e) = st.new_ctl_attach {
+                    let n = self
+                        .entity_names
+                        .iter()
+                        .find(|(x, _)| *x == e)
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_else(|| "the selected node".into());
+                    ui.small(format!("→ will attach to \"{n}\""));
+                }
+                if let Some(d) = &st.new_ctl_dir {
+                    ui.small(format!("in {d}/"));
+                }
+            });
+            if done && !buf.trim().is_empty() {
+                let name = buf.trim().to_string();
+                let key =
+                    anim::new_controller_key(self.project_root, st.new_ctl_dir.as_deref(), &name);
+                let doc = AnimControllerDoc::default();
+                self.anim.save_controller(self.project_root, &key, &doc);
+                // Add-Component flow: attach the fresh controller to the node.
+                if let Some(e) = st.new_ctl_attach.take() {
+                    self.cmd.set_anim_controller = Some((e, Some(key.clone())));
+                }
+                self.cmd.refresh_assets = true; // show the new file in the browser
+                st.graph_key = Some(key);
+                st.graph_doc = Some(doc);
+                st.graph_dirty = false;
+                st.graph_layer = 0;
+                st.new_ctl_buf = None;
+            } else if cancel || done {
+                st.new_ctl_buf = None;
+                st.new_ctl_attach = None;
+                st.new_ctl_dir = None;
+            }
+        }
+        let Some(doc) = st.graph_doc.as_mut() else {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.weak("Pick a controller above, or create one — then drag clips from the Assets browser into the graph.");
+            });
+            return;
+        };
+        ui.separator();
+
+        // ---- layers strip ----
+        ui.horizontal(|ui| {
+            ui.label("layers");
+            ui.small("(left = base, right = higher priority)").on_hover_text(
+                "a playing state on a higher layer overrides the nodes it animates; \
+                 everything else shows the layers below",
+            );
+            let mut remove: Option<usize> = None;
+            for i in 0..doc.layers.len() {
+                let sel = st.graph_layer == i;
+                let resp = ui.selectable_label(sel, &doc.layers[i].name);
+                if resp.clicked() {
+                    st.graph_layer = i;
+                    st.sel_state = None;
+                    st.sel_trans = None;
+                }
+                resp.context_menu(|ui| {
+                    if doc.layers.len() > 1 && ui.button("🗑 Delete layer…").clicked() {
+                        remove = Some(i); // asks for confirmation below
+                        ui.close();
+                    }
+                    if i > 0 && ui.button("⬅ Move down (lower priority)").clicked() {
+                        doc.layers.swap(i, i - 1);
+                        // keep the selection on the layer the user had selected
+                        if st.graph_layer == i {
+                            st.graph_layer = i - 1;
+                        } else if st.graph_layer == i - 1 {
+                            st.graph_layer = i;
+                        }
+                        st.graph_dirty = true;
+                        ui.close();
+                    }
+                    if i + 1 < doc.layers.len() && ui.button("➡ Move up (higher priority)").clicked() {
+                        doc.layers.swap(i, i + 1);
+                        if st.graph_layer == i {
+                            st.graph_layer = i + 1;
+                        } else if st.graph_layer == i + 1 {
+                            st.graph_layer = i;
+                        }
+                        st.graph_dirty = true;
+                        ui.close();
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                st.confirm_delete_layer = Some(i);
+            }
+            if ui.button("✚").on_hover_text("add a layer (e.g. an Attack layer above Movement)").clicked() {
+                let n = doc.layers.len();
+                doc.layers.push(floptle_scene::AnimLayerDoc {
+                    name: format!("Layer{n}"),
+                    weight: 1.0,
+                    states: Vec::new(),
+                    default_state: None,
+                    transitions: Vec::new(),
+                });
+                st.graph_layer = doc.layers.len() - 1;
+                st.graph_dirty = true;
+            }
+        });
+        // Deleting a layer erases all its states + transitions from the asset —
+        // confirm first (asset edits are outside scene undo).
+        if let Some(i) = st.confirm_delete_layer {
+            if i >= doc.layers.len() {
+                st.confirm_delete_layer = None;
+            } else {
+                let name = doc.layers[i].name.clone();
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 160, 80),
+                        format!("Delete layer \"{name}\" and everything in it? This edits the asset file and can't be undone."),
+                    );
+                    if ui.button("🗑 Delete").clicked() {
+                        doc.layers.remove(i);
+                        if st.graph_layer >= i && st.graph_layer > 0 {
+                            st.graph_layer -= 1;
+                        }
+                        st.sel_state = None;
+                        st.sel_trans = None;
+                        st.graph_dirty = true;
+                        st.confirm_delete_layer = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        st.confirm_delete_layer = None;
+                    }
+                });
+            }
+        }
+        st.graph_layer = st.graph_layer.min(doc.layers.len().saturating_sub(1));
+        let li = st.graph_layer;
+        ui.horizontal(|ui| {
+            let layer = &mut doc.layers[li];
+            ui.label("name");
+            if ui.add(egui::TextEdit::singleline(&mut layer.name).desired_width(110.0)).changed() {
+                st.graph_dirty = true;
+            }
+            ui.label("weight");
+            if ui.add(egui::Slider::new(&mut layer.weight, 0.0..=1.0)).changed() {
+                st.graph_dirty = true;
+            }
+            if let Some(d) = &layer.default_state {
+                ui.small(format!("default: {d}"));
+            } else {
+                ui.small("no default state (right-click a node)");
+            }
+        });
+
+        // ---- canvas (left) + selection panel (right) ----
+        let panel_w = 210.0;
+        ui.horizontal_top(|ui| {
+            let canvas_w = (ui.available_width() - panel_w - 8.0).max(200.0);
+            let canvas_h = ui.available_height().max(200.0);
+            let (canvas_rect, canvas_resp) =
+                ui.allocate_exact_size(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
+            self.graph_canvas(ui, canvas_rect, canvas_resp);
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(panel_w - 12.0);
+                self.graph_side_panel(ui);
+            });
+        });
+
+        self.flush_graph(false);
+    }
+
+    /// The node-graph canvas for the selected layer.
+    fn graph_canvas(&mut self, ui: &mut egui::Ui, rect: Rect, bg_resp: egui::Response) {
+        let cmd = &mut *self.cmd;
+        let anim: &anim::AnimSystem = &*self.anim;
+        let world: &floptle_core::World = &*self.world;
+        let project_root = self.project_root;
+        let st = &mut *self.anim_ui;
+        let Some(doc) = st.graph_doc.as_mut() else { return };
+        let default_fade = doc.default_fade;
+        let li = st.graph_layer.min(doc.layers.len().saturating_sub(1));
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+
+        // Pan with a background drag (nodes consume their own drags first).
+        if bg_resp.dragged() && st.drag_from.is_none() {
+            st.graph_pan += bg_resp.drag_delta();
+        }
+        if bg_resp.clicked() {
+            st.sel_state = None;
+            st.sel_trans = None;
+        }
+
+        let node_size = egui::vec2(150.0, 52.0);
+        let origin = rect.min + st.graph_pan + egui::vec2(16.0, 16.0);
+        let node_rect = |pos: [f32; 2]| Rect::from_min_size(origin + EVec2::from(pos), node_size);
+
+        let layer = &mut doc.layers[li];
+        // ---- transitions (under nodes) ----
+        for tr in layer.transitions.iter() {
+            let (Some(a), Some(b)) = (
+                layer.states.iter().find(|s| s.name == tr.from),
+                layer.states.iter().find(|s| s.name == tr.to),
+            ) else {
+                continue;
+            };
+            let (ra, rb) = (node_rect(a.pos), node_rect(b.pos));
+            let (mut pa, mut pb) = (ra.center(), rb.center());
+            // Offset paired A↔B arrows so both stay visible.
+            let dir = (pb - pa).normalized();
+            let perp = egui::vec2(-dir.y, dir.x) * 7.0;
+            if layer.transitions.iter().any(|o| o.from == tr.to && o.to == tr.from) {
+                pa += perp;
+                pb += perp;
+            }
+            let selected = st.sel_trans.as_ref() == Some(&(tr.from.clone(), tr.to.clone()));
+            let fade_in =
+                layer.states.iter().find(|s| s.name == tr.to).and_then(|s| s.fade_in);
+            let eff_fade = fade_in.unwrap_or(tr.fade);
+            let col = if selected {
+                ACCENT
+            } else if eff_fade <= 0.0 || fade_in.is_some() {
+                Color32::from_rgb(235, 170, 90)
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            painter.line_segment([pa, pb], Stroke::new(if selected { 2.5 } else { 1.5 }, col));
+            // Arrowhead at 62% along (so double arrows read directionally).
+            let tip = pa + (pb - pa) * 0.62;
+            let d = dir * 9.0;
+            let p = egui::vec2(-dir.y, dir.x) * 5.0;
+            painter.line_segment([tip, tip - d + p], Stroke::new(2.0, col));
+            painter.line_segment([tip, tip - d - p], Stroke::new(2.0, col));
+            let label = match fade_in {
+                Some(f) if f <= 0.0 => "⚡ instant".to_string(),
+                Some(f) => format!("⇥ {f:.2}s"), // state override wins
+                None => format!("{:.2}s", tr.fade),
+            };
+            painter.text(
+                pa + (pb - pa) * 0.5 + egui::vec2(0.0, -10.0),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(10.5),
+                col,
+            );
+            // Click-select an arrow (distance to segment).
+            if bg_resp.clicked() {
+                if let Some(cur) = ui.ctx().pointer_interact_pos() {
+                    if seg_dist2(cur, pa, pb) < 7.0 {
+                        st.sel_trans = Some((tr.from.clone(), tr.to.clone()));
+                        st.sel_state = None;
+                    }
+                }
+            }
+            // (Deletion goes through the side panel's 🗑 button — a raw Delete
+            // keypress here would collide with the scene's delete shortcut.)
+        }
+
+        // ---- nodes ----
+        let mut hovered_node: Option<String> = None;
+        for si in 0..layer.states.len() {
+            let (name, clip, fade_in, fps, looped) = {
+                let s = &layer.states[si];
+                (s.name.clone(), s.clip.clone(), s.fade_in, s.fps, s.looped)
+            };
+            let r = node_rect(layer.states[si].pos);
+            if !rect.intersects(r) {
+                // keep interactions sane; still draw (egui clips to painter rect)
+            }
+            let id = ui.id().with(("anim-state", li, si));
+            let resp = ui.interact(r, id, Sense::click_and_drag());
+            if resp.hovered() {
+                hovered_node = Some(name.clone());
+            }
+            if resp.dragged() && st.drag_from.is_none() {
+                layer.states[si].pos[0] += resp.drag_delta().x;
+                layer.states[si].pos[1] += resp.drag_delta().y;
+                st.graph_dirty = true;
+            }
+            if resp.clicked() {
+                st.sel_state = Some(name.clone());
+                st.sel_trans = None;
+            }
+            let is_default = layer.default_state.as_ref() == Some(&name);
+            let selected = st.sel_state.as_ref() == Some(&name);
+            let missing = anim.clip(&clip).is_none();
+            let fill = if selected {
+                ui.visuals().selection.bg_fill.gamma_multiply(0.6)
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            };
+            painter.rect_filled(r, 6.0, fill);
+            let stroke_col = if selected {
+                ACCENT
+            } else if is_default {
+                Color32::from_rgb(120, 200, 140)
+            } else {
+                ui.visuals().widgets.inactive.fg_stroke.color
+            };
+            painter.rect_stroke(r, 6.0, Stroke::new(if selected { 2.0 } else { 1.2 }, stroke_col), StrokeKind::Inside);
+            let title = if is_default { format!("▶ {name}") } else { name.clone() };
+            painter.text(
+                r.min + egui::vec2(8.0, 10.0),
+                Align2::LEFT_CENTER,
+                title,
+                FontId::proportional(13.0),
+                ui.visuals().strong_text_color(),
+            );
+            let mut sub = clip.rsplit('/').next().unwrap_or(&clip).to_string();
+            if missing {
+                sub = format!("⚠ {sub}");
+            }
+            let mut badges = String::new();
+            match fade_in {
+                Some(f) if f <= 0.0 => badges.push('⚡'),
+                Some(f) => badges.push_str(&format!("⇥{f:.2}s")),
+                None => {}
+            }
+            if let Some(f) = fps {
+                badges.push_str(&format!(" {f:.0}fps"));
+            }
+            if !looped {
+                badges.push_str(" ⏹once");
+            }
+            painter.text(
+                r.min + egui::vec2(8.0, 28.0),
+                Align2::LEFT_CENTER,
+                sub,
+                FontId::proportional(10.5),
+                if missing { Color32::from_rgb(230, 150, 90) } else { ui.visuals().weak_text_color() },
+            );
+            if !badges.is_empty() {
+                painter.text(
+                    r.min + egui::vec2(8.0, 42.0),
+                    Align2::LEFT_CENTER,
+                    badges,
+                    FontId::proportional(10.0),
+                    Color32::from_rgb(235, 170, 90),
+                );
+            }
+            // Transition port: a circle on the right edge; drag it to another
+            // node to create a transition.
+            let port = Pos2::new(r.right() - 8.0, r.center().y);
+            let port_r = Rect::from_center_size(port, egui::vec2(16.0, 16.0));
+            let port_resp = ui.interact(port_r, id.with("port"), Sense::click_and_drag());
+            painter.circle_filled(port, 5.0, if port_resp.hovered() { ACCENT } else { stroke_col });
+            if port_resp.drag_started() {
+                st.drag_from = Some(name.clone());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("▶ Set as default state").clicked() {
+                    layer.default_state = Some(name.clone());
+                    st.graph_dirty = true;
+                    ui.close();
+                }
+                if ui.button("✎ Edit keys/events (Animating)").clicked() {
+                    // Bind the Animating tab to a scene node actually using this
+                    // controller, so the jump lands on the right timeline.
+                    if let Some(key) = &st.graph_key {
+                        let stem = key.rsplit('/').next().unwrap_or(key);
+                        let target = world.query::<AnimController>().find_map(|(e, c)| {
+                            (c.asset == *key
+                                || c.asset.rsplit('/').next() == Some(stem))
+                            .then_some(e)
+                        });
+                        if let Some(t) = target {
+                            st.target = Some(t);
+                        }
+                    }
+                    st.sel_anim = Some(name.clone());
+                    st.clip_doc = None;
+                    cmd.focus_animating = true;
+                    ui.close();
+                }
+                if ui.button("🗑 Delete state").clicked() {
+                    let nm = name.clone();
+                    layer.states.retain(|s| s.name != nm);
+                    layer.transitions.retain(|t| t.from != nm && t.to != nm);
+                    if layer.default_state.as_ref() == Some(&nm) {
+                        layer.default_state = None;
+                    }
+                    st.sel_state = None;
+                    st.graph_dirty = true;
+                    ui.close();
+                }
+            });
+        }
+
+        // ---- live transition drag ----
+        if let Some(from) = st.drag_from.clone() {
+            if let Some(cur) = ui.ctx().pointer_hover_pos() {
+                if let Some(s) = layer.states.iter().find(|s| s.name == from) {
+                    let r = node_rect(s.pos);
+                    painter.line_segment(
+                        [Pos2::new(r.right() - 8.0, r.center().y), cur],
+                        Stroke::new(2.0, ACCENT),
+                    );
+                }
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                if let Some(to) = hovered_node.filter(|n| *n != from) {
+                    if !layer.transitions.iter().any(|t| t.from == from && t.to == to) {
+                        layer.transitions.push(AnimTransitionDoc {
+                            from: from.clone(),
+                            to: to.clone(),
+                            fade: default_fade,
+                        });
+                        st.sel_trans = Some((from, to));
+                        st.sel_state = None;
+                        st.graph_dirty = true;
+                    }
+                }
+                st.drag_from = None;
+            }
+        }
+
+        // ---- drop a clip asset onto the canvas → a new state ----
+        let payload = egui::DragAndDrop::payload::<AssetPayload>(ui.ctx());
+        if let Some(p) = payload {
+            if is_anim_clip(&p.path) {
+                if let Some(cur) = ui.ctx().pointer_hover_pos() {
+                    if rect.contains(cur) {
+                        painter.rect_stroke(rect.shrink(2.0), 4.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
+                        painter.text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            "drop to add state",
+                            FontId::proportional(14.0),
+                            ACCENT,
+                        );
+                        if ui.input(|i| i.pointer.any_released()) {
+                            let key =
+                                anim::asset_key(Path::new(&p.path), project_root, ANIM_CLIP_EXT);
+                            let base = key.rsplit('/').next().unwrap_or("Anim").to_string();
+                            let mut name = base.clone();
+                            let mut n = 2;
+                            while layer.states.iter().any(|s| s.name == name) {
+                                name = format!("{base}{n}");
+                                n += 1;
+                            }
+                            let drop_pos = cur - origin - node_size * 0.5;
+                            layer.states.push(AnimStateDoc {
+                                name: name.clone(),
+                                clip: key,
+                                speed: 1.0,
+                                looped: true,
+                                fade_in: None,
+                                fps: None,
+                                pos: [drop_pos.x, drop_pos.y],
+                            });
+                            if layer.default_state.is_none() {
+                                layer.default_state = Some(name.clone());
+                            }
+                            st.sel_state = Some(name);
+                            st.graph_dirty = true;
+                            egui::DragAndDrop::clear_payload(ui.ctx());
+                        }
+                    }
+                }
+            }
+        }
+
+        if layer.states.is_empty() {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                "drag animation clips (▷ .anim.ron) from Assets here",
+                FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+
+    /// Right-hand properties panel of the graph window (selected state /
+    /// transition).
+    fn graph_side_panel(&mut self, ui: &mut egui::Ui) {
+        let st = &mut *self.anim_ui;
+        let Some(doc) = st.graph_doc.as_mut() else { return };
+        let li = st.graph_layer.min(doc.layers.len().saturating_sub(1));
+        let layer = &mut doc.layers[li];
+        if let Some(sel) = st.sel_state.clone() {
+            let Some(si) = layer.states.iter().position(|s| s.name == sel) else {
+                st.sel_state = None;
+                return;
+            };
+            ui.strong("State");
+            let mut rename: Option<(String, String)> = None;
+            {
+                let s = &mut layer.states[si];
+                ui.horizontal(|ui| {
+                    ui.label("name");
+                    let mut name = s.name.clone();
+                    let resp = ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0));
+                    if resp.changed() && !name.trim().is_empty() {
+                        rename = Some((s.name.clone(), name.trim().to_string()));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("clip");
+                    let cur = s.clip.rsplit('/').next().unwrap_or(&s.clip).to_string();
+                    egui::ComboBox::from_id_salt("state-clip")
+                        .selected_text(cur)
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            let keys: Vec<String> =
+                                self.anim.clips.iter().map(|(k, _)| k.clone()).collect();
+                            for k in keys {
+                                if ui.selectable_label(s.clip == k, &k).clicked() {
+                                    s.clip = k.clone();
+                                    st.graph_dirty = true;
+                                }
+                            }
+                        });
+                });
+                if ui
+                    .add(egui::DragValue::new(&mut s.speed).speed(0.02).range(0.05..=8.0).prefix("speed "))
+                    .changed()
+                {
+                    st.graph_dirty = true;
+                }
+                if ui.checkbox(&mut s.looped, "looped").changed() {
+                    st.graph_dirty = true;
+                }
+                let mut override_in = s.fade_in.is_some();
+                if ui
+                    .checkbox(&mut override_in, "⇥ override incoming fades")
+                    .on_hover_text("EVERY transition into this state uses this fade time instead of the arrows/default. Set it to 0 for a guaranteed instant snap — even with stepped playback it lands exactly on frame 0.")
+                    .changed()
+                {
+                    s.fade_in = if override_in { Some(0.0) } else { None };
+                    st.graph_dirty = true;
+                }
+                if let Some(f) = s.fade_in.as_mut() {
+                    if ui
+                        .add(egui::DragValue::new(f).speed(0.01).range(0.0..=5.0).prefix("fade in ").suffix("s"))
+                        .changed()
+                    {
+                        st.graph_dirty = true;
+                    }
+                    if *f <= 0.0 {
+                        ui.small("⚡ 0 = always instant");
+                    }
+                }
+                let mut own_fps = s.fps.is_some();
+                if ui
+                    .checkbox(&mut own_fps, "own stepped fps")
+                    .on_hover_text("override the controller-wide stepped playback for just this state")
+                    .changed()
+                {
+                    s.fps = if own_fps { Some(8.0) } else { None };
+                    st.graph_dirty = true;
+                }
+                if let Some(f) = s.fps.as_mut() {
+                    if ui.add(egui::DragValue::new(f).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
+                        st.graph_dirty = true;
+                    }
+                }
+            }
+            if let Some((old, new)) = rename {
+                if !layer.states.iter().any(|s| s.name == new) {
+                    if let Some(s) = layer.states.iter_mut().find(|s| s.name == old) {
+                        s.name = new.clone();
+                    }
+                    for t in layer.transitions.iter_mut() {
+                        if t.from == old {
+                            t.from = new.clone();
+                        }
+                        if t.to == old {
+                            t.to = new.clone();
+                        }
+                    }
+                    if layer.default_state.as_ref() == Some(&old) {
+                        layer.default_state = Some(new.clone());
+                    }
+                    st.sel_state = Some(new);
+                    st.graph_dirty = true;
+                }
+            }
+            ui.separator();
+            if ui.button("▶ Set as default").clicked() {
+                layer.default_state = Some(sel.clone());
+                st.graph_dirty = true;
+            }
+            ui.small("drag the ○ port onto another state to add a transition");
+        } else if let Some((from, to)) = st.sel_trans.clone() {
+            ui.strong("Transition");
+            ui.label(format!("{from} → {to}"));
+            let target_fade_in =
+                layer.states.iter().find(|s| s.name == to).and_then(|s| s.fade_in);
+            if let Some(f) = target_fade_in {
+                ui.colored_label(
+                    Color32::from_rgb(235, 170, 90),
+                    if f <= 0.0 {
+                        "⚡ the target overrides ALL incoming fades to 0 (instant) — this arrow's fade is ignored".to_string()
+                    } else {
+                        format!("⇥ the target overrides ALL incoming fades to {f:.2}s — this arrow's fade is ignored")
+                    },
+                );
+            }
+            if let Some(tr) = layer.transitions.iter_mut().find(|t| t.from == from && t.to == to) {
+                if ui
+                    .add(egui::DragValue::new(&mut tr.fade).speed(0.01).range(0.0..=5.0).prefix("fade ").suffix("s"))
+                    .changed()
+                {
+                    st.graph_dirty = true;
+                }
+                ui.small("0 = snap. States without an explicit transition use the controller's default fade.");
+            }
+            if ui.button("🗑 Delete transition").clicked() {
+                layer.transitions.retain(|t| !(t.from == from && t.to == to));
+                st.sel_trans = None;
+                st.graph_dirty = true;
+            }
+        } else {
+            ui.weak("Click a state or a transition arrow to edit it.");
+            ui.add_space(6.0);
+            ui.small("• drag a ▷ clip from Assets onto the canvas to add a state");
+            ui.small("• drag the ○ port between states to add a transition");
+            ui.small("• right-click a state for default / delete");
+            ui.small("• fades: default on the controller, per-arrow overrides, ⇥ per-state override (0 = ⚡ instant)");
+        }
+    }
+
+    // =========================================================================
+    // The Animating tab (dopesheet timeline).
+    // =========================================================================
+    pub fn animating_ui(&mut self, ui: &mut egui::Ui) {
+        self.anim_ui.tab_visible = true;
+        // ---- resolve the bound node ----
+        let valid = |e: Entity, viewer: &Self| {
+            viewer.world.get::<AnimController>(e).is_some()
+                || matches!(viewer.world.get::<Matter>(e), Some(Matter::Mesh { asset_path })
+                    if viewer.mesh_registry.get(asset_path).is_some_and(|m| m.rig.is_some()))
+        };
+        if let Some(t) = self.anim_ui.target {
+            if !valid(t, self) {
+                self.anim_ui.target = None;
+            }
+        }
+        if self.anim_ui.target.is_none() {
+            if let Some(&sel) = self.selection.last() {
+                if valid(sel, self) {
+                    self.anim_ui.target = Some(sel);
+                }
+            }
+        }
+        let candidates: Vec<(Entity, String)> = self
+            .entity_names
+            .iter()
+            .filter(|(e, _)| valid(*e, self))
+            .map(|(e, n)| (*e, n.clone()))
+            .collect();
+        let Some(target) = self.anim_ui.target else {
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.weak("Select a node with an Animation Controller (or a rigged model) to animate.");
+                if candidates.is_empty() {
+                    ui.small("add one via Inspector ➕ Add Component ▸ Animation Controller");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("or pick:");
+                        for (e, n) in &candidates {
+                            if ui.button(n).clicked() {
+                                self.anim_ui.target = Some(*e);
+                            }
+                        }
+                    });
+                }
+            });
+            return;
+        };
+
+        // The controller doc + available states.
+        let ctl_key = self.world.get::<AnimController>(target).map(|c| c.asset.clone());
+        let states: Vec<(String, String)> = match &ctl_key {
+            Some(k) => self
+                .anim
+                .controller(k)
+                .map(|d| {
+                    d.layers
+                        .iter()
+                        .flat_map(|l| l.states.iter().map(|s| (s.name.clone(), s.clip.clone())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // Rig without a controller: embedded clip names. Using the NAME as the
+            // clip key lets the registry's stem-fallback find an extracted
+            // `.anim.ron` of the same name → full editable timeline; names with no
+            // extracted file fall through to the read-only banner below.
+            None => match self.world.get::<Matter>(target) {
+                Some(Matter::Mesh { asset_path }) => self
+                    .mesh_registry
+                    .get(asset_path)
+                    .and_then(|m| m.rig.as_ref())
+                    .map(|r| r.clips.iter().map(|c| (c.name.clone(), c.name.clone())).collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
+        };
+        if self.anim_ui.sel_anim.as_ref().is_none_or(|s| !states.iter().any(|(n, _)| n == s)) {
+            self.anim_ui.sel_anim = states.first().map(|(n, _)| n.clone());
+            self.anim_ui.clip_doc = None;
+            self.anim_ui.playhead = 0.0;
+        }
+
+        // ---- top bar ----
+        let tname = self
+            .entity_names
+            .iter()
+            .find(|(e, _)| *e == target)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("node");
+            egui::ComboBox::from_id_salt("animating-target")
+                .selected_text(tname)
+                .show_ui(ui, |ui| {
+                    for (e, n) in &candidates {
+                        if ui.selectable_label(*e == target, n).clicked() && *e != target {
+                            self.anim.restore_preview(self.world);
+                            self.anim_ui.target = Some(*e);
+                            self.anim_ui.sel_anim = None;
+                            self.anim_ui.clip_doc = None;
+                            self.anim_ui.last_scene_local.clear();
+                        }
+                    }
+                });
+            ui.label("animation");
+            let cur = self.anim_ui.sel_anim.clone().unwrap_or_else(|| "—".into());
+            egui::ComboBox::from_id_salt("animating-state")
+                .selected_text(cur.clone())
+                .show_ui(ui, |ui| {
+                    for (n, _) in &states {
+                        if ui.selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), n).clicked()
+                        {
+                            self.anim_ui.sel_anim = Some(n.clone());
+                            self.anim_ui.clip_doc = None;
+                            self.anim_ui.playhead = 0.0;
+                            self.anim_ui.sel_event = None;
+                        }
+                    }
+                });
+            if ctl_key.is_some() && ui.button("✚ New…").on_hover_text("create a new empty animation clip and add it to this controller").clicked() {
+                self.anim_ui.new_anim_buf = Some(String::new());
+                self.anim_ui.focus_prompt = true;
+            }
+            ui.separator();
+            if self.playing {
+                ui.colored_label(
+                    Color32::from_rgb(230, 180, 90),
+                    "⏵ Play mode — preview & record paused",
+                );
+            }
+            ui.add_enabled_ui(!self.playing, |ui| {
+                // Transport.
+                if ui.button("⏮").on_hover_text("to start").clicked() {
+                    self.anim_ui.playhead = 0.0;
+                }
+                let play_lbl = if self.anim_ui.preview_playing { "⏸" } else { "⏵" };
+                if ui.button(play_lbl).on_hover_text("preview play/pause").clicked() {
+                    self.anim_ui.preview_playing = !self.anim_ui.preview_playing;
+                    if self.anim_ui.preview_playing && self.anim_ui.record {
+                        stop_record_ui(self.world, self.anim_ui);
+                    }
+                }
+                if ui.button("⏹").on_hover_text("stop preview (restore the scene pose)").clicked() {
+                    self.anim_ui.preview_playing = false;
+                    self.anim_ui.playhead = 0.0;
+                    if self.anim_ui.record {
+                        stop_record_ui(self.world, self.anim_ui);
+                    }
+                    self.anim.restore_preview(self.world);
+                    self.anim.poses.remove(&target);
+                }
+                let rec = ui
+                    .selectable_label(self.anim_ui.record, "● Record")
+                    .on_hover_text(
+                        "key on move: pose this node's children with the gizmo/Inspector and keys \
+                         are written at the playhead. Scrubbing previews what you've keyed; turning \
+                         record off restores the scene pose (recording edits the CLIP, not the scene).",
+                    );
+                if rec.clicked() {
+                    if self.anim_ui.record {
+                        stop_record_ui(self.world, self.anim_ui);
+                    } else {
+                        self.anim_ui.record = true;
+                        self.anim_ui.preview_playing = false;
+                        // Snapshot the subtree so turning record off restores it.
+                        self.anim_ui.record_restore = scene_channel_names(self.world, target)
+                            .iter()
+                            .filter_map(|(e, _)| {
+                                self.world
+                                    .get::<floptle_core::Transform>(*e)
+                                    .map(|t| (*e, *t))
+                            })
+                            .collect();
+                        refresh_record_baseline(self.world, self.anim_ui, target);
+                    }
+                }
+            });
+            ui.separator();
+            ui.label(format!("{:.2}s", self.anim_ui.playhead));
+            ui.label("snap");
+            egui::ComboBox::from_id_salt("anim-snap")
+                .selected_text(if self.anim_ui.snap_fps <= 0.0 {
+                    "off".to_string()
+                } else {
+                    format!("{:.0} fps", self.anim_ui.snap_fps)
+                })
+                .width(70.0)
+                .show_ui(ui, |ui| {
+                    for f in [0.0, 8.0, 12.0, 24.0, 30.0, 60.0] {
+                        let lbl = if f <= 0.0 { "off".to_string() } else { format!("{f:.0} fps") };
+                        if ui.selectable_label(self.anim_ui.snap_fps == f, lbl).clicked() {
+                            self.anim_ui.snap_fps = f;
+                        }
+                    }
+                });
+            ui.add(
+                egui::Slider::new(&mut self.anim_ui.zoom, 30.0..=600.0)
+                    .logarithmic(true)
+                    .show_value(false)
+                    .text("zoom"),
+            );
+        });
+
+        // New-animation prompt.
+        if let Some(buf) = self.anim_ui.new_anim_buf.as_mut() {
+            let mut done = false;
+            let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            ui.horizontal(|ui| {
+                ui.label("new animation name");
+                let resp = ui.text_edit_singleline(buf);
+                if self.anim_ui.focus_prompt {
+                    resp.request_focus();
+                    self.anim_ui.focus_prompt = false;
+                }
+                if (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Create").clicked()
+                {
+                    done = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            if done && !buf.trim().is_empty() {
+                let name = buf.trim().to_string();
+                let clip_key = anim::new_clip_key(self.project_root, &name);
+                let doc = AnimClipDoc {
+                    name: name.clone(),
+                    duration: 2.0,
+                    source_model: String::new(),
+                    channels: Vec::new(),
+                    events: Vec::new(),
+                };
+                self.anim.save_clip(self.project_root, &clip_key, &doc);
+                if let Some(k) = &ctl_key {
+                    // The graph window may hold a working copy of this same
+                    // controller — flush its edits first, then force it to
+                    // reload after we add the state (no silent lost updates).
+                    if self.anim_ui.graph_key.as_ref() == Some(k) {
+                        self.flush_graph(true);
+                    }
+                    if let Some(mut cdoc) = self.anim.controller(k).cloned() {
+                        if let Some(layer) = cdoc.layers.first_mut() {
+                            let mut sname = name.clone();
+                            let mut n = 2;
+                            while layer.states.iter().any(|s| s.name == sname) {
+                                sname = format!("{name}{n}");
+                                n += 1;
+                            }
+                            layer.states.push(AnimStateDoc {
+                                name: sname.clone(),
+                                clip: clip_key.clone(),
+                                speed: 1.0,
+                                looped: true,
+                                fade_in: None,
+                                fps: None,
+                                pos: [40.0 + 30.0 * layer.states.len() as f32, 40.0],
+                            });
+                            if layer.default_state.is_none() {
+                                layer.default_state = Some(sname.clone());
+                            }
+                            self.anim.save_controller(self.project_root, k, &cdoc);
+                            if self.anim_ui.graph_key.as_ref() == Some(k) {
+                                self.anim_ui.graph_doc = None; // reload w/ new state
+                                self.anim_ui.graph_dirty = false;
+                            }
+                            self.anim_ui.sel_anim = Some(sname);
+                            self.anim_ui.clip_doc = None;
+                        }
+                    }
+                }
+                self.anim_ui.new_anim_buf = None;
+            } else if cancel || done {
+                self.anim_ui.new_anim_buf = None;
+            }
+        }
+
+        let Some(sel_anim) = self.anim_ui.sel_anim.clone() else {
+            ui.add_space(10.0);
+            ui.weak("No animations yet — extract some from a model, or ✚ New to author one.");
+            return;
+        };
+
+        // Resolve the editable clip doc for the selected state.
+        let clip_key: Option<String> = states
+            .iter()
+            .find(|(n, _)| *n == sel_anim)
+            .map(|(_, c)| c.clone())
+            .filter(|c| !c.is_empty());
+        // Resolve to the REGISTRY key (handles stem-fallback for moved files) so
+        // edits save onto the right file, and reload the working copy on change.
+        let resolved = clip_key.as_ref().and_then(|k| self.anim.resolve_clip_key(k));
+        if self.anim_ui.clip_doc.as_ref().map(|(k, _)| k.as_str()) != resolved.as_deref() {
+            self.anim_ui.clip_doc = resolved
+                .as_ref()
+                .and_then(|k| Some((k.clone(), self.anim.clip(k)?.clone())));
+            self.anim_ui.sel_event = None;
+        }
+
+        ui.separator();
+        if self.anim_ui.clip_doc.is_some() {
+            self.timeline_ui(ui, target);
+        } else {
+            ui.weak(
+                "This animation is embedded in the model. ⬇ Extract animations (select the model \
+                 asset in the browser) to edit keys and events.",
+            );
+            // Still allow preview scrubbing of embedded clips via a bare ruler.
+            self.bare_ruler_ui(ui, target, &sel_anim);
+        }
+
+        // (Record diffing runs in the render loop BEFORE the preview re-applies
+        // the clip — see anim_ui::record_scan.)
+
+        // Save coalescing for clip edits.
+        if self.anim_ui.clip_dirty && !self.pointer_down {
+            if let Some((k, d)) = self.anim_ui.clip_doc.clone() {
+                self.anim.save_clip(self.project_root, &k, &d);
+            }
+            self.anim_ui.clip_dirty = false;
+        }
+    }
+
+    /// Scrub-only ruler for embedded (un-extracted) clips.
+    fn bare_ruler_ui(&mut self, ui: &mut egui::Ui, _target: Entity, sel: &str) {
+        let dur = match self.world.get::<Matter>(_target) {
+            Some(Matter::Mesh { asset_path }) => self
+                .mesh_registry
+                .get(asset_path)
+                .and_then(|m| m.rig.as_ref())
+                .and_then(|r| r.clips.iter().find(|c| c.name == sel))
+                .map(|c| c.duration)
+                .unwrap_or(1.0),
+            _ => 1.0,
+        };
+        let h = 26.0;
+        let w = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+        draw_ruler(&painter, rect, dur, self.anim_ui.playhead, rect.width() / dur.max(0.01));
+        if resp.dragged() || resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * dur;
+                self.anim_ui.playhead = self.snap_time(t);
+                self.anim_ui.preview_playing = false;
+            }
+        }
+        if self.anim_ui.preview_playing && self.anim_ui.playhead > dur {
+            self.anim_ui.playhead %= dur.max(1e-3);
+        }
+    }
+
+    fn snap_time(&self, t: f32) -> f32 {
+        if self.anim_ui.snap_fps > 0.0 {
+            (t * self.anim_ui.snap_fps).round() / self.anim_ui.snap_fps
+        } else {
+            t
+        }
+    }
+
+}
+
+/// Ruler ticks + labels + playhead over `rect`.
+fn draw_ruler(painter: &egui::Painter, rect: Rect, dur: f32, playhead: f32, px_per_s: f32) {
+        let weak = Color32::from_gray(140);
+        // Second ticks + labels, denser tenth-ticks when zoomed in.
+        let mut t = 0.0;
+        while t <= dur + 1e-4 {
+            let x = rect.left() + t * px_per_s;
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 8.0)],
+                Stroke::new(1.0, weak),
+            );
+            painter.text(
+                Pos2::new(x + 3.0, rect.top() + 4.0),
+                Align2::LEFT_CENTER,
+                format!("{t:.0}s"),
+                FontId::proportional(9.0),
+                weak,
+            );
+            if px_per_s > 80.0 {
+                for i in 1..10 {
+                    let tt = t + i as f32 * 0.1;
+                    if tt > dur {
+                        break;
+                    }
+                    let xx = rect.left() + tt * px_per_s;
+                    painter.line_segment(
+                        [Pos2::new(xx, rect.top()), Pos2::new(xx, rect.top() + 4.0)],
+                        Stroke::new(0.5, weak.gamma_multiply(0.6)),
+                    );
+                }
+            }
+            t += 1.0;
+        }
+        // End-of-clip marker + playhead.
+        let xe = rect.left() + dur * px_per_s;
+        painter.line_segment(
+            [Pos2::new(xe, rect.top()), Pos2::new(xe, rect.bottom())],
+            Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
+        );
+        let xp = rect.left() + playhead * px_per_s;
+        painter.line_segment(
+            [Pos2::new(xp, rect.top()), Pos2::new(xp, rect.bottom())],
+            Stroke::new(1.5, PLAYHEAD),
+        );
+}
+
+impl EditorTabViewer<'_> {
+    /// The full dopesheet for an editable clip doc.
+    fn timeline_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
+        let st = &mut *self.anim_ui;
+        let Some((_, doc)) = st.clip_doc.as_mut() else { return };
+        let dur = doc.duration.max(0.01);
+        let px = st.zoom;
+        let label_w = 130.0;
+        let lane_h = 20.0;
+        let ruler_h = 22.0;
+        let event_h = 20.0;
+
+        // Header row: duration + event add + selected-event editor.
+        let mut kill_event: Option<usize> = None;
+        ui.horizontal(|ui| {
+            ui.label("duration");
+            let mut d = doc.duration;
+            if ui.add(egui::DragValue::new(&mut d).speed(0.02).range(0.05..=600.0).suffix("s")).changed() {
+                doc.duration = d;
+                st.clip_dirty = true;
+            }
+            if ui.button("⚑ Add event at playhead").on_hover_text("events call a Lua function (by name) on this node's scripts when the playhead crosses them").clicked() {
+                doc.events.push(AnimEventDoc { t: st.playhead.min(doc.duration), func: "onAnimEvent".into() });
+                doc.events.sort_by(|a, b| a.t.total_cmp(&b.t));
+                st.sel_event = doc
+                    .events
+                    .iter()
+                    .position(|e| (e.t - st.playhead.min(doc.duration)).abs() < 1e-5);
+                st.clip_dirty = true;
+            }
+            if let Some(ei) = st.sel_event {
+                if let Some(ev) = doc.events.get_mut(ei) {
+                    ui.separator();
+                    ui.label("event fn");
+                    if ui.add(egui::TextEdit::singleline(&mut ev.func).desired_width(130.0)).changed() {
+                        st.clip_dirty = true;
+                    }
+                    let mut t = ev.t;
+                    if ui.add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=doc.duration).suffix("s")).changed() {
+                        ev.t = t;
+                        st.clip_dirty = true;
+                    }
+                    if ui.button("🗑").clicked() {
+                        kill_event = Some(ei);
+                    }
+                } else {
+                    st.sel_event = None;
+                }
+            }
+        });
+        if let Some(ei) = kill_event {
+            doc.events.remove(ei);
+            st.sel_event = None;
+            st.clip_dirty = true;
+        }
+
+        // Per-node key rows: union of lane times per channel.
+        let n_rows = doc.channels.len();
+        let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
+        egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
+            let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
+            let (full, _) = ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::hover());
+            let painter = ui.painter_at(full);
+            let tl_left = full.left() + label_w;
+            let time_to_x = |t: f32| tl_left + t * px;
+            let x_to_time = |x: f32| ((x - tl_left) / px).clamp(0.0, dur);
+
+            // ---- ruler (scrub) ----
+            let ruler = Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px + 100.0, ruler_h));
+            let rresp = ui.interact(ruler, ui.id().with("anim-ruler"), Sense::click_and_drag());
+            if rresp.dragged() || rresp.clicked() {
+                if let Some(p) = rresp.interact_pointer_pos() {
+                    st.playhead = if st.snap_fps > 0.0 {
+                        (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
+                    } else {
+                        x_to_time(p.x)
+                    };
+                    st.preview_playing = false;
+                }
+            }
+            painter.rect_filled(ruler, 0.0, ui.visuals().extreme_bg_color);
+
+            // ---- event lane ----
+            let ev_rect = Rect::from_min_size(
+                Pos2::new(full.left(), full.top() + ruler_h),
+                egui::vec2(full.width(), event_h),
+            );
+            painter.rect_filled(
+                Rect::from_min_size(Pos2::new(tl_left, ev_rect.top()), egui::vec2(dur * px, event_h)),
+                0.0,
+                ui.visuals().faint_bg_color,
+            );
+            painter.text(
+                Pos2::new(full.left() + 4.0, ev_rect.center().y),
+                Align2::LEFT_CENTER,
+                "⚑ events",
+                FontId::proportional(11.0),
+                EVENT_COLOR,
+            );
+            let mut ev_drag: Option<(usize, f32)> = None;
+            for (ei, ev) in doc.events.iter().enumerate() {
+                let x = time_to_x(ev.t);
+                let flag = Rect::from_center_size(Pos2::new(x, ev_rect.center().y), egui::vec2(12.0, event_h));
+                let id = ui.id().with(("anim-event", ei));
+                let resp = ui.interact(flag, id, Sense::click_and_drag());
+                let col = if st.sel_event == Some(ei) { ACCENT } else { EVENT_COLOR };
+                painter.line_segment(
+                    [Pos2::new(x, ev_rect.top() + 2.0), Pos2::new(x, ev_rect.bottom() - 2.0)],
+                    Stroke::new(2.0, col),
+                );
+                painter.text(
+                    Pos2::new(x + 3.0, ev_rect.top() + 4.0),
+                    Align2::LEFT_TOP,
+                    &ev.func,
+                    FontId::proportional(9.0),
+                    col.gamma_multiply(0.9),
+                );
+                if resp.clicked() {
+                    st.sel_event = Some(ei);
+                }
+                if resp.dragged() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        ev_drag = Some((ei, x_to_time(p.x)));
+                    }
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("🗑 Delete event").clicked() {
+                        ev_drag = Some((ei, f32::NAN)); // NaN = delete
+                        ui.close();
+                    }
+                });
+            }
+            if let Some((ei, t)) = ev_drag {
+                if t.is_nan() {
+                    doc.events.remove(ei);
+                    st.sel_event = None;
+                } else if let Some(ev) = doc.events.get_mut(ei) {
+                    ev.t = if st.snap_fps > 0.0 { (t * st.snap_fps).round() / st.snap_fps } else { t };
+                    st.sel_event = Some(ei);
+                }
+                st.clip_dirty = true;
+            }
+
+            // ---- channel rows ----
+            let rows_top = full.top() + ruler_h + event_h;
+            let mut retime: Option<(usize, f32, f32)> = None; // (channel, old t, new t)
+            let mut delete_key: Option<(usize, f32)> = None;
+            for (ci, ch) in doc.channels.iter().enumerate() {
+                let y = rows_top + ci as f32 * lane_h;
+                let row = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(full.width(), lane_h));
+                if ci % 2 == 0 {
+                    painter.rect_filled(
+                        Rect::from_min_size(Pos2::new(tl_left, y), egui::vec2(dur * px, lane_h)),
+                        0.0,
+                        ui.visuals().faint_bg_color.gamma_multiply(0.6),
+                    );
+                }
+                let label = if ch.node.is_empty() { "(this node)" } else { ch.node.as_str() };
+                painter.text(
+                    Pos2::new(full.left() + 4.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(11.0),
+                    ui.visuals().text_color(),
+                );
+                // Union of key times across the node's lanes.
+                let times = union_times(ch);
+                for (ki, &t) in times.iter().enumerate() {
+                    // A drag previews at the pointer but the doc is only
+                    // retimed on RELEASE — live-resorting under the drag would
+                    // hand the drag to a neighboring key mid-gesture.
+                    let dragging_this = st
+                        .key_drag
+                        .is_some_and(|(dci, ot, _)| dci == ci && (ot - t).abs() < 1e-6);
+                    let draw_t =
+                        if dragging_this { st.key_drag.unwrap().2 } else { t };
+                    let x = time_to_x(draw_t);
+                    let c = Pos2::new(x, row.center().y);
+                    let key_rect = Rect::from_center_size(c, egui::vec2(12.0, 12.0));
+                    let id = ui.id().with(("anim-key", ci, ki));
+                    let resp = ui.interact(key_rect, id, Sense::click_and_drag());
+                    let col = if resp.hovered() || dragging_this { ACCENT } else { KEY_COLOR };
+                    // diamond
+                    let s = 4.5;
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            Pos2::new(c.x, c.y - s),
+                            Pos2::new(c.x + s, c.y),
+                            Pos2::new(c.x, c.y + s),
+                            Pos2::new(c.x - s, c.y),
+                        ],
+                        col,
+                        Stroke::new(1.0, Color32::from_black_alpha(120)),
+                    ));
+                    if resp.drag_started() {
+                        st.key_drag = Some((ci, t, t));
+                    }
+                    if resp.dragged() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            let nt = if st.snap_fps > 0.0 {
+                                (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
+                            } else {
+                                x_to_time(p.x)
+                            };
+                            if let Some(kd) = st.key_drag.as_mut() {
+                                if kd.0 == ci && (kd.1 - t).abs() < 1e-6 {
+                                    kd.2 = nt;
+                                }
+                            }
+                        }
+                    }
+                    if resp.drag_stopped() {
+                        if let Some((dci, ot, nt)) = st.key_drag.take() {
+                            if dci == ci && (ot - t).abs() < 1e-6 && (nt - ot).abs() > 1e-6 {
+                                retime = Some((ci, ot, nt));
+                            }
+                        }
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("🗑 Delete key").clicked() {
+                            delete_key = Some((ci, t));
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            if doc.channels.is_empty() {
+                painter.text(
+                    Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
+                    Align2::LEFT_CENTER,
+                    "no keys yet — ● Record, pose child nodes, and keys appear here",
+                    FontId::proportional(11.5),
+                    ui.visuals().weak_text_color(),
+                );
+            }
+            if let Some((ci, old, new)) = retime {
+                retime_channel(&mut doc.channels[ci], old, new);
+                st.clip_dirty = true;
+            }
+            if let Some((ci, t)) = delete_key {
+                delete_channel_key(&mut doc.channels[ci], t);
+                if doc.channels[ci].translation.is_none()
+                    && doc.channels[ci].rotation.is_none()
+                    && doc.channels[ci].scale.is_none()
+                {
+                    doc.channels.remove(ci);
+                }
+                st.clip_dirty = true;
+            }
+
+            // ---- playhead over everything ----
+            let xp = time_to_x(st.playhead.min(dur));
+            painter.line_segment(
+                [Pos2::new(xp, full.top()), Pos2::new(xp, full.bottom())],
+                Stroke::new(1.5, PLAYHEAD),
+            );
+            let xe = time_to_x(dur);
+            painter.line_segment(
+                [Pos2::new(xe, full.top()), Pos2::new(xe, full.bottom())],
+                Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
+            );
+            // ruler ticks over the top strip
+            draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px);
+        });
+
+        // Loop the preview playhead.
+        if st.preview_playing && st.playhead > dur {
+            st.playhead %= dur;
+        }
+    }
+
+}
+
+/// Turn ● Record off and restore the pre-record subtree pose — recording
+/// authors the clip, never the scene.
+pub fn stop_record_ui(world: &mut floptle_core::World, st: &mut AnimUiState) {
+    st.record = false;
+    for (e, tr) in st.record_restore.drain(..) {
+        if let Some(slot) = world.get_mut::<floptle_core::Transform>(e) {
+            *slot = tr;
+        }
+    }
+    st.last_scene_local.clear();
+}
+
+/// Record mode (called from the render loop BEFORE the preview applies): any
+/// bound descendant whose local transform changed since the last baseline is
+/// keyed at the playhead. Returns true when keys were written.
+pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: Entity) -> bool {
+    let named = scene_channel_names(world, target);
+    let playhead = if st.snap_fps > 0.0 {
+        (st.playhead * st.snap_fps).round() / st.snap_fps
+    } else {
+        st.playhead
+    };
+    let mut wrote = false;
+    for (e, chan_name) in &named {
+        // Unnamed children can't be addressed by a name-bound channel — skip
+        // (a "" channel means the target node itself).
+        if *e != target && chan_name.is_empty() {
+            continue;
+        }
+        let Some(tr) = world.get::<floptle_core::Transform>(*e) else { continue };
+        let cur = TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale };
+        if let Some(prev) = st.last_scene_local.get(e) {
+            if *prev != cur {
+                if let Some((_, doc)) = st.clip_doc.as_mut() {
+                    write_key(doc, chan_name, playhead, &cur);
+                    wrote = true;
+                }
+            }
+        }
+        st.last_scene_local.insert(*e, cur);
+    }
+    if wrote {
+        st.clip_dirty = true;
+    }
+    wrote
+}
+
+/// Reset the record baseline to the CURRENT transforms (what the preview just
+/// applied), so the next scan only sees fresh user edits.
+pub fn refresh_record_baseline(
+    world: &floptle_core::World,
+    st: &mut AnimUiState,
+    target: Entity,
+) {
+    for (e, _) in scene_channel_names(world, target) {
+        if let Some(tr) = world.get::<floptle_core::Transform>(e) {
+            st.last_scene_local.insert(
+                e,
+                TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
+            );
+        }
+    }
+}
+
+/// Squared-ish distance from `p` to segment `ab` (in points).
+fn seg_dist2(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq().max(1e-6);
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    (p - proj).length()
+}
+
+/// Union of key times across a channel's lanes (deduped, sorted).
+fn union_times(ch: &floptle_scene::AnimChannelDoc) -> Vec<f32> {
+    let mut v = Vec::new();
+    let mut extend = |times: Option<&Vec<f32>>| {
+        if let Some(ts) = times {
+            for &t in ts {
+                if !v.iter().any(|&x: &f32| (x - t).abs() < 1e-4) {
+                    v.push(t);
+                }
+            }
+        }
+    };
+    extend(ch.translation.as_ref().map(|l| &l.times));
+    extend(ch.rotation.as_ref().map(|l| &l.times));
+    extend(ch.scale.as_ref().map(|l| &l.times));
+    v.sort_by(|a, b| a.total_cmp(b));
+    v
+}
+
+/// Move every lane key at `old` to `new` (keeping lanes sorted). A key already
+/// sitting at `new` is replaced (merge), never doubled.
+fn retime_channel(ch: &mut floptle_scene::AnimChannelDoc, old: f32, new: f32) {
+    fn retime3(l: &mut AnimTrackDoc3, old: f32, new: f32) {
+        if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
+            let v = l.values.remove(i);
+            l.times.remove(i);
+            if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
+                l.values[j] = v; // merge onto the existing key
+                return;
+            }
+            let at = l.times.partition_point(|&t| t < new);
+            l.times.insert(at, new);
+            l.values.insert(at, v);
+        }
+    }
+    fn retime4(l: &mut AnimTrackDoc4, old: f32, new: f32) {
+        if let Some(i) = l.times.iter().position(|&t| (t - old).abs() < 1e-4) {
+            let v = l.values.remove(i);
+            l.times.remove(i);
+            if let Some(j) = l.times.iter().position(|&t| (t - new).abs() < 1e-4) {
+                l.values[j] = v;
+                return;
+            }
+            let at = l.times.partition_point(|&t| t < new);
+            l.times.insert(at, new);
+            l.values.insert(at, v);
+        }
+    }
+    if let Some(l) = ch.translation.as_mut() {
+        retime3(l, old, new);
+    }
+    if let Some(l) = ch.rotation.as_mut() {
+        retime4(l, old, new);
+    }
+    if let Some(l) = ch.scale.as_mut() {
+        retime3(l, old, new);
+    }
+}
+
+/// Delete every lane key at `t`; drops emptied lanes.
+fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
+    fn del3(l: &mut AnimTrackDoc3, t: f32) -> bool {
+        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            l.times.remove(i);
+            l.values.remove(i);
+        }
+        l.times.is_empty()
+    }
+    fn del4(l: &mut AnimTrackDoc4, t: f32) -> bool {
+        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            l.times.remove(i);
+            l.values.remove(i);
+        }
+        l.times.is_empty()
+    }
+    if ch.translation.as_mut().is_some_and(|l| del3(l, t)) {
+        ch.translation = None;
+    }
+    if ch.rotation.as_mut().is_some_and(|l| del4(l, t)) {
+        ch.rotation = None;
+    }
+    if ch.scale.as_mut().is_some_and(|l| del3(l, t)) {
+        ch.scale = None;
+    }
+}
+
+/// Write (or overwrite) a full TRS key for `chan_name` at time `t`.
+fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &TransformTRS) {
+    let ch = match doc.channels.iter_mut().find(|c| c.node == chan_name) {
+        Some(c) => c,
+        None => {
+            doc.channels.push(floptle_scene::AnimChannelDoc {
+                node: chan_name.to_string(),
+                ..Default::default()
+            });
+            doc.channels.last_mut().unwrap()
+        }
+    };
+    fn put3(l: &mut Option<AnimTrackDoc3>, t: f32, v: [f32; 3]) {
+        let l = l.get_or_insert_with(Default::default);
+        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            l.values[i] = v;
+        } else {
+            let at = l.times.partition_point(|&x| x < t);
+            l.times.insert(at, t);
+            l.values.insert(at, v);
+        }
+    }
+    fn put4(l: &mut Option<AnimTrackDoc4>, t: f32, v: [f32; 4]) {
+        let l = l.get_or_insert_with(Default::default);
+        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            l.values[i] = v;
+        } else {
+            let at = l.times.partition_point(|&x| x < t);
+            l.times.insert(at, t);
+            l.values.insert(at, v);
+        }
+    }
+    put3(&mut ch.translation, t, trs.t.to_array());
+    put4(&mut ch.rotation, t, trs.r.to_array());
+    put3(&mut ch.scale, t, trs.s.to_array());
+    if t > doc.duration {
+        doc.duration = t;
+    }
+}
+
+/// (entity, channel name) for the target + every descendant — the same names
+/// `anim::scene_skeleton` binds, `""` for the target itself.
+fn scene_channel_names(world: &floptle_core::World, root: Entity) -> Vec<(Entity, String)> {
+    let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    for (e, p) in world.query::<floptle_core::Parent>() {
+        children.entry(p.0).or_default().push(e);
+    }
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // The root records as channel "" but still claims its real name, matching
+    // anim::scene_skeleton's dedup exactly (a child sharing the root's name
+    // must land on the same "#2" suffix in both walks).
+    if let Some(n) = world.get::<Name>(root) {
+        seen.insert(n.0.clone());
+    }
+    fn walk(
+        world: &floptle_core::World,
+        children: &HashMap<Entity, Vec<Entity>>,
+        e: Entity,
+        root: bool,
+        out: &mut Vec<(Entity, String)>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        let mut name = if root {
+            String::new()
+        } else {
+            world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default()
+        };
+        if !root && !seen.insert(name.clone()) {
+            let mut i = 2;
+            while !seen.insert(format!("{name}#{i}")) {
+                i += 1;
+            }
+            name = format!("{name}#{i}");
+        }
+        out.push((e, name));
+        if let Some(kids) = children.get(&e) {
+            for &k in kids {
+                walk(world, children, k, false, out, seen);
+            }
+        }
+    }
+    walk(world, &children, root, true, &mut out, &mut seen);
+    out
+}

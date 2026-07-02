@@ -154,7 +154,9 @@ impl CollisionShape for CapsuleShape {
 
 /// An SDF-terrain collider — collides against the **same baked field the renderer
 /// draws** (ADR-0012), in the terrain's local space. Owns a snapshot of the field so
-/// the physics step is independent of editor state.
+/// the physics step is independent of editor state. World placement comes from the
+/// [`AnchoredCollider`] anchor (the terrain node's `f64` translation), so a terrain
+/// placed millions of units out collides exactly (ADR-0015).
 pub struct SdfTerrain {
     pub terrain: floptle_field::Terrain,
 }
@@ -328,9 +330,10 @@ impl GravityField {
         Self { sources: vec![GravitySource::Uniform(g)] }
     }
 
-    /// The summed acceleration at world point `p` (colliders are needed for the
-    /// `SdfSurface` tier).
-    pub fn accel_at(&self, p: Vec3, colliders: &[Box<dyn CollisionShape>]) -> Vec3 {
+    /// The summed acceleration at sim-frame point `p` (colliders are needed for the
+    /// `SdfSurface` tier). `Point` centers are sim-frame too — the caller converts
+    /// world positions when it builds the field.
+    pub fn accel_at(&self, p: Vec3, colliders: &[AnchoredCollider]) -> Vec3 {
         let mut a = Vec3::ZERO;
         for s in &self.sources {
             a += match s {
@@ -372,6 +375,11 @@ pub enum BodyShape {
 #[derive(Clone, Copy, Debug)]
 pub struct Body {
     pub pos: Vec3,
+    /// `pos` as of the START of the most recent fixed step. Rendering interpolates
+    /// between the two by the accumulator's leftover fraction, so on-screen motion
+    /// is smooth even though the sim advances in whole 1/120 s steps (without this,
+    /// frames alternate between covering 1 and 2 steps — visible micro-jitter).
+    pub prev_pos: Vec3,
     pub vel: Vec3,
     pub radius: f32,
     pub shape: BodyShape,
@@ -396,6 +404,7 @@ impl Body {
     pub fn sphere(pos: Vec3, radius: f32) -> Self {
         Self {
             pos,
+            prev_pos: pos,
             vel: Vec3::ZERO,
             radius,
             shape: BodyShape::Sphere,
@@ -485,15 +494,55 @@ fn set_axis(v: &mut Vec3, i: usize, val: f32) {
     }
 }
 
+/// A collider plus the world-space frame its geometry is expressed in (ADR-0015).
+///
+/// The sim runs **origin-relative**: bodies and queries use small coordinates near
+/// `world.origin`, never absolute world positions. Each collider's data is baked in
+/// its own frame (`anchor`, full `f64`); `offset = anchor − world.origin` is cached
+/// as `f32` and recomputed *from the `f64` anchor* on every rebase — so precision
+/// near the action never depends on how far the content sits from the world origin,
+/// and repeated rebases accumulate zero error into the geometry.
+pub struct AnchoredCollider {
+    pub shape: Box<dyn CollisionShape>,
+    /// World-space anchor of the frame `shape`'s data is expressed in.
+    pub anchor: DVec3,
+    /// Cached `(anchor − world.origin)` as f32; queries subtract it from the probe.
+    offset: Vec3,
+}
+
+impl AnchoredCollider {
+    /// A collider whose data is in ABSOLUTE world coordinates (anchor = 0) — the
+    /// right frame for data that's already near the world origin, and for tests.
+    pub fn world(shape: Box<dyn CollisionShape>) -> Self {
+        Self { shape, anchor: DVec3::ZERO, offset: Vec3::ZERO }
+    }
+
+    /// Signed distance from sim-frame point `p` to the surface.
+    pub fn distance(&self, p: Vec3) -> f32 {
+        self.shape.distance(p - self.offset)
+    }
+
+    /// Outward unit surface normal at sim-frame point `p`.
+    pub fn normal(&self, p: Vec3) -> Vec3 {
+        self.shape.normal(p - self.offset)
+    }
+}
+
 /// The collision world for one scene: a gravity field, a set of colliders, and the
 /// dynamic bodies, advanced together on a fixed timestep.
+///
+/// Everything in here is **origin-relative** (ADR-0015): body positions, contact
+/// points, gravity centers and ray origins are all expressed relative to `origin`,
+/// a `f64` world point. Near the origin (the default), the two frames coincide.
 #[derive(Default)]
 pub struct PhysicsWorld {
     pub gravity: GravityField,
-    pub colliders: Vec<Box<dyn CollisionShape>>,
+    pub colliders: Vec<AnchoredCollider>,
     pub bodies: Vec<Body>,
-    /// Contacts resolved on the most recent `step` (cleared each step).
+    /// Contacts resolved on the most recent `step` (cleared each step), sim frame.
     pub contacts: Vec<Contact>,
+    /// World-space location of the sim's local origin. `world = origin + local`.
+    pub origin: DVec3,
 }
 
 /// A raycast result: the world hit point, the surface normal there, and the distance
@@ -512,7 +561,7 @@ pub struct RayHit {
 /// surface (fine for the short rays games actually cast: ground checks, line-of-sight,
 /// shots). Range is bounded by the iteration budget (~512 units).
 pub fn raycast_colliders(
-    colliders: &[Box<dyn CollisionShape>],
+    colliders: &[AnchoredCollider],
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
@@ -548,12 +597,50 @@ pub fn raycast_colliders(
 
 impl PhysicsWorld {
     pub fn new(gravity: GravityField) -> Self {
-        Self { gravity, colliders: Vec::new(), bodies: Vec::new(), contacts: Vec::new() }
+        Self { gravity, ..Default::default() }
     }
 
+    /// Add a collider whose data is in absolute world coordinates (anchor = 0).
     pub fn add_collider(&mut self, shape: Box<dyn CollisionShape>) -> usize {
-        self.colliders.push(shape);
+        self.add_collider_at(DVec3::ZERO, shape)
+    }
+
+    /// Add a collider whose data is expressed relative to `anchor` (a world point,
+    /// full `f64`). Bake geometry near ITS OWN anchor and pass the anchor here —
+    /// that's what keeps collision exact for content placed far from the world origin.
+    pub fn add_collider_at(&mut self, anchor: DVec3, shape: Box<dyn CollisionShape>) -> usize {
+        let offset = (anchor - self.origin).as_vec3();
+        self.colliders.push(AnchoredCollider { shape, anchor, offset });
         self.colliders.len() - 1
+    }
+
+    /// Recenter the sim's local frame on `new_origin` (a world point; pass a
+    /// whole-number position so the shift is exact in f32). Bodies, contacts and
+    /// gravity centers shift by the delta; collider offsets are recomputed from
+    /// their `f64` anchors. World-space positions are unchanged — a rebase is
+    /// invisible outside the sim (ADR-0015).
+    pub fn rebase(&mut self, new_origin: DVec3) {
+        let delta = (self.origin - new_origin).as_vec3(); // added to local positions
+        if delta == Vec3::ZERO {
+            return;
+        }
+        for b in &mut self.bodies {
+            b.pos += delta;
+            b.prev_pos += delta;
+            b.home += delta;
+        }
+        for c in &mut self.contacts {
+            c.point += delta;
+        }
+        for s in &mut self.gravity.sources {
+            if let GravitySource::Point { center, .. } = s {
+                *center += delta;
+            }
+        }
+        self.origin = new_origin;
+        for c in &mut self.colliders {
+            c.offset = (c.anchor - new_origin).as_vec3();
+        }
     }
 
     /// Cast a ray against every collider; the first surface hit within `max_dist`, else
@@ -574,6 +661,7 @@ impl PhysicsWorld {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
         self.contacts.clear();
         for bi in 0..self.bodies.len() {
+            self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
             // A body with `use_gravity = false` isn't pulled (and keeps its up vector).
             let g = if self.bodies[bi].use_gravity {
@@ -765,16 +853,30 @@ pub struct Sim {
     map: Vec<BodyLink>,
     accum: f32,
     pub fixed_dt: f32,
+    /// Rebase policy (ADR-0015): when the focus (active camera) drifts past the
+    /// threshold, the sim's local frame recenters on it between fixed steps.
+    fo: floptle_core::FloatingOrigin,
 }
 
 impl Sim {
     /// Build the sim from the ECS: every `RigidBody` entity becomes a dynamic sphere at
-    /// its world position; `terrain` (e.g. the editor's combined field) becomes the SDF
-    /// collider. `gravity` is the scene's gravity field.
-    pub fn build(ecs: &World, terrain: Option<&Terrain>, gravity: GravityField) -> Self {
+    /// its world position; each terrain volume in `terrains` — `(node world translation,
+    /// node-local field)` — becomes its OWN anchored SDF collider, at the field's native
+    /// resolution (no combined-grid resolution spread, and exact placement anywhere in
+    /// the world). `gravity` is the scene's gravity field with `Point` centers already
+    /// converted to the sim frame. `origin` is the world point the sim's local frame is
+    /// centered on — pass the play-start focus (rounded to whole units) so the numbers
+    /// physics differences stay small even when the scene content sits far out.
+    pub fn build(
+        ecs: &World,
+        terrains: &[(DVec3, &Terrain)],
+        gravity: GravityField,
+        origin: DVec3,
+    ) -> Self {
         let mut world = PhysicsWorld::new(gravity);
-        if let Some(t) = terrain {
-            world.add_collider(Box::new(SdfTerrain { terrain: t.clone() }));
+        world.origin = origin.round();
+        for (anchor, t) in terrains {
+            world.add_collider_at(*anchor, Box::new(SdfTerrain { terrain: (*t).clone() }));
         }
         let mut map = Vec::new();
         // Collect first (immutable borrow of the ECS) then build the bodies. A `RigidBody`
@@ -788,8 +890,9 @@ impl Sim {
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
             let wt = world_transform(ecs, e);
-            let p = wt.translation;
-            let pos = Vec3::new(p.x as f32, p.y as f32, p.z as f32);
+            // Sim frame: subtract the origin in f64 FIRST, then narrow — the residual
+            // is small and exact no matter how far out the node sits.
+            let pos = (wt.translation - world.origin).as_vec3();
             let r = rb.radius.max(0.01);
             let mut b = match rb.kind {
                 BodyKind::Sphere => Body::sphere(pos, r),
@@ -807,49 +910,67 @@ impl Sim {
             let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
-        Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0 }
+        Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0, fo: floptle_core::FloatingOrigin::default() }
     }
 
-    /// Register a static triangle-mesh collider (WORLD-space verts + indices) — e.g. an
-    /// imported map model the player can walk on. Call after [`build`](Self::build); the
-    /// editor bakes a Mesh node's transform into the verts before passing them.
-    pub fn add_static_mesh(&mut self, verts: &[Vec3], indices: &[u32]) {
+    /// Register a static triangle-mesh collider — e.g. an imported map model the player
+    /// can walk on. `anchor` is the mesh node's world translation (full `f64`); `verts`
+    /// are baked RELATIVE to it, so a map placed a million units out collides exactly.
+    /// Call after [`build`](Self::build).
+    pub fn add_static_mesh(&mut self, anchor: DVec3, verts: &[Vec3], indices: &[u32]) {
         if indices.len() >= 3 && !verts.is_empty() {
-            self.world.add_collider(Box::new(TriMeshCollider::new(verts, indices)));
+            self.world.add_collider_at(anchor, Box::new(TriMeshCollider::new(verts, indices)));
         }
     }
 
     /// Register a static oriented-box collider (the "collidable" switch on a Cube node).
-    pub fn add_static_box(&mut self, center: Vec3, half: Vec3, rot: Quat) {
-        self.world.add_collider(Box::new(BoxShape::new(center, half, rot)));
+    /// `center` is the node's world translation (full `f64`).
+    pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat) {
+        self.world.add_collider_at(center, Box::new(BoxShape::new(Vec3::ZERO, half, rot)));
     }
 
     /// Register a static sphere collider (a collidable Sphere node).
-    pub fn add_static_sphere(&mut self, center: Vec3, radius: f32) {
-        self.world.add_collider(Box::new(SphereShape { center, radius: radius.max(1e-3) }));
+    pub fn add_static_sphere(&mut self, center: DVec3, radius: f32) {
+        self.world
+            .add_collider_at(center, Box::new(SphereShape { center: Vec3::ZERO, radius: radius.max(1e-3) }));
     }
 
     /// Register a static capsule collider (a collidable Capsule node). `up` is the capsule
     /// axis (world space); `half_height` is center-to-endcap-center; `radius` its thickness.
-    pub fn add_static_capsule(&mut self, center: Vec3, up: Vec3, half_height: f32, radius: f32) {
+    pub fn add_static_capsule(&mut self, center: DVec3, up: Vec3, half_height: f32, radius: f32) {
         let u = up.try_normalize().unwrap_or(Vec3::Y);
-        self.world.add_collider(Box::new(CapsuleShape {
-            a: center - u * half_height,
-            b: center + u * half_height,
-            radius: radius.max(1e-3),
-        }));
+        self.world.add_collider_at(
+            center,
+            Box::new(CapsuleShape { a: -u * half_height, b: u * half_height, radius: radius.max(1e-3) }),
+        );
     }
 
-    /// Cast a ray against the world's colliders (terrain + meshes). See
-    /// [`PhysicsWorld::raycast`].
-    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
-        self.world.raycast(origin, dir, max_dist)
+    /// Cast a ray against the world's colliders (terrain + meshes) from a WORLD-space
+    /// origin; the hit point comes back in world space too. See [`PhysicsWorld::raycast`].
+    pub fn raycast(&self, origin: DVec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
+        let o = (origin - self.world.origin).as_vec3();
+        self.world.raycast(o, dir, max_dist).map(|mut h| {
+            let p = self.world.origin + DVec3::new(h.point[0] as f64, h.point[1] as f64, h.point[2] as f64);
+            h.point = [p.x as f32, p.y as f32, p.z as f32];
+            h
+        })
     }
 
     /// Advance by a (variable) real frame delta via a fixed-timestep accumulator, then
-    /// write body positions back to the entities' local transform translations.
+    /// write body positions back to the entities' local transform translations —
+    /// interpolated by the accumulator's leftover fraction, so rendered motion is smooth
+    /// at any frame rate. `focus` (the active camera, world space) drives the floating
+    /// origin: drift past the threshold and the sim recenters on it between steps.
     /// (Physics bodies are treated as root nodes; parented dynamic bodies are later.)
-    pub fn advance(&mut self, ecs: &mut World, real_dt: f32) {
+    pub fn advance(&mut self, ecs: &mut World, real_dt: f32, focus: Option<DVec3>) {
+        if let Some(f) = focus {
+            let local = f - self.world.origin;
+            if local.length_squared() >= self.fo.threshold * self.fo.threshold {
+                let new_origin = f.round(); // whole numbers → the shift is exact in f32
+                self.fo.total_shift += self.world.origin - new_origin;
+                self.world.rebase(new_origin);
+            }
+        }
         self.accum += real_dt.clamp(0.0, 0.25);
         let mut iters = 0;
         while self.accum >= self.fixed_dt && iters < 8 {
@@ -857,7 +978,10 @@ impl Sim {
             self.accum -= self.fixed_dt;
             iters += 1;
         }
-        self.writeback_transforms(ecs);
+        // How far into the NEXT step real time has progressed (0..1): render that
+        // fraction of the way from each body's previous step position to its current.
+        let alpha = (self.accum / self.fixed_dt).clamp(0.0, 1.0);
+        self.writeback_transforms(ecs, alpha);
     }
 
     /// Per body: (entity, velocity, up, grounded, height) — so the editor can expose it
@@ -880,10 +1004,10 @@ impl Sim {
         }
     }
 
-    /// Re-read each dynamic body's tunable RigidBody params from the ECS (friction,
-    /// restitution, gravity on/off, position/rotation locks), WITHOUT touching position or
-    /// velocity. Lets the Inspector edit these live while playing (no teleport/reset). Shape
-    /// changes (kind/radius/height) still need a full rebuild.
+    /// Re-read each dynamic body's tunable RigidBody params from the ECS (shape/size,
+    /// friction, restitution, gravity on/off, position/rotation locks), WITHOUT resetting
+    /// position or velocity. Lets the Inspector edit these live while playing — including
+    /// dragging the radius/height/half-extents or switching shapes — with no teleport/reset.
     pub fn sync_dynamic_params(&mut self, ecs: &World) {
         for i in 0..self.map.len() {
             let (ent, bidx) = (self.map[i].entity, self.map[i].body);
@@ -894,6 +1018,19 @@ impl Sim {
                 b.friction = rb.friction;
                 b.use_gravity = rb.gravity;
                 b.lock_pos = rb.lock_pos;
+                b.radius = rb.radius.max(0.01);
+                b.shape = match rb.kind {
+                    BodyKind::Sphere => BodyShape::Sphere,
+                    BodyKind::Capsule => {
+                        let half = (rb.height.max(2.0 * b.radius) * 0.5 - b.radius).max(0.0);
+                        BodyShape::Capsule { half_height: half }
+                    }
+                    BodyKind::Box => {
+                        let s = world_transform(ecs, ent).scale;
+                        let h = rb.half_extents;
+                        BodyShape::Box { half: Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z) }
+                    }
+                };
             }
         }
     }
@@ -909,6 +1046,7 @@ impl Sim {
                     let r = b.radius;
                     let new_half = (height.max(2.0 * r) * 0.5 - r).max(0.0);
                     b.pos += b.up * (new_half - half_height); // keep feet planted
+                    b.prev_pos += b.up * (new_half - half_height); // don't smear the resize
                     b.shape = BodyShape::Capsule { half_height: new_half };
                 }
                 return;
@@ -916,11 +1054,12 @@ impl Sim {
         }
     }
 
-    fn writeback_transforms(&self, ecs: &mut World) {
+    fn writeback_transforms(&self, ecs: &mut World, alpha: f32) {
         for link in &self.map {
-            let p = self.world.bodies[link.body].pos;
+            let b = &self.world.bodies[link.body];
+            let p = b.prev_pos.lerp(b.pos, alpha);
             if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
-                t.translation = DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+                t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
                 // Rotation constraints: keep the authored angle on each locked axis.
                 if link.lock_rot.iter().any(|&l| l) {
                     let (ay, ax, az) = t.rotation.to_euler(EulerRot::YXZ);
@@ -1257,9 +1396,9 @@ mod tests {
         ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
         ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
 
-        let mut sim = Sim::build(&ecs, Some(&terrain), GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let mut sim = Sim::build(&ecs, &[(DVec3::ZERO, &terrain)], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
         for _ in 0..240 {
-            sim.advance(&mut ecs, 1.0 / 60.0);
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
         }
         let y = ecs.get::<Transform>(e).unwrap().translation.y;
         assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
@@ -1278,13 +1417,42 @@ mod tests {
         ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
         ecs.insert(e, floptle_core::Collidable);
 
-        let mut sim = Sim::build(&ecs, None, GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
         assert_eq!(sim.world.bodies.len(), 1, "a RigidBody node must become a dynamic body");
         for _ in 0..120 {
-            sim.advance(&mut ecs, 1.0 / 60.0);
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
         }
         let y = ecs.get::<Transform>(e).unwrap().translation.y;
         assert!(y < 4.0, "a RigidBody node must fall under gravity, got y={y}");
+    }
+
+    #[test]
+    fn sync_dynamic_params_resizes_shape_without_resetting_motion() {
+        // Editing a RigidBody's radius/kind live in the Inspector while playing must
+        // resize/reshape the running body in place — not reset its position or velocity
+        // (that would feel like a teleport/restart to the dev testing the change).
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { kind: BodyKind::Sphere, radius: 0.5, ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.world.bodies[0].vel = Vec3::new(1.0, -2.0, 0.0);
+        let pos_before = sim.world.bodies[0].pos;
+
+        // Grow the radius and switch to a capsule, as if dragged in the Inspector.
+        if let Some(rb) = ecs.get_mut::<RigidBody>(e) {
+            rb.kind = BodyKind::Capsule;
+            rb.radius = 1.5;
+            rb.height = 4.0;
+        }
+        sim.sync_dynamic_params(&ecs);
+
+        let body = &sim.world.bodies[0];
+        assert_eq!(body.radius, 1.5, "radius should update live");
+        assert!(matches!(body.shape, BodyShape::Capsule { half_height } if (half_height - 0.5).abs() < 1e-5));
+        assert_eq!(body.pos, pos_before, "resizing must not move the body");
+        assert_eq!(body.vel, Vec3::new(1.0, -2.0, 0.0), "resizing must not touch velocity");
     }
 
     #[test]
@@ -1325,5 +1493,113 @@ mod tests {
         w.step(1.0 / 120.0); // one more step to capture the contact
         assert!(!w.contacts.is_empty(), "a resting body should report a contact");
         assert!(w.contacts[0].normal.y > 0.9, "ground contact normal up, {:?}", w.contacts[0].normal);
+    }
+
+    #[test]
+    fn writeback_interpolates_between_fixed_steps() {
+        // THE moving-jitter fix: rendered motion must advance by exactly real_dt · v
+        // every frame, even when a frame consumes a fractional number of fixed steps.
+        // Without interpolation a 1.5-step frame renders 1 step (or 2), so on-screen
+        // displacement alternates — the "player jerks back and forth" bug.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::ZERO));
+        ecs.insert(e, RigidBody { radius: 0.5, gravity: false, ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::default(), DVec3::ZERO);
+        sim.world.bodies[0].vel = Vec3::new(2.0, 0.0, 0.0);
+        let dt = sim.fixed_dt;
+
+        // Frames of 1.5 steps each: rendered x must grow by exactly 1.5·dt·v per frame.
+        let mut last = 0.0f64;
+        for i in 1..=4 {
+            sim.advance(&mut ecs, dt * 1.5, None);
+            let x = ecs.get::<Transform>(e).unwrap().translation.x;
+            let step = x - last;
+            let want = (1.5 * dt * 2.0) as f64;
+            // The very first frame renders one whole step less (interpolation trails
+            // real time by a constant fixed step — 8 ms of latency, not a wobble).
+            let expect = if i == 1 { want - (dt * 2.0) as f64 } else { want };
+            assert!((step - expect).abs() < 1e-5, "frame {i}: moved {step}, expected {expect}");
+            last = x;
+        }
+    }
+
+    #[test]
+    fn anchored_collider_is_exact_far_from_world_origin() {
+        // ADR-0015 end-to-end: content placed 10 million units out must collide as
+        // exactly as content at the origin. At 1e7 an f32 ulp is a full unit — baking
+        // world-space f32 verts there (the old path) is off by up to a meter.
+        let far = DVec3::new(1.0e7, 0.0, 1.0e7);
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(far + DVec3::new(0.25, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+
+        let origin = (far + DVec3::new(0.0, 5.0, 0.0)).round();
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), origin);
+        // A 10×1×10 platform whose top face is at world y = 0.5.
+        sim.add_static_box(far, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY);
+        for _ in 0..240 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((t.y - 1.0).abs() < 0.02, "should rest on the platform top, y = {}", t.y);
+        assert!((t.x - (far.x + 0.25)).abs() < 1e-3, "must not drift in x, x = {}", t.x);
+    }
+
+    #[test]
+    fn rebase_is_invisible_in_world_space() {
+        // Recentering the sim's frame must not move anything on screen: world-space
+        // writeback positions stay put and colliders keep holding bodies.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.3, 2.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.add_static_box(DVec3::ZERO, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY);
+        for _ in 0..240 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let before = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((before.y - 1.0).abs() < 0.02, "settled on the box first, y = {}", before.y);
+
+        sim.world.rebase(DVec3::new(5000.0, 0.0, -3000.0));
+        for _ in 0..120 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let after = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((after - before).length() < 1e-3, "rebase moved the body: {before} -> {after}");
+    }
+
+    #[test]
+    fn terrain_volume_is_exact_far_from_world_origin() {
+        // The full terrain path at distance (ADR-0015): a node-local flat field anchored
+        // ten million units out must catch a falling body exactly at its surface — the
+        // world placement lives in the f64 anchor, the field's own numbers stay small.
+        let far = DVec3::new(1.0e7, 0.0, 1.0e7);
+        let terrain =
+            Terrain::flat([16, 16, 16], [0.0, 0.0, 0.0], [8.0, 8.0, 8.0], 0.0, [0.4, 0.6, 0.3]);
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(far + DVec3::new(0.25, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+
+        let origin = (far + DVec3::new(0.0, 5.0, 0.0)).round();
+        let mut sim = Sim::build(
+            &ecs,
+            &[(far, &terrain)],
+            GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+            origin,
+        );
+        for _ in 0..240 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((t.y - 0.5).abs() < 0.15, "should rest on the terrain surface, y = {}", t.y);
+        assert!((t.x - (far.x + 0.25)).abs() < 1e-3, "must not drift in x, x = {}", t.x);
     }
 }

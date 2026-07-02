@@ -1,7 +1,27 @@
 # ADR-0015 — Large-world space: floating origin, on by default
 
-- **Status:** Accepted · 2026-06-27
+- **Status:** Accepted · 2026-06-27 · layers 1–3 implemented 2026-07-02
 - **Decider:** Ty Johnston (Fopull LLC)
+
+> **Implementation note (2026-07-02).** Layer 2 landed as an **origin-relative
+> physics frame**, not a world mutation: `PhysicsWorld.origin` (f64) anchors the
+> sim; bodies/contacts/ray origins are origin-relative, each static collider is
+> baked relative to its own f64 anchor, and a rebase (camera > 4 km from the
+> origin) recenters the frame by a whole-number shift and recomputes collider
+> offsets *from the f64 anchors* — zero accumulated error, and **user-visible
+> coordinates never change** (scripts/ECS keep stable f64 world positions, so a
+> Lua variable holding a position survives any rebase). Writeback to the ECS is
+> also **interpolated** by the fixed-step accumulator fraction, which fixed the
+> long-standing "player jerks back and forth while moving" temporal-aliasing bug.
+> **Terrain is covered too:** per-volume fields are node-local by construction,
+> and the combined field is GONE — the renderer holds every volume in one 3D
+> atlas at native resolution and fuses them in-shader (smin, air-continued
+> outside boxes, union-edge taper), each placed by composing its node's `f64`
+> anchor + local center before going camera-relative; physics gives each volume
+> its own anchored collider at native resolution. Neither rendering nor
+> collision degrades with distance from the origin or between volumes.
+> Proof: `terrain_far_probe` renders the two-volume `terrain_blend_probe` scene
+> ten million units out — the PNGs are bit-identical.
 
 ## Context
 `f32` precision degrades as coordinates grow: far from the origin the gap between

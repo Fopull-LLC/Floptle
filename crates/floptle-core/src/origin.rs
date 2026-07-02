@@ -44,7 +44,9 @@ impl FloatingOrigin {
         if camera_local.length_squared() < self.threshold * self.threshold {
             return None;
         }
-        let shift = -camera_local; // pull the camera back to the origin
+        // Whole-number shift (as the module contract promises): adding an integer to
+        // any f32 in gameplay range is exact, so a rebase never smears geometry.
+        let shift = -camera_local.round(); // pull the camera back to the origin
         self.total_shift += shift;
         Some(shift)
     }
