@@ -190,7 +190,7 @@ fn recenter_and_measure(parts: &mut [ImportedPart]) -> (f32, [f32; 3], [f32; 3])
 }
 
 /// Area-weighted vertex normals for a primitive that ships without them.
-fn compute_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+pub(crate) fn compute_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut acc = vec![Vec3::ZERO; positions.len()];
     for tri in indices.chunks_exact(3) {
         let (a, b, c) = (
@@ -207,7 +207,7 @@ fn compute_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
 }
 
 /// Convert a decoded glTF image to tightly-packed RGBA8.
-fn to_rgba8(img: &gltf::image::Data) -> TextureData {
+pub(crate) fn to_rgba8(img: &gltf::image::Data) -> TextureData {
     use gltf::image::Format::*;
     let (w, h) = (img.width, img.height);
     let n = (w as usize) * (h as usize);

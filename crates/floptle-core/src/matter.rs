@@ -92,6 +92,18 @@ pub struct MeshCollider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collidable;
 
+/// Attaches a layered animation controller asset (`*.actl.ron`) to a node. The
+/// runtime it drives lives editor/runtime-side; this is just the reference —
+/// the same discipline as `Matter::Mesh { asset_path }`. On a rigged Mesh node
+/// it poses the model's parts; on any other node it animates the node itself +
+/// its descendants (matched by scene `Name`) — cutscenes, doors, platforms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnimController {
+    /// Controller asset key: project-relative path without extension
+    /// (`animation_controllers/Player`).
+    pub asset: String,
+}
+
 /// Whether a node's geometry is drawn. A node with **no** `Visible` component renders
 /// normally (visible is the default); attaching `Visible(false)` hides its mesh/shape
 /// (it still has a transform, physics, and children). Scripts toggle it with

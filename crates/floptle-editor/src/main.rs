@@ -30,6 +30,19 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+// Animation: editor-side glue (registries, binding, extraction, advance) and the
+// animation UI (Inspector panels, controller graph window, Animating tab). New
+// subsystems live in their own modules — main.rs only wires them in.
+mod anim;
+mod anim_ui;
+mod gizmo;
+mod ide;
+mod theme;
+
+use gizmo::*;
+use ide::*;
+use theme::*;
+
 // ---- the overlay transform gizmo ----------------------------------------------
 //
 // A screen-space gizmo drawn over the selected object with egui's painter. The
@@ -40,114 +53,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // no drift). The gizmo only PAINTS — it never registers an egui widget — so it
 // never steals input from the panel or the RMB fly-camera; ownership is decided by
 // our own pixel hit-test plus the existing `is_pointer_over_egui` gate.
-
-/// Handle length on screen, in physical pixels (kept roughly constant with depth).
-const GIZMO_PX: f32 = 90.0;
-/// Cursor-to-handle pick radius, physical pixels.
-const HANDLE_PX: f32 = 12.0;
-/// Axis-scale drag sensitivity (scale factor per pixel along the axis).
-const SCALE_SENS: f32 = 0.01;
-/// Screen radius (px) of the Rotate tool's center trackball ring.
-const CENTER_RING_PX: f32 = 52.0;
-/// Trackball free-rotate sensitivity (radians per pixel).
-const TRACKBALL_SENS: f32 = 0.01;
-
-/// The active editing tool. Bound to number keys 1-4 (5-9 reserved).
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum Tool {
-    #[default]
-    Select,
-    Move,
-    Rotate,
-    Scale,
-    /// Terrain sculpt/paint brush (LMB-drag edits the terrain field).
-    Sculpt,
-}
-
-impl Tool {
-    fn from_digit(n: u32) -> Option<Tool> {
-        match n {
-            1 => Some(Tool::Select),
-            2 => Some(Tool::Move),
-            3 => Some(Tool::Rotate),
-            4 => Some(Tool::Scale),
-            5 => Some(Tool::Sculpt),
-            _ => None, // 6-9 reserved for future tools
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Tool::Select => "select",
-            Tool::Move => "move",
-            Tool::Rotate => "rotate",
-            Tool::Scale => "scale",
-            Tool::Sculpt => "sculpt",
-        }
-    }
-}
-
-/// Which part of the gizmo the cursor is over / grabbed. An axis handle's meaning
-/// depends on the active `Tool` (move along / rotate about / scale along it).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Handle {
-    AxisX,
-    AxisY,
-    AxisZ,
-    Center,
-}
-
-impl Handle {
-    /// Index into the world basis (X=0, Y=1, Z=2), or `None` for the center.
-    fn axis_index(self) -> Option<usize> {
-        match self {
-            Handle::AxisX => Some(0),
-            Handle::AxisY => Some(1),
-            Handle::AxisZ => Some(2),
-            Handle::Center => None,
-        }
-    }
-}
-
-/// Cached, projected gizmo geometry for the current frame (all in physical pixels).
-struct GizmoFrame {
-    center: Vec2,
-    /// Local-axis arrow tips; `None` for an axis that projects behind the camera.
-    tips: [Option<Vec2>; 3],
-    /// Rotation-ring polylines, one per local axis (only filled for the Rotate tool).
-    ring_pts: [Vec<Vec2>; 3],
-    /// A flat screen-space ring around the center: the free/trackball handle for
-    /// Rotate, drawn so the center handle is grabbable (Move/Scale use a box).
-    center_ring: Vec<Vec2>,
-    /// Which handle the cursor is hovering this frame, if any.
-    hovered: Option<Handle>,
-}
-
-/// A start-of-drag snapshot, so drags apply an absolute transform (no drift).
-#[derive(Clone, Copy)]
-struct DragState {
-    handle: Handle,
-    /// The entity this snapshot belongs to — guards against the selection
-    /// changing mid-drag and applying the wrong object's start transform.
-    entity: Entity,
-    start_xf: Transform,
-    cursor_start: Vec2,
-}
-
-/// World basis vector for axis `i` (X=0, Y=1, Z=2).
-fn axis_world(i: usize) -> Vec3 {
-    [Vec3::X, Vec3::Y, Vec3::Z][i]
-}
-
-/// The object's LOCAL axis `i` expressed in world space (so the gizmo aligns with
-/// the object's current orientation, not the world frame).
-fn local_axis(rot: Quat, i: usize) -> Vec3 {
-    rot * axis_world(i)
-}
-
-fn handle_for_axis(i: usize) -> Handle {
-    [Handle::AxisX, Handle::AxisY, Handle::AxisZ][i]
-}
 
 /// A copied component's values, held on the editor clipboard so they can be pasted
 /// onto another component of the same kind (Inspector ⎘ copy / 📋 paste).
@@ -269,8 +174,10 @@ struct EditorCmd {
     reparent: Option<(Entity, Option<Entity>)>,
     /// Add a new node as a child of an entity (matter, parent).
     add_parented: Option<(MatterDoc, Entity)>,
-    /// Create a fresh flat terrain.
-    create_terrain: bool,
+    /// Open the "new terrain" size/thickness/color/texture dialog.
+    open_new_terrain: bool,
+    /// Create a fresh flat terrain with this config (from the "New terrain" dialog).
+    create_terrain: Option<NewTerrainCfg>,
     /// Remove the terrain.
     clear_terrain: bool,
     /// The terrain texture palette changed — re-upload it.
@@ -340,6 +247,23 @@ struct EditorCmd {
     do_rename: Option<(String, String)>,
     /// Delete this asset file/folder (absolute path).
     delete_asset: Option<String>,
+    /// Extract a model's embedded animation clips to assets/animations/ (a model path).
+    extract_anims: Option<String>,
+    /// Attach / change / remove a node's AnimationController: (entity, Some(key) | None).
+    set_anim_controller: Option<(Entity, Option<String>)>,
+    /// Open the Animation Controller graph window on this controller asset key.
+    open_anim_graph: Option<String>,
+    /// Open the graph window with the new-controller name prompt; the inner Entity
+    /// (if any) gets the created controller attached.
+    new_anim_controller: Option<Option<Entity>>,
+    /// Focus (or open) the ✎ Animating dock tab.
+    focus_animating: bool,
+    /// Focus (or open) the ◉ Controller graph dock tab.
+    focus_anim_graph: bool,
+    /// CONFIRMED asset deletion (from the delete modal) — actually deletes.
+    do_delete_asset: Option<String>,
+    /// Folder the new controller should be created in (absolute; None = default).
+    new_anim_controller_dir: Option<String>,
 }
 
 /// Editor reference-grid display + snapping settings.
@@ -464,6 +388,10 @@ fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("🖼", egui::Color32::from_rgb(140, 210, 140))
     } else if is_material(path) {
         ("◑", egui::Color32::from_rgb(240, 180, 110))
+    } else if anim_ui::is_anim_clip(path) {
+        ("▶", egui::Color32::from_rgb(235, 200, 110)) // baked animation clip
+    } else if anim_ui::is_anim_ctl(path) {
+        ("◉", egui::Color32::from_rgb(180, 160, 250)) // animation controller
     } else if path.to_ascii_lowercase().ends_with(".ron") {
         ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
     } else if is_markdown(path) {
@@ -571,6 +499,14 @@ const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
     ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
     ("float.lua", include_str!("../../../assets/scripts/float.lua")),
+    // Ready-made character setups: an FPS body-camera, and a third-person
+    // pair (body controller + orbit camera with first-person zoom).
+    ("first_person.lua", include_str!("../../../assets/scripts/first_person.lua")),
+    ("third_person.lua", include_str!("../../../assets/scripts/third_person.lua")),
+    (
+        "third_person_camera.lua",
+        include_str!("../../../assets/scripts/third_person_camera.lua"),
+    ),
 ];
 
 // ---- "Open in IDE" (ADR-0011): launch the user's external editor ------------
@@ -1120,11 +1056,71 @@ function input.button(i) end
 ---@param i integer
 ---@return boolean
 function input.clicked(i) end
+
+---Cast a ray against the world's colliders (terrain + meshes).
+---Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
+---@param ox number
+---@param oy number
+---@param oz number
+---@param dx number
+---@param dy number
+---@param dz number
+---@param max number
+---@return table|nil
+function raycast(ox, oy, oz, dx, dy, dz, max) end
+
+---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
+---viewport, Scene AND Game views. Call every frame you want a shape visible.
+---Colors are optional 0-1 floats (default green).
+---@class Gizmo
+gizmo = {}
+---A world-space debug line.
+---@param x1 number
+---@param y1 number
+---@param z1 number
+---@param x2 number
+---@param y2 number
+---@param z2 number
+---@param r? number
+---@param g? number
+---@param b? number
+function gizmo.line(x1, y1, z1, x2, y2, z2, r, g, b) end
+---A debug ray: origin + direction. With len the direction is normalized and
+---the ray is that long (mirrors raycast) — great for visualizing ground checks.
+---@param ox number
+---@param oy number
+---@param oz number
+---@param dx number
+---@param dy number
+---@param dz number
+---@param len? number
+---@param r? number
+---@param g? number
+---@param b? number
+function gizmo.ray(ox, oy, oz, dx, dy, dz, len, r, g, b) end
+---A wire debug sphere (three rings): trigger zones, blast radii, ranges.
+---@param x number
+---@param y number
+---@param z number
+---@param radius? number
+---@param r? number
+---@param g? number
+---@param b? number
+function gizmo.sphere(x, y, z, radius, r, g, b) end
+---A small 3-axis cross marking a spot: hit points, waypoints, spawns.
+---@param x number
+---@param y number
+---@param z number
+---@param size? number
+---@param r? number
+---@param g? number
+---@param b? number
+function gizmo.point(x, y, z, size, r, g, b) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\"]\n}\n";
+const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\"]\n}\n";
 
 /// Write the Lua language-server support files into a project (annotations always
 /// refreshed; `.luarc.json` only if absent, so a user's own config is preserved).
@@ -1262,7 +1258,7 @@ fn digit_of(code: KeyCode) -> Option<u32> {
 
 /// Project an absolute world point to physical-pixel screen space (camera-relative,
 /// ADR-0015). Returns `None` when the point is behind the camera.
-fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
+pub(crate) fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
     let rel = (world - cam_world).as_vec3();
     let clip = vp * rel.extend(1.0);
     if clip.w <= 1e-4 {
@@ -1321,14 +1317,6 @@ fn scene_hit(ctx: &egui::Context, cursor: Option<Vec2>, rect: Option<egui::Rect>
 }
 
 /// Distance from point `p` to segment `a`–`b` (pixel space).
-fn seg_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
-    let ab = b - a;
-    let len2 = ab.length_squared();
-    let t = if len2 < 1e-6 { 0.0 } else { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) };
-    (p - (a + ab * t)).length()
-}
-
-/// Snap each component of a world position to a grid `step` (no-op if step ≤ 0).
 fn snap_dvec3(v: DVec3, step: f64) -> DVec3 {
     if step <= 1e-6 {
         return v;
@@ -1337,243 +1325,6 @@ fn snap_dvec3(v: DVec3, step: f64) -> DVec3 {
 }
 
 /// Nearest positive ray–sphere hit `t` (general — `rd` need not be unit), else None.
-/// `t` is in the ray's own parameter space, so it stays comparable across objects
-/// even when the ray was transformed into a non-uniformly-scaled local frame.
-fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, radius: f32) -> Option<f32> {
-    let oc = ro - center;
-    let a = rd.dot(rd);
-    let b = 2.0 * oc.dot(rd);
-    let c = oc.length_squared() - radius * radius;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return None;
-    }
-    let s = disc.sqrt();
-    let t0 = (-b - s) / (2.0 * a);
-    if t0 > 1e-3 {
-        return Some(t0);
-    }
-    let t1 = (-b + s) / (2.0 * a); // origin inside the sphere
-    (t1 > 1e-3).then_some(t1)
-}
-
-/// Nearest positive ray–AABB hit `t` for a box centered at the origin with the given
-/// `half` extent (slab method; `rd` need not be unit).
-fn ray_aabb(ro: Vec3, rd: Vec3, half: f32) -> Option<f32> {
-    let inv = Vec3::ONE / rd; // 0 components ⏵ ±inf, handled by the min/max
-    let t1 = (Vec3::splat(-half) - ro) * inv;
-    let t2 = (Vec3::splat(half) - ro) * inv;
-    let near = t1.min(t2).max_element();
-    let far = t1.max(t2).min_element();
-    if near <= far && far > 1e-3 {
-        Some(near.max(1e-3))
-    } else {
-        None
-    }
-}
-
-/// Build the gizmo geometry for the selected entity and hit-test the cursor.
-fn build_gizmo(
-    tool: Tool,
-    selection: Option<Entity>,
-    world: &World,
-    cursor: Option<Vec2>,
-    cam_world: DVec3,
-    vp: Mat4,
-    w: f32,
-    h: f32,
-) -> Option<GizmoFrame> {
-    if tool == Tool::Select || tool == Tool::Sculpt {
-        return None;
-    }
-    let e = selection?;
-    // World transform, so the gizmo sits on the node's actual (parented) placement.
-    let t = floptle_core::world_transform(world, e);
-    let center = project(t.translation, cam_world, vp, w, h)?;
-    let rot = t.rotation;
-
-    // Pixel-constant handle length: world units that subtend ~GIZMO_PX at this depth
-    // (60° vertical fov). Clamp the near distance so a close object doesn't explode.
-    let dist = (t.translation - cam_world).length().max(0.4) as f32;
-    let axis_len = GIZMO_PX * 2.0 * dist * (30f32.to_radians()).tan() / h;
-
-    // Tips follow the object's LOCAL axes, so the gizmo aligns with its orientation.
-    let mut tips = [None; 3];
-    for i in 0..3 {
-        let tip_world = t.translation + (local_axis(rot, i) * axis_len).as_dvec3();
-        tips[i] = project(tip_world, cam_world, vp, w, h);
-    }
-
-    // Rotation rings live in the planes spanned by the object's local axes.
-    let mut ring_pts: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut center_ring: Vec<Vec2> = Vec::new();
-    if tool == Tool::Rotate {
-        const N: usize = 48;
-        for i in 0..3 {
-            let u = local_axis(rot, (i + 1) % 3);
-            let v = local_axis(rot, (i + 2) % 3);
-            let mut pts = Vec::with_capacity(N + 1);
-            for k in 0..=N {
-                let a = (k as f32) / (N as f32) * std::f32::consts::TAU;
-                let p = t.translation + ((u * a.cos() + v * a.sin()) * axis_len).as_dvec3();
-                if let Some(s) = project(p, cam_world, vp, w, h) {
-                    pts.push(s);
-                }
-            }
-            ring_pts[i] = pts;
-        }
-        // A flat screen-space trackball ring around the center — the free-rotate handle.
-        const M: usize = 40;
-        for k in 0..=M {
-            let a = (k as f32) / (M as f32) * std::f32::consts::TAU;
-            center_ring.push(center + Vec2::new(a.cos(), a.sin()) * CENTER_RING_PX);
-        }
-    }
-
-    let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts, &center_ring));
-    Some(GizmoFrame { center, tips, ring_pts, center_ring, hovered })
-}
-
-/// Nearest gizmo handle to the cursor within `HANDLE_PX`, if any.
-fn hit_test(
-    tool: Tool,
-    cursor: Vec2,
-    center: Vec2,
-    tips: &[Option<Vec2>; 3],
-    rings: &[Vec<Vec2>; 3],
-    center_ring: &[Vec2],
-) -> Option<Handle> {
-    let mut cands: Vec<(Handle, f32)> = Vec::new();
-    let ring_dist = |ring: &[Vec2]| {
-        let mut dmin = f32::INFINITY;
-        for win in ring.windows(2) {
-            dmin = dmin.min(seg_dist(cursor, win[0], win[1]));
-        }
-        dmin
-    };
-    match tool {
-        Tool::Move | Tool::Scale => {
-            for i in 0..3 {
-                if let Some(tip) = tips[i] {
-                    cands.push((handle_for_axis(i), seg_dist(cursor, center, tip)));
-                }
-            }
-            cands.push((Handle::Center, (cursor - center).length()));
-        }
-        Tool::Rotate => {
-            for i in 0..3 {
-                cands.push((handle_for_axis(i), ring_dist(&rings[i])));
-            }
-            // The trackball ring (free rotate) — only when not closer to an axis ring.
-            cands.push((Handle::Center, ring_dist(center_ring)));
-        }
-        Tool::Select | Tool::Sculpt => {}
-    }
-    cands
-        .into_iter()
-        .filter(|(_, d)| *d <= HANDLE_PX)
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(h, _)| h)
-}
-
-/// Brighten a handle color toward white when it is hovered or grabbed.
-fn brighten(c: egui::Color32, on: bool) -> egui::Color32 {
-    if !on {
-        return c;
-    }
-    let mix = |x: u8| ((x as u16 + 255) / 2) as u8;
-    egui::Color32::from_rgb(mix(c.r()), mix(c.g()), mix(c.b()))
-}
-
-/// A small filled arrowhead at `to`, pointing away from `from`.
-fn arrow_head(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, col: egui::Color32) {
-    let dir = to - from;
-    let len = dir.length();
-    if len < 1.0 {
-        return;
-    }
-    let d = dir / len;
-    let n = egui::vec2(-d.y, d.x);
-    let s = 8.0;
-    let p2 = to - d * s + n * (s * 0.5);
-    let p3 = to - d * s - n * (s * 0.5);
-    painter.add(egui::Shape::convex_polygon(vec![to, p2, p3], col, egui::Stroke::NONE));
-}
-
-/// Paint the cached gizmo with the egui painter. Geometry is physical pixels; the
-/// painter works in logical points, so divide by `ppp`.
-fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, grabbed: Option<Handle>, ppp: f32) {
-    use egui::{Color32, Pos2, Stroke};
-    let pt = |v: Vec2| Pos2::new(v.x / ppp, v.y / ppp);
-    let axis_col = [
-        Color32::from_rgb(220, 70, 70),
-        Color32::from_rgb(80, 200, 90),
-        Color32::from_rgb(80, 130, 235),
-    ];
-    let active = |h: Handle| grabbed == Some(h) || g.hovered == Some(h);
-    let center = pt(g.center);
-    match tool {
-        Tool::Move => {
-            for i in 0..3 {
-                if let Some(tip) = g.tips[i] {
-                    let on = active(handle_for_axis(i));
-                    let col = brighten(axis_col[i], on);
-                    let tp = pt(tip);
-                    painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
-                    arrow_head(painter, center, tp, col);
-                }
-            }
-            let on = active(Handle::Center);
-            painter.rect_filled(
-                egui::Rect::from_center_size(center, egui::vec2(9.0, 9.0)),
-                0.0,
-                brighten(Color32::from_gray(210), on),
-            );
-        }
-        Tool::Scale => {
-            for i in 0..3 {
-                if let Some(tip) = g.tips[i] {
-                    let on = active(handle_for_axis(i));
-                    let col = brighten(axis_col[i], on);
-                    let tp = pt(tip);
-                    painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
-                    painter.rect_filled(egui::Rect::from_center_size(tp, egui::vec2(8.0, 8.0)), 0.0, col);
-                }
-            }
-            let on = active(Handle::Center);
-            painter.rect_filled(
-                egui::Rect::from_center_size(center, egui::vec2(10.0, 10.0)),
-                0.0,
-                brighten(Color32::from_gray(210), on),
-            );
-        }
-        Tool::Rotate => {
-            // The trackball (free-rotate) ring first, so axis rings draw on top.
-            let on_c = active(Handle::Center);
-            let cring: Vec<Pos2> = g.center_ring.iter().map(|v| pt(*v)).collect();
-            if cring.len() >= 2 {
-                painter.line(cring, Stroke::new(if on_c { 3.0 } else { 1.5 }, brighten(Color32::from_gray(170), on_c)));
-            }
-            for i in 0..3 {
-                let on = active(handle_for_axis(i));
-                let col = brighten(axis_col[i], on);
-                let pts: Vec<Pos2> = g.ring_pts[i].iter().map(|v| pt(*v)).collect();
-                if pts.len() >= 2 {
-                    painter.line(pts, Stroke::new(if on { 3.5 } else { 2.0 }, col));
-                }
-            }
-            painter.circle_filled(center, 3.0, Color32::from_gray(200));
-        }
-        Tool::Select | Tool::Sculpt => {}
-    }
-}
-
-// ============================================================================
-// Dockable panel system (egui_dock): Hierarchy / Inspector / Assets / Scene /
-// Scripting. The Scene tab is transparent so the 3D viewport shows through it;
-// all other tabs paint an opaque background over the full-window render.
-// ============================================================================
-
 /// Which dockable panel a tab shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EditorTab {
@@ -1585,6 +1336,10 @@ enum EditorTab {
     Scene,
     Game,
     Scripting,
+    /// The animation timeline (dopesheet): preview, scrub, record keys, events.
+    Animation,
+    /// The animation controller graph: states, transitions, fades, layers.
+    AnimGraph,
 }
 
 impl EditorTab {
@@ -1598,6 +1353,8 @@ impl EditorTab {
             EditorTab::Scene => "⌖ Scene",
             EditorTab::Game => "⏵ Game",
             EditorTab::Scripting => "Scripting",
+            EditorTab::Animation => "✎ Animating",
+            EditorTab::AnimGraph => "◉ Controller",
         }
     }
 }
@@ -1636,8 +1393,17 @@ fn default_dock() -> egui_dock::DockState<EditorTab> {
     // Inspector + Terrain tabs share the right dock (Inspector shown first).
     let [central, _] =
         surface.split_right(central, 0.78, vec![EditorTab::Inspector, EditorTab::Terrain]);
-    // Console sits as a tab beside Assets in the bottom dock (Assets shown first).
-    let [_, _] = surface.split_below(central, 0.72, vec![EditorTab::Assets, EditorTab::Console]);
+    // Console + the animation tabs sit beside Assets in the bottom dock.
+    let [_, _] = surface.split_below(
+        central,
+        0.72,
+        vec![
+            EditorTab::Assets,
+            EditorTab::Console,
+            EditorTab::Animation,
+            EditorTab::AnimGraph,
+        ],
+    );
     dock
 }
 
@@ -1699,180 +1465,7 @@ enum ProjectAction {
     Close,
 }
 
-/// The built-in Scripting docs, shown on the IDE's Docs page.
-const SCRIPT_DOCS: &str = "\
-Floptle Scripting — Lua
-=======================
 
-Game logic is written in Lua. A script is a `.lua` file in your project's
-`scripts/` folder; attach it to a node and it runs every frame while playing.
-A script defines plain functions and a `defaults` table:
-
-    -- spin.lua
-    defaults = { speed = 45 }          -- tunables (also shown in the Inspector)
-
-    function start(node)               -- once, when play begins (optional)
-    end
-
-    function update(node, dt)          -- every frame while playing
-      node.yaw = node.yaw + math.rad(params.speed) * dt
-    end
-
-Each script keeps its own state across frames (set a variable in start, read it
-in update) and hot-reloads the moment you save the file. `+=  -=  *=  /=  ..=`
-and friends work too.
-
-
-1. THE NODE — transform
------------------------
-`node` is synced from the node's transform before each call and read back after,
-so setting a field moves the object:
-  • node.x, node.y, node.z              position (world units)
-  • node.yaw, node.pitch, node.roll     rotation, in radians
-  • node.scale                          uniform scale (shortcut)
-  • node.scale_x / scale_y / scale_z    per-axis scale
-
-
-2. THE NODE — physics body
---------------------------
-These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
-◆ Rigidbody). Drive the body by its velocity instead of teleporting it:
-  • node.vx, node.vy, node.vz   velocity (m/s) — READ the current value, modify,
-                                and WRITE it back; the engine integrates it
-  • node.grounded               true while the body rests on a surface (read-only)
-  • node.up_x, node.up_y, node.up_z   the body's up = −gravity (read-only):
-                                [0,1,0] on a flat world, RADIAL on a planet —
-                                move along it and you handle planets for free
-  • node.height                 capsule standing height — write a smaller value
-                                to crouch (the engine shrinks it, feet planted)
-
-
-3. INPUT (play mode)
---------------------
-  • input.key(\"w\")          true while held. Names: a-z, 0-9, space, enter,
-                            shift, ctrl, alt, left/right/up/down, escape, tab
-  • input.pressed(\"space\")  true only on the frame it goes DOWN (an edge)
-  • input.released(\"space\") true only on the frame it goes UP (an edge)
-  • input.axis(\"a\", \"d\")    -1 / 0 / 1 from a negative/positive key pair
-  • input.button(1)         mouse button held (0 left, 1 right, 2 middle)
-  • input.clicked(1)        mouse button pressed this frame (an edge)
-  • local dx, dy = input.mouse_delta()   mouse movement since last frame
-  • local x, y  = input.mouse()          cursor position in pixels
-  • input.scroll()          wheel delta this frame
-
-
-4. RAYCAST
-----------
-  • raycast(ox,oy,oz, dx,dy,dz, max)  cast a ray against the terrain + mesh
-    colliders. Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
-
-    -- is there ground within 1.2 units below me?
-    local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2)
-    if h then  -- h.y is the ground height, h.ny the slope --  end
-
-  Use it for ground checks, line-of-sight, shooting, placing things on a surface.
-
-
-5. REFERENCING OTHER NODES & SCRIPTS
-------------------------------------
-Reach beyond your own node — traverse the hierarchy, find any node/script in
-the scene, and call into other scripts to build systems that span many files.
-
-  Node handles (your `node`, and any node you reach, share the same fields):
-  • node.name / node.id        this node's name / a stable numeric id
-  • node.parent                the parent node handle (or nil)
-  • node:getparent()           same as node.parent
-  • node:children()            array of child handles
-  • node:getchild(\"Gun\")       first child with that name (or nil)
-  • node:find(\"Muzzle\")        first DESCENDANT (any depth) with that name
-  • node:getscript(\"health\")   a script handle on this node (or nil)
-
-  Scene-wide lookups (globals):
-  • find(\"Player\")             first node in the scene with that name (or nil)
-  • findAll(\"Coin\")            array of every node with that name
-  • findScript(\"GameManager\")  script handle for the first node running that
-                               script anywhere — the MANAGER pattern (or nil)
-
-  A script handle talks to another script:
-  • mgr.score                  read a variable it declared (its state)
-  • mgr.score = 10             write that variable
-  • mgr.addScore(5)            call a function it defines
-  • mgr.params                 its params table   • mgr.node  its node handle
-
-    -- a coin hands its points to the shared manager
-    local mgr = findScript(\"manager\")
-    if mgr then mgr.addScore(10) end
-
-Inside a script's own functions, `node` is always ITS node, so a method called
-from elsewhere still acts on the right object. Handles stay valid across frames —
-cache a lookup in start() and reuse it.
-
-
-ASSETS, MODELS & MATERIALS
---------------------------
-Reference files under Assets/ in code, and swap a node's components at runtime.
-  • assets.getFile(\"models/x.glb\")   the file's path (or nil) — pass it to model/material
-  • assets.getContents(\"models\")      array of EVERY file under a folder (recursive)
-  • node.model                        a Mesh node's model — assign to SWAP it live
-  • node.material = \"Gold\"             apply a material preset (a name, or a .ron path)
-  • node.visible = false               hide / show the node's geometry (true to show)
-
-    -- equip a different model on a key press
-    if input.pressed(\"e\") then node.model = assets.getFile(\"models/gold.glb\") end
-
-(Right-click an asset ▸ Copy asset path to grab the string to type.)
-
-
-6. GLOBALS
-----------
-  • params   this instance's tunables — a table SEEDED from `defaults`, so
-             `params.speed` works out of the box; the Inspector overrides them
-  • time     seconds since play started
-  • dt       seconds since the last frame (also passed to update)
-  • log(\"...\")   print to the engine console
-  • the full Lua standard library (math, string, table, …)
-
-
-7. MAKING A CHARACTER YOU CAN WALK AROUND AS
---------------------------------------------
-The first-person recipe (no glue code needed):
-  1. Add a Camera node; mark it Active.
-  2. Give it a Rigidbody, shape = Capsule.
-  3. Attach `character.lua`.
-Press Play — you ARE the capsule: it moves under physics and the camera rides
-it. Hold right-mouse to look, WASD to move, Space to jump, Shift to run, hold C
-to crouch. It works on flat ground AND around Radial-gravity planets.
-
-A minimal controller, to show the velocity loop:
-
-    defaults = { speed = 6, jump = 7 }
-    function update(node, dt)
-      local f = (input.key(\"w\") and 1 or 0) - (input.key(\"s\") and 1 or 0)
-      local vy = node.vy                          -- keep gravity/jump
-      if node.grounded and input.pressed(\"space\") then vy = params.jump end
-      node.vx = -math.sin(node.yaw) * f * params.speed
-      node.vz = -math.cos(node.yaw) * f * params.speed
-      node.vy = vy
-    end
-
-
-ATTACHING & RUNNING
--------------------
-• Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
-  section, or use Inspector ⏵ Scripting ⏵ + Add Script.
-• F1 = ⏵ Play / ⏹ Stop, F2 = pause the clock. Stop restores the scene.
-• The Inspector edits a script's params live; errors show at the top of this tab.
-
-Bundled examples (in scripts/): character.lua (walkable character), freelook.lua
-(fly camera), rotate.lua, pulsate.lua, float.lua — open one for a working start.";
-
-/// One script file open in the in-engine IDE.
-struct OpenScript {
-    path: String,
-    name: String,
-    text: String,
-    dirty: bool,
-}
 
 /// One line in the engine Console. Consecutive identical lines are merged at ingest
 /// (`count`), and `source` (script name + line) drives double-click-to-source.
@@ -1926,159 +1519,6 @@ impl ConsoleState {
     }
 }
 
-/// State of the Scripting-tab IDE: the open files and which one is shown
-/// (`None` = the built-in Docs page).
-struct IdeState {
-    open: Vec<OpenScript>,
-    active: Option<usize>,
-    /// A pending "scroll to this 1-based line" request (Console jump-to-source),
-    /// consumed by `scripting_ui` on the next frame it draws the editor.
-    goto: Option<usize>,
-    /// Ctrl+F find-in-file: bar open, the query, and a one-shot focus request.
-    find_open: bool,
-    find_query: String,
-    find_focus: bool,
-    /// The previous frame's find query, so we can jump to the first match as you type.
-    find_last: String,
-    /// "Find all references" results (most recent search) + the word searched.
-    refs: Vec<RefHit>,
-    refs_word: String,
-    /// The identifier captured at the last right-click, so the context menu stays stable
-    /// while it's open (the live hover position moves onto the menu and would flicker).
-    rc_word: Option<String>,
-}
-
-/// One "find all references" result: the file, its display name, the 1-based line, and
-/// that line's text.
-struct RefHit {
-    path: String,
-    name: String,
-    line: usize,
-    text: String,
-}
-
-impl Default for IdeState {
-    fn default() -> Self {
-        Self {
-            open: Vec::new(),
-            active: None,
-            goto: None,
-            find_open: false,
-            find_query: String::new(),
-            find_focus: false,
-            find_last: String::new(),
-            refs: Vec::new(),
-            refs_word: String::new(),
-            rc_word: None,
-        }
-    }
-}
-
-/// Byte ranges of every occurrence of `needle` in `hay`, case-insensitive (ASCII).
-/// Offsets are valid byte indices into `hay` (an ASCII needle only matches at ASCII
-/// byte positions, so multi-byte UTF-8 in `hay` is never split).
-fn find_ranges(hay: &str, needle: &str) -> Vec<(usize, usize)> {
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let (hb, nb) = (hay.as_bytes(), needle.as_bytes());
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + nb.len() <= hb.len() {
-        if (0..nb.len()).all(|k| hb[i + k].eq_ignore_ascii_case(&nb[k])) {
-            out.push((i, i + nb.len()));
-            i += nb.len();
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
-}
-
-/// Append whole-word, case-sensitive occurrences of `word` in `text` (one per line) to
-/// `out` as [`RefHit`]s — the engine of "find all references".
-fn collect_word_hits(path: &str, name: &str, text: &str, word: &str, out: &mut Vec<RefHit>) {
-    if word.is_empty() {
-        return;
-    }
-    for (ln, line) in text.lines().enumerate() {
-        let lb = line.as_bytes();
-        for (s, _) in line.match_indices(word) {
-            let e = s + word.len();
-            let before_ok = s == 0 || !is_ident_byte(lb[s - 1]);
-            let after_ok = e >= lb.len() || !is_ident_byte(lb[e]);
-            if before_ok && after_ok {
-                out.push(RefHit {
-                    path: path.to_string(),
-                    name: name.to_string(),
-                    line: ln + 1,
-                    text: line.trim().to_string(),
-                });
-                break; // one hit per line keeps the list readable
-            }
-        }
-    }
-}
-
-/// The 1-based line where `word` is *defined* in Lua source (a function or assignment),
-/// or None. Heuristic — good enough for go-to-definition in a scripting IDE.
-fn find_definition_line(text: &str, word: &str) -> Option<usize> {
-    if word.is_empty() {
-        return None;
-    }
-    for (n, raw) in text.lines().enumerate() {
-        let line = raw.trim_start();
-        let starts = [
-            format!("function {word}("),
-            format!("function {word} "),
-            format!("local function {word}("),
-            format!("local function {word} "),
-            format!("local {word} ="),
-            format!("local {word}="),
-        ];
-        if starts.iter().any(|p| line.starts_with(p.as_str())) {
-            return Some(n + 1);
-        }
-        // `function Table.word(` / `function Table:word(`
-        if line.starts_with("function ")
-            && (line.contains(&format!(".{word}(")) || line.contains(&format!(":{word}(")))
-        {
-            return Some(n + 1);
-        }
-        // Global assignment `word = ...` at line start (whole identifier, not `==`).
-        if let Some(rest) = line.strip_prefix(word) {
-            let rest = rest.trim_start();
-            if let Some(after) = rest.strip_prefix('=') {
-                if !after.starts_with('=') {
-                    return Some(n + 1);
-                }
-            }
-        }
-    }
-    None
-}
-
-impl IdeState {
-    /// Open `path` in the IDE (or focus it if already open). Returns false on read error.
-    fn open_file(&mut self, path: &str) -> bool {
-        if let Some(i) = self.open.iter().position(|f| f.path == path) {
-            self.active = Some(i);
-            return true;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else { return false };
-        let name = std::path::Path::new(path)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
-        self.open.push(OpenScript { path: path.to_string(), name, text, dirty: false });
-        self.active = Some(self.open.len() - 1);
-        true
-    }
-}
 
 /// Renders each dockable tab against borrowed slices of the editor's state, and
 /// records UI intents on `cmd` to be applied after the frame.
@@ -2119,7 +1559,7 @@ struct EditorTabViewer<'a> {
     terrain_detail: &'a mut u32,
     terrain_textures: &'a mut Vec<String>,
     terrain_present: bool,
-    terrain_voxels: Option<(u32, u32, u32)>,
+    terrain_voxels: Option<(usize, u64)>,
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,
@@ -2138,6 +1578,8 @@ struct EditorTabViewer<'a> {
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
     contact_gizmos: &'a [(Vec2, Vec2)],
+    /// Script `gizmo.*` debug lines (projected px + 0-1 color) — Scene view only.
+    script_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
     terrain_wire: &'a [(Vec2, Vec2)],
     mesh_wire: &'a [(Vec2, Vec2)],
     show_gizmos: &'a mut bool,
@@ -2157,6 +1599,16 @@ struct EditorTabViewer<'a> {
     ppp: f32,
     /// The selected code-editor theme index (into `CODE_THEMES`) for the Scripting tab.
     code_theme: usize,
+    /// Animation registries + live runtimes (the animation UI reads/edits them).
+    anim: &'a mut anim::AnimSystem,
+    /// Animation UI state (graph window + Animating tab).
+    anim_ui: &'a mut anim_ui::AnimUiState,
+    /// Registered models — rig lookups for the animation UI.
+    mesh_registry: &'a HashMap<String, MeshAsset>,
+    /// A pointer button is down this frame (asset saves coalesce to release).
+    pointer_down: bool,
+    /// Play mode is running (the Animating tab disables preview/record).
+    playing: bool,
     cmd: &'a mut EditorCmd,
 }
 
@@ -2206,6 +1658,8 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Scene => self.scene_ui(ui, false),
             EditorTab::Game => self.scene_ui(ui, true),
             EditorTab::Scripting => self.scripting_ui(ui),
+            EditorTab::Animation => self.animating_ui(ui),
+            EditorTab::AnimGraph => self.anim_graph_tab_ui(ui),
         }
     }
 }
@@ -2264,6 +1718,13 @@ impl<'a> EditorTabViewer<'a> {
     /// right-click (creates at scene root, `parent = None`), and each node's
     /// "Add child" submenu (`parent = Some(e)`).
     fn node_new_menu(&mut self, ui: &mut egui::Ui, parent: Option<Entity>) {
+        node_new_menu(ui, self.cmd, parent);
+    }
+}
+
+/// The shared node-creation catalog (Hierarchy ✚ New, ✚ Add child, and the
+/// menu-bar Add menu all list the same things).
+fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Option<Entity>) {
         let mut pick: Option<MatterDoc> = None;
         if ui.button("■ Cube").clicked() {
             pick = Some(new_cube());
@@ -2291,11 +1752,11 @@ impl<'a> EditorTabViewer<'a> {
         }
         ui.separator();
         if ui.button("Δ Terrain").on_hover_text("a sculptable SDF terrain node").clicked() {
-            self.cmd.create_terrain = true;
+            cmd.open_new_terrain = true;
             ui.close();
         }
         if ui.button("⌖ Camera").on_hover_text("a viewpoint you can give play-mode authority").clicked() {
-            self.cmd.add_camera = Some(parent);
+            cmd.add_camera = Some(parent);
             ui.close();
         }
         if ui.button("● Point Light").on_hover_text("a placeable omni light (color / intensity / range)").clicked() {
@@ -2312,12 +1773,13 @@ impl<'a> EditorTabViewer<'a> {
         }
         if let Some(m) = pick {
             match parent {
-                Some(p) => self.cmd.add_parented = Some((m, p)),
-                None => self.cmd.add = Some(m),
+                Some(p) => cmd.add_parented = Some((m, p)),
+                None => cmd.add = Some(m),
             }
         }
-    }
+}
 
+impl<'a> EditorTabViewer<'a> {
     /// Render one hierarchy row (indented by `depth`) + its children. The row is a
     /// drag source (drop it on another row to re-parent) and a drop target (for a
     /// dragged node or a script).
@@ -2466,6 +1928,11 @@ impl<'a> EditorTabViewer<'a> {
             if is_model(&path) {
                 ui.label("glTF model — drag onto the scene to place it.");
                 self.asset_preview_ui(ui);
+                self.model_asset_anim_ui(ui, &path);
+            } else if anim_ui::is_anim_clip(&path) {
+                self.clip_asset_ui(ui, &path);
+            } else if anim_ui::is_anim_ctl(&path) {
+                self.ctl_asset_ui(ui, &path);
             } else if is_material(&path) {
                 ui.label("material preset");
                 self.asset_preview_ui(ui);
@@ -3041,6 +2508,9 @@ impl<'a> EditorTabViewer<'a> {
                     });
                 }
 
+                // ===== Animation Controller (when attached) =====
+                anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
+
                 // ===== ➕ Add Component (searchable, icon'd) =====
                 ui.separator();
                 ui.add_space(2.0);
@@ -3094,6 +2564,8 @@ impl<'a> EditorTabViewer<'a> {
                         Preset(String),
                         Script(String),
                         Type(Matter),
+                        AnimCtl(String),
+                        AnimNew,
                     }
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
@@ -3106,6 +2578,18 @@ impl<'a> EditorTabViewer<'a> {
                     }
                     if !has_mat {
                         items.push(("Rendering", "◑  Material".into(), Add::Mat));
+                    }
+                    // Animation Controller: attach an existing controller asset, or
+                    // create a fresh one (opens the graph editor).
+                    if world.get::<floptle_core::AnimController>(e).is_none() {
+                        items.push((
+                            "Animation",
+                            "▶  Animation Controller (new)".into(),
+                            Add::AnimNew,
+                        ));
+                        for (k, _) in self.anim.controllers.iter() {
+                            items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
+                        }
                     }
                     for (name, _) in self.materials {
                         items.push(("Rendering", format!("◑  {name}  (preset)"), Add::Preset(name.clone())));
@@ -3171,6 +2655,7 @@ impl<'a> EditorTabViewer<'a> {
                         for cat in [
                             "Physics",
                             "Rendering",
+                            "Animation",
                             "Scripts",
                             "Type — replaces current",
                             "Mesh — replaces type",
@@ -3193,6 +2678,10 @@ impl<'a> EditorTabViewer<'a> {
                                         Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
                                         Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
                                         Add::Type(mt) => cmd.set_matter = Some((e, mt.clone())),
+                                        Add::AnimCtl(k) => {
+                                            cmd.set_anim_controller = Some((e, Some(k.clone())))
+                                        }
+                                        Add::AnimNew => cmd.new_anim_controller = Some(Some(e)),
                                     }
                                     picked = true;
                                     ui.close();
@@ -3294,12 +2783,12 @@ impl<'a> EditorTabViewer<'a> {
                     ui.selectable_value(&mut *terrain_detail, 144, "Ultra");
                 });
         });
-        if let Some((a, b, c)) = terrain_voxels {
-            ui.small(format!("combined: {a}×{b}×{c} voxels"));
+        if let Some((n, total)) = terrain_voxels {
+            ui.small(format!("{n} volume(s) · {total} voxels (native per-volume)"));
         }
         // New terrains can be added any time — each is a node you place + blend.
         if ui.button("✚ New terrain").on_hover_text("adds another terrain node at the cursor; overlapping terrains blend").clicked() {
-            cmd.create_terrain = true;
+            cmd.open_new_terrain = true;
         }
         if !terrain_present {
             ui.small("Adds a flat slab; then press 5 (Sculpt) and LMB-drag. Add more — they fuse where they overlap.");
@@ -3544,7 +3033,7 @@ impl<'a> EditorTabViewer<'a> {
     /// payload (models/scripts), and the shared context menu.
     fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str) {
         let selected = self.selected_asset.as_deref() == Some(path);
-        let draggable = is_model(path) || is_script(path);
+        let draggable = is_model(path) || is_script(path) || anim_ui::is_anim_clip(path);
         let resp = self.tile_frame(ui, icon, color, name, selected);
         if draggable {
             resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
@@ -3556,6 +3045,12 @@ impl<'a> EditorTabViewer<'a> {
         if resp.double_clicked() {
             if is_scene(path) {
                 self.cmd.open_scene = Some(path.to_string());
+            } else if anim_ui::is_anim_ctl(path) {
+                self.cmd.open_anim_graph = Some(anim::asset_key(
+                    Path::new(path),
+                    self.project_root,
+                    floptle_scene::ANIM_CTL_EXT,
+                ));
             } else if openable {
                 self.cmd.open_script_pref = Some(path.to_string());
             }
@@ -3647,6 +3142,11 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_new_scene = true;
             ui.close();
         }
+        if ui.button("◉ New Animation Controller").clicked() {
+            self.cmd.new_anim_controller = Some(None);
+            self.cmd.new_anim_controller_dir = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
     }
 
     fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry], dir: &Path) {
@@ -3671,7 +3171,7 @@ impl<'a> EditorTabViewer<'a> {
                 AssetEntry::File { name, path } => {
                     let model = is_model(path);
                     let script = is_script(path);
-                    let draggable = model || script;
+                    let draggable = model || script || anim_ui::is_anim_clip(path);
                     let selected = self.selected_asset.as_deref() == Some(path.as_str());
                     let (icon, _) = asset_kind_icon(path);
                     let grip = if draggable { "¦" } else { " " };
@@ -3705,6 +3205,12 @@ impl<'a> EditorTabViewer<'a> {
                     if resp.double_clicked() {
                         if is_scene(path) {
                             self.cmd.open_scene = Some(path.clone());
+                        } else if anim_ui::is_anim_ctl(path) {
+                            self.cmd.open_anim_graph = Some(anim::asset_key(
+                                Path::new(path),
+                                self.project_root,
+                                floptle_scene::ANIM_CTL_EXT,
+                            ));
                         } else if openable {
                             self.cmd.open_script_pref = Some(path.clone());
                         }
@@ -3845,7 +3351,7 @@ impl<'a> EditorTabViewer<'a> {
         if let Some(g) = self.gizmo.filter(|_| !game) {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("gizmo")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("gizmo")))
                 .with_clip_rect(rect);
             paint_gizmo(&painter, g, self.tool, self.grabbed, self.ppp);
         }
@@ -3855,7 +3361,7 @@ impl<'a> EditorTabViewer<'a> {
         if let Some(viz) = self.terrain_viz.filter(|_| !game) {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_brush")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("terrain_brush")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -3876,7 +3382,7 @@ impl<'a> EditorTabViewer<'a> {
         if !game && !self.camera_gizmos.is_empty() {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("camera_gizmos")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("camera_gizmos")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -3897,7 +3403,7 @@ impl<'a> EditorTabViewer<'a> {
         if !game && !self.light_gizmos.is_empty() {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("light_gizmos")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("light_gizmos")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -3913,7 +3419,7 @@ impl<'a> EditorTabViewer<'a> {
         if !game && (!self.body_gizmos.is_empty() || !self.contact_gizmos.is_empty()) {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("physics_gizmos")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("physics_gizmos")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -3933,7 +3439,7 @@ impl<'a> EditorTabViewer<'a> {
         if !game && !self.terrain_wire.is_empty() {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("terrain_wire")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("terrain_wire")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -3943,11 +3449,30 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
+        // Script debug gizmos (`gizmo.*`): Scene view only — like every other
+        // gizmo, the Game view stays clean (what the player would actually see).
+        if !game && !self.script_gizmo_lines.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("script_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            for (a, b, c) in self.script_gizmo_lines {
+                let col = egui::Color32::from_rgb(
+                    (c[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (c[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (c[2].clamp(0.0, 1.0) * 255.0) as u8,
+                );
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(2.0, col));
+            }
+        }
+
         // Mesh collider wireframes (imported maps flagged walkable) — a cyan triangle net.
         if !game && !self.mesh_wire.is_empty() {
             let painter = ui
                 .ctx()
-                .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("mesh_wire")))
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("mesh_wire")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
@@ -4242,1122 +3767,6 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// Populate the IDE's "references" list with every whole-word, case-sensitive use of
-    /// `word` across all open buffers (using their live, unsaved text) plus every other
-    /// `.lua` file in the project's scripts directory.
-    fn gather_references(&mut self, word: &str) {
-        let mut hits = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for f in &self.ide.open {
-            seen.insert(f.path.clone());
-            collect_word_hits(&f.path, &f.name, &f.text, word, &mut hits);
-        }
-        let dir = self.project_root.join("scripts");
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for entry in rd.flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()) != Some("lua") {
-                    continue;
-                }
-                let ps = p.to_string_lossy().to_string();
-                if seen.contains(&ps) {
-                    continue;
-                }
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    let name =
-                        p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    collect_word_hits(&ps, &name, &text, word, &mut hits);
-                }
-            }
-        }
-        self.ide.refs = hits;
-        self.ide.refs_word = word.to_string();
-    }
-
-    /// Jump to where `word` is defined: the active file first, then the other open files,
-    /// then the project's scripts on disk. Falls back to "find all references" if no
-    /// definition is found (so Ctrl+B / the menu item always does something useful).
-    fn goto_definition(&mut self, word: &str) {
-        let active = self.ide.active.filter(|&a| a < self.ide.open.len());
-        if let Some(a) = active {
-            if let Some(line) = find_definition_line(&self.ide.open[a].text, word) {
-                self.ide.goto = Some(line);
-                return;
-            }
-        }
-        // Other already-open files.
-        let others: Vec<(String, String)> = self
-            .ide
-            .open
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| Some(*idx) != active)
-            .map(|(_, f)| (f.path.clone(), f.text.clone()))
-            .collect();
-        for (path, text) in others {
-            if let Some(line) = find_definition_line(&text, word) {
-                if self.ide.open_file(&path) {
-                    self.ide.goto = Some(line);
-                }
-                return;
-            }
-        }
-        // Scripts on disk that aren't open yet.
-        let open_paths: std::collections::HashSet<String> =
-            self.ide.open.iter().map(|f| f.path.clone()).collect();
-        let dir = self.project_root.join("scripts");
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            let mut files: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("lua"))
-                .collect();
-            files.sort();
-            for p in files {
-                let ps = p.to_string_lossy().to_string();
-                if open_paths.contains(&ps) {
-                    continue;
-                }
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if let Some(line) = find_definition_line(&text, word) {
-                        if self.ide.open_file(&ps) {
-                            self.ide.goto = Some(line);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-        // No definition found — show references so Ctrl+B still helps.
-        self.gather_references(word);
-    }
-
-    fn scripting_ui(&mut self, ui: &mut egui::Ui) {
-        // Live script errors (from the last play frame) surface here in red.
-        if !self.script_errors.is_empty() {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgb(60, 20, 20))
-                .inner_margin(6.0)
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Δ script errors").strong().color(egui::Color32::from_rgb(255, 150, 150)));
-                    for e in self.script_errors {
-                        ui.label(egui::RichText::new(e).monospace().color(egui::Color32::from_rgb(255, 180, 180)));
-                    }
-                });
-        }
-        // Tab strip: Docs + each open file.
-        ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.ide.active.is_none(), "§ Docs").clicked() {
-                self.ide.active = None;
-            }
-            let mut close: Option<usize> = None;
-            for i in 0..self.ide.open.len() {
-                let f = &self.ide.open[i];
-                let title = if f.dirty { format!("{} *", f.name) } else { f.name.clone() };
-                if ui.selectable_label(self.ide.active == Some(i), title).clicked() {
-                    self.ide.active = Some(i);
-                }
-                if ui.small_button("×").clicked() {
-                    close = Some(i);
-                }
-            }
-            if let Some(i) = close {
-                self.ide.open.remove(i);
-                self.ide.active = match self.ide.active {
-                    Some(a) if a == i => None,
-                    Some(a) if a > i => Some(a - 1),
-                    other => other,
-                };
-            }
-        });
-        ui.separator();
-
-        match self.ide.active {
-            None => {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.monospace(SCRIPT_DOCS);
-                    ui.add_space(12.0);
-                    ui.separator();
-                    egui::CollapsingHeader::new("§ API reference")
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            ui.small("Hover an entry for details. (Inside a script, start typing for the same suggestions inline.)");
-                            ui.add_space(4.0);
-                            for e in LUA_API {
-                                ui.horizontal(|ui| {
-                                    ui.monospace(
-                                        egui::RichText::new(e.label)
-                                            .color(egui::Color32::from_rgb(78, 201, 176)),
-                                    )
-                                    .on_hover_text(e.doc);
-                                    ui.small(e.doc);
-                                });
-                            }
-                        });
-                });
-            }
-            Some(i) if i < self.ide.open.len() => {
-                ui.horizontal(|ui| {
-                    ui.small(self.ide.open[i].path.clone());
-                    if ui.button("Save").clicked() {
-                        let f = &mut self.ide.open[i];
-                        if std::fs::write(&f.path, &f.text).is_ok() {
-                            f.dirty = false;
-                            self.cmd.refresh_assets = true;
-                        }
-                    }
-                    if ui
-                        .button("⏵ Open in IDE")
-                        .on_hover_text("Open the project in your external editor (set it in Project Settings)")
-                        .clicked()
-                    {
-                        // Save first so the external editor sees the latest text.
-                        let f = &mut self.ide.open[i];
-                        if std::fs::write(&f.path, &f.text).is_ok() {
-                            f.dirty = false;
-                        }
-                        self.cmd.open_in_editor = Some(self.ide.open[i].path.clone());
-                    }
-                    ui.menu_button("Insert snippet", |ui| {
-                        for (label, snippet) in LUA_SNIPPETS {
-                            if ui.button(*label).clicked() {
-                                self.ide.open[i].text.push_str(snippet);
-                                self.ide.open[i].dirty = true;
-                                ui.close();
-                            }
-                        }
-                    });
-                });
-                // Hint: the tunables this script declares via its `defaults` table.
-                let hint = script_hint(&self.ide.open[i].text);
-                if !hint.is_empty() {
-                    ui.small(egui::RichText::new(hint).color(egui::Color32::from_gray(160)));
-                }
-                // Code editor: Lua syntax highlighting (plain for non-Lua files), a
-                // line-number gutter, an autocomplete popup and red squiggles.
-                let editor_id = egui::Id::new(("ide_editor", self.ide.open[i].path.clone()));
-                // Ctrl+F toggles the find-in-file bar (and focuses it).
-                if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::F)) {
-                    self.ide.find_open = true;
-                    self.ide.find_focus = true;
-                }
-                if self.ide.find_open {
-                    let text = self.ide.open[i].text.clone();
-                    let ranges = find_ranges(&text, &self.ide.find_query);
-                    // Jump to the first match as you type (live search).
-                    let live = self.ide.find_query != self.ide.find_last;
-                    self.ide.find_last = self.ide.find_query.clone();
-                    let (mut do_next, mut do_prev, mut close) = (false, false, false);
-                    ui.horizontal(|ui| {
-                        ui.label("🔍");
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(&mut self.ide.find_query)
-                                .desired_width(200.0)
-                                .hint_text("find (Enter = next)"),
-                        );
-                        if self.ide.find_focus {
-                            resp.request_focus();
-                            self.ide.find_focus = false;
-                        }
-                        if resp.lost_focus() && ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                            if ui.input(|inp| inp.modifiers.shift) { do_prev = true } else { do_next = true }
-                        }
-                        if ui.button("◀").on_hover_text("previous match").clicked() { do_prev = true; }
-                        if ui.button("▶").on_hover_text("next match").clicked() { do_next = true; }
-                        ui.label(
-                            if self.ide.find_query.is_empty() { String::new() }
-                            else if ranges.is_empty() { "no matches".to_string() }
-                            else { format!("{} matches", ranges.len()) },
-                        );
-                        if ui.button("✕").on_hover_text("close (Esc)").clicked() { close = true; }
-                    });
-                    if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) { close = true; }
-                    if (do_next || do_prev || live) && !ranges.is_empty() {
-                        let cur = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                            .and_then(|s| s.cursor.char_range())
-                            .map(|r| r.primary.index.0)
-                            .unwrap_or(0);
-                        let char_starts: Vec<usize> =
-                            ranges.iter().map(|&(a, _)| text[..a].chars().count()).collect();
-                        let idx = if do_prev {
-                            char_starts.iter().rposition(|&a| a < cur).unwrap_or(char_starts.len() - 1)
-                        } else if live {
-                            // Live: the first match at or after the caret (don't skip one under it).
-                            char_starts.iter().position(|&a| a >= cur).unwrap_or(0)
-                        } else {
-                            char_starts.iter().position(|&a| a > cur).unwrap_or(0)
-                        };
-                        let (bs, be) = ranges[idx];
-                        let cs = text[..bs].chars().count();
-                        let ce = text[..be].chars().count();
-                        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
-                            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                                egui::text::CCursor::new(cs),
-                                egui::text::CCursor::new(ce),
-                            )));
-                            state.store(ui.ctx(), editor_id);
-                        }
-                        ui.ctx().memory_mut(|m| m.request_focus(editor_id));
-                        self.ide.goto = Some(text[..bs].matches('\n').count() + 1);
-                    }
-                    if close {
-                        self.ide.find_open = false;
-                    }
-                }
-                let is_lua = self.ide.open[i].path.ends_with(".lua");
-                let font = egui::FontId::monospace(13.0);
-                let lfont = font.clone();
-                let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
-                let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-                    // No wrap (code editor) — logical lines == rows, so the gutter aligns.
-                    let mut job = if is_lua {
-                        lua_highlight(buf.as_str(), lfont.clone(), &theme)
-                    } else {
-                        plain_job(buf.as_str(), lfont.clone(), &theme)
-                    };
-                    job.wrap.max_width = f32::INFINITY;
-                    ui.fonts_mut(|f| f.layout_job(job))
-                };
-                // Whole-line editing shortcuts, intercepted BEFORE the editor consumes the
-                // keys (so they don't type/copy the selection instead). Needs editor focus.
-                if ui.memory(|m| m.has_focus(editor_id)) {
-                    let cursor = egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                        .and_then(|s| s.cursor.char_range());
-                    let empty_sel = cursor.map(|r| r.primary.index == r.secondary.index).unwrap_or(true);
-                    let caret = cursor.map(|r| r.primary.index.0).unwrap_or(0);
-                    // Ctrl+C with no selection → copy the whole current line.
-                    if empty_sel && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::C)) {
-                        ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
-                    }
-                    // Ctrl+X with no selection → cut the whole current line.
-                    if empty_sel && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::X)) {
-                        let clip = line_edit::line_with_newline(&self.ide.open[i].text, caret);
-                        ui.ctx().copy_text(clip);
-                        let new_caret = {
-                            let text = &mut self.ide.open[i].text;
-                            let (s, _e, next) = line_edit::line_bytes(text, caret);
-                            text.replace_range(s..next, "");
-                            line_edit::char_of_byte(text, s)
-                        };
-                        self.ide.open[i].dirty = true;
-                        set_ide_caret(ui.ctx(), editor_id, new_caret);
-                    }
-                    // Ctrl+D → duplicate the current line below.
-                    if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::D)) {
-                        let text = &mut self.ide.open[i].text;
-                        let (s, e, next) = line_edit::line_bytes(text, caret);
-                        let content = text[s..e].to_string();
-                        if next > e {
-                            text.insert_str(next, &format!("{content}\n"));
-                        } else {
-                            text.insert_str(e, &format!("\n{content}"));
-                        }
-                        self.ide.open[i].dirty = true;
-                    }
-                    // Ctrl+/ → toggle a line comment (Lua files).
-                    if is_lua && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::Slash)) {
-                        let text = &mut self.ide.open[i].text;
-                        let (s, e, _next) = line_edit::line_bytes(text, caret);
-                        let line = &text[s..e];
-                        let indent = line.len() - line.trim_start().len();
-                        let trimmed = line.trim_start();
-                        let at = s + indent;
-                        if trimmed.starts_with("-- ") {
-                            text.replace_range(at..at + 3, "");
-                        } else if trimmed.starts_with("--") {
-                            text.replace_range(at..at + 2, "");
-                        } else {
-                            text.insert_str(at, "-- ");
-                        }
-                        self.ide.open[i].dirty = true;
-                    }
-                    // Ctrl+B → go to the definition of the identifier under the caret.
-                    if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::B)) {
-                        let mut w = word_at(&self.ide.open[i].text, caret);
-                        if w.is_empty() && caret > 0 {
-                            w = word_at(&self.ide.open[i].text, caret - 1);
-                        }
-                        if !w.is_empty() {
-                            self.goto_definition(&w);
-                        }
-                    }
-                }
-                // Tab accepts the top completion: if the popup was open last frame,
-                // eat Tab *before* the editor runs so it doesn't shift focus instead.
-                let ac_id = egui::Id::new(("ide_ac_open", editor_id));
-                let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
-                let tab_accept =
-                    ac_was_open && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-                let line_count = self.ide.open[i].text.matches('\n').count() + 1;
-                let output = egui::ScrollArea::both()
-                    .id_salt("ide_scroll")
-                    .show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            // Line-number gutter (aligned with the un-wrapped rows).
-                            let nums: String = (1..=line_count).fold(String::new(), |mut s, n| {
-                                s.push_str(&format!("{n}\n"));
-                                s
-                            });
-                            ui.add(egui::Label::new(
-                                egui::RichText::new(nums).font(font.clone()).color(theme.gutter32()),
-                            ));
-                            // The code editor's background follows the selected editor theme.
-                            ui.style_mut().visuals.extreme_bg_color = theme.bg32();
-                            egui::TextEdit::multiline(&mut self.ide.open[i].text)
-                                .id(editor_id)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(20)
-                                .layouter(&mut layouter)
-                                .show(ui)
-                        })
-                        .inner
-                    })
-                    .inner;
-                if output.response.response.changed() {
-                    self.ide.open[i].dirty = true;
-                }
-                // Current-line + find-match highlights (a subtle wash on top; the low alpha
-                // keeps text readable). Monospace, un-wrapped rows → the column math is exact.
-                {
-                    let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
-                    if output.response.response.has_focus() {
-                        if let Some(cr) = output.cursor_range {
-                            let caret = cr.primary.index.0;
-                            let row = self.ide.open[i].text.chars().take(caret).filter(|&c| c == '\n').count();
-                            if let Some(r) = output.galley.rows.get(row) {
-                                let rr = r.rect();
-                                let clip = ui.clip_rect();
-                                let rect = egui::Rect::from_min_max(
-                                    egui::pos2(clip.left(), output.galley_pos.y + rr.top()),
-                                    egui::pos2(clip.right(), output.galley_pos.y + rr.bottom()),
-                                );
-                                ui.painter().rect_filled(rect, 0.0, theme.cur_line32());
-                            }
-                        }
-                    }
-                    if self.ide.find_open && !self.ide.find_query.is_empty() {
-                        let hl = egui::Color32::from_rgba_unmultiplied(255, 210, 0, 55);
-                        let text = &self.ide.open[i].text;
-                        for (bs, be) in find_ranges(text, &self.ide.find_query) {
-                            let line = text[..bs].matches('\n').count();
-                            let line_start = text[..bs].rfind('\n').map(|p| p + 1).unwrap_or(0);
-                            let col = text[line_start..bs].chars().count();
-                            let len = text[bs..be].chars().count();
-                            if let Some(r) = output.galley.rows.get(line) {
-                                let rr = r.rect();
-                                let x0 = output.galley_pos.x + rr.left() + col as f32 * char_w;
-                                let x1 = x0 + len as f32 * char_w;
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_max(
-                                        egui::pos2(x0, output.galley_pos.y + rr.top()),
-                                        egui::pos2(x1, output.galley_pos.y + rr.bottom()),
-                                    ),
-                                    2.0,
-                                    hl,
-                                );
-                            }
-                        }
-                    }
-                }
-                // Right-click an identifier → Go to definition / Find all references. Capture
-                // the word at the moment of the click (from the pointer position over the
-                // code) and hold it: reading the LIVE hover each frame flickers, because once
-                // the menu opens the pointer sits over the menu, not the word.
-                if output.response.response.secondary_clicked() {
-                    self.ide.rc_word = output
-                        .response
-                        .response
-                        .hover_pos()
-                        .map(|p| {
-                            let cc = output.galley.cursor_from_pos(p - output.galley_pos);
-                            word_at(&self.ide.open[i].text, cc.index.0)
-                        })
-                        .filter(|w| !w.is_empty());
-                }
-                let rc_word = self.ide.rc_word.clone();
-                output.response.response.context_menu(|ui| {
-                    match &rc_word {
-                        Some(w) => {
-                            if ui.button(format!("⧉ Go to definition of \"{w}\"  (Ctrl+B)")).clicked() {
-                                self.goto_definition(w);
-                                ui.close();
-                            }
-                            if ui.button(format!("🔎 Find all references to \"{w}\"")).clicked() {
-                                self.gather_references(w);
-                                ui.close();
-                            }
-                        }
-                        None => {
-                            ui.label("right-click a word for its definition / references");
-                        }
-                    }
-                });
-                // A pending Console jump scrolls the requested line into view.
-                if let Some(line) = self.ide.goto.take() {
-                    let row = line.saturating_sub(1).min(output.galley.rows.len().saturating_sub(1));
-                    if let Some(r) = output.galley.rows.get(row) {
-                        let rr = r.rect();
-                        let target = egui::Rect::from_min_max(
-                            output.galley_pos + rr.left_top().to_vec2(),
-                            output.galley_pos + rr.right_bottom().to_vec2(),
-                        );
-                        ui.scroll_to_rect(target, Some(egui::Align::Center));
-                    }
-                }
-                // Red squiggle on the line of a Lua syntax error.
-                if let Some((line, _)) = self.ide_diag {
-                    let row = line.saturating_sub(1).min(output.galley.rows.len().saturating_sub(1));
-                    if let Some(r) = output.galley.rows.get(row) {
-                        let rr = r.rect();
-                        let y = output.galley_pos.y + rr.bottom();
-                        let x0 = output.galley_pos.x + rr.left();
-                        let x1 = output.galley_pos.x + rr.right().max(rr.left() + 30.0);
-                        ui.painter().line_segment(
-                            [egui::pos2(x0, y), egui::pos2(x1, y)],
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(235, 80, 80)),
-                        );
-                    }
-                }
-                if let Some((line, msg)) = self.ide_diag {
-                    ui.colored_label(egui::Color32::from_rgb(235, 120, 120), format!("Δ line {line}: {msg}"));
-                }
-                let ac_open = self.ide_autocomplete(
-                    ui,
-                    i,
-                    editor_id,
-                    output.response.response.has_focus(),
-                    output.cursor_range,
-                    &output.galley,
-                    output.galley_pos,
-                    tab_accept,
-                );
-                ui.ctx().data_mut(|d| d.insert_temp(ac_id, ac_open));
-
-                // Hover doc: hovering an API identifier in the code shows its tooltip.
-                if let Some(p) = output.response.response.hover_pos() {
-                    let rel = p - output.galley_pos;
-                    let cc = output.galley.cursor_from_pos(rel);
-                    let word = word_at(&self.ide.open[i].text, cc.index.0);
-                    if let Some(api) = LUA_API.iter().find(|a| a.label == word) {
-                        output.response.response.clone().on_hover_ui_at_pointer(|ui| {
-                            ui.set_max_width(360.0);
-                            ui.monospace(egui::RichText::new(api.label).color(egui::Color32::from_rgb(78, 201, 176)));
-                            ui.label(api.doc);
-                        });
-                    }
-                }
-
-                // "Find all references" results — click a row to jump to that file + line.
-                if !self.ide.refs.is_empty() {
-                    ui.separator();
-                    let word = self.ide.refs_word.clone();
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("⌕ {} reference(s) to \"{word}\"", self.ide.refs.len()));
-                        if ui.small_button("✕ clear").clicked() {
-                            self.ide.refs.clear();
-                        }
-                    });
-                    let mut jump: Option<(String, usize)> = None;
-                    egui::ScrollArea::vertical().max_height(150.0).id_salt("refs_scroll").show(ui, |ui| {
-                        for r in &self.ide.refs {
-                            let row = format!("{}:{}", r.name, r.line);
-                            if ui
-                                .selectable_label(false, egui::RichText::new(format!("{row}   {}", r.text)).monospace())
-                                .clicked()
-                            {
-                                jump = Some((r.path.clone(), r.line));
-                            }
-                        }
-                    });
-                    if let Some((path, line)) = jump {
-                        if self.ide.open_file(&path) {
-                            self.ide.goto = Some(line);
-                        }
-                    }
-                }
-            }
-            _ => {
-                self.ide.active = None;
-            }
-        }
-    }
-
-    /// An autocomplete popup at the caret offering the engine API. Click a row or
-    /// press Tab (`tab_accept`) to insert; hover a row for its doc. Returns whether
-    /// the popup is showing (so the caller can route Tab to it next frame).
-    #[allow(clippy::too_many_arguments)]
-    fn ide_autocomplete(
-        &mut self,
-        ui: &mut egui::Ui,
-        i: usize,
-        editor_id: egui::Id,
-        has_focus: bool,
-        cursor_range: Option<egui::text::CCursorRange>,
-        galley: &egui::text::Galley,
-        galley_pos: egui::Pos2,
-        tab_accept: bool,
-    ) -> bool {
-        if !has_focus {
-            return false;
-        }
-        let Some(range) = cursor_range else { return false };
-        if !range.is_empty() {
-            return false; // a selection, not a caret
-        }
-        let cursor = range.primary.index.0;
-        let (start, token) = current_token(&self.ide.open[i].text, cursor);
-        // Pop only on a real prefix: ≥2 chars for a plain word, or any member access.
-        if token.len() < 2 && !token.contains('.') {
-            return false;
-        }
-        let lower = token.to_ascii_lowercase();
-        let matches: Vec<&ApiEntry> = LUA_API
-            .iter()
-            .filter(|e| {
-                let l = e.label.to_ascii_lowercase();
-                l.starts_with(&lower) && l != lower
-            })
-            .take(8)
-            .collect();
-        if matches.is_empty() {
-            return false;
-        }
-
-        let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
-        let pos = galley_pos + caret.left_bottom().to_vec2();
-        // Tab inserts the top match; otherwise a click does.
-        let mut chosen: Option<&'static str> = if tab_accept { Some(matches[0].insert) } else { None };
-        egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(340.0);
-                    ui.small("Tab to accept");
-                    for (n, e) in matches.iter().enumerate() {
-                        let label = if n == 0 {
-                            egui::RichText::new(e.label).monospace().strong()
-                        } else {
-                            egui::RichText::new(e.label).monospace()
-                        };
-                        if ui.selectable_label(false, label).on_hover_text(e.doc).clicked() {
-                            chosen = Some(e.insert);
-                        }
-                    }
-                });
-            });
-
-        if let Some(insert) = chosen {
-            replace_chars(&mut self.ide.open[i].text, start, cursor, insert);
-            self.ide.open[i].dirty = true;
-            let new_idx = start + insert.chars().count();
-            if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
-                state
-                    .cursor
-                    .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_idx))));
-                state.store(ui.ctx(), editor_id);
-            }
-            ui.ctx().memory_mut(|m| m.request_focus(editor_id));
-            return false; // inserted — popup closes
-        }
-        true
-    }
-}
-
-/// A starter Lua script body (ADR-0003) — named after the file it lands in.
-fn script_template(name: &str) -> String {
-    format!(
-        "-- {name}.lua\n\
-         --\n\
-         -- `defaults` are tunables shown in the Inspector; `params` are this\n\
-         -- instance's live values. `node` is the node's transform (x/y/z,\n\
-         -- scale/scale_x..z, yaw/pitch/roll in radians). `time` = seconds since\n\
-         -- play started, `dt` = frame delta. The full Lua stdlib is in scope.\n\
-         \n\
-         defaults = {{ speed = 1.0 }}\n\
-         \n\
-         function start(node)\n\
-         \x20 -- runs once when play begins\n\
-         end\n\
-         \n\
-         function update(node, dt)\n\
-         \x20 node.yaw = node.yaw + params.speed * dt\n\
-         end\n"
-    )
-}
-
-/// Insert-menu snippets for the in-engine IDE: (label, Lua to append).
-const LUA_SNIPPETS: &[(&str, &str)] = &[
-    (
-        "update",
-        "\nfunction update(node, dt)\n  \nend\n",
-    ),
-    (
-        "start",
-        "\nfunction start(node)\n  \nend\n",
-    ),
-    (
-        "spin (yaw)",
-        "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
-    ),
-    (
-        "pulse (scale)",
-        "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
-    ),
-];
-
-/// A one-line hint listing the tunables a script declares (parsed from its
-/// `defaults = { ... }` table), shown above the code editor.
-fn script_hint(text: &str) -> String {
-    let Some(start) = text.find("defaults") else { return String::new() };
-    let Some(open) = text[start..].find('{') else { return String::new() };
-    let body_start = start + open + 1;
-    let Some(close) = text[body_start..].find('}') else { return String::new() };
-    let body = &text[body_start..body_start + close];
-    let keys: Vec<&str> = body
-        .split(',')
-        .filter_map(|p| p.split('=').next())
-        .map(|k| k.trim())
-        .filter(|k| !k.is_empty())
-        .collect();
-    if keys.is_empty() {
-        String::new()
-    } else {
-        format!("params: {}", keys.join(", "))
-    }
-}
-
-// ---- in-engine IDE: Lua syntax highlighting + autocomplete -----------------
-
-/// Lua reserved words (highlighted as keywords).
-const LUA_KEYWORDS: &[&str] = &[
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
-    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
-];
-
-/// Identifiers highlighted as engine/builtin API (teal).
-const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "defaults", "log", "start", "update", "input", "math",
-    "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
-    "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets",
-];
-
-/// One completion / docs entry for the in-engine IDE.
-struct ApiEntry {
-    label: &'static str,
-    insert: &'static str,
-    doc: &'static str,
-}
-
-/// The engine scripting API, surfaced as autocomplete + hover docs (and the Docs
-/// page's reference). Lua stdlib highlights are included so completion is useful.
-const LUA_API: &[ApiEntry] = &[
-    ApiEntry { label: "update", insert: "update", doc: "function update(node, dt) — runs every frame while playing." },
-    ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
-    ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
-    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },
-    ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
-    ApiEntry { label: "node.x", insert: "node.x", doc: "World X position (number)." },
-    ApiEntry { label: "node.y", insert: "node.y", doc: "World Y position (number)." },
-    ApiEntry { label: "node.z", insert: "node.z", doc: "World Z position (number)." },
-    ApiEntry { label: "node.scale", insert: "node.scale", doc: "Uniform scale (shortcut). Setting it scales all axes." },
-    ApiEntry { label: "node.scale_x", insert: "node.scale_x", doc: "Scale along X." },
-    ApiEntry { label: "node.scale_y", insert: "node.scale_y", doc: "Scale along Y." },
-    ApiEntry { label: "node.scale_z", insert: "node.scale_z", doc: "Scale along Z." },
-    ApiEntry { label: "node.yaw", insert: "node.yaw", doc: "Heading about Y, in radians." },
-    ApiEntry { label: "node.pitch", insert: "node.pitch", doc: "Pitch about X, in radians." },
-    ApiEntry { label: "node.roll", insert: "node.roll", doc: "Roll about Z, in radians." },
-    ApiEntry { label: "node.vx", insert: "node.vx", doc: "Rigidbody velocity X (m/s). Read + write to drive the body; the engine integrates it." },
-    ApiEntry { label: "node.vy", insert: "node.vy", doc: "Rigidbody velocity Y (m/s). Keep this for gravity/jump while replacing the horizontal part." },
-    ApiEntry { label: "node.vz", insert: "node.vz", doc: "Rigidbody velocity Z (m/s)." },
-    ApiEntry { label: "node.grounded", insert: "node.grounded", doc: "True while the rigidbody rests on a surface (read-only). Gate jumps on it." },
-    ApiEntry { label: "node.up_x", insert: "node.up_x", doc: "Body up (−gravity) X — radial on a planet, so move along it for planet gravity. Read-only." },
-    ApiEntry { label: "node.up_y", insert: "node.up_y", doc: "Body up (−gravity) Y (read-only)." },
-    ApiEntry { label: "node.up_z", insert: "node.up_z", doc: "Body up (−gravity) Z (read-only)." },
-    ApiEntry { label: "node.height", insert: "node.height", doc: "Capsule standing height — write a smaller value to crouch (the engine resizes it, feet planted)." },
-    ApiEntry { label: "node.model", insert: "node.model", doc: "A Mesh node's model path — read it, or ASSIGN it to swap the model live (e.g. node.model = assets.getFile(\"models/x.glb\"))." },
-    ApiEntry { label: "node.material", insert: "node.material", doc: "Apply a material — assign a preset name (\"Gold\") or an assets.getFile(\"materials/X.ron\")." },
-    ApiEntry { label: "node.visible", insert: "node.visible", doc: "Whether the node's geometry is drawn — set node.visible = false to hide it (true to show)." },
-    ApiEntry { label: "time", insert: "time", doc: "Seconds since play started (number)." },
-    ApiEntry { label: "dt", insert: "dt", doc: "Seconds since the last frame (number)." },
-    ApiEntry { label: "log", insert: "log(", doc: "log(\"message\") — print to the engine console." },
-    ApiEntry { label: "input", insert: "input", doc: "Player input (play mode). input.key/pressed/axis/mouse/button — make interactive games." },
-    ApiEntry { label: "input.key", insert: "input.key(", doc: "input.key(\"w\") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab." },
-    ApiEntry { label: "input.pressed", insert: "input.pressed(", doc: "input.pressed(\"space\") — true only on the frame the key goes down (an edge)." },
-    ApiEntry { label: "input.released", insert: "input.released(", doc: "input.released(\"space\") — true only on the frame the key goes up (an edge)." },
-    ApiEntry { label: "input.axis", insert: "input.axis(", doc: "input.axis(\"a\", \"d\") — returns -1/0/1 from a negative/positive key pair (e.g. strafing)." },
-    ApiEntry { label: "input.mouse", insert: "input.mouse(", doc: "local x, y = input.mouse() — cursor position in pixels." },
-    ApiEntry { label: "input.mouse_delta", insert: "input.mouse_delta(", doc: "local dx, dy = input.mouse_delta() — mouse movement since last frame." },
-    ApiEntry { label: "input.button", insert: "input.button(", doc: "input.button(0) — true while a mouse button is held (0 left, 1 right, 2 middle)." },
-    ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
-    ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
-    ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — grab the cursor to the window and hide it (for FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
-    ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
-    ApiEntry { label: "input.setMouseLocked", insert: "input.setMouseLocked(", doc: "input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle)." },
-    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
-    ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
-    ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
-    ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },
-    ApiEntry { label: "find", insert: "find(", doc: "find(\"Player\") — the first node in the scene with that name (a node handle), or nil." },
-    ApiEntry { label: "findAll", insert: "findAll(", doc: "findAll(\"Coin\") — an array of every node with that name." },
-    ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state." },
-    ApiEntry { label: "findScriptInScene", insert: "findScriptInScene(", doc: "Alias of findScript(kind)." },
-    ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
-    ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
-    ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
-    ApiEntry { label: "node:getparent", insert: "node:getparent()", doc: "The parent node handle, or nil (same as node.parent)." },
-    ApiEntry { label: "node:children", insert: "node:children()", doc: "An array of this node's child handles." },
-    ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
-    ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
-    ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(\"PointLight\") — a component handle whose numeric fields you can read AND assign at runtime, or nil if absent. PointLight: intensity, range, r, g, b. RigidBody: friction, restitution, gravity (0/1), radius, height. e.g. light.intensity = 2 * (0.5 + 0.5 * math.sin(time))." },
-    ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
-    ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
-    ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
-    ApiEntry { label: "math.deg", insert: "math.deg(", doc: "math.deg(rad) — radians to degrees." },
-    ApiEntry { label: "math.pi", insert: "math.pi", doc: "The constant π." },
-    ApiEntry { label: "math.abs", insert: "math.abs(", doc: "math.abs(x) — absolute value." },
-    ApiEntry { label: "math.max", insert: "math.max(", doc: "math.max(a, b, …) — largest argument." },
-    ApiEntry { label: "math.min", insert: "math.min(", doc: "math.min(a, b, …) — smallest argument." },
-    ApiEntry { label: "math.sqrt", insert: "math.sqrt(", doc: "math.sqrt(x) — square root." },
-    ApiEntry { label: "math.floor", insert: "math.floor(", doc: "math.floor(x) — round down." },
-    ApiEntry { label: "math.random", insert: "math.random(", doc: "math.random() — random in [0,1); math.random(n) — 1..n." },
-    ApiEntry { label: "string.format", insert: "string.format(", doc: "string.format(fmt, …) — printf-style formatting." },
-    ApiEntry { label: "function", insert: "function ", doc: "Define a function." },
-    ApiEntry { label: "local", insert: "local ", doc: "Declare a local variable." },
-];
-
-/// Build a colored layout for Lua source (keywords, strings, numbers, comments,
-/// engine API). A simple single-pass tokenizer — good enough for an in-engine IDE.
-/// A code-editor color theme: the syntax token colors plus the editor background, gutter
-/// and current-line highlight. Colors are raw RGB(A) so the presets can be `const`.
-#[derive(Clone, Copy)]
-struct CodeTheme {
-    name: &'static str,
-    bg: [u8; 3],
-    gutter: [u8; 3],
-    kw: [u8; 3],
-    api: [u8; 3],
-    string: [u8; 3],
-    num: [u8; 3],
-    comment: [u8; 3],
-    text: [u8; 3],
-    /// Current-line highlight (RGBA; alpha is the wash strength).
-    cur_line: [u8; 4],
-}
-
-impl CodeTheme {
-    fn bg32(&self) -> egui::Color32 {
-        egui::Color32::from_rgb(self.bg[0], self.bg[1], self.bg[2])
-    }
-    fn gutter32(&self) -> egui::Color32 {
-        egui::Color32::from_rgb(self.gutter[0], self.gutter[1], self.gutter[2])
-    }
-    fn text32(&self) -> egui::Color32 {
-        egui::Color32::from_rgb(self.text[0], self.text[1], self.text[2])
-    }
-    fn cur_line32(&self) -> egui::Color32 {
-        let [r, g, b, a] = self.cur_line;
-        egui::Color32::from_rgba_unmultiplied(r, g, b, a)
-    }
-}
-
-/// The selectable code-editor themes (Preferences → Editor theme). Index 0 is the default.
-const CODE_THEMES: &[CodeTheme] = &[
-    CodeTheme {
-        name: "Floptle Dark",
-        bg: [30, 30, 30],
-        gutter: [100, 100, 100],
-        kw: [86, 156, 214],
-        api: [78, 201, 176],
-        string: [206, 145, 120],
-        num: [181, 206, 168],
-        comment: [106, 153, 85],
-        text: [212, 212, 212],
-        cur_line: [255, 255, 255, 14],
-    },
-    CodeTheme {
-        name: "Monokai",
-        bg: [39, 40, 34],
-        gutter: [120, 120, 110],
-        kw: [249, 38, 114],
-        api: [102, 217, 239],
-        string: [230, 219, 116],
-        num: [174, 129, 255],
-        comment: [117, 113, 94],
-        text: [248, 248, 242],
-        cur_line: [255, 255, 255, 16],
-    },
-    CodeTheme {
-        name: "Dracula",
-        bg: [40, 42, 54],
-        gutter: [98, 114, 164],
-        kw: [255, 121, 198],
-        api: [139, 233, 253],
-        string: [241, 250, 140],
-        num: [189, 147, 249],
-        comment: [98, 114, 164],
-        text: [248, 248, 242],
-        cur_line: [255, 255, 255, 16],
-    },
-    CodeTheme {
-        name: "Solarized Dark",
-        bg: [0, 43, 54],
-        gutter: [88, 110, 117],
-        kw: [133, 153, 0],
-        api: [42, 161, 152],
-        string: [42, 161, 152],
-        num: [211, 54, 130],
-        comment: [88, 110, 117],
-        text: [147, 161, 161],
-        cur_line: [255, 255, 255, 14],
-    },
-    CodeTheme {
-        name: "GitHub Light",
-        bg: [255, 255, 255],
-        gutter: [160, 160, 160],
-        kw: [215, 58, 73],
-        api: [0, 92, 197],
-        string: [3, 47, 98],
-        num: [0, 92, 197],
-        comment: [106, 115, 125],
-        text: [36, 41, 46],
-        cur_line: [0, 0, 0, 14],
-    },
-];
-
-/// An editor/engine chrome theme (Preferences → Engine theme). Built on egui's dark/light
-/// base, then key surfaces are overridden. Index 0 is the default (egui dark).
-#[derive(Clone, Copy)]
-struct EngineTheme {
-    name: &'static str,
-    dark: bool,
-    /// Override panel/window/extreme backgrounds; `None` keeps the egui base value.
-    panel: Option<[u8; 3]>,
-    window: Option<[u8; 3]>,
-    extreme: Option<[u8; 3]>,
-    /// Selection / hyperlink accent.
-    accent: Option<[u8; 3]>,
-}
-
-const ENGINE_THEMES: &[EngineTheme] = &[
-    EngineTheme { name: "Floptle Dark", dark: true, panel: None, window: None, extreme: None, accent: None },
-    EngineTheme {
-        name: "Midnight",
-        dark: true,
-        panel: Some([18, 20, 30]),
-        window: Some([22, 25, 37]),
-        extreme: Some([12, 13, 20]),
-        accent: Some([90, 130, 245]),
-    },
-    EngineTheme {
-        name: "Slate",
-        dark: true,
-        panel: Some([38, 42, 50]),
-        window: Some([44, 49, 58]),
-        extreme: Some([28, 31, 37]),
-        accent: Some([120, 160, 200]),
-    },
-    EngineTheme {
-        name: "Carbon (OLED)",
-        dark: true,
-        panel: Some([8, 8, 8]),
-        window: Some([14, 14, 14]),
-        extreme: Some([0, 0, 0]),
-        accent: Some([0, 200, 160]),
-    },
-    EngineTheme { name: "Light", dark: false, panel: None, window: None, extreme: None, accent: None },
-];
-
-impl EngineTheme {
-    /// The egui visuals for this theme (base + overrides).
-    fn visuals(&self) -> egui::Visuals {
-        let mut v = if self.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
-        let c = |rgb: [u8; 3]| egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
-        if let Some(p) = self.panel {
-            v.panel_fill = c(p);
-        }
-        if let Some(w) = self.window {
-            v.window_fill = c(w);
-            v.widgets.noninteractive.bg_fill = c(w);
-        }
-        if let Some(e) = self.extreme {
-            v.extreme_bg_color = c(e);
-        }
-        if let Some(a) = self.accent {
-            v.selection.bg_fill = c(a).gamma_multiply(0.55);
-            v.hyperlink_color = c(a);
-        }
-        v
-    }
-}
-
-fn lua_highlight(text: &str, font: egui::FontId, theme: &CodeTheme) -> egui::text::LayoutJob {
-    use egui::Color32;
-    let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
-    let c_kw = rgb(theme.kw);
-    let c_api = rgb(theme.api);
-    let c_str = rgb(theme.string);
-    let c_num = rgb(theme.num);
-    let c_com = rgb(theme.comment);
-    let c_def = rgb(theme.text);
-
-    let mut job = egui::text::LayoutJob::default();
-    let mut push = |s: &str, color: Color32| {
-        job.append(s, 0.0, egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() });
-    };
-
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        // line comment
-        if c == b'-' && i + 1 < b.len() && b[i + 1] == b'-' {
-            let s = i;
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
-            }
-            push(&text[s..i], c_com);
-        } else if c == b'"' || c == b'\'' {
-            // string (single line; handles \" escapes)
-            let q = c;
-            let s = i;
-            i += 1;
-            while i < b.len() {
-                if b[i] == b'\\' {
-                    i = (i + 2).min(b.len());
-                    continue;
-                }
-                if b[i] == q || b[i] == b'\n' {
-                    i = (i + 1).min(b.len());
-                    break;
-                }
-                i += 1;
-            }
-            push(&text[s..i], c_str);
-        } else if c.is_ascii_digit() {
-            let s = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
-                i += 1;
-            }
-            push(&text[s..i], c_num);
-        } else if c.is_ascii_alphabetic() || c == b'_' {
-            let s = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let word = &text[s..i];
-            let color = if LUA_KEYWORDS.contains(&word) {
-                c_kw
-            } else if LUA_API_WORDS.contains(&word) {
-                c_api
-            } else {
-                c_def
-            };
-            push(word, color);
-        } else {
-            // one (possibly multibyte) character verbatim
-            let ch = text[i..].chars().next().unwrap();
-            let l = ch.len_utf8();
-            push(&text[i..i + l], c_def);
-            i += l;
-        }
-    }
-    job
-}
-
-/// A plain monospace layout (no highlighting) — used for non-Lua files (Markdown).
-fn plain_job(text: &str, font: egui::FontId, theme: &CodeTheme) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob::default();
-    job.append(
-        text,
-        0.0,
-        egui::text::TextFormat { font_id: font, color: theme.text32(), ..Default::default() },
-    );
-    job
-}
-
-/// Helpers for whole-line editing (Ctrl+C / Ctrl+X / Ctrl+D on the current line).
-mod line_edit {
-    /// The byte range of the line containing char index `char_idx`, plus the byte index
-    /// where the next line starts (== content end when there's no trailing newline).
-    /// Returns `(line_start, content_end, next_line_start)`.
-    pub fn line_bytes(text: &str, char_idx: usize) -> (usize, usize, usize) {
-        let byte_idx = text.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(text.len());
-        let line_start = text[..byte_idx].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let content_end = text[line_start..].find('\n').map(|p| line_start + p).unwrap_or(text.len());
-        let next_line_start = if content_end < text.len() { content_end + 1 } else { text.len() };
-        (line_start, content_end, next_line_start)
-    }
-
-    /// The current line's text with a trailing newline (what Ctrl+C / Ctrl+X put on the
-    /// clipboard, so pasting re-inserts a whole line).
-    pub fn line_with_newline(text: &str, char_idx: usize) -> String {
-        let (s, e, _) = line_bytes(text, char_idx);
-        format!("{}\n", &text[s..e])
-    }
-
-    /// Number of chars before byte offset `b` (to place the caret after an edit).
-    pub fn char_of_byte(text: &str, b: usize) -> usize {
-        text[..b.min(text.len())].chars().count()
-    }
-}
-
-/// Move the in-engine editor's caret to a char index (collapsed selection).
-fn set_ide_caret(ctx: &egui::Context, id: egui::Id, char_idx: usize) {
-    if let Some(mut st) = egui::text_edit::TextEditState::load(ctx, id) {
-        let c = egui::text::CCursor::new(char_idx);
-        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(c)));
-        st.store(ctx, id);
-    }
-}
-
-/// The token (run of identifier/`.` chars) ending at `cursor_char`, plus its start
-/// char index — what autocomplete matches against.
-fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
-    let chars: Vec<char> = text.chars().collect();
-    let cur = cursor_char.min(chars.len());
-    let mut start = cur;
-    while start > 0 {
-        let c = chars[start - 1];
-        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    (start, chars[start..cur].iter().collect())
-}
-
-/// The full identifier (run of `[A-Za-z0-9_.]`) containing char index `idx`, or
-/// empty if that char isn't part of one. Used for hover docs.
-fn word_at(text: &str, idx: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return String::new();
-    }
-    let i = idx.min(chars.len() - 1);
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
-    if !is_word(chars[i]) {
-        return String::new();
-    }
-    let mut s = i;
-    while s > 0 && is_word(chars[s - 1]) {
-        s -= 1;
-    }
-    let mut e = i;
-    while e + 1 < chars.len() && is_word(chars[e + 1]) {
-        e += 1;
-    }
-    chars[s..=e].iter().collect()
-}
-
-/// Replace the characters in `[start, end)` (char indices) of `s` with `ins`.
-fn replace_chars(s: &mut String, start: usize, end: usize, ins: &str) {
-    let byte = |n: usize| s.char_indices().nth(n).map(|(b, _)| b).unwrap_or(s.len());
-    let (bs, be) = (byte(start), byte(end));
-    s.replace_range(bs..be, ins);
 }
 
 fn main() {
@@ -5407,6 +3816,28 @@ impl Default for TerrainBrush {
             fill_floor: -8.0,
             fill_inset: 0.0,
         }
+    }
+}
+
+/// Config gathered by the "New terrain" dialog before the node is actually created —
+/// footprint size, thickness, and an initial color/texture painted across the whole
+/// slab, so a terrain arrives already the size/look you want instead of always
+/// starting as the same small default patch you have to sculpt/fill out by hand.
+#[derive(Clone)]
+struct NewTerrainCfg {
+    /// Full width/depth of the flat slab (X and Z), world units.
+    size_xz: f32,
+    /// Full height of the slab (Y), world units.
+    thickness: f32,
+    color: [f32; 3],
+    /// An asset texture path painted across the whole terrain (empty = none / flat
+    /// color only). Resolved to a palette slot at creation time.
+    texture: String,
+}
+
+impl Default for NewTerrainCfg {
+    fn default() -> Self {
+        Self { size_xz: 32.0, thickness: 12.0, color: [0.35, 0.6, 0.28], texture: String::new() }
     }
 }
 
@@ -5834,6 +4265,24 @@ struct FocusAnim {
     t: f32,
 }
 
+/// Grab (hide + pin) or release the OS cursor. Prefers a hard lock — the cursor
+/// physically can't move (Wayland/macOS/Windows) — falling back to confining it
+/// to the window (X11, which has no lock). Returns true when only the CONFINE
+/// took, so the caller re-centers the cursor every frame to emulate the pin.
+fn grab_cursor(window: &Window, want: bool) -> bool {
+    if !want {
+        let _ = window.set_cursor_grab(CursorGrabMode::None);
+        window.set_cursor_visible(true);
+        return false;
+    }
+    window.set_cursor_visible(false);
+    if window.set_cursor_grab(CursorGrabMode::Locked).is_ok() {
+        return false;
+    }
+    let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+    true
+}
+
 // Field order is drop order: every GPU-resource holder (raster/raymarch/retro/egui)
 // must drop BEFORE `gpu` (the device + surface), so `gpu` is intentionally last.
 #[derive(Default)]
@@ -5865,19 +4314,19 @@ struct Editor {
     /// `.floptle/textures.ron`. Absent ⏵ the crisp tiling default.
     texture_settings: HashMap<String, TexSetting>,
     /// Editable terrain SDF fields, keyed by their scene node Entity (each in its
-    /// node's LOCAL space). Empty until "New Terrain". Multiple terrains are folded
-    /// into one combined field for rendering ([`rebuild_combined`]).
+    /// node's LOCAL space). Empty until "New Terrain". Every volume is uploaded to
+    /// the renderer's 3D atlas at native resolution and fused on the GPU.
     terrains: HashMap<Entity, floptle_field::Terrain>,
     /// The terrain the sculpt brush currently targets (the one under the cursor),
     /// chosen each frame.
     active_terrain: Option<Entity>,
-    /// Cached world-space union of every terrain field (what the GPU renders).
-    combined: Option<floptle_field::Terrain>,
-    /// The (node, world origin) set the `combined` was built from — so a moved
-    /// terrain (gizmo/inspector/undo) is detected and triggers a rebuild.
-    combined_origins: Vec<(Entity, DVec3)>,
-    /// The combined field needs rebuilding + re-uploading (any add/edit/move/delete).
-    combined_dirty: bool,
+    /// Atlas slot order: the terrain entities as uploaded to the renderer (sorted by
+    /// terrain id). Each volume renders at its NATIVE resolution from its own slot;
+    /// placement comes from the node's f64 translation, read fresh every frame — so
+    /// moving a terrain needs zero GPU work and there is no combined field at all.
+    terrain_slots: Vec<Entity>,
+    /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
+    terrain_gpu_dirty: bool,
     /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
     /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
     /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is
@@ -5919,6 +4368,10 @@ struct Editor {
     body_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// Projected collision-contact crosses (telegraphed during Play).
     contact_gizmos: Vec<(Vec2, Vec2)>,
+    /// Script debug-draw commands from this frame's `gizmo.*` calls (world space).
+    script_gizmos: Vec<floptle_script::GizmoCmd>,
+    /// Their projected viewport segments (physical px) + color, rebuilt per frame.
+    script_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
     /// Master toggle for ALL viewport gizmos/overlays (a button at the viewport's top
     /// right). Off = a clean view; the selected node's collider still hides too.
     show_gizmos: bool,
@@ -5928,8 +4381,10 @@ struct Editor {
     /// always shows its wireframe regardless (as long as `show_gizmos` is on).
     show_mesh_colliders: bool,
     /// Cached WORLD-space wireframe of the combined terrain's collision surface; rebuilt
-    /// when the terrain changes (cleared on `combined_dirty`), projected each frame.
-    terrain_wire_world: Vec<(Vec3, Vec3)>,
+    /// when the terrain changes (cleared on `terrain_gpu_dirty`), projected each frame.
+    /// Per terrain entity, in the node's LOCAL frame (the f64 anchor is added at
+    /// projection, so a moved terrain's wireframe follows for free).
+    terrain_wire_world: Vec<(Entity, Vec<(Vec3, Vec3)>)>,
     /// This frame's projected terrain-collider wireframe segments (screen space).
     terrain_wire_gizmo: Vec<(Vec2, Vec2)>,
     /// MODEL-LOCAL deduped triangle edges per mesh asset path (built once on demand),
@@ -5983,6 +4438,9 @@ struct Editor {
     /// free-look. While set, the RMB-release handler won't release the grab, and Stop
     /// releases it. Reset when play ends.
     script_mouse_lock: bool,
+    /// The active cursor grab is only a CONFINE (X11 has no OS-level lock): the
+    /// cursor can still wander inside the window, so we re-center it every frame.
+    cursor_lock_soft: bool,
     /// Offscreen target for the Inspector's spinning model / material preview.
     preview: Option<PreviewTarget>,
     /// Offscreen 16:9 target for the Inspector's selected-camera POV preview.
@@ -6063,6 +4521,10 @@ struct Editor {
     play_snapshot: Option<SceneDoc>,
     /// The Lua VM that runs node scripts in play mode (ADR-0003).
     script_host: ScriptHost,
+    /// Animation: clip/controller registries + live per-entity runtimes.
+    anim: anim::AnimSystem,
+    /// Animation UI state (graph window + Animating tab).
+    anim_ui: anim_ui::AnimUiState,
     /// Errors from the most recent script frame, shown in the Scripting tab.
     script_errors: Vec<String>,
     /// Cache of each script file's declared `defaults` keyed by path, with the file's
@@ -6092,11 +4554,19 @@ struct Editor {
     rename_target: Option<(String, String)>,
     /// New-scene name buffer (Some = the prompt is open).
     new_scene_buf: Option<String>,
+    /// New-terrain size/thickness/color/texture buffer (Some = the dialog is open).
+    new_terrain_cfg: Option<NewTerrainCfg>,
     /// The scene has unsaved edits (drives the "save before opening?" prompt).
     scene_dirty: bool,
     /// A scene the user asked to open while there were unsaved changes — the
     /// confirm modal is shown until they Save / Discard / Cancel.
     pending_open_scene: Option<String>,
+    /// Quit was requested with unsaved changes — the confirm modal is up.
+    show_quit_confirm: bool,
+    /// The quit modal confirmed — the next CloseRequested exits for real.
+    quit_confirmed: bool,
+    /// An asset delete awaiting confirmation (absolute path).
+    delete_confirm: Option<String>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,
@@ -6133,9 +4603,12 @@ struct Egui {
 }
 
 /// An imported model's registered GPU mesh parts + its rough world size.
+/// Rigged models (any glTF with animations) also carry their skeleton/clips
+/// and each part's node binding, so the draw arm can pose parts per frame.
 struct MeshAsset {
     parts: Vec<MeshId>,
     size: f32,
+    rig: Option<anim::RigAsset>,
 }
 
 /// An offscreen target the Inspector renders an asset preview into (a spinning
@@ -6202,6 +4675,7 @@ impl ApplicationHandler for Editor {
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
+        self.anim.rescan(&self.project_root);
         self.load_texture_settings();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
@@ -6263,7 +4737,13 @@ impl ApplicationHandler for Editor {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.scene_dirty && !self.quit_confirmed {
+                    self.show_quit_confirm = true;
+                } else {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
@@ -6306,7 +4786,10 @@ impl ApplicationHandler for Editor {
                     // a RELEASE (pressed == false) always clears it, so a key can
                     // never stick on if the release lands while a field is focused
                     // (e.g. hold W, click into the IDE, release W). C moves DOWN.
-                    let mv = pressed && !typing && !game_view;
+                    // Fly-camera keys only arm while the pointer is over the Scene
+                    // viewport — WASD in the Animating tab (or any other panel)
+                    // must not drive the editor camera.
+                    let mv = pressed && !typing && !game_view && self.cursor_over_scene();
                     match code {
                         KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
                         KeyCode::KeyS => self.input.back = mv && !self.ctrl,
@@ -6331,7 +4814,18 @@ impl ApplicationHandler for Editor {
                     if pressed && !typing {
                         // Engine controls work in any view (Play/Pause/Quit).
                         match code {
-                            KeyCode::Escape => event_loop.exit(),
+                            KeyCode::Escape => {
+                                // Escape is a "cancel" gesture first: back out of an
+                                // in-progress transition drag or the graph window, and
+                                // never silently discard unsaved work.
+                                if self.anim_ui.drag_from.is_some() {
+                                    self.anim_ui.drag_from = None;
+                                } else if self.scene_dirty {
+                                    self.show_quit_confirm = true;
+                                } else {
+                                    event_loop.exit();
+                                }
+                            }
                             KeyCode::F1 => self.toggle_play(),
                             KeyCode::F2 => self.toggle_pause(),
                             // Everything else is an EDITOR shortcut — suppressed in the
@@ -6378,6 +4872,15 @@ impl ApplicationHandler for Editor {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(0, pressed);
                 if pressed {
+                    // Clicking anywhere outside a text field ends text editing —
+                    // a click into the viewport (which egui never sees) included.
+                    if let Some(eg) = self.egui.as_ref() {
+                        if !eg.ctx.is_pointer_over_egui() {
+                            if let Some(f) = eg.ctx.memory(|m| m.focused()) {
+                                eg.ctx.memory_mut(|m| m.surrender_focus(f));
+                            }
+                        }
+                    }
                     // In the Game view a left click is a GAME input only — never an editor
                     // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
                     // over the scene for editor purposes.
@@ -6466,10 +4969,7 @@ impl ApplicationHandler for Editor {
                             self.input.looking = true;
                         }
                         if let Some(window) = self.window.as_ref() {
-                            let _ = window
-                                .set_cursor_grab(CursorGrabMode::Confined)
-                                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
-                            window.set_cursor_visible(false);
+                            self.cursor_lock_soft = grab_cursor(window, true);
                         }
                         self.cursor = None;
                     }
@@ -6479,8 +4979,7 @@ impl ApplicationHandler for Editor {
                     // Don't release the grab if a script is holding the mouse locked.
                     if !self.script_mouse_lock {
                         if let Some(window) = self.window.as_ref() {
-                            let _ = window.set_cursor_grab(CursorGrabMode::None);
-                            window.set_cursor_visible(true);
+                            self.cursor_lock_soft = grab_cursor(window, false);
                         }
                     }
                     // A click (negligible motion) over the viewport ⏵ context menu (editor only).
@@ -6555,69 +5054,60 @@ impl Editor {
             }
         });
 
-        // Cheap MOVE path: a single terrain that only changed POSITION needs no rebuild
-        // or GPU re-upload — its voxels are identical, only the world-space box center
-        // shifts (the renderer reads that each frame). This is what made dragging a
-        // terrain lag (it used to re-clone + re-upload the whole volume every frame).
-        if !self.combined_dirty && self.terrains.len() == 1 && self.terrain_region_dirty.is_none() {
-            let e = *self.terrains.keys().next().unwrap();
-            let o = self.terrain_world_origin(e);
-            let in_sync = self.combined_origins.first().is_some_and(|(ce, co)| *ce == e && (*co - o).length() < 1e-6);
-            if !in_sync {
-                if let (Some(t), Some(combined)) = (self.terrains.get(&e), self.combined.as_mut()) {
-                    combined.baked.center = [
-                        t.baked.center[0] + o.x as f32,
-                        t.baked.center[1] + o.y as f32,
-                        t.baked.center[2] + o.z as f32,
-                    ];
-                    self.combined_origins = vec![(e, o)];
-                    self.terrain_wire_world.clear(); // wireframe follows the move
-                } else {
-                    self.combined_dirty = true; // combined not built yet → full path
+        // Terrain volumes render PER-VOLUME, each at native resolution: moving a
+        // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
+        // when the globals are built. Only structural changes (add/edit/delete/resize)
+        // re-upload the volume set into the shared 3D atlas.
+        if self.terrain_gpu_dirty {
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                // Deterministic slot order (by Matter::Terrain id) so the globals'
+                // per-frame fill always matches the atlas layout.
+                let mut items: Vec<(u32, Entity)> = self
+                    .terrains
+                    .keys()
+                    .map(|&e| {
+                        let id = match self.world.get::<Matter>(e) {
+                            Some(Matter::Terrain { id }) => *id,
+                            _ => 0,
+                        };
+                        (id, e)
+                    })
+                    .collect();
+                items.sort_by_key(|(id, _)| *id);
+                let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
+                let baked: Vec<&floptle_field::BakedSdf> =
+                    entities.iter().map(|e| &self.terrains[e].baked).collect();
+                let accepted = raymarch.set_volumes(gpu, &baked);
+                if accepted < entities.len() {
+                    // Never drop content silently: colliders still work, but say so.
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!(
+                            "{} terrain volume(s) exceed the GPU volume budget and won't render (collision is unaffected)",
+                            entities.len() - accepted
+                        ),
+                        None,
+                    );
                 }
+                self.terrain_slots = entities[..accepted].to_vec();
+                self.terrain_gpu_dirty = false;
+                self.terrain_region_dirty = None; // the full upload supersedes any region
+                self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
             }
-        } else if !self.combined_dirty && self.terrains_moved() {
-            // Multi-terrain (or count changed): a move re-blends the fields, so rebuild.
-            self.combined_dirty = true;
-        }
-        // Rebuild the combined terrain (fold all nodes' fields) + re-upload to the GPU
-        // after any add/edit/move/delete (needs &mut Raymarch, before the destructure).
-        if self.combined_dirty {
-            self.rebuild_combined();
-            if let (Some(gpu), Some(raymarch), Some(combined)) =
-                (self.gpu.as_ref(), self.raymarch.as_mut(), self.combined.as_ref())
-            {
-                raymarch.set_volume(gpu, &combined.baked);
-            }
-            self.combined_dirty = false;
-            self.terrain_region_dirty = None; // the full upload supersedes any region
-            self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
         } else if let Some((e, mn, mx, geom)) = self.terrain_region_dirty.take() {
-            // Fast paint/sculpt path: upload only the dabbed voxel box. For a single
-            // terrain the GPU volume mirrors its field 1:1, so its baked data maps directly.
-            if let (Some(gpu), Some(raymarch), Some(t)) =
-                (self.gpu.as_ref(), self.raymarch.as_mut(), self.terrains.get(&e))
-            {
-                raymarch.set_volume_region(gpu, &t.baked, mn, mx);
-            }
-            // Keep `combined` (collision at Play + the wireframe) in sync by copying just
-            // the changed sub-box from the terrain — no full re-clone.
-            if let (Some(t), Some(combined)) = (self.terrains.get(&e), self.combined.as_mut()) {
-                if combined.baked.dims == t.baked.dims {
-                    let [w, h, d] = t.baked.dims;
-                    for z in mn[2]..mx[2].min(d) {
-                        for y in mn[1]..mx[1].min(h) {
-                            let row = ((z * h + y) * w) as usize;
-                            let a = row + mn[0] as usize;
-                            let b = row + mx[0].min(w) as usize;
-                            combined.baked.distance[a..b].copy_from_slice(&t.baked.distance[a..b]);
-                            combined.baked.color[a..b].copy_from_slice(&t.baked.color[a..b]);
-                        }
-                    }
-                }
+            // Fast paint/sculpt path: upload only the dabbed voxel box into this
+            // terrain's atlas slot — its field maps 1:1 at native resolution.
+            if let (Some(gpu), Some(raymarch), Some(t), Some(slot)) = (
+                self.gpu.as_ref(),
+                self.raymarch.as_mut(),
+                self.terrains.get(&e),
+                self.terrain_slots.iter().position(|&se| se == e),
+            ) {
+                raymarch.set_volume_region(gpu, slot, &t.baked, mn, mx);
             }
             if geom {
-                self.terrain_wire_world.clear(); // sculpt moved the surface
+                // Sculpt moved this terrain's surface — rebuild just its wireframe.
+                self.terrain_wire_world.retain(|(we, _)| *we != e);
             }
         }
         // Re-upload the terrain texture palette when it changes. Each slot resolves
@@ -6797,9 +5287,11 @@ impl Editor {
                 floptle_script::InputSnapshot::default()
             });
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
-            // (physics doesn't step until after scripts, so this is safe).
+            // (physics doesn't step until after scripts, so this is safe). The sim
+            // origin rides along so ray coordinates convert world ↔ sim frame.
             if let Some(sim) = self.sim.as_mut() {
-                self.script_host.set_colliders(std::mem::take(&mut sim.world.colliders));
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
             }
             // Lend the asset root (for `assets.getFile/getContents`) and the material
             // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
@@ -6807,22 +5299,19 @@ impl Editor {
             self.script_host.set_materials(
                 self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
             );
+            // Feed each animator's state (layers/current/time) so scripts can read
+            // anim:state()/:time()/:clips() this frame.
+            self.script_host.set_anim_info(anim::build_info(&self.anim));
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
             // cursor for free-look, or release it). The state persists until changed/Stop.
+            // Script debug gizmos queued this frame (drawn by the viewport overlay).
+            self.script_gizmos = self.script_host.take_gizmos();
             if let Some(want) = self.script_host.take_mouse_lock() {
                 self.script_mouse_lock = want;
                 if let Some(window) = self.window.as_ref() {
-                    if want {
-                        let _ = window
-                            .set_cursor_grab(CursorGrabMode::Confined)
-                            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Locked));
-                        window.set_cursor_visible(false);
-                    } else {
-                        let _ = window.set_cursor_grab(CursorGrabMode::None);
-                        window.set_cursor_visible(true);
-                    }
+                    self.cursor_lock_soft = grab_cursor(window, want);
                 }
             }
             // GPU-load any models a script swapped via `node.model` (the Matter is already
@@ -6831,6 +5320,24 @@ impl Editor {
             // they're held.
             for (_eid, path) in self.script_host.take_model_changes() {
                 if !self.mesh_registry.contains_key(&path) {
+                    // Rigged first (animated glTF keeps its node tree + clips).
+                    match floptle_assets::import_rigged(std::path::Path::new(&path)) {
+                        Ok(Some(model)) => {
+                            let parts = model
+                                .parts
+                                .iter()
+                                .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                                .collect();
+                            let rig = anim::rig_from_model(&model);
+                            self.mesh_registry.insert(
+                                path.clone(),
+                                MeshAsset { parts, size: model.size, rig: Some(rig) },
+                            );
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(e) => eprintln!("  rig swap-import {path} failed ({e}); trying static"),
+                    }
                     match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
                         Ok(model) => {
                             let parts = model
@@ -6839,17 +5346,51 @@ impl Editor {
                                 .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                                 .collect();
                             self.mesh_registry
-                                .insert(path.clone(), MeshAsset { parts, size: model.size });
+                                .insert(path.clone(), MeshAsset { parts, size: model.size, rig: None });
                         }
                         Err(e) => eprintln!("  swap-import {path} failed: {e}"),
                     }
                 }
             }
+            // Animation: bind + apply queued Lua animator commands + advance every
+            // controller (ordering: scripts → animation → physics), then dispatch
+            // fired clip events back into the node's scripts.
+            let anim_cmds = self.script_host.take_anim_commands();
+            let fired = anim::advance_animators(
+                &mut self.anim,
+                &mut self.world,
+                &self.mesh_registry,
+                sdt,
+                anim_cmds,
+            );
+            for (eid, func) in fired {
+                self.script_host.call_function(&mut self.world, eid, &func);
+            }
+            // Animator warnings (e.g. play() on a state name the controller
+            // doesn't have) surface in the Console, once per name.
+            for msg in self.anim.warnings.drain(..) {
+                self.console.push(floptle_script::LogLevel::Warn, msg, None);
+            }
+            // Event handlers can log/raise — surface those in the Scripting tab
+            // (run() cleared + snapshotted errors before the dispatch above).
+            if !self.script_host.errors().is_empty() {
+                self.script_errors = self.script_host.errors().to_vec();
+            }
             // Apply script velocity writes, then advance physics (writes transforms back).
+            // Gravity field is rebuilt from the scene's GravityVolume node(s) every frame
+            // (cheap scan) so tweaking mode/strength/radius — or moving the volume — takes
+            // effect immediately instead of needing a Stop/Play. The active camera is the
+            // floating-origin focus: drift far enough and the sim recenters on it.
+            let focus = self.world.query::<Matter>().find_map(|(e, m)| {
+                matches!(m, Matter::Camera { active: true, .. })
+                    .then(|| floptle_core::world_transform(&self.world, e).translation)
+            });
             if let Some(sim) = self.sim.as_mut() {
+                sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
                 sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
-                // Live Inspector edits: re-read RigidBody tunables (friction, restitution,
-                // gravity, pos/rot locks) into the running bodies each frame — no teleport.
+                // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
+                // restitution, gravity, pos/rot locks) into the running bodies each frame —
+                // no teleport.
                 sim.sync_dynamic_params(&self.world);
                 for (eid, v) in self.script_host.take_body_changes() {
                     sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
@@ -6857,7 +5398,7 @@ impl Editor {
                 for (eid, h) in self.script_host.take_body_height_changes() {
                     sim.set_body_height(eid, h);
                 }
-                sim.advance(&mut self.world, sdt);
+                sim.advance(&mut self.world, sdt, focus);
             }
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
@@ -6868,6 +5409,19 @@ impl Editor {
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
+        // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
+        // wander inside the window — pin it to the center ourselves while a
+        // look/lock is active. Look input reads RAW device motion, so this
+        // re-centering never pollutes the deltas.
+        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking) {
+            if let Some(window) = self.window.as_ref() {
+                let sz = window.inner_size();
+                let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                    sz.width / 2,
+                    sz.height / 2,
+                ));
+            }
+        }
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
             self.console.push(l.level, l.msg, l.source);
@@ -6924,6 +5478,52 @@ impl Editor {
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
         self.mesh_wire_gizmo.clear();
+        // Script debug gizmos (`gizmo.*` from Lua). Unlike the editor overlays these
+        // draw in the GAME view too — they're the developer's own telegraphs — but
+        // the viewport gizmos toggle still hides them. (Projected for the SURFACE
+        // camera; in split view the tab viewer paints them on the Scene side only.)
+        self.script_gizmo_lines.clear();
+        if self.show_gizmos && !self.script_gizmos.is_empty() {
+            let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+            let cmds = &self.script_gizmos;
+            let out = &mut self.script_gizmo_lines;
+            let cam_pos = cam.world_position;
+            let mut seg = |a: DVec3, b: DVec3, color: [f32; 3]| {
+                if let (Some(pa), Some(pb)) =
+                    (project(a, cam_pos, view_proj, gw, gh), project(b, cam_pos, view_proj, gw, gh))
+                {
+                    out.push((pa, pb, color));
+                }
+            };
+            let v3 = |p: [f32; 3]| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+            for cmd in cmds {
+                match *cmd {
+                    floptle_script::GizmoCmd::Line { a, b, color } => seg(v3(a), v3(b), color),
+                    floptle_script::GizmoCmd::Sphere { center, radius, color } => {
+                        // Three axis-aligned rings read as a sphere from any angle.
+                        let c = v3(center);
+                        let r = radius as f64;
+                        const N: usize = 20;
+                        for (u, v) in [(DVec3::X, DVec3::Y), (DVec3::Y, DVec3::Z), (DVec3::X, DVec3::Z)] {
+                            let mut prev = c + u * r;
+                            for k in 1..=N {
+                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                                let p = c + u * (r * t.cos()) + v * (r * t.sin());
+                                seg(prev, p, color);
+                                prev = p;
+                            }
+                        }
+                    }
+                    floptle_script::GizmoCmd::Point { pos, size, color } => {
+                        let p = v3(pos);
+                        let h = size as f64 * 0.5;
+                        for off in [DVec3::X, DVec3::Y, DVec3::Z] {
+                            seg(p - off * h, p + off * h, color);
+                        }
+                    }
+                }
+            }
+        }
         if !game_view && self.show_gizmos {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             // Only cameras and point lights get gizmos — gather the few Copy fields we
@@ -7004,10 +5604,12 @@ impl Editor {
                 }
             }
             // Collision telegraph: a small cross at each contact resolved this step.
+            // (Contacts are sim-frame — origin-relative — so convert to world here.)
             if let Some(sim) = self.sim.as_ref() {
                 let cs = 0.15;
                 for c in &sim.world.contacts {
-                    let cp = DVec3::new(c.point.x as f64, c.point.y as f64, c.point.z as f64);
+                    let cp = sim.world.origin
+                        + DVec3::new(c.point.x as f64, c.point.y as f64, c.point.z as f64);
                     for off in [DVec3::X, DVec3::Y, DVec3::Z] {
                         if let (Some(a), Some(b)) = (
                             project(cp - off * cs, cam.world_position, view_proj, gw, gh),
@@ -7018,24 +5620,30 @@ impl Editor {
                     }
                 }
             }
-            // Terrain collider wireframe (the SDF surface you walk on). The world-space
-            // segments are cached + rebuilt only when the terrain changes; here we just
-            // re-project them. Coarseness scales with the grid so the line count stays sane.
+            // Terrain collider wireframes (the SDF surfaces you walk on). Cached per
+            // terrain in NODE-LOCAL coords at native resolution + rebuilt only when
+            // that terrain's shape changes; here we add each node's f64 anchor and
+            // re-project — so a moved terrain's wireframe follows for free.
+            // Coarseness scales with each grid so the line count stays sane.
             if self.show_terrain_collider {
-                if self.terrain_wire_world.is_empty() {
-                    if let Some(c) = self.combined.as_ref() {
-                        let stride = (c.baked.dims.into_iter().max().unwrap_or(64) / 48).max(2);
-                        self.terrain_wire_world = terrain_collider_wire(c, stride);
+                for (&e, t) in &self.terrains {
+                    if !self.terrain_wire_world.iter().any(|(we, _)| *we == e) {
+                        let stride = (t.baked.dims.into_iter().max().unwrap_or(64) / 48).max(2);
+                        self.terrain_wire_world.push((e, terrain_collider_wire(t, stride)));
                     }
                 }
-                for &(a, b) in &self.terrain_wire_world {
-                    let wa = DVec3::new(a.x as f64, a.y as f64, a.z as f64);
-                    let wb = DVec3::new(b.x as f64, b.y as f64, b.z as f64);
-                    if let (Some(pa), Some(pb)) = (
-                        project(wa, cam.world_position, view_proj, gw, gh),
-                        project(wb, cam.world_position, view_proj, gw, gh),
-                    ) {
-                        self.terrain_wire_gizmo.push((pa, pb));
+                self.terrain_wire_world.retain(|(we, _)| self.terrains.contains_key(we));
+                for (e, segs) in &self.terrain_wire_world {
+                    let anchor = floptle_core::world_transform(&self.world, *e).translation;
+                    for &(a, b) in segs {
+                        let wa = anchor + DVec3::new(a.x as f64, a.y as f64, a.z as f64);
+                        let wb = anchor + DVec3::new(b.x as f64, b.y as f64, b.z as f64);
+                        if let (Some(pa), Some(pb)) = (
+                            project(wa, cam.world_position, view_proj, gw, gh),
+                            project(wb, cam.world_position, view_proj, gw, gh),
+                        ) {
+                            self.terrain_wire_gizmo.push((pa, pb));
+                        }
                     }
                 }
             }
@@ -7167,6 +5775,47 @@ impl Editor {
                 },
             );
 
+        // Edit-mode animation preview (Animating tab): pose the bound node at the
+        // playhead. Scene-node bindings apply transiently and are restored right
+        // after the draw list below is built, so a preview never dirties the
+        // authored scene (undo, save, and the Inspector all see real transforms).
+        if !self.playing {
+            if self.anim_ui.tab_visible {
+                if let (Some(target), Some(state)) =
+                    (self.anim_ui.target, self.anim_ui.sel_anim.clone())
+                {
+                    if self.anim_ui.preview_playing {
+                        self.anim_ui.playhead += dt;
+                    }
+                    // Record first: capture the user's pose edits as keys BEFORE
+                    // the preview re-applies the clip (which then includes them).
+                    if self.anim_ui.record {
+                        if anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
+                            self.anim_ui.clip_dirty = true;
+                        }
+                    }
+                    anim::preview_pose(
+                        &mut self.anim,
+                        &mut self.world,
+                        &self.mesh_registry,
+                        target,
+                        &state,
+                        self.anim_ui.playhead,
+                    );
+                    if self.anim_ui.record {
+                        // Re-baseline against what the preview applied, so next
+                        // frame's diff sees only NEW user edits.
+                        anim_ui::refresh_record_baseline(&self.world, &mut self.anim_ui, target);
+                    }
+                }
+            } else if !self.anim.poses.is_empty() || !self.anim.instances.is_empty() {
+                // Tab hidden: drop stale preview runtimes so models return to rest.
+                self.anim.poses.clear();
+                self.anim.instances.clear();
+            }
+            self.anim_ui.tab_visible = false; // re-armed by the tab each frame it draws
+        }
+
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
@@ -7175,8 +5824,13 @@ impl Editor {
             if let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
                 let model = ghost.render_matrix(cam.world_position);
-                for &mid in &asset.parts {
-                    instances.push((mid, None, instance_of(model, [0.7, 0.85, 1.0])));
+                for (i, &mid) in asset.parts.iter().enumerate() {
+                    let local = asset
+                        .rig
+                        .as_ref()
+                        .and_then(|r| r.rest_world.get(*r.part_nodes.get(i)?).copied())
+                        .unwrap_or(Mat4::IDENTITY);
+                    instances.push((mid, None, instance_of(model * local, [0.7, 0.85, 1.0])));
                 }
             }
         }
@@ -7212,8 +5866,23 @@ impl Editor {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
-                        for &mid in &asset.parts {
-                            instances.push((mid, tex, instance_of_mat(model, &mp)));
+                        if let Some(rig) = asset.rig.as_ref() {
+                            // Rigged: each part rides its (possibly animated) node.
+                            let node_world =
+                                self.anim.poses.get(e).unwrap_or(&rig.rest_world);
+                            for (i, &mid) in asset.parts.iter().enumerate() {
+                                let local = rig
+                                    .part_nodes
+                                    .get(i)
+                                    .and_then(|&n| node_world.get(n))
+                                    .copied()
+                                    .unwrap_or(Mat4::IDENTITY);
+                                instances.push((mid, tex, instance_of_mat(model * local, &mp)));
+                            }
+                        } else {
+                            for &mid in &asset.parts {
+                                instances.push((mid, tex, instance_of_mat(model, &mp)));
+                            }
                         }
                     }
                 }
@@ -7226,6 +5895,10 @@ impl Editor {
                 | Matter::Skybox { .. } => {}
             }
         }
+
+        // Undo any transient scene-binding animation preview now that the draw list
+        // is built — the ECS goes back to authored transforms before UI/undo/save.
+        self.anim.restore_preview(&mut self.world);
 
         // Skybox: a Skybox node drives the environment background — a solid color, or an
         // equirect texture × tint, rotated by the node so a script can spin the sky.
@@ -7269,8 +5942,10 @@ impl Editor {
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [0.0; 4],
                 params: [elapsed, n as f32, 0.0, 0.0],
-                vol_center: [0.0, 0.0, 0.0, 0.0], // no baked volume in v1
-                vol_half: [1.0, 1.0, 1.0, 0.5],
+                vol_center: [[0.0; 4]; 16],
+                vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
+                vol_atlas: [[0.0; 4]; 16],
+                vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
                 terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
@@ -7296,7 +5971,8 @@ impl Editor {
         // only the selected blob.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
-        if let Some(e) = self.selection.last().copied() {
+        // The Game view plays like a build — no selection outline there.
+        if let Some(e) = self.selection.last().copied().filter(|_| !game_view) {
             if let Some(m) = self.world.get::<Matter>(e) {
                 let t = floptle_core::world_transform(&self.world, e);
                 match m {
@@ -7309,8 +5985,24 @@ impl Editor {
                     Matter::Mesh { asset_path } => {
                         if let Some(asset) = self.mesh_registry.get(asset_path) {
                             let model = t.render_matrix(cam.world_position);
-                            for &mid in &asset.parts {
-                                mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                            if let Some(rig) = asset.rig.as_ref() {
+                                // Match the posed draw so the outline hugs the pose.
+                                let node_world =
+                                    self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
+                                for (i, &mid) in asset.parts.iter().enumerate() {
+                                    let local = rig
+                                        .part_nodes
+                                        .get(i)
+                                        .and_then(|&n| node_world.get(n))
+                                        .copied()
+                                        .unwrap_or(Mat4::IDENTITY);
+                                    mask_mesh
+                                        .push((mid, instance_of(model * local, [1.0, 1.0, 1.0])));
+                                }
+                            } else {
+                                for &mid in &asset.parts {
+                                    mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                                }
                             }
                         }
                     }
@@ -7335,17 +6027,9 @@ impl Editor {
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
         // and/or the combined terrain volume. Build its globals if either is present.
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm = if show_blobs || self.combined.is_some() {
+        let rm = if show_blobs || !self.terrains.is_empty() {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
-            if let Some((hf, bc)) =
-                self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
-            {
-                // The combined field is WORLD-space (its node sits at world origin),
-                // so the box center is just its `baked.center`, camera-relative.
-                let cr = DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position;
-                g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0]; // present
-                g.vol_half = [hf[0], hf[1], hf[2], 0.1];
-            }
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
             Some(g)
         } else {
             None
@@ -7400,14 +6084,23 @@ impl Editor {
         let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
+        let show_quit_confirm = &mut self.show_quit_confirm;
+        let quit_confirmed = &mut self.quit_confirmed;
+        let delete_confirm = &mut self.delete_confirm;
+        let scene_dirty_now = self.scene_dirty;
+        let new_terrain_cfg = &mut self.new_terrain_cfg;
         let pending_open_scene = &mut self.pending_open_scene;
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
         let terrain_textures = &mut self.terrain_textures;
         let terrain_present = !self.terrains.is_empty();
-        let terrain_voxels = self.combined.as_ref().map(|t| {
-            let [a, b, c] = t.baked.dims;
-            (a, b, c)
+        let terrain_voxels = (!self.terrains.is_empty()).then(|| {
+            let total: u64 = self
+                .terrains
+                .values()
+                .map(|t| t.baked.dims.iter().map(|&d| d as u64).product::<u64>())
+                .sum();
+            (self.terrains.len(), total)
         });
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
@@ -7455,16 +6148,23 @@ impl Editor {
         let light_gizmos = self.light_gizmos.as_slice();
         let body_gizmos = self.body_gizmos.as_slice();
         let contact_gizmos = self.contact_gizmos.as_slice();
+        let script_gizmo_lines = self.script_gizmo_lines.as_slice();
         let terrain_wire = self.terrain_wire_gizmo.as_slice();
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
+        let anim_sys = &mut self.anim;
+        let anim_ui_state = &mut self.anim_ui;
+        let mesh_registry = &self.mesh_registry;
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
+        let mut frame_pointer_down = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
+            let pointer_down = ui.input(|i| i.pointer.any_down());
+            frame_pointer_down = pointer_down;
             // ---- top menu bar ----
             egui::Panel::top("menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -7509,14 +6209,8 @@ impl Editor {
                             ui.close();
                         }
                     });
-                    ui.menu_button("Add", |ui| {
-                        if ui.button("Cube").clicked() { cmd.add = Some(new_cube()); ui.close(); }
-                        if ui.button("Sphere").clicked() { cmd.add = Some(new_sphere()); ui.close(); }
-                        if ui.button("Blob").clicked() {
-                            cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
-                            ui.close();
-                        }
-                    });
+                    // The same catalog as the Hierarchy's ✚ New menu — one source of truth.
+                    ui.menu_button("Add", |ui| node_new_menu(ui, &mut cmd, None));
                     ui.menu_button("View", |ui| {
                         ui.checkbox(&mut grid.show, "Grid");
                         ui.checkbox(&mut grid.snap, "Snap to grid");
@@ -7525,11 +6219,27 @@ impl Editor {
                             ui.close();
                         }
                         ui.separator();
-                        ui.checkbox(&mut *show_material_editor, "Material Editor");
                         ui.checkbox(&mut *show_terrain_collider, "Terrain collider wireframe")
                             .on_hover_text("show the terrain's collision surface (what the player walks on)");
                         ui.checkbox(&mut *show_mesh_colliders, "Collider wireframes (mesh + shapes)")
                             .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
+                    });
+                    // Tool windows + panels live under Window (View = viewport display).
+                    // Every entry opens/focuses its window (close them from the
+                    // window itself) — one consistent behavior.
+                    ui.menu_button("Window", |ui| {
+                        if ui.button("◑ Material Editor").clicked() {
+                            *show_material_editor = true;
+                            ui.close();
+                        }
+                        if ui.button("◉ Animation Controller").on_hover_text("the state-graph editor: states, transitions, fades, layers").clicked() {
+                            cmd.focus_anim_graph = true;
+                            ui.close();
+                        }
+                        if ui.button("✎ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
+                            cmd.focus_animating = true;
+                            ui.close();
+                        }
                         if ui.button("Δ Terrain tools").clicked() {
                             cmd.focus_terrain = true;
                             ui.close();
@@ -7600,6 +6310,7 @@ impl Editor {
                 light_gizmos,
                 body_gizmos,
                 contact_gizmos,
+                script_gizmo_lines,
                 terrain_wire,
                 mesh_wire,
                 show_gizmos,
@@ -7614,6 +6325,11 @@ impl Editor {
                 scene_name: &scene_name,
                 ppp,
                 code_theme,
+                anim: anim_sys,
+                anim_ui: anim_ui_state,
+                mesh_registry,
+                pointer_down,
+                playing,
                 cmd: &mut cmd,
             };
             // Fullscreen: one tab maximized over the whole window (double-click a tab to
@@ -8000,6 +6716,161 @@ impl Editor {
                 }
             }
 
+            // ---- quit with unsaved changes ----
+            if *show_quit_confirm {
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new("Unsaved changes")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(320.0)
+                    .show(ui.ctx(), |ui| {
+                        if scene_dirty_now {
+                            ui.label("The scene has unsaved changes.");
+                        } else {
+                            ui.label("Quit Floptle?");
+                        }
+                        ui.horizontal(|ui| {
+                            if scene_dirty_now && ui.button("💾 Save & Quit").clicked() {
+                                want_save = true;
+                                *quit_confirmed = true;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                close = true;
+                            }
+                            if ui.button("Quit without saving").clicked() {
+                                *quit_confirmed = true;
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *show_quit_confirm = false;
+                }
+            }
+
+            // ---- delete asset confirmation (deletion is irreversible) ----
+            if let Some(path) = delete_confirm.clone() {
+                let mut open = true;
+                let mut close = false;
+                let name = Path::new(&path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.clone());
+                let is_dir = Path::new(&path).is_dir();
+                egui::Window::new("Delete asset")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(340.0)
+                    .show(ui.ctx(), |ui| {
+                        if is_dir {
+                            ui.label(format!("Delete the folder \"{name}\" and everything in it?"));
+                        } else {
+                            ui.label(format!("Delete \"{name}\"?"));
+                        }
+                        ui.small("This can't be undone.");
+                        ui.horizontal(|ui| {
+                            if ui.button("🗑 Delete").clicked() {
+                                cmd.do_delete_asset = Some(path.clone());
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *delete_confirm = None;
+                }
+            }
+
+            // ---- new terrain dialog ----
+            // Lets a fresh terrain arrive already the size/look you want (a tiny
+            // rock-grey patch or a massive grass field) instead of always starting as
+            // the same small default slab you'd otherwise have to sculpt/fill out by
+            // hand — see NewTerrainCfg.
+            if let Some(cfg) = new_terrain_cfg.as_mut() {
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new("New terrain")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(320.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("Footprint (X/Z) and thickness (Y), world units:");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.size_xz)
+                                    .range(0.5..=4000.0)
+                                    .speed(1.0)
+                                    .prefix("size ")
+                                    .suffix(" (x/z)"),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut cfg.thickness)
+                                    .range(0.2..=500.0)
+                                    .speed(0.5)
+                                    .prefix("thick ")
+                                    .suffix(" (y)"),
+                            );
+                        });
+                        ui.small("a flat slab renders perfectly smooth at any size — set \"detail\" in the Terrain tab higher before sculpting bumps into a large one.");
+                        ui.horizontal(|ui| {
+                            ui.label("color");
+                            ui.color_edit_button_rgb(&mut cfg.color);
+                        });
+                        ui.label("texture (optional — paints the whole slab)");
+                        let mut tex_list = Vec::new();
+                        collect_texture_paths(asset_tree, &mut tex_list);
+                        let cur_label = if cfg.texture.is_empty() {
+                            "(none — flat color)".to_string()
+                        } else {
+                            Path::new(&cfg.texture)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        };
+                        egui::ComboBox::from_id_salt("new_terrain_tex")
+                            .selected_text(cur_label)
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(cfg.texture.is_empty(), "(none — flat color)")
+                                    .clicked()
+                                {
+                                    cfg.texture.clear();
+                                }
+                                for p in &tex_list {
+                                    let n = Path::new(p)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    if ui.selectable_label(&cfg.texture == p, n).clicked() {
+                                        cfg.texture = p.clone();
+                                    }
+                                }
+                            });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Create").clicked() {
+                                cmd.create_terrain = Some(cfg.clone());
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *new_terrain_cfg = None;
+                }
+            }
+
             // ---- open-scene unsaved-changes confirm ----
             if let Some(path) = pending_open_scene.clone() {
                 let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -8071,7 +6942,8 @@ impl Editor {
                     Some(clear.map(|c| c as f64))
                 };
                 raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
-                if self.grid.show {
+                // The reference grid is an editor aid — Scene view only.
+                if self.grid.show && !game_view {
                     let c = self.grid.color;
                     grid_render.draw(
                         gpu,
@@ -8242,6 +7114,24 @@ impl Editor {
         if cmd.inspector_changed {
             self.begin_edit();
         }
+        // Persist pending animation-asset edits even when their tab is hidden
+        // (the tabs flush on draw; this covers edits left behind a tab switch).
+        if !frame_pointer_down {
+            if self.anim_ui.graph_dirty {
+                if let (Some(k), Some(doc)) =
+                    (self.anim_ui.graph_key.clone(), self.anim_ui.graph_doc.clone())
+                {
+                    self.anim.save_controller(&self.project_root, &k, &doc);
+                }
+                self.anim_ui.graph_dirty = false;
+            }
+            if self.anim_ui.clip_dirty {
+                if let Some((k, d)) = self.anim_ui.clip_doc.clone() {
+                    self.anim.save_clip(&self.project_root, &k, &d);
+                }
+                self.anim_ui.clip_dirty = false;
+            }
+        }
         if cmd.toggle_play {
             self.toggle_play();
         }
@@ -8371,14 +7261,88 @@ impl Editor {
         if let Some(path) = cmd.extract_textures {
             self.extract_textures(&path);
         }
+        if let Some(path) = cmd.extract_anims {
+            self.anim_ui.probes.remove(&path); // refresh the model's clip list
+            match anim::extract_clips(&mut self.anim, &self.project_root, &path) {
+                Ok(keys) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "extracted {} animation clip(s) → assets/animations/",
+                            keys.len()
+                        ),
+                        None,
+                    );
+                    self.asset_tree = build_assets(&self.project_root);
+                }
+                Err(e) => self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("extract animations failed: {e}"),
+                    None,
+                ),
+            }
+        }
+        if let Some((e, key)) = cmd.set_anim_controller {
+            self.record();
+            match key {
+                Some(k) => {
+                    self.world.insert(e, floptle_core::AnimController { asset: k });
+                }
+                None => {
+                    self.world.remove::<floptle_core::AnimController>(e);
+                }
+            }
+            // Live in Play: the runtime rebinds lazily on the next animator advance.
+        }
+        if let Some(key) = cmd.open_anim_graph {
+            cmd.focus_anim_graph = true;
+            self.anim_ui.graph_key = Some(key);
+            self.anim_ui.graph_doc = None; // reload the working copy
+            self.anim_ui.graph_dirty = false;
+            self.anim_ui.sel_state = None;
+            self.anim_ui.sel_trans = None;
+        }
+        if let Some(attach) = cmd.new_anim_controller {
+            cmd.focus_anim_graph = true;
+            self.anim_ui.new_ctl_buf = Some(String::new());
+            self.anim_ui.focus_prompt = true;
+            self.anim_ui.new_ctl_attach = attach;
+            self.anim_ui.new_ctl_dir = cmd.new_anim_controller_dir.take().and_then(|d| {
+                Path::new(&d)
+                    .strip_prefix(&self.project_root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            });
+        }
+        if cmd.focus_animating {
+            if let Some(dock) = self.dock_state.as_mut() {
+                if let Some(path) = dock.find_tab(&EditorTab::Animation) {
+                    let _ = dock.set_active_tab(path);
+                } else {
+                    dock.push_to_focused_leaf(EditorTab::Animation);
+                }
+            }
+        }
+        if cmd.focus_anim_graph {
+            if let Some(dock) = self.dock_state.as_mut() {
+                if let Some(path) = dock.find_tab(&EditorTab::AnimGraph) {
+                    let _ = dock.set_active_tab(path);
+                } else {
+                    dock.push_to_focused_leaf(EditorTab::AnimGraph);
+                }
+            }
+        }
         if let Some((child, parent)) = cmd.reparent {
             self.reparent(child, parent);
         }
         if let Some((matter, parent)) = cmd.add_parented {
             self.add_parented(matter, parent);
         }
-        if cmd.create_terrain {
-            self.create_terrain();
+        if cmd.open_new_terrain {
+            self.new_terrain_cfg = Some(NewTerrainCfg::default());
+        }
+        if let Some(cfg) = cmd.create_terrain {
+            self.create_terrain(&cfg);
             self.focus_terrain();
         }
         if let Some(parent) = cmd.add_camera {
@@ -8407,8 +7371,7 @@ impl Editor {
                 }
                 self.terrains.clear();
                 self.active_terrain = None;
-                self.combined = None;
-                self.combined_dirty = true;
+                self.terrain_gpu_dirty = true;
             }
         }
         if cmd.terrain_palette_changed {
@@ -8429,7 +7392,7 @@ impl Editor {
                         TerrainFill::Color(c) => t.fill_color(c),
                         TerrainFill::Texture(slot) => t.fill_texture(slot),
                     }
-                    self.combined_dirty = true;
+                    self.terrain_gpu_dirty = true;
                 }
             }
         }
@@ -8450,7 +7413,7 @@ impl Editor {
                 );
                 if let Some(t) = self.terrains.get_mut(&e) {
                     t.fill_bounds(top, floor, inset, color);
-                    self.combined_dirty = true;
+                    self.terrain_gpu_dirty = true;
                 }
             }
         }
@@ -8480,6 +7443,8 @@ impl Editor {
         }
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
+            self.anim.rescan(&self.project_root);
+            self.anim_ui.probes.clear(); // re-probe model animation lists
         }
         if let Some(dir) = cmd.new_folder_in {
             self.new_folder(&dir);
@@ -8502,6 +7467,10 @@ impl Editor {
             self.rename_asset(&from, &to);
         }
         if let Some(path) = cmd.delete_asset {
+            // Deleting a file/folder is irreversible — always confirm first.
+            self.delete_confirm = Some(path);
+        }
+        if let Some(path) = cmd.do_delete_asset {
             self.delete_asset(&path);
         }
         // Pre-warm a model being dragged so its live ghost can render next frame
@@ -8697,6 +7666,8 @@ impl Editor {
         }
     }
     fn restore(&mut self, doc: SceneDoc) {
+        // Entities are respawned below — drop animator runtimes keyed by the old ones.
+        self.anim.clear_instances();
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
@@ -8719,7 +7690,7 @@ impl Editor {
         let cur = self.terrains.get(&e).map(|t| t.to_bytes());
         if let Some(t) = floptle_field::Terrain::from_bytes(bytes) {
             self.terrains.insert(e, t);
-            self.combined_dirty = true;
+            self.terrain_gpu_dirty = true;
         }
         cur
     }
@@ -8760,25 +7731,27 @@ impl Editor {
         }
     }
 
-    /// Enter/leave play mode. Play snapshots the authored scene and runs scripts;
-    /// Stop restores the authored scene so script-driven changes aren't persisted.
     /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
     /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
-    /// gravity well at the node. With no volumes, a default −Y 9.81 keeps normal games
-    /// working out of the box.
-    fn build_gravity_field(&self) -> floptle_physics::GravityField {
+    /// gravity well at the node. No GravityVolume node → ZERO gravity (a space/zero-g
+    /// world). Takes `&World` (not `&self`) so it can be called from the play loop
+    /// while `self.gpu`/egui are mutably borrowed — see call site.
+    /// Build the scene's gravity field for the sim. `origin` is the sim's world origin
+    /// (ADR-0015): radial centers are converted to the sim frame in f64 here, so a
+    /// planet placed far out pulls exactly.
+    fn build_gravity_field(world: &floptle_core::World, origin: DVec3) -> floptle_physics::GravityField {
         use floptle_core::{GravityMode, Matter};
         let mut field = floptle_physics::GravityField::default();
-        for (e, m) in self.world.query::<Matter>() {
+        for (e, m) in world.query::<Matter>() {
             if let Matter::GravityVolume { mode, strength, radius } = m {
                 match mode {
                     GravityMode::Down => field
                         .sources
                         .push(floptle_physics::GravitySource::Uniform(Vec3::new(0.0, -*strength, 0.0))),
                     GravityMode::Radial => {
-                        let p = floptle_core::world_transform(&self.world, e).translation;
+                        let p = floptle_core::world_transform(world, e).translation;
                         field.sources.push(floptle_physics::GravitySource::Point {
-                            center: Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                            center: (p - origin).as_vec3(),
                             strength: *strength,
                             radius: *radius,
                         });
@@ -8786,9 +7759,22 @@ impl Editor {
                 }
             }
         }
-        // No GravityVolume node → ZERO gravity (a space/zero-g world). Add a Gravity
-        // Volume (Down for normal gravity, Radial for a planet) to pull bodies.
         field
+    }
+
+    /// Where the sim's local frame should be centered at Play (ADR-0015): the active
+    /// camera if there is one, else the first rigidbody, else the world origin —
+    /// rounded to whole units so every later rebase shift stays exact in f32.
+    fn sim_origin_hint(&self) -> DVec3 {
+        use floptle_core::Matter;
+        let focus = self
+            .world
+            .query::<Matter>()
+            .find_map(|(e, m)| matches!(m, Matter::Camera { active: true, .. }).then_some(e))
+            .or_else(|| self.world.query::<floptle_core::RigidBody>().map(|(e, _)| e).next());
+        focus
+            .map(|e| floptle_core::world_transform(&self.world, e).translation.round())
+            .unwrap_or(DVec3::ZERO)
     }
 
     /// Build every node's STATIC collider into the sim at Play. A node is a static
@@ -8816,7 +7802,10 @@ impl Editor {
         }
         for e in ents {
             let wt = floptle_core::world_transform(&self.world, e);
-            let center = wt.translation.as_vec3();
+            // Anchor each collider on its own node (full f64) and bake geometry
+            // RELATIVE to it — the residuals stay small and exact no matter how far
+            // out the node sits (ADR-0015); the sim re-anchors them per rebase.
+            let anchor = wt.translation;
             let s = wt.scale;
             match self.world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
@@ -8825,7 +7814,9 @@ impl Editor {
                         eprintln!("collidable mesh: failed to load {path}");
                         continue;
                     };
-                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, center);
+                    // Scale + rotate locally (f32 is exact here — model-sized numbers);
+                    // the node's translation lives in the f64 anchor, never the verts.
+                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
                     let mut verts: Vec<Vec3> = Vec::new();
                     let mut indices: Vec<u32> = Vec::new();
                     for part in &model.parts {
@@ -8833,20 +7824,20 @@ impl Editor {
                         verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
                         indices.extend(part.mesh.indices.iter().map(|i| i + base));
                     }
-                    sim.add_static_mesh(&verts, &indices);
+                    sim.add_static_mesh(anchor, &verts, &indices);
                 }
                 // Primitive geometry → matching analytic collider, sized to match the
                 // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
-                        sim.add_static_box(center, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation);
+                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation);
                     }
                     floptle_core::Shape::Sphere => {
-                        sim.add_static_sphere(center, 0.85 * s.max_element());
+                        sim.add_static_sphere(anchor, 0.85 * s.max_element());
                     }
                     floptle_core::Shape::Capsule => {
                         let up = wt.rotation * Vec3::Y;
-                        sim.add_static_capsule(center, up, 0.5 * s.y, 0.5 * s.x.max(s.z));
+                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z));
                     }
                 },
                 _ => {}
@@ -8861,10 +7852,23 @@ impl Editor {
         if !self.playing {
             return;
         }
-        let gravity = self.build_gravity_field();
-        let mut sim = floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity);
+        let origin = self.sim_origin_hint();
+        let gravity = Self::build_gravity_field(&self.world, origin);
+        let terrain_vols = self.terrain_volumes();
+        let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
+        drop(terrain_vols);
         self.add_static_colliders(&mut sim);
         self.sim = Some(sim);
+    }
+
+    /// Every terrain volume as `(node world translation, node-local field)` — what the
+    /// sim colliders anchor on. Each volume collides at its NATIVE resolution (the
+    /// combined field is render-only), placed in full `f64` (ADR-0015).
+    fn terrain_volumes(&self) -> Vec<(DVec3, &floptle_field::Terrain)> {
+        self.terrains
+            .iter()
+            .map(|(&e, t)| (floptle_core::world_transform(&self.world, e).translation, t))
+            .collect()
     }
 
     /// Paste the component clipboard onto `e` (the held clip decides the kind). Adds
@@ -8918,7 +7922,47 @@ impl Editor {
         }
     }
 
+    /// Enter/leave play mode. Play snapshots the authored scene and runs scripts;
+    /// Stop restores the authored scene so script-driven changes aren't persisted.
+    /// Drop every animator runtime + the Animating tab's entity bindings —
+    /// called whenever the World is rebuilt (scene/project switches), since
+    /// entity handles from the old world alias entities in the new one.
+    fn reset_anim_bindings(&mut self) {
+        self.stop_recording();
+        self.anim.clear_instances();
+        self.anim_ui.target = None;
+        self.anim_ui.sel_anim = None;
+        self.anim_ui.clip_doc = None;
+        self.anim_ui.preview_playing = false;
+        self.anim_ui.last_scene_local.clear();
+    }
+
+    /// Turn ● Record off and put the posed subtree back exactly as it was
+    /// when recording started — recording authors the CLIP, never the scene.
+    fn stop_recording(&mut self) {
+        if !self.anim_ui.record && self.anim_ui.record_restore.is_empty() {
+            return;
+        }
+        self.anim_ui.record = false;
+        for (e, tr) in self.anim_ui.record_restore.drain(..) {
+            if let Some(slot) = self.world.get_mut::<Transform>(e) {
+                *slot = tr;
+            }
+        }
+        self.anim_ui.last_scene_local.clear();
+    }
+
     fn toggle_play(&mut self) {
+        // Fresh animator runtimes both ways (Play binds against the live scene;
+        // Stop drops them so the restored scene isn't posed by stale animators).
+        self.anim.clear_instances();
+        self.anim_ui.preview_playing = false;
+        // Recording must never run during Play (gameplay motion would bake into
+        // the clip asset), and stale queued animator commands must not leak
+        // across sessions.
+        self.stop_recording();
+        self.script_host.clear_anim_state();
+        self.script_gizmos.clear();
         if self.playing {
             self.playing = false;
             self.paused = false;
@@ -8927,27 +7971,46 @@ impl Editor {
             if self.script_mouse_lock {
                 self.script_mouse_lock = false;
                 if let Some(window) = self.window.as_ref() {
-                    let _ = window.set_cursor_grab(CursorGrabMode::None);
-                    window.set_cursor_visible(true);
+                    self.cursor_lock_soft = grab_cursor(window, false);
                 }
             }
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
         } else {
+            // Scripts run from what's on DISK — flush unsaved IDE edits first so
+            // Play always tests the code you're looking at.
+            let mut flushed = 0;
+            for f in self.ide.open.iter_mut().filter(|f| f.dirty) {
+                if std::fs::write(&f.path, &f.text).is_ok() {
+                    f.dirty = false;
+                    flushed += 1;
+                }
+            }
             self.play_snapshot = Some(self.snapshot());
             self.play_t = 0.0;
             self.paused = false;
-            // Build the physics sim from the scene: RigidBody nodes + the combined
-            // terrain (SDF collider) + the gravity field from GravityVolume nodes.
-            let gravity = self.build_gravity_field();
-            let mut sim = floptle_physics::Sim::build(&self.world, self.combined.as_ref(), gravity);
+            // Build the physics sim from the scene: RigidBody nodes + every terrain
+            // volume (its own anchored SDF collider, native resolution) + the gravity
+            // field from GravityVolume nodes.
+            let origin = self.sim_origin_hint();
+            let gravity = Self::build_gravity_field(&self.world, origin);
+            let terrain_vols = self.terrain_volumes();
+            let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
+            drop(terrain_vols);
             // Add static colliders (any node flagged "Collidable", plus legacy mesh
             // colliders) so a character can walk on / bump into them, not just terrain.
             self.add_static_colliders(&mut sim);
             self.sim = Some(sim);
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
+            if flushed > 0 {
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("⏵ auto-saved {flushed} edited script(s)"),
+                    None,
+                );
+            }
             // Press Play → bring the Game tab to the front (active-camera view), so it's
             // clear you're testing the game, not the editor scene view.
             if let Some(dock) = self.dock_state.as_mut() {
@@ -8990,6 +8053,8 @@ impl Editor {
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+        let anim_controller =
+            self.world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         Some(NodeDoc {
             name,
             transform,
@@ -9000,6 +8065,7 @@ impl Editor {
             mesh_collider,
             collidable,
             visible,
+            anim_controller,
             parent: None,
         })
     }
@@ -9035,6 +8101,9 @@ impl Editor {
         if !node.visible {
             self.world.insert(e, floptle_core::Visible(false));
         }
+        if let Some(ctl) = &node.anim_controller {
+            self.world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
+        }
         e
     }
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -9055,6 +8124,7 @@ impl Editor {
             mesh_collider: false,
             collidable: false,
             visible: true,
+            anim_controller: None,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -9068,6 +8138,26 @@ impl Editor {
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return false;
         };
+        // Rigged path first: any glTF with animations keeps its node tree +
+        // clips (parts stay node-local and get posed each frame).
+        match floptle_assets::import_rigged(std::path::Path::new(path)) {
+            Ok(Some(model)) => {
+                let parts = model
+                    .parts
+                    .iter()
+                    .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                    .collect();
+                let rig = anim::rig_from_model(&model);
+                self.mesh_registry.insert(
+                    path.to_string(),
+                    MeshAsset { parts, size: model.size, rig: Some(rig) },
+                );
+                println!("  imported {path} (rigged, {} clip(s))", model.clips.len());
+                return true;
+            }
+            Ok(None) => {} // no animations — fall through to the static bake
+            Err(e) => eprintln!("  rig import {path} failed ({e}); trying static"),
+        }
         match floptle_assets::gltf_import::import(std::path::Path::new(path)) {
             Ok(model) => {
                 let parts = model
@@ -9076,7 +8166,7 @@ impl Editor {
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
                 self.mesh_registry
-                    .insert(path.to_string(), MeshAsset { parts, size: model.size });
+                    .insert(path.to_string(), MeshAsset { parts, size: model.size, rig: None });
                 println!("  imported {path}");
                 true
             }
@@ -9158,8 +8248,10 @@ impl Editor {
             self.preview_spin += dt * 0.8;
         }
 
-        // Resolve the subject into drawable parts + a bounding radius.
+        // Resolve the subject into drawable parts + a bounding radius. Rigged
+        // models supply a per-part rest matrix (their parts are node-local).
         let mut parts: Vec<(MeshId, Option<TexId>)> = Vec::new();
+        let mut part_mats: Option<Vec<Mat4>> = None;
         let mut radius = 1.0f32;
         let mut mat = MaterialParams::flat([0.8, 0.8, 0.82]);
         let is_mat = is_material(&path);
@@ -9170,6 +8262,14 @@ impl Editor {
             if let Some(a) = self.mesh_registry.get(&path) {
                 radius = (a.size * 0.5).max(0.2);
                 parts = a.parts.iter().map(|m| (*m, None)).collect();
+                if let Some(rig) = a.rig.as_ref() {
+                    part_mats = Some(
+                        rig.part_nodes
+                            .iter()
+                            .map(|&n| rig.rest_world.get(n).copied().unwrap_or(Mat4::IDENTITY))
+                            .collect(),
+                    );
+                }
             }
         } else {
             // Material preset: (re)load it from the loaded presets by file stem.
@@ -9211,13 +8311,23 @@ impl Editor {
         );
         let vp = cam.view_proj(1.0);
         let model = Mat4::from_translation(-eye); // obj at origin, camera-relative
-        let raw = if is_mat {
-            instance_of_mat(model, &mat)
-        } else {
-            instance_of(model, [1.0, 1.0, 1.0])
-        };
-        let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
-            parts.iter().map(|(m, t)| (*m, *t, raw)).collect();
+        let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = parts
+            .iter()
+            .enumerate()
+            .map(|(i, (m, t))| {
+                let local = part_mats
+                    .as_ref()
+                    .and_then(|v| v.get(i))
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY);
+                let raw = if is_mat {
+                    instance_of_mat(model * local, &mat)
+                } else {
+                    instance_of(model * local, [1.0, 1.0, 1.0])
+                };
+                (*m, *t, raw)
+            })
+            .collect();
         let l = Vec3::new(0.5, 0.8, 0.6).normalize();
         let globals = Globals {
             view_proj: vp.to_cols_array_2d(),
@@ -9374,7 +8484,7 @@ impl Editor {
         let clear = [sky_solid[0], sky_solid[1], sky_solid[2], 1.0];
         let terrain_mat = self.terrain_material();
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm = if show_blobs || self.combined.is_some() {
+        let rm = if show_blobs || !self.terrains.is_empty() {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
             if show_blobs {
@@ -9395,8 +8505,10 @@ impl Editor {
                 bg: [clear[0], clear[1], clear[2], 1.0],
                 center: [0.0; 4],
                 params: [elapsed, if show_blobs { n as f32 } else { 0.0 }, 0.0, 0.0],
-                vol_center: [0.0, 0.0, 0.0, 0.0],
-                vol_half: [1.0, 1.0, 1.0, 0.5],
+                vol_center: [[0.0; 4]; 16],
+                vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
+                vol_atlas: [[0.0; 4]; 16],
+                vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
                 terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
@@ -9415,13 +8527,7 @@ impl Editor {
                 sky_tint,
                 sky_rot,
             };
-            if let Some((hf, bc)) =
-                self.combined.as_ref().map(|t| (t.baked.half_extent, t.baked.center))
-            {
-                let cr = DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position;
-                g.vol_center = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0];
-                g.vol_half = [hf[0], hf[1], hf[2], 0.1];
-            }
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
             Some(g)
         } else {
             None
@@ -9562,6 +8668,7 @@ impl Editor {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                anim_controller: None,
                 parent: None,
             };
             let e = self.spawn_node(&node);
@@ -9653,7 +8760,7 @@ impl Editor {
                 if self.active_terrain == Some(e) {
                     self.active_terrain = None;
                 }
-                self.combined_dirty = true;
+                self.terrain_gpu_dirty = true;
             }
             self.world.despawn(e);
         }
@@ -10143,7 +9250,7 @@ impl Editor {
                         _ => (active, mn, hi, geom),
                     });
                 }
-                _ => self.combined_dirty = true,
+                _ => self.terrain_gpu_dirty = true,
             }
         }
     }
@@ -10154,21 +9261,30 @@ impl Editor {
         [d, (d * 3 / 8).max(8), d]
     }
 
-    /// Create a fresh flat terrain as a NEW scene node (you can have any number).
-    /// It is placed at the cursor's ground point so multiple terrains can be laid
-    /// out and blended; its field is centered in the node's local space.
-    fn create_terrain(&mut self) {
+    /// Create a fresh flat terrain as a NEW scene node (you can have any number). It
+    /// is placed at the cursor's ground point so multiple terrains can be laid out
+    /// and blended; its field is centered in the node's local space. `cfg` (from the
+    /// "New terrain" dialog) sizes the flat slab and paints it with a color/texture
+    /// up front — a flat field renders exactly right at any voxel density (trilinear
+    /// interpolation of a plane is exact), so a huge open field is just as clean as a
+    /// tiny patch; `terrain_dims()`/detail only matters once you start sculpting bumps.
+    fn create_terrain(&mut self, cfg: &NewTerrainCfg) {
         self.record();
         let id = self.next_terrain_id;
         self.next_terrain_id += 1;
         let pos = self.cursor_world();
-        let field = floptle_field::Terrain::flat(
+        let half_xz = cfg.size_xz.max(0.1) * 0.5;
+        let half_y = cfg.thickness.max(0.1) * 0.5;
+        let mut field = floptle_field::Terrain::flat(
             self.terrain_dims(),
             [0.0, 0.0, 0.0],
-            [16.0, 6.0, 16.0],
+            [half_xz, half_y, half_xz],
             0.0,
-            [0.35, 0.6, 0.28],
+            cfg.color,
         );
+        if let Some(slot) = self.ensure_texture_slot(&cfg.texture) {
+            field.fill_texture(slot + 1);
+        }
         let e = self.world.spawn();
         self.world.insert(e, Transform { translation: pos, ..Transform::IDENTITY });
         let n = self.terrains.len() + 1;
@@ -10176,8 +9292,24 @@ impl Editor {
         self.world.insert(e, Matter::Terrain { id });
         self.terrains.insert(e, field);
         self.active_terrain = Some(e);
-        self.combined_dirty = true;
+        self.terrain_gpu_dirty = true;
         self.select_single(e);
+    }
+
+    /// Resolve a texture asset path to a terrain-palette slot (0-based), assigning it
+    /// to the first empty slot if it isn't already in the palette. `None` for an empty
+    /// path (no texture wanted) or a full palette with no matching existing slot.
+    fn ensure_texture_slot(&mut self, path: &str) -> Option<u8> {
+        if path.is_empty() {
+            return None;
+        }
+        if let Some(i) = self.terrain_textures.iter().position(|p| p == path) {
+            return Some(i as u8);
+        }
+        let i = self.terrain_textures.iter().position(|p| p.is_empty())?;
+        self.terrain_textures[i] = path.to_string();
+        self.terrain_textures_dirty = true;
+        Some(i as u8)
     }
 
     // ---- cameras -----------------------------------------------------------
@@ -10252,7 +9384,7 @@ impl Editor {
     fn adopt_terrain(&mut self) {
         self.terrains.clear();
         self.active_terrain = None;
-        self.combined = None;
+        self.terrain_slots.clear();
         let nodes: Vec<(Entity, u32)> = self
             .world
             .query::<Matter>()
@@ -10291,7 +9423,7 @@ impl Editor {
             self.terrains.insert(e, field);
         }
         self.next_terrain_id = max_id + 1;
-        self.combined_dirty = !self.terrains.is_empty();
+        self.terrain_gpu_dirty = !self.terrains.is_empty();
         // Restore the texture palette so painted-texture slots map to images again.
         if !self.terrains.is_empty() {
             if let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
@@ -10328,26 +9460,37 @@ impl Editor {
         None
     }
 
-    /// Fold every terrain field (each at its node's world translation) into one
-    /// world-space combined field for rendering. Cheap no-op clone for one terrain.
-    /// True if any terrain node has moved (or the set changed) since the combined
-    /// field was last built — i.e. a rebuild is needed.
-    fn terrains_moved(&self) -> bool {
-        if self.terrains.len() != self.combined_origins.len() {
-            return true;
+    /// Fill the raymarch globals' per-volume slots: each uploaded terrain's box,
+    /// composed anchor (node f64 translation) + local center FIRST, then
+    /// camera-relative — exact at any world distance (ADR-0015). Each volume samples
+    /// its own atlas slot at native resolution; overlapping volumes fuse on the GPU
+    /// with the same smin the old CPU combine used (k = 0.6).
+    /// (Associated fn taking explicit fields — callers sit inside the render section
+    /// where `self.gpu`/`self.egui` are mutably borrowed, so `&self` is unavailable.)
+    fn fill_terrain_volumes(
+        terrains: &HashMap<Entity, floptle_field::Terrain>,
+        slots: &[Entity],
+        world: &floptle_core::World,
+        g: &mut RaymarchGlobals,
+        cam_world: DVec3,
+    ) {
+        g.params[2] = 0.1; // blob↔terrain blend k (the old single-field look)
+        for (i, &e) in slots.iter().take(floptle_render::MAX_VOLUMES).enumerate() {
+            // A just-deleted terrain leaves a stale slot for one frame — leave it
+            // absent (w = 0); the dirty flag re-uploads the set next frame.
+            let Some(t) = terrains.get(&e) else { continue };
+            let anchor = floptle_core::world_transform(world, e).translation;
+            let bc = t.baked.center;
+            let hf = t.baked.half_extent;
+            let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
+            g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0];
+            g.vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
         }
-        self.terrains.keys().any(|&e| {
-            let o = self.terrain_world_origin(e);
-            !self
-                .combined_origins
-                .iter()
-                .any(|(ce, co)| *ce == e && (*co - o).length() < 1e-5)
-        })
     }
 
     /// The surface [`Material`] that drives terrain shading. Terrain uses the same
     /// lighting model as the meshes, so this picks whose lighting params (ambient,
-    /// specular/reflectiveness, rim, emissive, unlit, color tint) the combined terrain
+    /// specular/reflectiveness, rim, emissive, unlit, color tint) every terrain
     /// adopts: the active terrain's material if it has one, else any terrain that has
     /// one, else a neutral matte default. Per-terrain color still comes from painting.
     fn terrain_material(&self) -> MaterialParams {
@@ -10363,51 +9506,6 @@ impl Editor {
         pick.and_then(|e| self.world.get::<Material>(e))
             .map(material_params)
             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
-    }
-
-    fn rebuild_combined(&mut self) {
-        if self.terrains.is_empty() {
-            self.combined = None;
-            self.combined_origins.clear();
-            return;
-        }
-        // Fast path: a single terrain needs no resample — clone it and shift its box
-        // center by the node origin so the field reads in world space.
-        if self.terrains.len() == 1 {
-            let (&e, t) = self.terrains.iter().next().unwrap();
-            let o = self.terrain_world_origin(e);
-            let mut world = t.clone();
-            world.baked.center[0] += o.x as f32;
-            world.baked.center[1] += o.y as f32;
-            world.baked.center[2] += o.z as f32;
-            self.combined = Some(world);
-            self.combined_origins = vec![(e, o)];
-            return;
-        }
-        // Deterministic order (by Matter::Terrain id) so the fold is stable.
-        let mut items: Vec<(u32, Entity)> = self
-            .terrains
-            .keys()
-            .map(|&e| {
-                let id = match self.world.get::<Matter>(e) {
-                    Some(Matter::Terrain { id }) => *id,
-                    _ => 0,
-                };
-                (id, e)
-            })
-            .collect();
-        items.sort_by_key(|(id, _)| *id);
-        let mut origins: Vec<(Entity, DVec3)> = Vec::new();
-        let volumes: Vec<([f64; 3], &floptle_field::Terrain)> = items
-            .iter()
-            .filter_map(|(_, e)| {
-                let o = self.terrain_world_origin(*e);
-                origins.push((*e, o));
-                self.terrains.get(e).map(|t| ([o.x, o.y, o.z], t))
-            })
-            .collect();
-        self.combined = Some(floptle_field::Terrain::combine(&volumes, 0.6));
-        self.combined_origins = origins;
     }
 
     // ---- scene-graph (parenting) -------------------------------------------
@@ -10459,6 +9557,7 @@ impl Editor {
 
     /// Create a new blank scene `<name>.ron`, save it, and switch the editor to it.
     fn new_scene(&mut self, name: &str) {
+        self.reset_anim_bindings();
         let name = {
             let n = name.trim();
             if n.is_empty() { "untitled".to_string() } else { n.to_string() }
@@ -10490,6 +9589,7 @@ impl Editor {
     /// Open an existing scene `.ron` (double-clicked in Assets). Resets the world to
     /// it, loads its terrain + meshes. The caller handles unsaved-changes prompting.
     fn open_scene_file(&mut self, path: &str) {
+        self.reset_anim_bindings();
         let p = Path::new(path);
         let doc = match floptle_scene::load(p) {
             Ok(d) => d,
@@ -10705,6 +9805,7 @@ impl Editor {
 
     /// Switch the editor to the project rooted at `root`, reloading everything.
     fn open_project(&mut self, root: PathBuf) {
+        self.reset_anim_bindings();
         self.project_root = root;
         self.seed_project_dirs();
         let (path, doc) = self.load_active_scene();
@@ -10760,12 +9861,13 @@ impl Editor {
 
     /// Close the current project: empty world, no selection, clean history.
     fn close_project(&mut self) {
+        self.reset_anim_bindings();
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
         self.scene_name = "untitled".into();
         self.terrains.clear();
         self.active_terrain = None;
-        self.combined = None;
+        self.terrain_slots.clear();
         self.selection.clear();
         self.selected_asset = None;
         self.ide = IdeState::default();
@@ -10859,6 +9961,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         mesh_collider: false,
         collidable: false,
         visible: true,
+        anim_controller: None,
         parent: None,
     }
 }
@@ -10888,6 +9991,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                anim_controller: None,
                 parent: None,
             },
             NodeDoc {
@@ -10900,6 +10004,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                anim_controller: None,
                 parent: None,
             },
             NodeDoc {
@@ -10912,6 +10017,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                anim_controller: None,
                 parent: None,
             },
             default_camera_node(),

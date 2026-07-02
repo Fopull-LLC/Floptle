@@ -134,7 +134,10 @@ pub struct ScriptHost {
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
-    colliders: Rc<RefCell<Vec<Box<dyn floptle_physics::CollisionShape>>>>,
+    colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
+    /// World position of the sim's local origin (ADR-0015). Scripts speak world
+    /// coordinates; `raycast` converts to the sim frame in f64 at this boundary.
+    sim_origin: Rc<RefCell<glam::DVec3>>,
     /// The scene graph mirror the node handles read/write (synced each `run`).
     scene: Rc<RefCell<SceneMirror>>,
     /// Live per-(entity, script) environments, for script handles.
@@ -159,6 +162,57 @@ pub struct ScriptHost {
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
     mouse_lock: Rc<RefCell<Option<bool>>>,
+    /// Animator state per entity (layers/states/time), fed by the editor before `run`
+    /// so scripts can read `anim:state()`, `anim:time()`, `anim:clips()`, ….
+    anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
+    /// Animator commands scripts queued this frame (`anim:play(...)` etc.), drained by
+    /// the editor and applied to the controller runtimes before they advance — so intent
+    /// set this frame lands this frame.
+    anim_commands: Rc<RefCell<Vec<(u32, AnimCmd)>>>,
+    /// Debug-draw commands scripts queued this frame (`gizmo.line(...)` etc.) —
+    /// immediate mode: drained by the editor each frame and drawn for one frame.
+    gizmos: Rc<RefCell<Vec<GizmoCmd>>>,
+}
+
+/// One immediate-mode debug-draw command from a script's `gizmo.*` call.
+/// World-space; lives for exactly one frame.
+#[derive(Clone, Copy, Debug)]
+pub enum GizmoCmd {
+    Line { a: [f32; 3], b: [f32; 3], color: [f32; 3] },
+    Sphere { center: [f32; 3], radius: f32, color: [f32; 3] },
+    Point { pos: [f32; 3], size: f32, color: [f32; 3] },
+}
+
+/// A `gizmo.*` call's optional trailing color (0–1 floats), else the default green.
+fn gizmo_color(r: Option<f64>, g: Option<f64>, b: Option<f64>) -> [f32; 3] {
+    match (r, g, b) {
+        (Some(r), Some(g), Some(b)) => [r as f32, g as f32, b as f32],
+        _ => [0.35, 1.0, 0.45],
+    }
+}
+
+/// The animator state of one entity, mirrored to scripts each frame.
+#[derive(Clone, Debug, Default)]
+pub struct AnimInfo {
+    /// Per layer, base first: (layer name, current state, time seconds, finished).
+    pub layers: Vec<(String, Option<String>, f32, bool)>,
+    /// Every playable state name across all layers.
+    pub states: Vec<String>,
+}
+
+/// One queued `node:animator()` command.
+#[derive(Clone, Debug)]
+pub enum AnimCmd {
+    /// Transition to a state. `fade` overrides the controller's fade table;
+    /// `restart` re-enters even if the state is already playing.
+    Play { state: String, layer: Option<String>, fade: Option<f32>, restart: bool },
+    /// Stop a layer (`None` = every layer) — fades out / falls back to default.
+    Stop { layer: Option<String>, fade: Option<f32> },
+    /// Global playback speed multiplier.
+    SetSpeed(f32),
+    SetLayerWeight { layer: String, weight: f32 },
+    /// Scrub the current state of `layer` (`None` = base) to `t` seconds.
+    Seek { t: f32, layer: Option<String> },
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from
@@ -213,6 +267,10 @@ struct Shared {
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: Rc<RefCell<HashMap<(u32, String, String), f64>>>,
+    /// Animator mirror (entity → layers/states), fed by the editor each frame.
+    anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
+    /// Animator commands queued by `node:animator()` handles this frame.
+    anim_commands: Rc<RefCell<Vec<(u32, AnimCmd)>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -405,25 +463,30 @@ impl ScriptHost {
         }
         // `raycast(ox,oy,oz, dx,dy,dz, max)` against the world's colliders (terrain +
         // mesh): returns a hit table {x,y,z, nx,ny,nz, distance} or nil. Use it for ground
-        // checks, line-of-sight, shooting.
-        let colliders: Rc<RefCell<Vec<Box<dyn floptle_physics::CollisionShape>>>> =
+        // checks, line-of-sight, shooting. Scripts speak WORLD coordinates; the sim runs
+        // origin-relative (ADR-0015), so convert in f64 on the way in and out.
+        let colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>> =
             Rc::new(RefCell::new(Vec::new()));
+        let sim_origin: Rc<RefCell<glam::DVec3>> = Rc::new(RefCell::new(glam::DVec3::ZERO));
         {
             let cols = colliders.clone();
+            let so = sim_origin.clone();
             type Args = (f64, f64, f64, f64, f64, f64, f64);
             if let Ok(f) = lua.create_function(move |lua, (ox, oy, oz, dx, dy, dz, max): Args| {
+                let origin = *so.borrow();
+                let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
                 let hit = floptle_physics::raycast_colliders(
                     &cols.borrow(),
-                    glam::Vec3::new(ox as f32, oy as f32, oz as f32),
+                    o,
                     glam::Vec3::new(dx as f32, dy as f32, dz as f32),
                     max as f32,
                 );
                 match hit {
                     Some(h) => {
                         let t = lua.create_table()?;
-                        t.set("x", h.point[0] as f64)?;
-                        t.set("y", h.point[1] as f64)?;
-                        t.set("z", h.point[2] as f64)?;
+                        t.set("x", origin.x + h.point[0] as f64)?;
+                        t.set("y", origin.y + h.point[1] as f64)?;
+                        t.set("z", origin.z + h.point[2] as f64)?;
                         t.set("nx", h.normal[0] as f64)?;
                         t.set("ny", h.normal[1] as f64)?;
                         t.set("nz", h.normal[2] as f64)?;
@@ -435,6 +498,89 @@ impl ScriptHost {
             }) {
                 let _ = lua.globals().set("raycast", f);
             }
+        }
+
+        // `gizmo.*` — immediate-mode debug drawing: world-space lines, rays, spheres
+        // and points that show for ONE frame in the Scene view (never the Game view;
+        // the viewport's gizmo toggle hides them). Colors are optional 0–1 floats.
+        // Per-frame command count is capped so a runaway loop can't flood the renderer.
+        let gizmos: Rc<RefCell<Vec<GizmoCmd>>> = Rc::new(RefCell::new(Vec::new()));
+        const GIZMO_CAP: usize = 4096;
+        if let Ok(t) = lua.create_table() {
+            let q = gizmos.clone();
+            let _ = t.set(
+                "line",
+                lua.create_function(move |_, (x1, y1, z1, x2, y2, z2, r, g, b): (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>)| {
+                    let mut q = q.borrow_mut();
+                    if q.len() < GIZMO_CAP {
+                        q.push(GizmoCmd::Line {
+                            a: [x1 as f32, y1 as f32, z1 as f32],
+                            b: [x2 as f32, y2 as f32, z2 as f32],
+                            color: gizmo_color(r, g, b),
+                        });
+                    }
+                    Ok(())
+                })
+                .ok(),
+            );
+            let q = gizmos.clone();
+            let _ = t.set(
+                "ray",
+                lua.create_function(move |_, (ox, oy, oz, dx, dy, dz, len, r, g, b): (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                    let mut q = q.borrow_mut();
+                    if q.len() < GIZMO_CAP {
+                        let d = glam::DVec3::new(dx, dy, dz);
+                        // With a length the direction is normalized (matches raycast);
+                        // without one the vector IS the ray.
+                        let end = match len {
+                            Some(l) if d.length_squared() > 1e-12 => {
+                                glam::DVec3::new(ox, oy, oz) + d.normalize() * l
+                            }
+                            _ => glam::DVec3::new(ox + dx, oy + dy, oz + dz),
+                        };
+                        q.push(GizmoCmd::Line {
+                            a: [ox as f32, oy as f32, oz as f32],
+                            b: [end.x as f32, end.y as f32, end.z as f32],
+                            color: gizmo_color(r, g, b),
+                        });
+                    }
+                    Ok(())
+                })
+                .ok(),
+            );
+            let q = gizmos.clone();
+            let _ = t.set(
+                "sphere",
+                lua.create_function(move |_, (x, y, z, radius, r, g, b): (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                    let mut q = q.borrow_mut();
+                    if q.len() < GIZMO_CAP {
+                        q.push(GizmoCmd::Sphere {
+                            center: [x as f32, y as f32, z as f32],
+                            radius: radius.unwrap_or(0.5).max(0.001) as f32,
+                            color: gizmo_color(r, g, b),
+                        });
+                    }
+                    Ok(())
+                })
+                .ok(),
+            );
+            let q = gizmos.clone();
+            let _ = t.set(
+                "point",
+                lua.create_function(move |_, (x, y, z, size, r, g, b): (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                    let mut q = q.borrow_mut();
+                    if q.len() < GIZMO_CAP {
+                        q.push(GizmoCmd::Point {
+                            pos: [x as f32, y as f32, z as f32],
+                            size: size.unwrap_or(0.25).max(0.001) as f32,
+                            color: gizmo_color(r, g, b),
+                        });
+                    }
+                    Ok(())
+                })
+                .ok(),
+            );
+            let _ = lua.globals().set("gizmo", t);
         }
 
         // `assets.getFile(path)` / `assets.getContents(dir)`: resolve files in the project's
@@ -501,6 +647,8 @@ impl ScriptHost {
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
+            anim_info: Rc::new(RefCell::new(HashMap::new())),
+            anim_commands: Rc::new(RefCell::new(Vec::new())),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -517,6 +665,7 @@ impl ScriptHost {
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             colliders,
+            sim_origin,
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
             model_changes: shared.model_changes.clone(),
@@ -526,7 +675,70 @@ impl ScriptHost {
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             mouse_lock,
+            anim_info: shared.anim_info.clone(),
+            anim_commands: shared.anim_commands.clone(),
+            gizmos,
         }
+    }
+
+    /// Feed each animated entity's controller state for this frame (before `run`),
+    /// so scripts can read `anim:state()/:time()/:clips()`.
+    pub fn set_anim_info(&self, map: HashMap<u32, AnimInfo>) {
+        *self.anim_info.borrow_mut() = map;
+    }
+
+    /// Drain the animator commands scripts queued this frame — the editor applies
+    /// them to the controller runtimes before advancing them.
+    pub fn take_anim_commands(&self) -> Vec<(u32, AnimCmd)> {
+        std::mem::take(&mut *self.anim_commands.borrow_mut())
+    }
+
+    /// Drain the debug-draw commands scripts queued this frame (`gizmo.*`) — the
+    /// editor projects and paints them over the viewport for one frame.
+    pub fn take_gizmos(&self) -> Vec<GizmoCmd> {
+        std::mem::take(&mut *self.gizmos.borrow_mut())
+    }
+
+    /// Call `func(node)` on every script instance attached to entity `eid` whose
+    /// environment defines it — the dispatch path for animation clip events.
+    /// Missing functions are fine (an event can target one script of several).
+    /// Runs after `run()`, so any transform writes the handler makes are
+    /// flushed back to the ECS here (the next `run` would otherwise wipe them
+    /// when it re-syncs the mirror).
+    pub fn call_function(&mut self, world: &mut World, eid: u32, func: &str) {
+        let targets: Vec<(String, Table)> = self
+            .envs
+            .borrow()
+            .iter()
+            .filter(|((id, _), _)| *id == eid)
+            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .collect();
+        let mut called = false;
+        for (kind, env) in targets {
+            // raw_get: the env's metatable falls through to the Lua globals,
+            // and an event must never mis-dispatch to a stdlib/global name.
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>(func) else { continue };
+            let node = match new_node_handle(&self.lua, eid) {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            called = true;
+            if let Err(err) = f.call::<()>(node) {
+                self.record_error(&kind, format!("{kind}: anim event {func}: {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
+    /// Reset the animator bridge at a play-session boundary: drop the state
+    /// mirror and any commands queued after the final drain (e.g. by a clip
+    /// event handler on the session's last frame, or top-level script code
+    /// evaluated outside play) so nothing leaks into the next session.
+    pub fn clear_anim_state(&self) {
+        self.anim_info.borrow_mut().clear();
+        self.anim_commands.borrow_mut().clear();
     }
 
     /// Drain a pending `input.lockMouse()` / `input.unlockMouse()` request from this frame:
@@ -537,14 +749,17 @@ impl ScriptHost {
 
     /// Lend the sim's colliders to the script host for one frame so `raycast(...)` can see
     /// them (the editor takes them back with [`take_colliders`](Self::take_colliders)
-    /// before stepping physics). Call before [`run`](Self::run).
-    pub fn set_colliders(&self, cols: Vec<Box<dyn floptle_physics::CollisionShape>>) {
+    /// before stepping physics). `origin` is the sim's world origin (ADR-0015) so ray
+    /// origins/hits convert between the world coordinates scripts speak and the sim frame.
+    /// Call before [`run`](Self::run).
+    pub fn set_colliders(&self, cols: Vec<floptle_physics::AnchoredCollider>, origin: glam::DVec3) {
         *self.colliders.borrow_mut() = cols;
+        *self.sim_origin.borrow_mut() = origin;
     }
 
     /// Reclaim the colliders lent via [`set_colliders`](Self::set_colliders). Call after
     /// [`run`](Self::run), before stepping the sim.
-    pub fn take_colliders(&self) -> Vec<Box<dyn floptle_physics::CollisionShape>> {
+    pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
         std::mem::take(&mut self.colliders.borrow_mut())
     }
 
@@ -636,6 +851,9 @@ impl ScriptHost {
     /// `dt` is the frame delta and `time` is seconds since play started.
     pub fn run(&mut self, world: &mut World, scripts_dir: &Path, dt: f32, time: f32) {
         self.errors.clear();
+        // Gizmos are immediate mode — a fresh frame starts empty even if the last
+        // frame's batch was never drained.
+        self.gizmos.borrow_mut().clear();
         for inst in self.instances.values_mut() {
             inst.seen = false;
         }
@@ -1901,6 +2119,237 @@ fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()> {
             })?,
         )?;
     }
+    // node:animator() → the animation handle: play/stop/fade animation states on the
+    // node's AnimationController (or a rigged model's embedded clips). Setters queue
+    // into `anim_commands` (applied before the animators advance, same frame); getters
+    // read the `anim_info` mirror the editor feeds each frame.
+    {
+        let anim_methods = lua.create_table()?;
+        let queue = |cmds: &Rc<RefCell<Vec<(u32, AnimCmd)>>>, e: u32, c: AnimCmd| {
+            cmds.borrow_mut().push((e, c));
+        };
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "play",
+                lua.create_function(
+                    move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
+                        let e: u32 = this.raw_get("__id")?;
+                        queue(&cmds, e, AnimCmd::Play {
+                            state,
+                            layer,
+                            fade: fade.map(|f| f as f32),
+                            restart: false,
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "restart",
+                lua.create_function(
+                    move |_, (this, state, fade, layer): (Table, String, Option<f64>, Option<String>)| {
+                        let e: u32 = this.raw_get("__id")?;
+                        queue(&cmds, e, AnimCmd::Play {
+                            state,
+                            layer,
+                            fade: fade.map(|f| f as f32),
+                            restart: true,
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "crossfade",
+                lua.create_function(
+                    move |_, (this, state, fade, layer): (Table, String, f64, Option<String>)| {
+                        let e: u32 = this.raw_get("__id")?;
+                        queue(&cmds, e, AnimCmd::Play {
+                            state,
+                            layer,
+                            fade: Some(fade as f32),
+                            restart: false,
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "stop",
+                lua.create_function(
+                    move |_, (this, layer, fade): (Table, Option<String>, Option<f64>)| {
+                        let e: u32 = this.raw_get("__id")?;
+                        queue(&cmds, e, AnimCmd::Stop { layer, fade: fade.map(|f| f as f32) });
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "setSpeed",
+                lua.create_function(move |_, (this, s): (Table, f64)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::SetSpeed(s as f32));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "setLayerWeight",
+                lua.create_function(move |_, (this, layer, w): (Table, String, f64)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::SetLayerWeight { layer, weight: w as f32 });
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let cmds = shared.anim_commands.clone();
+            anim_methods.set(
+                "seek",
+                lua.create_function(move |_, (this, t, layer): (Table, f64, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    queue(&cmds, e, AnimCmd::Seek { t: t as f32, layer });
+                    Ok(())
+                })?,
+            )?;
+        }
+        // The layer whose state "shows": the topmost active layer, else the base.
+        fn showing(info: &AnimInfo) -> Option<&(String, Option<String>, f32, bool)> {
+            info.layers.iter().rev().find(|(_, s, _, _)| s.is_some()).or(info.layers.first())
+        }
+        {
+            let inf = shared.anim_info.clone();
+            let f = lua.create_function(move |lua, (this, layer): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let info = inf.borrow();
+                let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                let slot = match &layer {
+                    Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                    None => showing(i),
+                };
+                Ok(match slot.and_then(|(_, s, _, _)| s.as_ref()) {
+                    Some(s) => Value::String(lua.create_string(s)?),
+                    None => Value::Nil,
+                })
+            })?;
+            anim_methods.set("state", f.clone())?;
+            anim_methods.set("current", f)?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "time",
+                lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let info = inf.borrow();
+                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                    let slot = match &layer {
+                        Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                        None => showing(i),
+                    };
+                    Ok(slot.map(|(_, _, t, _)| Value::Number(*t as f64)).unwrap_or(Value::Nil))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "finished",
+                lua.create_function(move |_, (this, layer): (Table, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let info = inf.borrow();
+                    let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
+                    let slot = match &layer {
+                        Some(l) => i.layers.iter().find(|(n, _, _, _)| n == l),
+                        None => showing(i),
+                    };
+                    Ok(Value::Boolean(slot.map(|(_, _, _, f)| *f).unwrap_or(false)))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "isPlaying",
+                lua.create_function(move |_, (this, state): (Table, Option<String>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let info = inf.borrow();
+                    let Some(i) = info.get(&e) else { return Ok(Value::Boolean(false)) };
+                    Ok(Value::Boolean(match &state {
+                        Some(s) => i
+                            .layers
+                            .iter()
+                            .any(|(_, cur, _, fin)| cur.as_deref() == Some(s) && !fin),
+                        None => i.layers.iter().any(|(_, cur, _, _)| cur.is_some()),
+                    }))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "clips",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let arr = lua.create_table()?;
+                    if let Some(i) = inf.borrow().get(&e) {
+                        for (n, s) in i.states.iter().enumerate() {
+                            arr.set(n + 1, lua.create_string(s)?)?;
+                        }
+                    }
+                    Ok(arr)
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "layers",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let arr = lua.create_table()?;
+                    if let Some(i) = inf.borrow().get(&e) {
+                        for (n, (name, _, _, _)) in i.layers.iter().enumerate() {
+                            arr.set(n + 1, lua.create_string(name)?)?;
+                        }
+                    }
+                    Ok(arr)
+                })?,
+            )?;
+        }
+        let anim_mt = lua.create_table()?;
+        anim_mt.set("__index", anim_methods)?;
+        lua.set_named_registry_value("floptle_anim_mt", anim_mt)?;
+
+        methods.set(
+            "animator",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let t = lua.create_table()?;
+                t.raw_set("__id", e)?;
+                if let Ok(mt) = lua.named_registry_value::<Table>("floptle_anim_mt") {
+                    t.set_metatable(Some(mt));
+                }
+                Ok(t)
+            })?,
+        )?;
+    }
+
     lua.set_named_registry_value("floptle_node_methods", methods)?;
 
     // ---- script metatable -----------------------------------------------------------
@@ -2078,12 +2527,55 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![] }]),
         );
         let mut host = ScriptHost::new();
-        host.set_colliders(vec![Box::new(floptle_physics::Plane::ground(0.0))]);
+        host.set_colliders(
+            vec![floptle_physics::AnchoredCollider::world(Box::new(floptle_physics::Plane::ground(0.0)))],
+            glam::DVec3::ZERO,
+        );
         host.run(&mut world, &dir, 0.1, 0.1);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         let _ = host.take_colliders();
         let y = world.get::<Transform>(e).unwrap().translation.y;
         assert!(y.abs() < 0.1, "raycast should have set y to the ground (≈0), got {y}");
+    }
+
+    #[test]
+    fn script_can_draw_gizmos() {
+        let dir = std::env::temp_dir().join("floptle_script_test_gizmos");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "drawer",
+            "function update(node, dt)\n  gizmo.line(0,0,0, 1,2,3)\n  gizmo.ray(0,0,0, 0,-2,0, 5, 1,0,0)\n  gizmo.sphere(4,5,6, 2)\n  gizmo.point(7,8,9)\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "drawer".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let cmds = host.take_gizmos();
+        assert_eq!(cmds.len(), 4);
+        // Explicit color sticks; ray normalizes the direction and scales by len.
+        match cmds[1] {
+            GizmoCmd::Line { a, b, color } => {
+                assert_eq!(a, [0.0, 0.0, 0.0]);
+                assert!((b[1] + 5.0).abs() < 1e-4, "ray end {b:?}");
+                assert_eq!(color, [1.0, 0.0, 0.0]);
+            }
+            ref other => panic!("expected a line from gizmo.ray, got {other:?}"),
+        }
+        // Omitted color falls back to the default green.
+        match cmds[0] {
+            GizmoCmd::Line { color, .. } => assert!(color[1] > 0.9),
+            ref other => panic!("expected a line, got {other:?}"),
+        }
+        // A second run() starts a fresh (empty) batch — immediate mode.
+        host.run(&mut world, &dir, 0.1, 0.2);
+        assert_eq!(host.take_gizmos().len(), 4);
     }
 
     #[test]

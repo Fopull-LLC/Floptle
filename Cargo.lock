@@ -858,6 +858,7 @@ dependencies = [
 name = "floptle-assets"
 version = "0.0.0"
 dependencies = [
+ "floptle-anim",
  "floptle-core",
  "floptle-render",
  "gltf",

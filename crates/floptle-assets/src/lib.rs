@@ -13,7 +13,9 @@
 //! - `db`          : asset database (stable ids, hot-reload, dependency graph). *(TODO)*
 
 pub mod gltf_import;
+pub mod gltf_rig;
 pub mod texture;
 
 pub use gltf_import::{import, ImportError, ImportedModel};
+pub use gltf_rig::{import_rigged, probe_animations, RiggedModel, RiggedPart};
 pub use texture::{load_texture, load_texture_sized, save_texture_png};

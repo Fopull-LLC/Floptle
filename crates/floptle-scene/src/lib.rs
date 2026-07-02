@@ -17,6 +17,13 @@ use floptle_core::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod anim;
+pub use anim::{
+    load_anim_clip, load_anim_controller, save_anim_clip, save_anim_controller, AnimChannelDoc,
+    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimLayerDoc, AnimStateDoc, AnimTrackDoc3,
+    AnimTrackDoc4, AnimTransitionDoc, ANIM_CLIP_EXT, ANIM_CTL_EXT,
+};
+
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
 /// nodes in it. Project-wide render settings live separately in [`ProjectConfigDoc`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -52,6 +59,10 @@ pub struct NodeDoc {
     /// Only the rare hidden node serializes this.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub visible: bool,
+    /// Animation controller asset key on this node (`None` = no controller).
+    /// See [`floptle_core::AnimController`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anim_controller: Option<String>,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -687,6 +698,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if !node.visible {
             world.insert(e, floptle_core::Visible(false));
         }
+        if let Some(ctl) = &node.anim_controller {
+            world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -709,6 +723,17 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         world.insert(sky, Name("Skybox".into()));
         world.insert(sky, Transform::IDENTITY);
         world.insert(sky, Matter::default_skybox());
+    }
+
+    // Every scene has gravity out of the box: if the doc has no GravityVolume node at
+    // all, spawn a default normal-game "Down" volume (strength 10) so bodies fall
+    // without any setup. A scene that already defines its own gravity (a planet's
+    // Radial well, or a custom-tuned Down volume) is left alone.
+    if !doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })) {
+        let gravity = world.spawn();
+        world.insert(gravity, Name("Gravity".into()));
+        world.insert(gravity, Transform::IDENTITY);
+        world.insert(gravity, Matter::GravityVolume { mode: GravityMode::Down, strength: 10.0, radius: 20.0 });
     }
 }
 
@@ -733,6 +758,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+        let anim_controller =
+            world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -744,6 +771,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             mesh_collider,
             collidable,
             visible,
+            anim_controller,
             parent,
         });
     }
@@ -792,6 +820,7 @@ mod tests {
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     collidable: true,    // exercise the collidable round-trip
                     visible: false,      // exercise the visible round-trip
+                    anim_controller: Some("animation_controllers/Test".into()),
                     parent: None,
                 },
                 NodeDoc {
@@ -804,6 +833,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    anim_controller: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -816,6 +846,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    anim_controller: None,
                     parent: None,
                 },
                 NodeDoc {
@@ -828,6 +859,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    anim_controller: None,
                     parent: None,
                 },
             ],
@@ -847,15 +879,19 @@ mod tests {
         let doc = demo();
         let mut world = World::new();
         spawn_into(&doc, &mut world);
-        // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + the
-        // mandatory Lighting node.
-        assert_eq!(world.len(), 6);
+        // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + an
+        // auto-spawned GravityVolume + the mandatory Lighting node.
+        assert_eq!(world.len(), 7);
         let snap = to_doc("demo", &world);
-        // The 4 authored matter nodes plus the auto-added Skybox node.
-        assert_eq!(snap.nodes.len(), 5);
+        // The 4 authored matter nodes plus the auto-added Skybox + GravityVolume nodes.
+        assert_eq!(snap.nodes.len(), 6);
         assert!(
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::Skybox { .. })),
             "a default Skybox node should be present"
+        );
+        assert!(
+            snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })),
+            "a default GravityVolume node should be present"
         );
         // non-default directional intensity survives
         assert_eq!(snap.lighting.intensity, 2.5);

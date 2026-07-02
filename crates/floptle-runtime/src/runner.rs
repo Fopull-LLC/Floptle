@@ -454,6 +454,10 @@ impl Runner {
         let present = if self.volume_present { 1.0 } else { 0.0 };
         let mut blobs = [[0.0f32; 4]; 16];
         blobs[0] = [center_cam.x, center_cam.y, center_cam.z, self.matter_scale];
+        let mut vol_center = [[0.0f32; 4]; 16];
+        let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+        vol_center[0] = [vol_cam.x, vol_cam.y, vol_cam.z, present];
+        vol_half[0] = [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7];
         let rm_globals = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -462,9 +466,10 @@ impl Runner {
             ambient: [0.12, 0.12, 0.16, 0.0],
             bg: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
             center: [0.0; 4],
-            params: [self.app.time.elapsed as f32, 1.0, 0.0, 0.0],
-            vol_center: [vol_cam.x, vol_cam.y, vol_cam.z, present],
-            vol_half: [self.volume_half[0], self.volume_half[1], self.volume_half[2], 0.7],
+            // z = blob↔volume blend k (the cube fuses into the blob across 0.7).
+            params: [self.app.time.elapsed as f32, 1.0, 0.7, 0.0],
+            vol_center,
+            vol_half,
             blobs,
             ..Default::default()
         };

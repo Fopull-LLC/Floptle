@@ -82,8 +82,8 @@ fn main() {
         bg: [0.5, 0.62, 0.78, 1.0],
         center: [0.0; 4],
         params: [0.0, 0.0, 0.0, 0.0], // no blobs
-        vol_center: [cr.x, cr.y, cr.z, 1.0], // present
-        vol_half: [16.0, 6.0, 16.0, 0.1],
+        vol_center: { let mut a = [[0.0f32; 4]; 16]; a[0] = [cr.x, cr.y, cr.z, 1.0]; a }, // present
+        vol_half: { let mut a = [[1.0f32, 1.0, 1.0, 0.5]; 16]; a[0] = [16.0, 6.0, 16.0, 0.1]; a },
         blobs: [[0.0; 4]; 16],
         ..Default::default()
     };

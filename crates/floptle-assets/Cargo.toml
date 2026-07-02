@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+floptle-anim = { path = "../floptle-anim" }
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
 

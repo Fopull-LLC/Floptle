@@ -107,6 +107,36 @@ if cam.translation.length() > origin.threshold {
 `world_offset` is `DVec3` and accumulates the true distance from the universe origin;
 add it back only when you need an absolute coordinate (serialization, frame math).
 
+> **As implemented (2026-07-02).** The shipped design inverts the sketch above in
+> one important way: instead of rebasing *ECS translations*, the rebase lives
+> **inside the physics sim**. `PhysicsWorld.origin` (`DVec3`) anchors an
+> origin-relative frame — bodies, contacts, gravity centers and ray origins are
+> all small `f32` numbers near that origin; each static collider is baked
+> relative to its own `f64` anchor and re-offset (`anchor − origin`, computed in
+> `f64`) on every rebase, so repeated rebases accumulate **zero** error into
+> geometry. The ECS keeps stable, absolute `f64` translations at all times, which
+> means **scripts and gameplay code never observe a rebase** — a Lua variable
+> holding a world position is still valid afterward. The trigger is the active
+> camera drifting > `FloatingOrigin.threshold` (4 096 m) from `origin`; the new
+> origin is the camera position rounded to whole units (whole-number shifts are
+> exact in `f32`). Sim → ECS writeback also **interpolates** between the last two
+> fixed steps by the accumulator fraction, so rendered motion is smooth at any
+> frame rate. **Terrain** (2026-07-02, same day): per-volume fields are node-local,
+> and there is **no combined field at all anymore** — every terrain volume is
+> uploaded into one shared 3D atlas at its NATIVE voxel resolution and the shader
+> folds them with the same smin the old CPU combine used (fields continued as air
+> outside their boxes — the near-zero-shell lesson — and the slab-edge taper
+> applied once, post-fold, against the *union* of the boxes so interior seams stay
+> seamless while true outer faces still slope to air). Placement is per-volume:
+> node `f64` anchor + local center composed in `f64`, then camera-relative, read
+> fresh every frame — moving a terrain costs zero GPU work. Physics likewise
+> anchors each volume as its own collider at native resolution. So neither
+> collision nor rendering degrades with distance from the origin OR with distance
+> *between* volumes; the only capacity limits are explicit and surfaced (16
+> volumes per scene / the device's 3D-texture size, warned in the Console, never
+> silent). Visual regression proof: `terrain_far_probe` (two-volume scene at 1e7
+> units) is bit-identical to `terrain_blend_probe` (same scene at the origin).
+
 ### Layer 3 — `f64` authoritative transforms
 
 `Transform.translation` is **`DVec3`** (glam's `f64` vec) — rotation and scale stay

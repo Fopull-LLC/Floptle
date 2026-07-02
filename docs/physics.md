@@ -99,6 +99,15 @@ Each frame while playing, in order:
 3. Run every node's `update(node, dt)`.
 4. Apply the velocities + heights scripts wrote back to the bodies.
 5. Step the sim on a fixed timestep (gravity → move → resolve collisions).
-6. Write resolved transforms back to the nodes; render.
+6. Write resolved transforms back to the nodes — **interpolated** between the last
+   two fixed steps by the leftover accumulator fraction, so motion renders smooth
+   at any frame rate (no whole-step aliasing); render.
+
+The sim also runs **origin-relative** (ADR-0015): bodies and colliders use small
+coordinates near a `f64` origin that follows the active camera (recentering past
+4 km), while nodes and scripts always see stable world coordinates. Every static
+collider — including each **terrain volume**, which gets its own collider at the
+field's native resolution — is anchored on its node's `f64` translation. Content
+placed millions of units out simulates as precisely as content at the origin.
 
 Stop (F1) drops the sim and restores the scene to its pre-Play state.

@@ -1,7 +1,8 @@
-//! Headless probe for MULTI-TERRAIN bake-combine: build two terrains (each a flat
-//! slab with a hill), placed so their boxes overlap, fold them with
-//! `Terrain::combine`, upload the single combined field, and raymarch to a PNG.
-//! Validates the seam blends smoothly (one fused surface, no shell, no double).
+//! Headless probe for MULTI-TERRAIN rendering: build two terrains (each a flat
+//! slab with a hill), placed so their boxes overlap, upload BOTH as separate
+//! volumes (each at native resolution — no combined grid), and raymarch to a PNG.
+//! The GPU fuses them with the same smin the old CPU combine used — validates the
+//! seam blends smoothly (one fused surface, no shell, no double).
 //!
 //! Run: cargo run -p floptle-render --example terrain_blend_probe -- <out.png>
 
@@ -40,15 +41,14 @@ fn main() {
         b.sculpt(Brush::Raise, [5.0, 1.0, 0.0], 4.0, 1.0);
     }
     // Place B shifted +14 in X so a's right half overlaps b's left half.
-    let combined = Terrain::combine(&[([0.0, 0.0, 0.0], &a), ([14.0, 0.0, 0.0], &b)], 0.6);
-    println!(
-        "combined dims {:?} center {:?} half {:?}",
-        combined.baked.dims, combined.baked.center, combined.baked.half_extent
-    );
+    let origins = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(14.0, 0.0, 0.0)];
+    let volumes = [&a, &b];
+    println!("volume dims {:?} + {:?} (native, no combined grid)", a.baked.dims, b.baked.dims);
 
     let mut raymarch = Raymarch::new(&gpu);
     raymarch.set_terrain_textures(&gpu, &[white256()]);
-    raymarch.set_volume(&gpu, &combined.baked);
+    let n = raymarch.set_volumes(&gpu, &[&a.baked, &b.baked]);
+    assert_eq!(n, 2, "both volumes must fit the atlas");
 
     // Camera up + back, looking at the seam region (~x=7).
     let target = Vec3::new(7.0, 0.0, 0.0);
@@ -62,11 +62,18 @@ fn main() {
     );
     let view_proj = cam.view_proj(W as f32 / H as f32);
     let light = Vec3::new(0.4, 0.9, 0.45).normalize();
-    // The combined field is WORLD-space: its node sits at world origin, so the box
-    // center is just baked.center, camera-relative.
-    let bc = combined.baked.center;
-    let hf = combined.baked.half_extent;
-    let cr = (DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position).as_vec3();
+    // Per-volume box centers: node anchor (f64) + local center, then camera-relative
+    // (exact at any world distance, ADR-0015). w = present; half.w = the fuse k.
+    let mut vol_center = [[0.0f32; 4]; 16];
+    let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
+    for (i, (t, o)) in volumes.iter().zip(origins).enumerate() {
+        let bc = t.baked.center;
+        let hf = t.baked.half_extent;
+        let cr = (o + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam.world_position)
+            .as_vec3();
+        vol_center[i] = [cr.x, cr.y, cr.z, 1.0];
+        vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
+    }
 
     let rm = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),
@@ -77,8 +84,8 @@ fn main() {
         bg: [0.5, 0.62, 0.78, 1.0],
         center: [0.0; 4],
         params: [0.0, 0.0, 0.0, 0.0],
-        vol_center: [cr.x, cr.y, cr.z, 1.0],
-        vol_half: [hf[0], hf[1], hf[2], 0.1],
+        vol_center,
+        vol_half,
         blobs: [[0.0; 4]; 16],
         ..Default::default()
     };

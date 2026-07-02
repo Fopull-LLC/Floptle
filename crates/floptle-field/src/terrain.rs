@@ -389,19 +389,23 @@ impl Terrain {
     }
 
     /// Fold several terrain fields, each placed at a WORLD `origin` (its node's world
-    /// translation), into ONE world-space [`Terrain`] for rendering. Overlaps blend
+    /// translation, full `f64`), into ONE [`Terrain`] for rendering. Overlaps blend
     /// via [`smin`] (the same polynomial smooth-min the GPU uses), so terrains fuse
-    /// seamlessly; painted color/slot blend toward the nearer surface. The combined
-    /// field's own local space IS world space (its `baked.center` is the world union
-    /// center), so the editor renders it with no extra transform.
+    /// seamlessly; painted color/slot blend toward the nearer surface.
+    ///
+    /// Returns `(anchor, field)`: the field's own coordinates are relative to the
+    /// returned **`f64` anchor** (the union's snapped world minimum), never absolute
+    /// world space — so the fold is exact no matter how far out the terrains sit
+    /// (ADR-0015). Reconstruct world positions as `anchor + local`. All the interior
+    /// math is `f64` already; only small residuals are ever narrowed to `f32`.
     ///
     /// `k` is the blend radius. Voxel size = the finest of the sources (per axis),
     /// clamped so no axis exceeds `MAX_DIM` cells (far-apart terrains share a coarser
     /// grid — the documented resolution-spread trade-off).
-    pub fn combine(volumes: &[([f64; 3], &Terrain)], k: f32) -> Terrain {
+    pub fn combine(volumes: &[([f64; 3], &Terrain)], k: f32) -> ([f64; 3], Terrain) {
         const MAX_DIM: u32 = 256;
         if volumes.is_empty() {
-            return Terrain::flat([1, 1, 1], [0.0; 3], [1.0; 3], 0.0, [1.0; 3]);
+            return ([0.0; 3], Terrain::flat([1, 1, 1], [0.0; 3], [1.0; 3], 0.0, [1.0; 3]));
         }
         // Union world bounds + finest per-axis voxel size.
         let mut lo = [f64::INFINITY; 3];
@@ -434,7 +438,9 @@ impl Terrain {
             dims[a] = n;
             cell[a] = v;
             half[a] = (span * 0.5) as f32;
-            center[a] = (world_min[a] + span * 0.5) as f32;
+            // Anchor-relative: the field's frame starts at `world_min`, so its center
+            // is just half the span — a small, exact number at any world position.
+            center[a] = (span * 0.5) as f32;
         }
         let [w, h, d] = dims;
         let n = (w * h * d) as usize;
@@ -487,7 +493,7 @@ impl Terrain {
                 }
             }
         }
-        Terrain { baked: BakedSdf { dims, center, half_extent: half, distance, color } }
+        (world_min, Terrain { baked: BakedSdf { dims, center, half_extent: half, distance, color } })
     }
 
     /// March a ray (world space) and return the first surface hit reached *from
@@ -831,18 +837,45 @@ mod tests {
         let a = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
         let b = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.3, 0.4, 0.7]);
         // place b shifted +10 in x (boxes overlap from x=2..8 of a / -8..-2 of b world)
-        let c = Terrain::combine(&[([0.0, 0.0, 0.0], &a), ([10.0, 0.0, 0.0], &b)], 1.0);
+        let (anchor, c) = Terrain::combine(&[([0.0, 0.0, 0.0], &a), ([10.0, 0.0, 0.0], &b)], 1.0);
+        // The field is anchor-relative; world = anchor + local.
+        let s = |x: f32, y: f32, z: f32| {
+            c.sample([x - anchor[0] as f32, y - anchor[1] as f32, z - anchor[2] as f32])
+        };
         // Combined world box spans roughly x in [-8, 18].
-        assert!(c.baked.center[0] > 3.0 && c.baked.center[0] < 7.0, "center {:?}", c.baked.center);
+        let cx = anchor[0] as f32 + c.baked.center[0];
+        assert!(cx > 3.0 && cx < 7.0, "world center x {cx}");
         assert!(c.baked.half_extent[0] >= 12.0, "half {:?}", c.baked.half_extent);
         // Ground is flat at y=0 across the whole span (above positive, below negative).
         for &x in &[-6.0f32, 0.0, 5.0, 10.0, 16.0] {
-            assert!(c.sample([x, 2.0, 0.0]) > 0.0, "above ground at x={x}");
-            assert!(c.sample([x, -2.0, 0.0]) < 0.0, "below ground at x={x}");
+            assert!(s(x, 2.0, 0.0) > 0.0, "above ground at x={x}");
+            assert!(s(x, -2.0, 0.0) < 0.0, "below ground at x={x}");
         }
         // A downward ray in the overlap hits near y=0 (one fused surface, no double).
-        let hit = c.raycast([5.0, 6.0, 0.0], [0.0, -1.0, 0.0]).expect("hits ground in seam");
-        assert!(hit[1].abs() < 0.4, "seam hit y={}", hit[1]);
+        let hit = c
+            .raycast(
+                [5.0 - anchor[0] as f32, 6.0 - anchor[1] as f32, 0.0 - anchor[2] as f32],
+                [0.0, -1.0, 0.0],
+            )
+            .expect("hits ground in seam");
+        let hit_y = anchor[1] as f32 + hit[1];
+        assert!(hit_y.abs() < 0.4, "seam hit y={hit_y}");
+    }
+
+    #[test]
+    fn combine_is_exact_far_from_world_origin() {
+        // ADR-0015: the fold must not lose precision when the terrains sit millions of
+        // units out — the largeness lives in the f64 anchor, the field stays small.
+        let a = Terrain::flat([32, 24, 32], [0.0; 3], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
+        let far = 1.0e7f64;
+        let (anchor, c) = Terrain::combine(&[([far, 0.0, far], &a)], 1.0);
+        // The anchor carries the world offset; the field's own numbers are small.
+        assert!(anchor[0] > far - 100.0 && anchor[0] < far + 100.0, "anchor {anchor:?}");
+        assert!(c.baked.center[0].abs() < 100.0, "center is local: {:?}", c.baked.center);
+        // Ground surface exactly at world y = 0 (sampled anchor-relative).
+        let lx = (far - anchor[0]) as f32; // volume center in field coords
+        assert!(c.sample([lx, 2.0 - anchor[1] as f32, lx]) > 0.0, "air above");
+        assert!(c.sample([lx, -2.0 - anchor[1] as f32, lx]) < 0.0, "solid below");
     }
 
     #[test]

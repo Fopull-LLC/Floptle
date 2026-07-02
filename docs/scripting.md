@@ -17,9 +17,11 @@ it up immediately.
 6. [Globals: `params`, `time`, `dt`, `log`](#6-globals-params-time-dt-log)
 7. [Assets & swapping models / materials](#7-assets--swapping-models--materials)
 8. [Referencing other nodes & scripts](#8-referencing-other-nodes--scripts)
-9. [Recipe: a walkable first-person character](#9-recipe-a-walkable-first-person-character)
-10. [Bundled example scripts](#10-bundled-example-scripts)
-11. [Tips & gotchas](#11-tips--gotchas)
+9. [Animation: `node:animator()`](#9-animation-nodeanimator)
+10. [Recipe: a walkable first-person character](#10-recipe-a-walkable-first-person-character)
+11. [Bundled example scripts](#11-bundled-example-scripts)
+12. [The in-engine IDE](#12-the-in-engine-ide)
+13. [Tips & gotchas](#13-tips--gotchas)
 
 ---
 
@@ -112,9 +114,14 @@ Available while playing.
 | `local dx, dy = input.mouse_delta()` | mouse movement since last frame |
 | `local x, y = input.mouse()` | cursor position, pixels |
 | `input.scroll()` | wheel delta this frame |
+| `input.setMouseLocked(true)` | pin + hide the cursor (FPS mouselook); `false` releases. Also `input.lockMouse()` / `input.unlockMouse()` |
 
 Key names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`, `backspace`,
 `delete`, `shift`, `ctrl`, `alt`, and arrows `left` `right` `up` `down`.
+
+A locked cursor is genuinely pinned to the window center (hardware lock where
+the OS supports it, per-frame re-centering where it doesn't) — read motion with
+`input.mouse_delta()`. Stop always releases the lock.
 
 ### Raycasting
 
@@ -134,6 +141,35 @@ end
 Use it for ground checks, line-of-sight, shooting, or dropping objects onto a surface.
 (The built-in `node.grounded` already does a robust contact check for the character;
 raycast is the general-purpose tool for everything else.)
+
+### Debug gizmos
+
+Draw one-frame debug shapes over the viewport straight from code. They show in
+the **Scene view only** (the Game view stays clean — it's what the player would
+see), and the viewport's gizmos toggle hides them all. Colors are optional
+`0–1` floats (default green); everything is **immediate mode** — call it every
+frame you want the shape visible.
+
+| Call | Draws |
+|---|---|
+| `gizmo.line(x1,y1,z1, x2,y2,z2 [, r,g,b])` | a world-space line |
+| `gizmo.ray(ox,oy,oz, dx,dy,dz [, len [, r,g,b]])` | origin + direction (with `len` the direction is normalized — mirrors `raycast`) |
+| `gizmo.sphere(x,y,z [, radius [, r,g,b]])` | a wire sphere (trigger zones, blast radii) |
+| `gizmo.point(x,y,z [, size [, r,g,b]])` | a small 3-axis cross (hit points, waypoints) |
+
+```lua
+-- visualize a ground probe: green when it hits, red when it misses
+local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.5)
+if h then
+  gizmo.ray(node.x, node.y, node.z, 0, -1, 0, 1.5, 0.3, 1.0, 0.4)
+  gizmo.point(h.x, h.y, h.z, 0.2)
+else
+  gizmo.ray(node.x, node.y, node.z, 0, -1, 0, 1.5, 1.0, 0.35, 0.3)
+end
+```
+
+The bundled character controllers ship with exactly this: set their `debug_ray`
+param to `1` in the Inspector and the ground-check probe draws itself.
 
 ## 6. Globals: `params`, `time`, `dt`, `log`
 
@@ -294,7 +330,52 @@ called from elsewhere still acts on the right object), and `params` is its tunab
 > single manager. Looking something up by name? Cache it in `start` and reuse it; a
 > handle stays valid across frames.
 
-## 9. Recipe: a walkable first-person character
+## 9. Animation: `node:animator()`
+
+Any node with an **Animation Controller** component (or a rigged model with
+embedded clips) exposes an animation handle. See `docs/animation.md` for the
+full system (controllers, layers, events, the stepped retro look).
+
+```lua
+local anim
+function start(node)
+  anim = node:animator()
+end
+
+function update(node, dt)
+  local speed = math.sqrt(node.vx^2 + node.vz^2)
+  if not node.grounded then anim:play("Jump")
+  elseif speed > 6     then anim:play("Run")
+  elseif speed > 0.5   then anim:play("Walk")
+  else                      anim:play("Idle") end
+
+  if input.pressed("j") then anim:restart("Slash") end -- one-shot attack layer
+end
+
+-- called by a ⚑ event key placed on a clip's timeline:
+function onSlashHit(node) log("hit frame!") end
+```
+
+| Call | What it does |
+|---|---|
+| `anim:play(state [, fade [, layer]])` | transition (controller decides the fade; safe every frame) |
+| `anim:restart(state [, fade [, layer]])` | force re-entry (re-trigger a one-shot) |
+| `anim:crossfade(state, fade [, layer])` | transition with an explicit fade |
+| `anim:stop([layer [, fade]])` | stop a layer (all if omitted) |
+| `anim:setSpeed(x)` | global speed multiplier |
+| `anim:setLayerWeight(layer, w)` | blend a layer over the ones below (0..1) |
+| `anim:seek(t [, layer])` | jump the playhead |
+| `anim:state([layer])` / `anim:time([layer])` | what's showing / seconds in |
+| `anim:finished([layer])` | a one-shot reached its end |
+| `anim:isPlaying([state])` | is a state (or anything) playing |
+| `anim:clips()` / `anim:layers()` | available state / layer names |
+
+**Events → functions.** Put a ⚑ event on a clip in the **✎ Animating** tab and
+name a function; when the playhead crosses it during Play, that function is
+called (with the node) on every script attached to the controller's node that
+defines it.
+
+## 10. Recipe: a walkable first-person character
 
 No glue code required:
 
@@ -329,19 +410,47 @@ function update(node, dt)
 end
 ```
 
-## 10. Bundled example scripts
+## 11. Bundled example scripts
 
 Every project ships these under `scripts/` — open one for a working start:
 
 | Script | What it does |
 |---|---|
-| `character.lua` | First-person walkable character (free-look, run, crouch, jump; planet-aware) |
+| `first_person.lua` | First-person character (attach to an active Camera with a capsule Rigidbody: free-look, run, crouch, jump; planet-aware; slope-forgiving jump via a downward ground probe) |
+| `third_person.lua` | Third-person character body (capsule Rigidbody + a child named `Model` for the visuals; camera-relative movement, auto-turns, drives Idle/Walk/Run/Jump — matches the controller's real state names, e.g. `Idle.001`; slope-forgiving jump) |
+| `third_person_camera.lua` | Orbit camera for the third-person body (mouse orbits, scroll zooms, zoom all the way in for first-person freelook; raycasts so walls never clip the view) |
 | `freelook.lua` | Free-fly camera (right-mouse look, WASD, Shift to boost) |
 | `rotate.lua` | Spin a node about Y |
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |
 
-## 11. Tips & gotchas
+## 12. The in-engine IDE
+
+Double-click a `.lua` in Assets (or use the Inspector's Scripting section) to
+open it in the **Scripting** tab — a small but real code editor:
+
+- **Find & replace** — `Ctrl+F` finds (seeded from your selection), `Ctrl+H`
+  adds a replace row, `Enter` / `Shift+Enter` or `F3` / `Shift+F3` step
+  through matches (the current one is outlined), `Aa` toggles match case, and
+  **⌕ all scripts** lists every matching line across the whole project.
+  Typing in the find field never yanks focus back into the code.
+- **Line editing** — with nothing selected, `Ctrl+C` / `Ctrl+X` copy / cut the
+  whole current line. `Ctrl+D` duplicates, `Ctrl+Shift+K` deletes,
+  `Alt+Up/Down` moves the selected lines, `Ctrl+/` toggles `--` comments over
+  the selection, and `Tab` / `Shift+Tab` indent / outdent a multi-line
+  selection. `Enter` auto-indents (one level deeper after `then`/`do`/`function`).
+- **Navigation** — `Ctrl+G` goes to a line, `Ctrl+B` (or right-click) jumps to
+  a definition, right-click also finds all references. The Console's
+  double-click-to-source lands here too.
+- **Saving** — `Ctrl+S` saves, `Ctrl+Shift+S` saves all; closing a tab with
+  unsaved changes asks first, and pressing **Play auto-saves** open edits so
+  the run always matches what you see.
+- **Completion & docs** — typing suggests the engine API *and* identifiers
+  from the file (`Tab` accepts); hovering an API name shows its doc.
+
+The full shortcut list lives on the tab's **§ Docs** page.
+
+## 13. Tips & gotchas
 
 - **Run, then Play:** scripts only execute while the game is playing (F1). Stop
   restores the scene to its pre-Play state.
