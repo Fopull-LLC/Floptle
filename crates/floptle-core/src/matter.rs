@@ -129,6 +129,27 @@ pub struct Light {
     pub ambient: [f32; 3],
     /// Brightness multiplier on the key (directional) light color.
     pub intensity: f32,
+    /// Sun shadows: the field is marched from each shaded point toward the light
+    /// (SDF soft shadows), so terrain/blobs cast on everything and meshes cast via
+    /// their collider proxy shapes. All the knobs below only apply when `true`.
+    pub shadows: bool,
+    /// 0 = razor-hard edge (PS1) … 1 = dreamy-soft penumbra. Maps to the penumbra
+    /// sharpness `k` in the shadow march (analytic softness — no blur kernels).
+    pub shadow_softness: f32,
+    /// How dark full shadow gets, 0..1 (1 = the directional light fully blocked;
+    /// ambient still fills, so the scene never goes pitch black).
+    pub shadow_strength: f32,
+    /// Shadows darken *toward this color* instead of plain black — purple dusk,
+    /// sepia, horror green. Black = neutral darkening.
+    pub shadow_tint: [f32; 3],
+    /// 0 = smooth penumbra; 2..=8 = posterize it into that many bands (toon/retro).
+    pub shadow_quantize: u32,
+    /// Bayer-dither the penumbra (pairs with `shadow_quantize` + retro mode for the
+    /// classic PS1 dithered shadow edge).
+    pub shadow_dither: bool,
+    /// Max distance (world units) a shadow ray marches before giving up — a perf
+    /// fence; far geometry simply stops casting past it.
+    pub shadow_distance: f32,
 }
 
 impl Default for Light {
@@ -138,7 +159,26 @@ impl Default for Light {
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
             intensity: 1.0,
+            shadows: true,
+            shadow_softness: 0.35,
+            shadow_strength: 1.0,
+            shadow_tint: [0.0, 0.0, 0.0],
+            shadow_quantize: 0,
+            shadow_dither: false,
+            shadow_distance: 150.0,
         }
+    }
+}
+
+/// Whether a node's collider shape casts sun shadows (as a proxy occluder in the
+/// shadow march). A node with **no** `CastShadow` component casts by default —
+/// attach `CastShadow(false)` to opt a collider out of shadowing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CastShadow(pub bool);
+
+impl Default for CastShadow {
+    fn default() -> Self {
+        CastShadow(true)
     }
 }
 
@@ -232,8 +272,9 @@ pub enum AoMode {
     /// darkens everything on screen — meshes and SDF matter alike. The default.
     ScreenSpace,
     /// Geometric AO sampled from the actual SDF field along the surface normal —
-    /// "true" occlusion with no screen-space artifacts, but it only shades SDF
-    /// matter (terrain/blobs); plain meshes are not occluded by it.
+    /// "true" occlusion with no screen-space artifacts. Everything receives it -
+    /// the raster pass marches the same field for its mesh fragments - but only
+    /// SDF matter (terrain/blobs) *occludes*; meshes aren't in the field.
     Sdf,
 }
 

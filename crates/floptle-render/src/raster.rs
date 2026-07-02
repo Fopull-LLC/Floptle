@@ -180,6 +180,9 @@ pub struct Raster {
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     tex_layout: wgpu::BindGroupLayout,
+    /// Fallback group(2) for callers without a raymarch pass: zeroed field
+    /// globals (no volumes/blobs, shadows + AO off) → the field branches skip.
+    empty_field_bind: wgpu::BindGroup,
     /// One sampler per distinct [`TexSampling`], built on demand and reused (textures
     /// pick theirs by filter/wrap; samplers are cheap to share).
     samplers: HashMap<TexSampling, wgpu::Sampler>,
@@ -206,9 +209,14 @@ impl Raster {
     pub fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
 
+        // The shared distance-field module (field.wgsl) is concatenated on: the
+        // fragment shader marches the raymarch pass's field (bound at group(2))
+        // so meshes RECEIVE field sun-shadows and true SDF AO.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raster"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("raster.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl")).into(),
+            ),
         });
 
         // Group 0: frame globals (uniform).
@@ -249,9 +257,13 @@ impl Raster {
             ],
         });
 
+        // Group 2: the shared SDF field (the raymarch pass's globals + distance
+        // atlas). The editor passes `Raymarch::field_bind`; standalone callers get
+        // the empty fallback below (zeroed globals → every field branch skips).
+        let field_layout = crate::raymarch::field_bind_layout(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout), Some(&field_layout)],
             immediate_size: 0,
         });
 
@@ -380,6 +392,29 @@ impl Raster {
             &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
         );
 
+        // The empty field fallback: a zeroed globals buffer (wgpu zero-initializes)
+        // + a 1³ distance texture that's never actually sampled.
+        let empty_field_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-empty-field"),
+            size: std::mem::size_of::<crate::raymarch::RaymarchGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let empty_dist = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-empty-field-dist"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let empty_field_samp = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let empty_field_bind = crate::raymarch::make_field_bind(
+            device, &field_layout, &empty_field_buf, &empty_dist, &empty_field_samp,
+        );
+
         let instance_cap = 16;
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster-instances"),
@@ -395,6 +430,7 @@ impl Raster {
             globals_bind,
             globals_buf,
             tex_layout,
+            empty_field_bind,
             samplers: HashMap::new(),
             default_tex,
             instance_buf,
@@ -573,6 +609,9 @@ impl Raster {
     /// bound. The targets are passed in (rather than hard-wired to the swapchain) so
     /// the scene can render either straight to the window or into a low-res retro
     /// buffer; `color` must use the surface format and `depth` the depth format.
+    /// `field`: the raymarch pass's [`field_bind`](crate::Raymarch::field_bind) so
+    /// meshes receive field shadows + SDF AO — or `None` for a standalone draw
+    /// (previews, probes) where every field effect is simply off.
     pub fn draw_scene(
         &mut self,
         gpu: &Gpu,
@@ -581,6 +620,7 @@ impl Raster {
         globals: Globals,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         clear: Option<[f64; 4]>,
+        field: Option<&wgpu::BindGroup>,
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
@@ -661,6 +701,7 @@ impl Raster {
                 multiview_mask: None,
             });
             rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             let draw = |rp: &mut wgpu::RenderPass<'_>, buckets: &[(usize, Option<u32>, u32, u32)]| {
                 for &(mesh_idx, tex_key, start, count) in buckets {

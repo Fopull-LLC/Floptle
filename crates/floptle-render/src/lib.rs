@@ -43,7 +43,7 @@ pub use raster::{
     instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId,
     TexSampling, TexWrap,
 };
-pub use raymarch::{Raymarch, RaymarchGlobals, MAX_VOLUMES, TERRAIN_SLOTS};
+pub use raymarch::{Raymarch, RaymarchGlobals, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS};
 pub use retro::Retro;
 
 /// Backends Floptle can target through wgpu. Mac uses Metal automatically.

@@ -6,45 +6,12 @@
 // same smin weight, so where the two fuse the textures crossfade across the seam.
 // Rays come from inverse(view_proj) (camera-relative, ADR-0015) and the fragment
 // writes frag_depth, so this shares one depth buffer with the raster meshes.
+//
+// The `Globals` struct and all distance-only field machinery (`map_d`, blob/
+// volume distances, SDF AO, `sun_shadow`) live in `field.wgsl`, which is
+// concatenated onto this module at creation — this file keeps the COLOR-carrying
+// surface path (what the hit looks like) and the primary march.
 
-struct Globals {
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    light_dir: vec4<f32>,
-    light_color: vec4<f32>,
-    ambient: vec4<f32>,
-    bg: vec4<f32>,
-    center: vec4<f32>,      // (unused legacy field; blobs now live in `blobs`)
-    params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
-    // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
-    // 3D atlas (no combined-grid resolution spread — ADR-0015 / multi-volume terrain).
-    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = present
-    vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
-    vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
-    vol_dims: array<vec4<f32>, 16>,   // xyz voxel dims of this volume (renderer-patched)
-    // Terrain surface material (same model as the raster meshes). Ignored by blobs.
-    terrain_tint: vec4<f32>,     // rgb tint (× painted albedo), a unused
-    terrain_emissive: vec4<f32>, // rgb, a = strength
-    terrain_specular: vec4<f32>, // rgb, a = strength
-    terrain_params: vec4<f32>,   // x shininess, y rim_strength, z unlit, w ambient_mul
-    terrain_rim: vec4<f32>,      // rgb, a unused
-    blobs: array<vec4<f32>, 16>, // each: xyz camera-relative center, w = scale
-    point_count: vec4<f32>,            // x = active point-light count
-    point_pos: array<vec4<f32>, 16>,   // xyz camera-relative pos, w = range
-    point_color: array<vec4<f32>, 16>, // rgb = color * intensity
-    // Per-blob material (same model as terrain_*), indexed by blob.
-    blob_tint: array<vec4<f32>, 16>,     // rgb tint (× procedural color), a unused
-    blob_emissive: array<vec4<f32>, 16>, // rgb, a = strength
-    blob_specular: array<vec4<f32>, 16>, // rgb, a = strength
-    blob_params: array<vec4<f32>, 16>,   // x shininess, y rim_strength, z unlit, w ambient_mul
-    blob_rim: array<vec4<f32>, 16>,      // rgb, a unused
-    sky_params: vec4<f32>,               // x = mode (0 solid, 1 texture), y = size
-    sky_tint: vec4<f32>,                 // rgb tint × sampled texel
-    sky_rot0: vec4<f32>,                 // inverse skybox rotation, column 0 (xyz)
-    sky_rot1: vec4<f32>,                 // column 1
-    sky_rot2: vec4<f32>,                 // column 2
-    ao_params: vec4<f32>,                // SDF AO: x on, y strength, z radius (world)
-};
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var dist_tex: texture_3d<f32>;
 @group(0) @binding(2) var color_tex: texture_3d<f32>;
@@ -113,15 +80,6 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
 
 struct Matter { d: f32, col: vec3<f32> };
 
-fn sd_sphere(p: vec3<f32>, r: f32) -> f32 {
-    return length(p) - r;
-}
-
-fn smin(a: f32, b: f32, k: f32) -> f32 {
-    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-    return mix(b, a, h) - k * h * (1.0 - h);
-}
-
 // smin that blends distance AND color by the same weight h (texture crossfade).
 fn smin_matter(a: Matter, b: Matter, k: f32) -> Matter {
     let h = clamp(0.5 + 0.5 * (b.d - a.d) / k, 0.0, 1.0);
@@ -130,7 +88,7 @@ fn smin_matter(a: Matter, b: Matter, k: f32) -> Matter {
     return Matter(d, col);
 }
 
-// The analytic blob: a STATIC smooth metaball (fixed-offset smin-blended spheres,
+// The analytic blob: a STATIC smooth metaball (geometry in `blob_d`, field.wgsl —
 // no time morph) so it is a predictable, placeable shape whose size comes only
 // from the transform — `center.w` is the scale, and the blob's radius is ≈ 0.85 *
 // scale (comparable to the unit sphere). A low-frequency iridescent tint (its
@@ -139,13 +97,9 @@ fn smin_matter(a: Matter, b: Matter, k: f32) -> Matter {
 // not from this color. Animation, if wanted, belongs to scripts, not the shape.
 fn blob_one(p: vec3<f32>, center: vec3<f32>, s: f32) -> Matter {
     let q = (p - center) / s;
-    var d = sd_sphere(q - vec3<f32>(0.26, 0.10, 0.0), 0.55);
-    d = smin(d, sd_sphere(q - vec3<f32>(-0.24, 0.16, 0.12), 0.50), 0.30);
-    d = smin(d, sd_sphere(q - vec3<f32>(0.06, -0.22, -0.14), 0.50), 0.30);
-    d = smin(d, sd_sphere(q - vec3<f32>(-0.10, -0.06, 0.24), 0.48), 0.30);
     let iri = 0.5 + 0.5 * cos(6.2831 * (q.y * 0.5 + vec3<f32>(0.0, 0.33, 0.67)));
     let col = mix(vec3<f32>(0.35, 0.16, 0.55), iri, 0.55);
-    return Matter(d * s, col);
+    return Matter(blob_d(p, center, s), col);
 }
 
 // Every blob folded together with smin. Seeded with blob 0 (never blended against
@@ -195,32 +149,6 @@ fn march_bound() -> f32 {
     return reach * 60.0 + maxc + 100.0;
 }
 
-// Distance from `p` INWARD from volume `i`'s side/bottom faces (positive inside;
-// the top face never tapers — it's the ground surface).
-fn box_edge(i: u32, p: vec3<f32>) -> f32 {
-    let vh = G.vol_half[i].xyz;
-    let rel = p - G.vol_center[i].xyz;
-    return min(min(vh.x - abs(rel.x), vh.z - abs(rel.z)), rel.y + vh.y);
-}
-
-// Edge distance to the UNION of all present volume boxes at `p` — the max of the
-// containing boxes' individual edge distances. This is what makes seams seamless:
-// near volume A's face but deep inside overlapping volume B, the union edge is B's
-// (large), so no taper; on a face no neighbor continues past, it's small → taper.
-// A single isolated volume reduces exactly to its own edge (the original look).
-fn union_edge(p: vec3<f32>) -> f32 {
-    var e = -1e9;
-    let vols = min(u32(G.params.w), 16u);
-    for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
-        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
-        if (max(q.x, max(q.y, q.z)) < 0.0) {
-            e = max(e, box_edge(i, p));
-        }
-    }
-    return e;
-}
-
 // One baked volume, RAW (untapered): a box SDF outside (to march toward), the
 // sampled distance + albedo inside, read from this volume's slot of the shared 3D
 // atlas at its NATIVE voxel resolution. The slab-edge taper is applied ONCE, after
@@ -248,16 +176,6 @@ fn volume_at(i: u32, p: vec3<f32>) -> Matter {
     let d = textureSampleLevel(dist_tex, vol_samp, uvw, 0.0).r;
     let col = textureSampleLevel(color_tex, vol_samp, uvw, 0.0).rgb;
     return Matter(d, col);
-}
-
-// Map a box-relative position to atlas texture coords for volume `i`. The voxel
-// coordinate is clamped half a voxel inside the slot — the per-volume equivalent of
-// ClampToEdge, which also stops trilinear taps bleeding into the neighbouring slot.
-fn atlas_uvw(i: u32, rel: vec3<f32>) -> vec3<f32> {
-    let dims = G.vol_dims[i].xyz;
-    let frac = clamp(rel / (2.0 * G.vol_half[i].xyz) + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
-    let vox = clamp(frac * dims, vec3<f32>(0.5), dims - 0.5);
-    return (G.vol_atlas[i].xyz + vox) / vec3<f32>(textureDimensions(dist_tex));
 }
 
 // Every present volume folded together with smin (the SAME polynomial fuse the old
@@ -292,36 +210,6 @@ fn volumes(p: vec3<f32>) -> VolFold {
     return VolFold(m, any);
 }
 
-// True when `p` is inside ANY volume's box expanded by `e` — used to reject false
-// hits on the boxes' bounding faces (the box-approach distance is never a real
-// surface), while a small `e` still admits genuine terrain hits right at a face.
-fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
-    let vols = min(u32(G.params.w), 16u);
-    for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
-        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
-        if (max(q.x, max(q.y, q.z)) < e) { return true; }
-    }
-    return false;
-}
-
-// The volume containing `p` (smallest sampled distance among boxes it's inside,
-// expanded by `e`) — for per-volume voxel size / texture-slot decisions. −1 = none.
-fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
-    var best = -1;
-    var bd = 1e9;
-    let vols = min(u32(G.params.w), 16u);
-    for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; }
-        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
-        if (max(q.x, max(q.y, q.z)) < e) {
-            let d = volume_at(i, p).d;
-            if (d < bd) { bd = d; best = i32(i); }
-        }
-    }
-    return best;
-}
-
 // A threshold-crossing is a REAL surface (not the shell) when there are no volumes,
 // or we are strictly inside some volume's box, or an analytic blob is the matter
 // here. The box test must stay STRICT: outside the bricks `volumes()` returns a
@@ -332,7 +220,7 @@ fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
 fn real_surface(p: vec3<f32>, thr: f32) -> bool {
     if (G.params.w < 0.5) { return true; }
     if (inside_volume_box_eps(p, 0.0)) { return true; }
-    return G.params.y >= 0.5 && analytic(p).d < thr;
+    return G.params.y >= 0.5 && analytic_d(p) < thr;
 }
 
 // The whole field: every piece of matter folded together with smin.
@@ -417,17 +305,11 @@ fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
 }
 
 fn calc_normal(p: vec3<f32>) -> vec3<f32> {
-    // For TERRAIN (a sampled voxel field) use an epsilon of ~one voxel so the central
+    // For TERRAIN (a sampled voxel field) `field_eps` is ~one voxel, so the central
     // difference spans cell boundaries and low-passes residual grid/f16 noise instead
     // of reporting a single cell's facet (the grain). Analytic blobs have a continuous
     // gradient and want a small epsilon for crisp edges.
-    var h = 0.012;
-    let ci = containing_volume(p, 0.08);
-    if (ci >= 0) {
-        let i = u32(ci);
-        let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
-        h = clamp(max(voxel.x, max(voxel.y, voxel.z)), 0.02, 1.0);
-    }
+    let h = field_eps(p);
     // Tetrahedron offsets: 4 taps, isotropic (no axis-aligned facet bias), cheaper
     // than the 6-tap central cross.
     let k0 = vec3<f32>(1.0, -1.0, -1.0);
@@ -435,28 +317,9 @@ fn calc_normal(p: vec3<f32>) -> vec3<f32> {
     let k2 = vec3<f32>(-1.0, 1.0, -1.0);
     let k3 = vec3<f32>(1.0, 1.0, 1.0);
     return normalize(
-        k0 * map(p + k0 * h).d + k1 * map(p + k1 * h).d + k2 * map(p + k2 * h).d
-            + k3 * map(p + k3 * h).d,
+        k0 * map_d(p + k0 * h) + k1 * map_d(p + k1 * h) + k2 * map_d(p + k2 * h)
+            + k3 * map_d(p + k3 * h),
     );
-}
-
-// SDF ("true") ambient occlusion: step outward along the normal and measure how
-// much the fused field (volumes + blobs) pinches in versus open space — iq's
-// exponentially-weighted AO. Because it reads the real distance field it shades
-// creases, overhangs and contact points regardless of the camera, with none of
-// SSAO's screen-space artifacts. Driven by the scene PostProcess node's `Sdf` AO
-// mode (ao_params: y = strength, z = radius in world units).
-fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
-    let radius = max(G.ao_params.z, 1e-3);
-    var occ = 0.0;
-    var sca = 1.0;
-    for (var i = 1; i <= 5; i = i + 1) {
-        let h = radius * f32(i) / 5.0;
-        occ = occ + (h - map(p + n * h).d) * sca;
-        sca = sca * 0.6;
-    }
-    let ao = clamp(1.0 - 1.5 * occ / radius, 0.0, 1.0);
-    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0));
 }
 
 struct FsOut {
@@ -475,7 +338,6 @@ fn fs(in: VOut) -> FsOut {
     var t = 0.0;
     var prev_t = 0.0;
     var hit = false;
-    var m: Matter;
     // Closest approach to a real surface, so a grazing ray that never quite trips the
     // coarse threshold — the silhouette of a hill/ravine, where the step shrinks and
     // the iteration budget runs out — can be accepted below instead of leaving a
@@ -486,18 +348,20 @@ fn fs(in: VOut) -> FsOut {
     var min_prev = 0.0;
     for (var i = 0; i < 256; i = i + 1) {
         let p = ro + rd * t;
-        m = map(p);
+        // Distance-only sampling in the hot loop (map_d, field.wgsl) — the color
+        // atlas is read once, at the refined hit, not per step.
+        let d = map_d(p);
         // Distance-relaxed threshold for the COARSE hit (the precise surface is then
         // found by bisection below). A gentle t-growth still helps grazing rays
         // converge without exhausting the step budget, but it's kept small so the far
         // silhouette stays sharp (the old larger growth left a fuzzy wispy horizon).
         let thr = 0.0006 * t + 0.002;
-        if (m.d < min_d && real_surface(p, 0.08)) {
-            min_d = m.d;
+        if (d < min_d && real_surface(p, 0.08)) {
+            min_d = d;
             min_t = t;
             min_prev = prev_t;
         }
-        if (m.d < thr && real_surface(p, thr)) {
+        if (d < thr && real_surface(p, thr)) {
             hit = true;
             break;
         }
@@ -505,7 +369,7 @@ fn fs(in: VOut) -> FsOut {
         // Conservative step (0.85): the smin-blended + trilinear-sampled field is
         // not a perfectly exact SDF, so understep to avoid overshoot cracks when
         // the camera is close to the surface.
-        t = t + max(m.d, 0.003) * 0.85;
+        t = t + max(d, 0.003) * 0.85;
         if (t > max_t) {
             break;
         }
@@ -516,7 +380,6 @@ fn fs(in: VOut) -> FsOut {
         hit = true;
         t = min_t;
         prev_t = min_prev;
-        m = map(ro + rd * t);
     }
 
     // Refine the loose threshold hit to the TRUE surface (where the field crosses
@@ -529,7 +392,7 @@ fn fs(in: VOut) -> FsOut {
         // Walk `b` until it's truly inside (d < 0) so [a,b] brackets the crossing.
         var bracketed = false;
         for (var k = 0; k < 10; k = k + 1) {
-            if (map(ro + rd * b).d < 0.0) { bracketed = true; break; }
+            if (map_d(ro + rd * b) < 0.0) { bracketed = true; break; }
             a = b;
             b = b + 0.02;
         }
@@ -539,17 +402,17 @@ fn fs(in: VOut) -> FsOut {
         if (bracketed) {
             for (var j = 0; j < 14; j = j + 1) {
                 let tm = 0.5 * (a + b);
-                if (map(ro + rd * tm).d < 0.0) { b = tm; } else { a = tm; }
+                if (map_d(ro + rd * tm) < 0.0) { b = tm; } else { a = tm; }
             }
             t = 0.5 * (a + b);
         }
-        m = map(ro + rd * t);
     }
 
     var out: FsOut;
     var drawn = false;
     if (hit) {
         let p = ro + rd * t;
+        let m = map(p); // the hit's blended surface color (one color fetch per ray)
         let clip = G.view_proj * vec4<f32>(p, 1.0);
         let ndc_z = clip.z / clip.w;
         if (clip.w > 0.0 && ndc_z >= 0.0 && ndc_z <= 1.0) {
@@ -565,6 +428,15 @@ fn fs(in: VOut) -> FsOut {
             if (G.ao_params.x > 0.5) {
                 occ = sdf_ao(p, n);
             }
+            // Sun shadows (Lighting node): a field march toward the light. Only
+            // multiplies the DIRECTIONAL diffuse + specular — ambient and point
+            // lights are the unshadowed fill. Skipped on sun-averted surfaces
+            // (diff = 0 already zeroes the terms it would scale).
+            let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+            var sh = vec3<f32>(1.0);
+            if (diff > 0.0) {
+                sh = sun_shadow(p, n, pix);
+            }
             var col: vec3<f32>;
             if (inside_volume_box_eps(p, 0.06)) {
                 // TERRAIN: shade with its Material using the SAME model as the raster
@@ -578,12 +450,12 @@ fn fs(in: VOut) -> FsOut {
                     col = tinted + emissive; // unlit / fullbright
                 } else {
                     let ambient = G.ambient.rgb * G.terrain_params.w;
-                    col = tinted * (ambient + G.light_color.rgb * diff);
+                    col = tinted * (ambient + G.light_color.rgb * diff * sh);
                     col = col + tinted * point_diffuse(p, n); // placeable point lights
                     let h = normalize(l + v);
                     let shininess = max(G.terrain_params.x, 1.0);
                     let spec = pow(max(dot(n, h), 0.0), shininess) * G.terrain_specular.a * select(0.0, 1.0, diff > 0.0);
-                    col = col + G.terrain_specular.rgb * spec * G.light_color.rgb;
+                    col = col + G.terrain_specular.rgb * spec * G.light_color.rgb * sh;
                     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * G.terrain_params.y;
                     col = (col + G.terrain_rim.rgb * rim_f) * occ + emissive;
                 }
@@ -600,12 +472,12 @@ fn fs(in: VOut) -> FsOut {
                     col = tinted + emissive; // unlit / fullbright
                 } else {
                     let ambient = G.ambient.rgb * bpar.w;
-                    col = tinted * (ambient + G.light_color.rgb * diff);
+                    col = tinted * (ambient + G.light_color.rgb * diff * sh);
                     col = col + tinted * point_diffuse(p, n); // placeable point lights
                     let h = normalize(l + v);
                     let shininess = max(bpar.x, 1.0);
                     let spec = pow(max(dot(n, h), 0.0), shininess) * G.blob_specular[bi].a * select(0.0, 1.0, diff > 0.0);
-                    col = col + G.blob_specular[bi].rgb * spec * G.light_color.rgb;
+                    col = col + G.blob_specular[bi].rgb * spec * G.light_color.rgb * sh;
                     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * bpar.y;
                     col = (col + G.blob_rim[bi].rgb * rim_f) * occ + emissive;
                 }
@@ -637,7 +509,7 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     var masked = 0.0;
     for (var i = 0; i < 160; i = i + 1) {
         let p = ro + rd * t;
-        let d = map(p).d;
+        let d = map_d(p);
         let thr = 0.0015 * t + 0.0025;
         if (d < thr && real_surface(p, thr)) {
             let clip = G.view_proj * vec4<f32>(p, 1.0);

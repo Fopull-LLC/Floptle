@@ -919,6 +919,116 @@ fn collect_point_lights(
     ([n as f32, 0.0, 0.0, 0.0], pos, col)
 }
 
+/// The Lighting node's shadow knobs as the raymarch-globals uniform vec4s
+/// (`shadow_params` / `shadow_tint` / `shadow_extra`). Softness 0..1 maps to the
+/// penumbra sharpness `k` on a log ramp (0 → 64 razor-hard, 1 → 2 dreamy-soft) so
+/// the slider feels perceptually even.
+fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let k = 64.0 * (2.0f32 / 64.0).powf(l.shadow_softness.clamp(0.0, 1.0));
+    (
+        [
+            if l.shadows { 1.0 } else { 0.0 },
+            k,
+            l.shadow_strength.clamp(0.0, 1.0),
+            l.shadow_distance.max(1.0),
+        ],
+        [l.shadow_tint[0], l.shadow_tint[1], l.shadow_tint[2], l.shadow_quantize as f32],
+        [if l.shadow_dither { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+    )
+}
+
+/// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
+/// how raster meshes CAST sun shadows without being in the SDF field. Mirrors the
+/// physics build: a RigidBody node casts its body shape; a Collidable primitive
+/// casts the static shape `add_static_colliders` gives it (Cube → 0.7·scale box,
+/// Sphere → 0.85·max-scale, Capsule → 0.5-sized). Trimesh colliders (Collidable
+/// meshes) have no cheap analytic stand-in — give such a node a RigidBody box if
+/// it should cast. Skips hidden nodes and `CastShadow(false)` opt-outs; returns
+/// zeros when shadows are off.
+fn collect_shadow_proxies(
+    world: &World,
+    cam_world: DVec3,
+    enabled: bool,
+) -> ([f32; 4], [[f32; 4]; 32], [[f32; 4]; 32], [[f32; 4]; 32]) {
+    let mut a = [[0.0f32; 4]; 32];
+    let mut b = [[0.0f32; 4]; 32];
+    let mut r = [[0.0f32, 0.0, 0.0, 1.0]; 32];
+    let mut n = 0usize;
+    if !enabled {
+        return ([0.0; 4], a, b, r);
+    }
+    let casts = |e: Entity| {
+        world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true)
+            && !matches!(world.get::<floptle_core::Visible>(e), Some(floptle_core::Visible(false)))
+    };
+    // Dynamic bodies first (the movers a shadow grounds most), then static
+    // Collidable primitives. Blobs/terrain are already in the field itself.
+    for (e, rb) in world.query::<floptle_core::RigidBody>() {
+        if n >= floptle_render::MAX_SHADOW_PROXIES || !casts(e) {
+            continue;
+        }
+        let wt = floptle_core::world_transform(world, e);
+        let c = (wt.translation - cam_world).as_vec3();
+        match rb.kind {
+            floptle_core::BodyKind::Sphere => {
+                a[n] = [c.x, c.y, c.z, rb.radius];
+                b[n] = [0.0, 0.0, 0.0, 0.0];
+            }
+            floptle_core::BodyKind::Capsule => {
+                let up = wt.rotation * Vec3::Y;
+                let half = (0.5 * rb.height - rb.radius).max(0.0);
+                let (pa, pb) = (c - up * half, c + up * half);
+                a[n] = [pa.x, pa.y, pa.z, rb.radius];
+                b[n] = [pb.x, pb.y, pb.z, 1.0];
+            }
+            floptle_core::BodyKind::Box => {
+                let h = rb.half_extents;
+                a[n] = [c.x, c.y, c.z, 0.0];
+                b[n] = [h[0], h[1], h[2], 2.0];
+                let q = wt.rotation;
+                r[n] = [q.x, q.y, q.z, q.w];
+            }
+        }
+        n += 1;
+    }
+    for (e, _) in world.query::<floptle_core::Collidable>() {
+        if n >= floptle_render::MAX_SHADOW_PROXIES
+            || !casts(e)
+            || world.get::<floptle_core::RigidBody>(e).is_some()
+        {
+            continue;
+        }
+        let wt = floptle_core::world_transform(world, e);
+        let c = (wt.translation - cam_world).as_vec3();
+        let s = wt.scale;
+        match world.get::<Matter>(e) {
+            Some(Matter::Primitive { shape, .. }) => match shape {
+                floptle_core::Shape::Cube => {
+                    a[n] = [c.x, c.y, c.z, 0.0];
+                    b[n] = [0.7 * s.x, 0.7 * s.y, 0.7 * s.z, 2.0];
+                    let q = wt.rotation;
+                    r[n] = [q.x, q.y, q.z, q.w];
+                }
+                floptle_core::Shape::Sphere => {
+                    a[n] = [c.x, c.y, c.z, 0.85 * s.max_element()];
+                    b[n] = [0.0, 0.0, 0.0, 0.0];
+                }
+                floptle_core::Shape::Capsule => {
+                    let up = wt.rotation * Vec3::Y;
+                    let radius = 0.5 * s.x.max(s.z);
+                    let half = (0.5 * s.y).max(0.0);
+                    let (pa, pb) = (c - up * half, c + up * half);
+                    a[n] = [pa.x, pa.y, pa.z, radius];
+                    b[n] = [pb.x, pb.y, pb.z, 1.0];
+                }
+            },
+            _ => continue, // trimesh colliders don't proxy (see doc comment)
+        }
+        n += 1;
+    }
+    ([n as f32, 0.0, 0.0, 0.0], a, b, r)
+}
+
 /// How a texture is filtered — the serde-friendly mirror of [`floptle_render::TexFilter`],
 /// persisted per texture in `.floptle/textures.ron`.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -1983,6 +2093,63 @@ impl<'a> EditorTabViewer<'a> {
                     });
                     cmd.inspector_changed |=
                         ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity")).changed();
+
+                    ui.separator();
+                    cmd.inspector_changed |= ui
+                        .checkbox(&mut l.shadows, "sun shadows")
+                        .on_hover_text(
+                            "march the SDF field toward the sun — analytically soft shadows, \
+                             no shadow maps. Terrain and blobs cast on everything; meshes cast \
+                             via their collider shapes and receive like everything else.",
+                        )
+                        .changed();
+                    ui.add_enabled_ui(l.shadows, |ui| {
+                        cmd.inspector_changed |= ui
+                            .add(egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0).text("softness"))
+                            .on_hover_text("0 = razor-hard edge (retro), 1 = dreamy-soft penumbra")
+                            .changed();
+                        cmd.inspector_changed |= ui
+                            .add(egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0).text("strength"))
+                            .on_hover_text("how dark full shadow gets — ambient light still fills, so 1.0 isn't pitch black")
+                            .changed();
+                        ui.horizontal(|ui| {
+                            ui.label("tint");
+                            cmd.inspector_changed |= ui
+                                .color_edit_button_rgb(&mut l.shadow_tint)
+                                .on_hover_text("shadows darken toward this color — black is neutral; try purple dusk or sepia")
+                                .changed();
+                            ui.label("quantize");
+                            let qlabel = match l.shadow_quantize {
+                                0 => "smooth".to_string(),
+                                n => format!("{n} bands"),
+                            };
+                            egui::ComboBox::from_id_salt("shadow_quantize")
+                                .selected_text(qlabel)
+                                .show_ui(ui, |ui| {
+                                    cmd.inspector_changed |=
+                                        ui.selectable_value(&mut l.shadow_quantize, 0, "smooth").clicked();
+                                    for nb in 2..=4u32 {
+                                        cmd.inspector_changed |= ui
+                                            .selectable_value(&mut l.shadow_quantize, nb, format!("{nb} bands"))
+                                            .clicked();
+                                    }
+                                });
+                        });
+                        ui.add_enabled_ui(l.shadow_quantize >= 2, |ui| {
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut l.shadow_dither, "dither the penumbra")
+                                .on_hover_text("Bayer-pattern the quantized penumbra — the PS1 shadow edge; pairs with retro mode")
+                                .changed();
+                        });
+                        cmd.inspector_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut l.shadow_distance, 10.0..=1000.0)
+                                    .logarithmic(true)
+                                    .text("distance"),
+                            )
+                            .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
+                            .changed();
+                    });
                 }
             }
             Some(e) if world.get::<Transform>(e).is_some() => {
@@ -2242,7 +2409,7 @@ impl<'a> EditorTabViewer<'a> {
                                         }
                                         if ui
                                             .selectable_label(m == AoMode::Sdf, "SDF (true)")
-                                            .on_hover_text("samples the real distance field — no screen-space artifacts, but only shades SDF matter (terrain/blobs), not meshes")
+                                            .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
                                             .clicked()
                                         {
                                             m = AoMode::Sdf;
@@ -2475,6 +2642,23 @@ impl<'a> EditorTabViewer<'a> {
                             });
                         }
                     });
+                    // The body shape doubles as the node's sun-shadow proxy (see the
+                    // Lighting node) — casting is the default; the component only
+                    // exists to record an opt-out.
+                    let mut casts =
+                        world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
+                    if ui
+                        .checkbox(&mut casts, "casts shadows")
+                        .on_hover_text("this body shape stands in for the mesh in the sun-shadow march — untick to stop this node casting")
+                        .changed()
+                    {
+                        if casts {
+                            world.remove::<floptle_core::CastShadow>(e);
+                        } else {
+                            world.insert(e, floptle_core::CastShadow(false));
+                        }
+                        cmd.inspector_changed = true;
+                    }
                 }
 
                 // ===== Collider (static collision; only when the node has one) =====
@@ -2500,6 +2684,28 @@ impl<'a> EditorTabViewer<'a> {
                         ));
                         if world.get::<floptle_core::RigidBody>(e).is_some() {
                             ui.small("⚠ This node also has a Rigidbody, so on Play it's a dynamic body (it falls / gets moved) and this static Collider is ignored. To make it a solid obstacle the player bumps into, remove the Rigidbody so it becomes static world geometry (the solver has no body-vs-body pass, so two dynamic bodies pass through each other).");
+                        } else {
+                            // Primitive colliders double as the node's sun-shadow proxy
+                            // (a trimesh has no cheap analytic stand-in — add a Rigidbody
+                            // box if a Collidable mesh should cast).
+                            if !matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. })) {
+                                let mut casts = world
+                                    .get::<floptle_core::CastShadow>(e)
+                                    .map(|c| c.0)
+                                    .unwrap_or(true);
+                                if ui
+                                    .checkbox(&mut casts, "casts shadows")
+                                    .on_hover_text("this collider shape stands in for the node in the sun-shadow march — untick to stop this node casting")
+                                    .changed()
+                                {
+                                    if casts {
+                                        world.remove::<floptle_core::CastShadow>(e);
+                                    } else {
+                                        world.insert(e, floptle_core::CastShadow(false));
+                                    }
+                                    cmd.inspector_changed = true;
+                                }
+                            }
                         }
                         if remove {
                             cmd.set_collidable = Some((e, false));
@@ -5882,6 +6088,12 @@ impl Editor {
         let light = Vec3::from(light_node.direction).normalize_or_zero();
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
+        // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
+        // raster meshes cast — both ride the raymarch globals, which the raster pass
+        // reads too through the shared field bind group.
+        let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
+        let (prox_count, prox_a, prox_b, prox_rot) =
+            collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
@@ -6106,6 +6318,13 @@ impl Editor {
                 sky_tint,
                 sky_rot,
                 ao_params: rm_ao_params,
+                shadow_params: sh_params,
+                shadow_tint: sh_tint,
+                shadow_extra: sh_extra,
+                prox_count,
+                prox_a,
+                prox_b,
+                prox_rot,
             }
         };
 
@@ -6169,14 +6388,15 @@ impl Editor {
         }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
-        // and/or the combined terrain volume. Build its globals if either is present.
+        // and/or the combined terrain volume. The globals are built either way — on
+        // frames with nothing to raymarch they're still uploaded (not drawn) so the
+        // raster pass's field bind group has this frame's shadow/proxy data.
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm = if show_blobs || !self.terrains.is_empty() {
+        let rm_draw = show_blobs || !self.terrains.is_empty();
+        let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
-            Some(g)
-        } else {
-            None
+            g
         };
 
         // ---- build the egui UI (mutating the World) ----
@@ -7048,14 +7268,20 @@ impl Editor {
                 } else {
                     (&frame.view, gpu.depth_view())
                 };
-                // `rm` already accounts for the matter toggle + terrain presence.
-                let raster_clear = if let Some(rm) = rm {
+                // `rm_draw` already accounts for the matter toggle + terrain presence;
+                // with nothing to raymarch the globals still upload so the raster
+                // pass's field group (shadows/AO/proxies) sees this frame's data.
+                let raster_clear = if rm_draw {
                     raymarch.draw_into(gpu, color, depth, rm);
                     None
                 } else {
+                    raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
                 };
-                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
+                raster.draw_scene(
+                    gpu, color, depth, globals, &instances, raster_clear,
+                    Some(raymarch.field_bind()),
+                );
                 // The reference grid is an editor aid — Scene view only.
                 if self.grid.show && !game_view {
                     let c = self.grid.color;
@@ -8228,6 +8454,8 @@ impl Editor {
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+        let cast_shadow =
+            self.world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
             self.world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         Some(NodeDoc {
@@ -8240,6 +8468,7 @@ impl Editor {
             mesh_collider,
             collidable,
             visible,
+            cast_shadow,
             anim_controller,
             parent: None,
         })
@@ -8299,6 +8528,7 @@ impl Editor {
             mesh_collider: false,
             collidable: false,
             visible: true,
+            cast_shadow: true,
             anim_controller: None,
             parent: None,
         };
@@ -8523,6 +8753,7 @@ impl Editor {
                 globals,
                 &instances,
                 Some([0.07, 0.08, 0.10, 1.0]),
+                None, // no field: previews don't receive scene shadows/AO
             );
         }
     }
@@ -8601,6 +8832,9 @@ impl Editor {
         let light = Vec3::from(light_node.direction).normalize_or_zero();
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
+        let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
+        let (prox_count, prox_a, prox_b, prox_rot) =
+            collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light.x, light.y, light.z, 0.0],
@@ -8662,7 +8896,8 @@ impl Editor {
         let (_, rm_ao_params) = post_process_uniforms(&self.world);
         let terrain_mat = self.terrain_material();
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm = if show_blobs || !self.terrains.is_empty() {
+        let rm_draw = show_blobs || !self.terrains.is_empty();
+        let rm = {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
             if show_blobs {
@@ -8705,23 +8940,34 @@ impl Editor {
                 sky_tint,
                 sky_rot,
                 ao_params: rm_ao_params,
+                shadow_params: sh_params,
+                shadow_tint: sh_tint,
+                shadow_extra: sh_extra,
+                prox_count,
+                prox_a,
+                prox_b,
+                prox_rot,
             };
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
-            Some(g)
-        } else {
-            None
+            g
         };
 
         if let (Some(gpu), Some(raster), Some(raymarch)) =
             (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
         {
-            let raster_clear = if let Some(rm) = rm {
+            let raster_clear = if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
                 None
             } else {
+                // Nothing to raymarch, but the raster field group still needs this
+                // frame's shadow/proxy data (mesh-only scenes cast via proxies).
+                raymarch.upload_globals(gpu, rm);
                 Some(clear.map(|c| c as f64))
             };
-            raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
+            raster.draw_scene(
+                gpu, color, depth, globals, &instances, raster_clear,
+                Some(raymarch.field_bind()),
+            );
         }
     }
 
@@ -8875,6 +9121,7 @@ impl Editor {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                cast_shadow: true,
                 anim_controller: None,
                 parent: None,
             };
@@ -10189,6 +10436,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         mesh_collider: false,
         collidable: false,
         visible: true,
+        cast_shadow: true,
         anim_controller: None,
         parent: None,
     }
@@ -10219,6 +10467,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                cast_shadow: true,
                 anim_controller: None,
                 parent: None,
             },
@@ -10232,6 +10481,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                cast_shadow: true,
                 anim_controller: None,
                 parent: None,
             },
@@ -10245,6 +10495,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 mesh_collider: false,
                 collidable: false,
                 visible: true,
+                cast_shadow: true,
                 anim_controller: None,
                 parent: None,
             },

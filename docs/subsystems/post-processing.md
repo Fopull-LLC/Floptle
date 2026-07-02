@@ -41,10 +41,13 @@ it samples the low-res retro depth, so the AO goes chunky with the pixels —
 which is the point.
 
 **SDF ("true")** — iq's exponentially-weighted occlusion sampled from the
-*real fused distance field* (volumes + blobs) along the surface normal, inside
-`raymarch.wgsl`. No screen-space artifacts, correct behind-the-camera
-occlusion — but it only shades **SDF matter** (terrain/blobs); plain meshes
-are not in the field, so they receive none. It never darkens emissive.
+*real fused distance field* (volumes + blobs) along the surface normal
+(`sdf_ao` in the shared `field.wgsl`). No screen-space artifacts, correct
+behind-the-camera occlusion — and since 2026-07-02 **everything receives it**:
+the raster pass binds the same field (see [`./shadows.md`](./shadows.md) §2),
+so a mesh resting on terrain gets true contact darkening. Only SDF matter
+*occludes*, though — meshes aren't in the field, so they don't self-shade or
+shade each other in this mode (SSAO does). It never darkens emissive.
 This is the Tier-0 AO promised in [`./light.md`](./light.md) §2.
 
 Both modes share `ao_strength` (how dark) and `ao_radius` (reach in meters).

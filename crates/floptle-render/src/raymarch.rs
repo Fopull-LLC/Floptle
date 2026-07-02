@@ -81,8 +81,29 @@ pub struct RaymarchGlobals {
     /// SDF ("true") ambient occlusion, from the scene's PostProcess node when its
     /// AO mode is `Sdf`: x = on (0/1), y = strength (0..1), z = radius (world
     /// units), w unused. Occlusion is sampled from the real distance field along
-    /// the surface normal — it shades SDF matter only (meshes aren't in the field).
+    /// the surface normal; the raster pass binds the same field, so meshes
+    /// RECEIVE it too (they just don't occlude — they aren't in the field).
     pub ao_params: [f32; 4],
+    /// Sun shadows (the Lighting node's knobs): x = on (0/1), y = penumbra
+    /// sharpness `k` (≈2 dreamy-soft … ≈64 razor-hard), z = strength (0..1),
+    /// w = max shadow-march distance (world units).
+    pub shadow_params: [f32; 4],
+    /// rgb = the color full shadow darkens toward (black = plain darkness),
+    /// w = quantize bands (0 = smooth penumbra, 2..=8 = posterized).
+    pub shadow_tint: [f32; 4],
+    /// x = Bayer-dither the penumbra (0/1); yzw reserved.
+    pub shadow_extra: [f32; 4],
+    /// x = active proxy-occluder count (see `prox_a`); rest pad to a vec4.
+    pub prox_count: [f32; 4],
+    /// Up to [`MAX_SHADOW_PROXIES`] proxy occluders — collider shapes standing in
+    /// for raster meshes in the shadow march (meshes aren't in the field).
+    /// Per proxy: xyz = center / capsule end A (camera-relative), w = radius.
+    pub prox_a: [[f32; 4]; 32],
+    /// Per proxy: xyz = capsule end B / box half-extents,
+    /// w = kind (0 = sphere, 1 = capsule, 2 = box).
+    pub prox_b: [[f32; 4]; 32],
+    /// Per proxy: the box's orientation quaternion (xyzw); unused otherwise.
+    pub prox_rot: [[f32; 4]; 32],
 }
 
 impl Default for RaymarchGlobals {
@@ -120,6 +141,13 @@ impl Default for RaymarchGlobals {
             sky_tint: [1.0, 1.0, 1.0, 1.0],
             sky_rot: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
             ao_params: [0.0, 0.7, 0.5, 0.0],
+            shadow_params: [0.0, 12.0, 1.0, 150.0],
+            shadow_tint: [0.0; 4],
+            shadow_extra: [0.0; 4],
+            prox_count: [0.0; 4],
+            prox_a: [[0.0; 4]; 32],
+            prox_b: [[0.0; 4]; 32],
+            prox_rot: [[0.0, 0.0, 0.0, 1.0]; 32],
         }
     }
 }
@@ -133,6 +161,9 @@ pub const MAX_VOLUMES: usize = 16;
 
 /// Max placeable point lights accumulated in one pass (raster + raymarch).
 pub const MAX_POINT_LIGHTS: usize = 16;
+
+/// Max proxy shadow occluders (collider shapes cast for raster meshes) in one pass.
+pub const MAX_SHADOW_PROXIES: usize = 32;
 
 pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,
@@ -152,6 +183,11 @@ pub struct Raymarch {
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
     bind: wgpu::BindGroup,
+    /// The SHARED field bind group (globals uniform + distance atlas + sampler)
+    /// the raster pass binds at group(2), so mesh fragments march the same field
+    /// (shadows received + true SDF AO). Rebuilt with the atlas.
+    field_layout: wgpu::BindGroupLayout,
+    field_bind: wgpu::BindGroup,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at.
@@ -162,9 +198,13 @@ impl Raymarch {
     pub fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
 
+        // The shared distance-field module (Globals struct, map_d, AO, shadows) is
+        // concatenated on — module-scope WGSL declarations are order-independent.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raymarch"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("raymarch.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl")).into(),
+            ),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -330,6 +370,8 @@ impl Raymarch {
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
             &tile_sampler, &sky_tex,
         );
+        let field_layout = field_bind_layout(device);
+        let field_bind = make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &sampler);
 
         Self {
             pipeline,
@@ -344,7 +386,26 @@ impl Raymarch {
             terrain_tex,
             sky_tex,
             bind,
+            field_layout,
+            field_bind,
         }
+    }
+
+    /// The field bind group the raster pass binds at group(2) — the same globals
+    /// buffer + distance atlas this pass marches, so meshes receive field shadows
+    /// and SDF AO. `draw_into` (or [`upload_globals`](Self::upload_globals) on
+    /// frames with nothing to raymarch) must run first so the buffer holds this
+    /// frame's data — the raymarch pass draws before the raster pass anyway.
+    pub fn field_bind(&self) -> &wgpu::BindGroup {
+        &self.field_bind
+    }
+
+    /// Write `globals` (atlas slots patched) WITHOUT drawing — for frames where no
+    /// SDF matter renders but the raster pass still marches the field via
+    /// [`field_bind`](Self::field_bind) (mesh-only scenes casting proxy shadows).
+    pub fn upload_globals(&self, gpu: &Gpu, mut globals: RaymarchGlobals) {
+        self.patch_globals(&mut globals);
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
     }
 
     /// Upload the equirectangular skybox texture (`None` resets to solid / white). The
@@ -444,6 +505,8 @@ impl Raymarch {
             &self.tile_sampler,
             &self.sky_tex,
         );
+        self.field_bind =
+            make_field_bind(&gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &self.sampler);
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
         accepted.len()
@@ -531,10 +594,9 @@ impl Raymarch {
         gpu: &Gpu,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-        mut globals: RaymarchGlobals,
+        globals: RaymarchGlobals,
     ) {
-        self.patch_globals(&mut globals);
-        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.upload_globals(gpu, globals);
 
         let mut encoder = gpu
             .device
@@ -572,9 +634,8 @@ impl Raymarch {
 
     /// Render the SDF matter's silhouette as 1.0 into a single-channel mask (clearing
     /// it first) — the selection-outline source for the blob.
-    pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, mut globals: RaymarchGlobals) {
-        self.patch_globals(&mut globals);
-        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+    pub fn draw_mask(&self, gpu: &Gpu, mask: &wgpu::TextureView, globals: RaymarchGlobals) {
+        self.upload_globals(gpu, globals);
 
         let mut encoder = gpu
             .device
@@ -602,6 +663,55 @@ impl Raymarch {
         }
         gpu.queue.submit([encoder.finish()]);
     }
+}
+
+/// The bind group layout for the SHARED distance field (uniform globals +
+/// distance atlas + sampler) — what `field.wgsl` declares. Created identically by
+/// the raymarch pass (which owns the resources) and the raster pipeline (which
+/// binds them at group(2)); wgpu deduplicates structurally-equal layouts, so the
+/// two are compatible.
+pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sdf-field"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            vol_tex_entry(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+pub(crate) fn make_field_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals: &wgpu::Buffer,
+    dist: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sdf-field"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dist_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn vol_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
