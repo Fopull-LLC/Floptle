@@ -2,9 +2,11 @@
 
 **Status: IMPLEMENTED · 2026-07-02** — field-first SDF sun shadows, per scene,
 on everything: terrain/blobs cast from the field itself, raster meshes *receive*
-by marching the same field and *cast* through collider-proxy occluders. The
-style range spans razor-hard PS1 to dreamy-soft modern from one dial set on the
-Lighting node. (Deferred: point-light shadows, bent shadow rays — see §6.)
+by marching the same field and *cast* two ways — static level meshes as baked
+shadow-only occluder volumes (true silhouettes, dark interiors), dynamic bodies
+as collider-shape proxies. The style range spans razor-hard PS1 to dreamy-soft
+modern from one dial set on the Lighting node. (Deferred: point-light shadows,
+bent shadow rays — see §6.)
 
 > Reads-with: [`./renderer.md`](./renderer.md) §3 (the march that carries the
 > shadow ray), [`./light.md`](./light.md) (this is Tier 0's "SDF soft shadows";
@@ -29,9 +31,10 @@ rays* reachable — the shadow ray is already a field march; a shadow-map
 pipeline would have to be thrown away to get there.
 
 **What we gave up** (still true): pixel-exact silhouettes of complex *dynamic*
-meshes — a windmill's blades shadow as their collider box, not as blades. If a
-game someday needs a hero-caster silhouette, a single non-cascaded shadow map
-can be folded into the same visibility term *then*.
+meshes — a windmill's blades shadow as their collider box, not as blades.
+(Static level meshes are NOT in this bucket: they bake real occluder volumes,
+§2.) If a game someday needs a hero-caster silhouette, a single non-cascaded
+shadow map can be folded into the same visibility term *then*.
 
 ## 2. How it works
 
@@ -64,24 +67,35 @@ the buffer always holds the frame's data. Standalone raster callers (asset
 previews, probes) pass no field and get a zeroed fallback — every field branch
 skips, zero cost.
 
-**Meshes cast — proxy occluders:** meshes aren't in the field, so the editor
-harvests up to 32 cheap analytic stand-ins per frame (`collect_shadow_proxies`)
-from what the scene already authors — **physics collider shapes**:
+**Meshes cast — two paths, picked by what the node already authors:**
 
-- a `RigidBody` casts its body shape (sphere / capsule / oriented box);
-- a static `Collidable` primitive casts the same shape the physics build gives
-  it (Cube → 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized);
-- trimesh colliders (Collidable **meshes**) have no cheap analytic stand-in —
-  give such a node a RigidBody box if it should cast;
-- blobs/terrain never need proxies (they're in the field itself).
+1. **Static level meshes → baked occluder volumes.** A `Matter::Mesh` node with
+   a `Collidable`/`MeshCollider` (and no RigidBody) is baked once by
+   `floptle_field::bake_occluder` — a fast unsigned distance field (surface
+   voxelization + chamfer transform, milliseconds-to-subsecond even for whole
+   maps; logged to the Console) — and uploaded into the same 3D atlas as the
+   terrains, flagged **shadow-only** (`vol_center.w = 2`). The shadow march
+   folds it in; the drawn field, AO, collision and the selection mask all skip
+   it. The mesh therefore casts with its **true silhouette**: building
+   interiors go dark under their own roofs, and the map shadows the terrain
+   around it. Bakes are cached by (asset, rotation, scale) — *moving* a map
+   never rebakes (the volume anchors on the node's f64 translation per frame);
+   re-orienting or rescaling one rebakes once.
+2. **Dynamic meshes → proxy occluders.** The editor harvests up to 32 cheap
+   analytic stand-ins per frame (`collect_shadow_proxies`): a `RigidBody`
+   casts its body shape (sphere / capsule / oriented box), and a static
+   `Collidable` *primitive* casts the shape the physics build gives it
+   (Cube → 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized).
+   A capsule character casting a soft capsule shadow *is* the retro
+   blob-shadow look. A proxy containing the ray start is skipped, so a mesh
+   never blanket-shadows itself from inside its own capsule.
 
-A capsule character casting a soft capsule shadow *is* the retro blob-shadow
-look — grounded but forgiving. Proxies are folded into the shadow march only
-(never the drawn surface or AO), a proxy containing the ray start is skipped
-(so a mesh doesn't blanket-shadow itself from inside its own capsule), hidden
+Blobs/terrain never need either — they're in the field itself. Both paths are
+folded into the shadow march only (never the drawn surface or AO), hidden
 (`Visible(false)`) nodes don't cast, and every collider node has a
 **casts shadows** checkbox in the Inspector (`CastShadow(false)` opt-out —
-casting is the default, per-node opt-out serializes only when off).
+casting is the default, per-node opt-out serializes only when off; toggles
+apply instantly, no rebake).
 
 ## 3. The knobs (Lighting node, per scene)
 
@@ -116,10 +130,16 @@ scenes load with the defaults above and just start casting).
   machinery (`map_d`, blob/volume distances, `field_eps`, SDF AO) — the
   raymarch pass keeps only the color-carrying surface path, and its hot march
   loop samples `map_d` (one color fetch per ray, at the hit).
+- Volume slots carry a role flag (`vol_center.w`: 0 absent, 1 render,
+  2 shadow-only). The editor bakes/caches occluders in
+  `refresh_mesh_occluders`, uploads them AFTER the terrains in the same
+  `set_volumes` atlas, and places them per frame in `fill_terrain_volumes`
+  (where the per-node cast/visible toggles gate placement).
 - Probes: `shadow_probe` renders the whole matrix (off / soft / hard / retro /
-  tint / full-with-AO) over a hill + shadowed cube (receive) + sunny cube and
-  capsule (proxy cast) + blob; `terrain_far_probe` stays bit-identical with
-  shadows off.
+  tint / full-with-AO) over a hill + shadowed cube (receive) + capsule (proxy
+  cast) + blob + an invisible occluder slab with a cube "indoors" beneath it
+  (the level-mesh path); `terrain_far_probe` stays bit-identical with shadows
+  off.
 
 ## 5. Performance posture
 

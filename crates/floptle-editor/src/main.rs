@@ -938,13 +938,14 @@ fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
-/// how raster meshes CAST sun shadows without being in the SDF field. Mirrors the
-/// physics build: a RigidBody node casts its body shape; a Collidable primitive
-/// casts the static shape `add_static_colliders` gives it (Cube → 0.7·scale box,
-/// Sphere → 0.85·max-scale, Capsule → 0.5-sized). Trimesh colliders (Collidable
-/// meshes) have no cheap analytic stand-in — give such a node a RigidBody box if
-/// it should cast. Skips hidden nodes and `CastShadow(false)` opt-outs; returns
-/// zeros when shadows are off.
+/// how DYNAMIC raster meshes CAST sun shadows without being in the SDF field.
+/// Mirrors the physics build: a RigidBody node casts its body shape; a Collidable
+/// primitive casts the static shape `add_static_colliders` gives it (Cube →
+/// 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized). Static collider
+/// MESHES don't proxy — they bake real shadow-only occluder volumes instead
+/// (`refresh_mesh_occluders`), so a level casts with its true silhouette. Skips
+/// hidden nodes and `CastShadow(false)` opt-outs; returns zeros when shadows are
+/// off.
 fn collect_shadow_proxies(
     world: &World,
     cam_world: DVec3,
@@ -1028,6 +1029,12 @@ fn collect_shadow_proxies(
     }
     ([n as f32, 0.0, 0.0, 0.0], a, b, r)
 }
+
+/// Cache key for a mesh shadow-occluder bake: the asset path + the node's world
+/// rotation and scale quantized to 1e-3. Translation is deliberately absent —
+/// the volume anchors on the node's f64 translation per frame, so MOVING a map
+/// never rebakes; only re-orienting or rescaling it does.
+type OccKey = (String, [i32; 4], [i32; 3]);
 
 /// How a texture is filtered — the serde-friendly mirror of [`floptle_render::TexFilter`],
 /// persisted per texture in `.floptle/textures.ron`.
@@ -2685,26 +2692,25 @@ impl<'a> EditorTabViewer<'a> {
                         if world.get::<floptle_core::RigidBody>(e).is_some() {
                             ui.small("⚠ This node also has a Rigidbody, so on Play it's a dynamic body (it falls / gets moved) and this static Collider is ignored. To make it a solid obstacle the player bumps into, remove the Rigidbody so it becomes static world geometry (the solver has no body-vs-body pass, so two dynamic bodies pass through each other).");
                         } else {
-                            // Primitive colliders double as the node's sun-shadow proxy
-                            // (a trimesh has no cheap analytic stand-in — add a Rigidbody
-                            // box if a Collidable mesh should cast).
-                            if !matches!(world.get::<Matter>(e), Some(Matter::Mesh { .. })) {
-                                let mut casts = world
-                                    .get::<floptle_core::CastShadow>(e)
-                                    .map(|c| c.0)
-                                    .unwrap_or(true);
-                                if ui
-                                    .checkbox(&mut casts, "casts shadows")
-                                    .on_hover_text("this collider shape stands in for the node in the sun-shadow march — untick to stop this node casting")
-                                    .changed()
-                                {
-                                    if casts {
-                                        world.remove::<floptle_core::CastShadow>(e);
-                                    } else {
-                                        world.insert(e, floptle_core::CastShadow(false));
-                                    }
-                                    cmd.inspector_changed = true;
+                            // The collider doubles as the node's sun-shadow caster:
+                            // primitives stand in as analytic proxy shapes, and a
+                            // Collidable MESH is baked into a shadow-only occluder
+                            // volume (its true silhouette — interiors go dark).
+                            let mut casts = world
+                                .get::<floptle_core::CastShadow>(e)
+                                .map(|c| c.0)
+                                .unwrap_or(true);
+                            if ui
+                                .checkbox(&mut casts, "casts shadows")
+                                .on_hover_text("this collider stands in for the node in the sun-shadow march (primitives as proxy shapes, meshes as a baked occluder volume) — untick to stop this node casting")
+                                .changed()
+                            {
+                                if casts {
+                                    world.remove::<floptle_core::CastShadow>(e);
+                                } else {
+                                    world.insert(e, floptle_core::CastShadow(false));
                                 }
+                                cmd.inspector_changed = true;
                             }
                         }
                         if remove {
@@ -4667,6 +4673,19 @@ struct Editor {
     terrain_slots: Vec<Entity>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
+    /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
+    /// no RigidBody): each level mesh is baked once into an unsigned distance
+    /// volume (`bake_occluder`) and uploaded into the SAME 3D atlas as the
+    /// terrains, flagged shadow-only (`vol_center.w = 2`) — so a map casts sun
+    /// shadows with its true silhouette (dark interiors) while never being drawn
+    /// or collided as SDF matter. Keyed per node; the bake is shared through
+    /// `occluder_cache` when several nodes place the same asset the same way.
+    mesh_occluders: HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>,
+    /// Bakes by (asset path, quantized world rotation + scale) — translation is
+    /// free (the anchor is read per frame), so moving a map never rebakes.
+    occluder_cache: HashMap<OccKey, std::sync::Arc<floptle_field::BakedSdf>>,
+    /// Atlas slot order for the occluder volumes (appended AFTER `terrain_slots`).
+    occluder_slots: Vec<Entity>,
     /// A paint/sculpt dab on a single terrain only dirties a small voxel box — uploaded
     /// to the GPU directly (no full re-clone + re-upload), so editing a big terrain stays
     /// smooth. `(entity, min inclusive, max exclusive, geometry-changed)`; `geometry` is
@@ -5401,8 +5420,10 @@ impl Editor {
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
         // when the globals are built. Only structural changes (add/edit/delete/resize)
-        // re-upload the volume set into the shared 3D atlas.
-        if self.terrain_gpu_dirty {
+        // re-upload the volume set into the shared 3D atlas. Static collider MESHES
+        // join the same atlas as shadow-only occluder volumes (they cast, never draw).
+        let occluders_changed = self.refresh_mesh_occluders();
+        if self.terrain_gpu_dirty || occluders_changed {
             if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
                 // Deterministic slot order (by Matter::Terrain id) so the globals'
                 // per-frame fill always matches the atlas layout.
@@ -5419,21 +5440,38 @@ impl Editor {
                     .collect();
                 items.sort_by_key(|(id, _)| *id);
                 let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
-                let baked: Vec<&floptle_field::BakedSdf> =
+                // Occluders upload AFTER the terrains (stable order by asset + name,
+                // so identical content always lays out identically).
+                let mut occ_items: Vec<(String, Entity)> = self
+                    .mesh_occluders
+                    .iter()
+                    .map(|(&e, (key, _))| {
+                        let name =
+                            self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
+                        (format!("{}\u{1}{name}", key.0), e)
+                    })
+                    .collect();
+                occ_items.sort_by(|a, b| a.0.cmp(&b.0));
+                let occ_entities: Vec<Entity> = occ_items.iter().map(|(_, e)| *e).collect();
+                let mut baked: Vec<&floptle_field::BakedSdf> =
                     entities.iter().map(|e| &self.terrains[e].baked).collect();
+                baked.extend(occ_entities.iter().map(|e| &*self.mesh_occluders[e].1));
                 let accepted = raymarch.set_volumes(gpu, &baked);
-                if accepted < entities.len() {
+                let total = entities.len() + occ_entities.len();
+                if accepted < total {
                     // Never drop content silently: colliders still work, but say so.
                     self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!(
-                            "{} terrain volume(s) exceed the GPU volume budget and won't render (collision is unaffected)",
-                            entities.len() - accepted
+                            "{} volume(s) (terrain / mesh shadow occluders) exceed the GPU volume budget and won't render or cast (collision is unaffected)",
+                            total - accepted
                         ),
                         None,
                     );
                 }
-                self.terrain_slots = entities[..accepted].to_vec();
+                let t_kept = accepted.min(entities.len());
+                self.terrain_slots = entities[..t_kept].to_vec();
+                self.occluder_slots = occ_entities[..accepted - t_kept].to_vec();
                 self.terrain_gpu_dirty = false;
                 self.terrain_region_dirty = None; // the full upload supersedes any region
                 self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
@@ -6395,7 +6433,7 @@ impl Editor {
         let rm_draw = show_blobs || !self.terrains.is_empty();
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             g
         };
 
@@ -8176,6 +8214,121 @@ impl Editor {
     /// a Mesh bakes its world-space triangles; a Cube/Sphere/Capsule primitive becomes
     /// a box/sphere/capsule sized to the primitive geometry × the node's scale (and
     /// oriented by its rotation). These are environment colliders, not dynamic bodies.
+    /// Keep the shadow-occluder bakes in sync with the scene's static collider
+    /// meshes (Collidable / MeshCollider on a `Matter::Mesh` node, no RigidBody —
+    /// dynamic bodies cast via their shape proxies instead). Each eligible mesh
+    /// bakes once per (asset, rotation, scale) into an unsigned occluder volume
+    /// (`bake_occluder`), cached so duplicates and pure moves are free. Returns
+    /// true when the SET changed and the atlas needs re-uploading; per-node
+    /// "casts shadows" / visibility toggles are applied at fill time (no rebake).
+    fn refresh_mesh_occluders(&mut self) -> bool {
+        // The desired (entity → key) set this frame.
+        let mut desired: Vec<(Entity, OccKey)> = Vec::new();
+        let ents: Vec<(Entity, String)> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Mesh { asset_path } => Some((e, asset_path.clone())),
+                _ => None,
+            })
+            .collect();
+        for (e, path) in ents {
+            let static_collider = (self.world.get::<floptle_core::Collidable>(e).is_some()
+                || self.world.get::<floptle_core::MeshCollider>(e).is_some())
+                && self.world.get::<floptle_core::RigidBody>(e).is_none();
+            if !static_collider {
+                continue;
+            }
+            let wt = floptle_core::world_transform(&self.world, e);
+            let q = |v: f32| (v * 1000.0).round() as i32;
+            let key: OccKey = (
+                path,
+                [q(wt.rotation.x), q(wt.rotation.y), q(wt.rotation.z), q(wt.rotation.w)],
+                [q(wt.scale.x), q(wt.scale.y), q(wt.scale.z)],
+            );
+            desired.push((e, key));
+        }
+        let unchanged = desired.len() == self.mesh_occluders.len()
+            && desired
+                .iter()
+                .all(|(e, key)| self.mesh_occluders.get(e).is_some_and(|(k, _)| k == key));
+        if unchanged {
+            return false;
+        }
+
+        let mut next: HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)> =
+            HashMap::new();
+        for (e, key) in desired {
+            let baked = if let Some(b) = self.occluder_cache.get(&key) {
+                b.clone()
+            } else {
+                // Bake: rotation + scale applied to the vertices (like the physics
+                // colliders); translation stays in the per-frame f64 anchor.
+                let started = Instant::now();
+                let Ok(model) =
+                    floptle_assets::gltf_import::import(std::path::Path::new(&key.0))
+                else {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("shadow occluder: failed to load {}", key.0),
+                        None,
+                    );
+                    continue;
+                };
+                let rot = Quat::from_xyzw(
+                    key.1[0] as f32 / 1000.0,
+                    key.1[1] as f32 / 1000.0,
+                    key.1[2] as f32 / 1000.0,
+                    key.1[3] as f32 / 1000.0,
+                )
+                .normalize();
+                let s = Vec3::new(
+                    key.2[0] as f32 / 1000.0,
+                    key.2[1] as f32 / 1000.0,
+                    key.2[2] as f32 / 1000.0,
+                );
+                let m = Mat4::from_scale_rotation_translation(s, rot, Vec3::ZERO);
+                let mut verts: Vec<[f32; 3]> = Vec::new();
+                let mut indices: Vec<u32> = Vec::new();
+                for part in &model.parts {
+                    let base = verts.len() as u32;
+                    verts.extend(
+                        part.mesh
+                            .vertices
+                            .iter()
+                            .map(|v| m.transform_point3(Vec3::from(v.pos)).to_array()),
+                    );
+                    indices.extend(part.mesh.indices.iter().map(|i| i + base));
+                }
+                // 128 voxels along the longest axis: a whole-map bake lands well
+                // under a second and keeps doorways/rooms resolvable (the user's
+                // ~80-unit map → ~0.6-unit voxels).
+                let baked =
+                    std::sync::Arc::new(floptle_field::bake_occluder(&verts, &indices, 128));
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "baked shadow occluder for {} ({} tris → {}×{}×{} voxels, {} ms)",
+                        key.0,
+                        indices.len() / 3,
+                        baked.dims[0],
+                        baked.dims[1],
+                        baked.dims[2],
+                        started.elapsed().as_millis()
+                    ),
+                    None,
+                );
+                self.occluder_cache.insert(key.clone(), baked.clone());
+                baked
+            };
+            next.insert(e, (key, baked));
+        }
+        // Drop cache entries nothing references anymore (a resized/removed map).
+        self.occluder_cache.retain(|k, _| next.values().any(|(nk, _)| nk == k));
+        self.mesh_occluders = next;
+        true
+    }
+
     fn add_static_colliders(&self, sim: &mut floptle_physics::Sim) {
         // Union of Collidable + legacy MeshCollider entities (dedup; a node flagged both
         // is added once). A node with a RigidBody is a *dynamic* body (Sim::build made it
@@ -8948,7 +9101,7 @@ impl Editor {
                 prox_b,
                 prox_rot,
             };
-            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.world, &mut g, cam.world_position);
+            Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             g
         };
 
@@ -9943,6 +10096,8 @@ impl Editor {
     fn fill_terrain_volumes(
         terrains: &HashMap<Entity, floptle_field::Terrain>,
         slots: &[Entity],
+        occluders: &HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>,
+        occ_slots: &[Entity],
         world: &floptle_core::World,
         g: &mut RaymarchGlobals,
         cam_world: DVec3,
@@ -9958,6 +10113,31 @@ impl Editor {
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
             g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0];
             g.vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
+        }
+        // Mesh shadow occluders ride the slots AFTER the terrains, flagged
+        // shadow-only (w = 2): the shadow march folds them in, the drawn field
+        // skips them. Per-node "casts shadows" / visibility opt-outs simply leave
+        // the slot absent this frame — no re-upload needed to toggle.
+        for (j, &e) in occ_slots.iter().enumerate() {
+            let i = slots.len() + j;
+            if i >= floptle_render::MAX_VOLUMES {
+                break;
+            }
+            let Some((_, b)) = occluders.get(&e) else { continue };
+            let casts = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true)
+                && !matches!(
+                    world.get::<floptle_core::Visible>(e),
+                    Some(floptle_core::Visible(false))
+                );
+            if !casts {
+                continue;
+            }
+            let anchor = floptle_core::world_transform(world, e).translation;
+            let bc = b.center;
+            let hf = b.half_extent;
+            let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
+            g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 2.0];
+            g.vol_half[i] = [hf[0], hf[1], hf[2], 0.0];
         }
     }
 

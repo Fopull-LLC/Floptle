@@ -1,9 +1,11 @@
 //! Headless probe for SDF sun shadows — the full receive/cast matrix on one scene:
 //! a tall western hill (field matter) casting east across flat ground with the sun
 //! low in the west, a raster cube parked INSIDE that shadow band (meshes RECEIVE
-//! field shadows), a second cube + a standing capsule out on open ground casting
-//! their own shadows via collider-proxy occluders (meshes CAST), and a blob
-//! (field matter) shadowing terrain. Rendered as a style matrix:
+//! field shadows), a standing capsule on open ground casting via its collider
+//! proxy (dynamic meshes CAST), a blob (field matter) shadowing terrain, and a
+//! floating SHADOW-ONLY occluder slab (a baked mesh volume, `bake_occluder`) —
+//! invisible in every frame, but the blue cube + ground under it go dark, the
+//! way a level mesh's roof darkens its interior. Rendered as a style matrix:
 //!
 //!   shadow_off.png    — everything lit (the baseline)
 //!   shadow_soft.png   — dreamy-soft penumbra (low k)
@@ -15,7 +17,7 @@
 //! Run: cargo run -p floptle-render --example shadow_probe
 
 use floptle_core::transform::Transform;
-use floptle_field::{Brush, Terrain};
+use floptle_field::{bake_occluder, Brush, Terrain};
 use floptle_render::{
     capsule, cube, instance_of, Globals, Gpu, InstanceRaw, MeshId, Projection, Raster, Raymarch,
     RaymarchGlobals, RenderCamera, TexId, TextureData,
@@ -55,7 +57,19 @@ fn main() {
     let capsule_id = raster.register(&gpu, &capsule(0.5, 0.55, 16, 24), None);
     let mut raymarch = Raymarch::new(&gpu);
     raymarch.set_terrain_textures(&gpu, &[white256()]);
-    assert_eq!(raymarch.set_volumes(&gpu, &[&t.baked]), 1);
+
+    // A shadow-ONLY occluder: a flat slab mesh baked into an unsigned distance
+    // volume (the level-mesh path). It never renders — but everything under it
+    // must go dark, like the interior of a mapped building.
+    let slab_mesh = cube(0.7);
+    let slab_scale = [5.0f32, 0.5, 4.0]; // 3.5 × 0.35 × 2.8 half-extents
+    let slab_verts: Vec<[f32; 3]> = slab_mesh
+        .vertices
+        .iter()
+        .map(|v| [v.pos[0] * slab_scale[0], v.pos[1] * slab_scale[1], v.pos[2] * slab_scale[2]])
+        .collect();
+    let slab = bake_occluder(&slab_verts, &slab_mesh.indices, 48);
+    assert_eq!(raymarch.set_volumes(&gpu, &[&t.baked, &slab]), 2);
 
     // Camera: south-east, high enough to see the whole shadow band.
     let target = Vec3::new(-1.0, 0.0, 0.0);
@@ -86,8 +100,9 @@ fn main() {
         (id, None, instance_of(tr.render_matrix(cam.world_position), color))
     };
     let cube_shadowed = [-1.0, 0.7, 0.0]; // inside the hill's shadow
-    let cube_sunny = [7.0, 0.7, 6.0]; // open ground
+    let cube_sunny = [11.0, 0.7, 5.0]; // under the invisible slab's shadow
     let capsule_pos = [5.0, 1.05, -6.0]; // "character" standing on the flat
+    let slab_pos = [2.0f64, 4.0, 6.0]; // the shadow-only occluder floats here
     let instances = vec![
         mesh(cube_id, cube_shadowed, [0.9, 0.45, 0.35]),
         mesh(cube_id, cube_sunny, [0.4, 0.7, 0.95]),
@@ -122,6 +137,13 @@ fn main() {
     let mut vol_half = [[1.0f32, 1.0, 1.0, 0.5]; 16];
     vol_center[0] = [vc.x, vc.y, vc.z, 1.0];
     vol_half[0] = [hf[0], hf[1], hf[2], 0.6];
+    // Slot 1: the slab, flagged shadow-only (w = 2) — marched by light_vis, never drawn.
+    let sc = (DVec3::from(slab_pos)
+        + DVec3::new(slab.center[0] as f64, slab.center[1] as f64, slab.center[2] as f64)
+        - cam.world_position)
+        .as_vec3();
+    vol_center[1] = [sc.x, sc.y, sc.z, 2.0];
+    vol_half[1] = [slab.half_extent[0], slab.half_extent[1], slab.half_extent[2], 0.0];
 
     let base = RaymarchGlobals {
         view_proj: view_proj.to_cols_array_2d(),
