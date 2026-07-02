@@ -88,12 +88,12 @@ fn main() {
     };
 
     // Pass 1: SSAO off (pure passthrough copy).
-    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.55, 0.7, 0.9, 1.0]));
+    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.55, 0.7, 0.9, 1.0]), None);
     post.run(&gpu, &base, None, &color_view);
     save_png(&gpu, &color_tex, &out_off);
 
     // Pass 2: SSAO on.
-    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.55, 0.7, 0.9, 1.0]));
+    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.55, 0.7, 0.9, 1.0]), None);
     post.run(&gpu, &PostSettings { ssao: true, ..base }, Some(&ssao_frame), &color_view);
     save_png(&gpu, &color_tex, &out_on);
 

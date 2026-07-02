@@ -43,6 +43,9 @@ Straight rays, SDF soft shadows, SDF ambient occlusion — exactly what
 toward the light; AO from a few `map()` taps along the normal). No new data, no new
 pass. **When every light tier is off the compiled WGSL is identical** to today's —
 that's the contract, asserted bit-for-bit by the proof harness. Cost: zero over baseline.
+*(Shipped 2026-07-02: both halves live in the shared `field.wgsl` — AO via the
+PostProcess node ([`./post-processing.md`](./post-processing.md)), sun shadows via
+the Lighting node ([`./shadows.md`](./shadows.md)).)*
 
 ## 3. Tier 1 — Programmable radiance hook
 

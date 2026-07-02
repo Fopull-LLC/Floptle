@@ -59,6 +59,10 @@ pub struct NodeDoc {
     /// Only the rare hidden node serializes this.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
     pub visible: bool,
+    /// Whether the node's collider casts sun shadows as a proxy occluder (default
+    /// true). See [`floptle_core::CastShadow`]; only an opted-out node serializes this.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub cast_shadow: bool,
     /// Animation controller asset key on this node (`None` = no controller).
     /// See [`floptle_core::AnimController`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -480,6 +484,28 @@ pub struct LightDoc {
     pub ambient: [f32; 3],
     #[serde(default = "one_f32")]
     pub intensity: f32,
+    // Sun shadows (SDF field march). Pre-shadow scenes deserialize to the defaults.
+    #[serde(default = "true_bool")]
+    pub shadows: bool,
+    #[serde(default = "default_shadow_softness")]
+    pub shadow_softness: f32,
+    #[serde(default = "one_f32")]
+    pub shadow_strength: f32,
+    #[serde(default)]
+    pub shadow_tint: [f32; 3],
+    #[serde(default)]
+    pub shadow_quantize: u32,
+    #[serde(default)]
+    pub shadow_dither: bool,
+    #[serde(default = "default_shadow_distance")]
+    pub shadow_distance: f32,
+}
+
+fn default_shadow_softness() -> f32 {
+    0.35
+}
+fn default_shadow_distance() -> f32 {
+    150.0
 }
 
 impl Default for LightDoc {
@@ -490,7 +516,19 @@ impl Default for LightDoc {
 
 impl From<&Light> for LightDoc {
     fn from(l: &Light) -> Self {
-        Self { direction: l.direction, color: l.color, ambient: l.ambient, intensity: l.intensity }
+        Self {
+            direction: l.direction,
+            color: l.color,
+            ambient: l.ambient,
+            intensity: l.intensity,
+            shadows: l.shadows,
+            shadow_softness: l.shadow_softness,
+            shadow_strength: l.shadow_strength,
+            shadow_tint: l.shadow_tint,
+            shadow_quantize: l.shadow_quantize,
+            shadow_dither: l.shadow_dither,
+            shadow_distance: l.shadow_distance,
+        }
     }
 }
 
@@ -501,6 +539,13 @@ impl LightDoc {
             color: self.color,
             ambient: self.ambient,
             intensity: self.intensity,
+            shadows: self.shadows,
+            shadow_softness: self.shadow_softness,
+            shadow_strength: self.shadow_strength,
+            shadow_tint: self.shadow_tint,
+            shadow_quantize: self.shadow_quantize,
+            shadow_dither: self.shadow_dither,
+            shadow_distance: self.shadow_distance,
         }
     }
 }
@@ -810,6 +855,10 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if !node.visible {
             world.insert(e, floptle_core::Visible(false));
         }
+        // Casting is the default; only an opted-out node carries the component.
+        if !node.cast_shadow {
+            world.insert(e, floptle_core::CastShadow(false));
+        }
         if let Some(ctl) = &node.anim_controller {
             world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
         }
@@ -881,6 +930,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+        let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
             world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
@@ -894,6 +944,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             mesh_collider,
             collidable,
             visible,
+            cast_shadow,
             anim_controller,
             parent,
         });
@@ -910,7 +961,15 @@ mod tests {
     fn demo() -> SceneDoc {
         SceneDoc {
             name: "demo".into(),
-            lighting: LightDoc { intensity: 2.5, ..LightDoc::default() },
+            lighting: LightDoc {
+                intensity: 2.5,
+                // exercise the shadow-knob round-trips
+                shadow_softness: 0.8,
+                shadow_tint: [0.3, 0.1, 0.4],
+                shadow_quantize: 3,
+                shadow_dither: true,
+                ..LightDoc::default()
+            },
             nodes: vec![
                 NodeDoc {
                     name: "cube".into(),
@@ -943,6 +1002,7 @@ mod tests {
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     collidable: true,    // exercise the collidable round-trip
                     visible: false,      // exercise the visible round-trip
+                    cast_shadow: false,  // exercise the cast-shadow opt-out round-trip
                     anim_controller: Some("animation_controllers/Test".into()),
                     parent: None,
                 },
@@ -956,6 +1016,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    cast_shadow: true,
                     anim_controller: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
@@ -969,6 +1030,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    cast_shadow: true,
                     anim_controller: None,
                     parent: None,
                 },
@@ -982,6 +1044,7 @@ mod tests {
                     mesh_collider: false,
                     collidable: false,
                     visible: true,
+                    cast_shadow: true,
                     anim_controller: None,
                     parent: None,
                 },
@@ -1022,8 +1085,12 @@ mod tests {
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })),
             "a default PostProcess node should be present"
         );
-        // non-default directional intensity survives
+        // non-default directional intensity + shadow knobs survive
         assert_eq!(snap.lighting.intensity, 2.5);
+        assert_eq!(snap.lighting.shadow_softness, 0.8);
+        assert_eq!(snap.lighting.shadow_tint, [0.3, 0.1, 0.4]);
+        assert_eq!(snap.lighting.shadow_quantize, 3);
+        assert!(snap.lighting.shadow_dither);
         // the cube's authored translation survives the World round-trip
         let cube = snap.nodes.iter().find(|n| n.name == "cube").unwrap();
         assert_eq!(cube.transform.translation, [1.0, 2.0, 3.0]);
@@ -1036,6 +1103,7 @@ mod tests {
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");
+        assert!(!cube.cast_shadow, "cast_shadow opt-out lost in round-trip");
         assert!(!rb.gravity, "rigidbody gravity flag lost in round-trip");
         // the point light's color/intensity/range round-trip
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();

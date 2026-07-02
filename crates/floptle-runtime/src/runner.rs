@@ -492,7 +492,7 @@ impl Runner {
                 } else {
                     Some(clear)
                 };
-                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear);
+                raster.draw_scene(gpu, color, depth, globals, &instances, raster_clear, None);
 
                 if self.retro_on {
                     retro.blit(gpu, &frame);

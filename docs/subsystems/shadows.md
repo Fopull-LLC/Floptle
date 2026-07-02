@@ -1,155 +1,147 @@
-# Floptle — Shadows (plan; nothing implemented yet)
+# Floptle — Shadows (field-marched sun shadows)
 
-**Status: PROPOSED · 2026-07-02 — research + design, decisions open.**
-The engine currently has **no cast shadows** (only the PostProcess node's
-ambient occlusion, which grounds objects but has no direction). This doc lays
-out how the industry does shadows, what fits Floptle's hybrid
-raymarched-SDF + raster renderer, and a recommended path — flexible enough to
-span *pretty modern soft shadows* ↔ *hard retro PS1 shadows* per game.
+**Status: IMPLEMENTED · 2026-07-02** — field-first SDF sun shadows, per scene,
+on everything: terrain/blobs cast from the field itself, raster meshes *receive*
+by marching the same field and *cast* through collider-proxy occluders. The
+style range spans razor-hard PS1 to dreamy-soft modern from one dial set on the
+Lighting node. (Deferred: point-light shadows, bent shadow rays — see §6.)
 
-> Reads-with: [`./renderer.md`](./renderer.md) §3 (the march that will carry
-> the shadow ray), [`./light.md`](./light.md) (Tier 0 promises "SDF soft
-> shadows"; Tier 2 later *bends* the same shadow ray),
-> [`./post-processing.md`](./post-processing.md) (AO — the sibling effect).
+> Reads-with: [`./renderer.md`](./renderer.md) §3 (the march that carries the
+> shadow ray), [`./light.md`](./light.md) (this is Tier 0's "SDF soft shadows";
+> Tier 2 later *bends* the same ray), [`./post-processing.md`](./post-processing.md)
+> (SDF AO — the sibling effect, same shared field module).
 
-## 1. The landscape (what the industry does)
+## 1. Why field-first (the design call)
 
-**Shadow mapping** (the raster default: render depth from the light, compare):
-- *Hard 1-tap* — pixelated edges; the PS2/early-PC look.
-- *PCF* — N depth taps, blurred edge; the standard "soft-ish" shadow.
-- *PCSS* — penumbra widens with caster distance; pretty, several× PCF cost.
-- *CSM* — cascades re-fit the map to the camera for big worlds; 2–4 maps every
-  frame, and cascade seams/shimmer are a permanent maintenance tax. Every
-  general engine (Unity/Unreal/Godot) ships CSM+PCF because they must serve
-  arbitrary triangle soups. We don't have to.
+**Shadow mapping** (render depth from the light, compare) is what general
+engines ship because they must serve arbitrary triangle soups: hard 1-tap →
+PCF → PCSS for softness, plus CSM cascades for big worlds — 2–4 extra scene
+renders per frame and a permanent seam/shimmer maintenance tax.
 
-**SDF shadows** (march the distance field toward the light, iq's
-`min(k·d/t)` penumbra — the technique this engine's own renderer.md already
-promises): one extra march per shaded pixel, **no shadow map, no cascades, no
-resolution, no shimmer**, world-scale for free (the field is camera-relative),
-and *analytically soft* — `k` sweeps hard→soft continuously. Limitation:
-only things **in the field** cast.
+Floptle's renderer already marches **one fused SDF field** (terrain volumes +
+blobs), so the field *is* the shadow system: march from each shaded point
+toward the sun tracking iq's `min(k·d/t)` and you get **analytically soft
+shadows** — no shadow maps, no cascades, no resolution, no shimmer, and
+large-world-safe for free (the field is camera-relative, ADR-0015). All
+cross-shadowing (hills into valleys, blobs onto terrain, terrain onto meshes)
+falls out of the one `map_d()`. This also keeps light.md's Tier 2 *bent shadow
+rays* reachable — the shadow ray is already a field march; a shadow-map
+pipeline would have to be thrown away to get there.
 
-**Retro looks** are mostly *degradations you must be able to opt into*:
-N64/PS1 games used **blob shadows** (a dark disc under the character),
-vertex-baked darkening, or a character-only stencil silhouette. A modern retro
-game gets the vibe with: hard edges, **quantized penumbra** (2–3 bands),
-**ordered-dither** in the penumbra, chunky resolution, and shadows that are
-a flat tinted multiply rather than physically-varying darkness.
+**What we gave up** (still true): pixel-exact silhouettes of complex *dynamic*
+meshes — a windmill's blades shadow as their collider box, not as blades. If a
+game someday needs a hero-caster silhouette, a single non-cascaded shadow map
+can be folded into the same visibility term *then*.
 
-## 2. What fits Floptle — the field is the shadow map
+## 2. How it works
 
-The renderer already *is* a raymarcher over one fused field (terrain volumes +
-blobs, `map()` in `raymarch.wgsl`). SDF shadows reuse it verbatim:
+Everything lives in **`crates/floptle-render/src/field.wgsl`** — the shared
+distance-field module concatenated onto *both* passes' shaders (WGSL
+module-scope declarations are order-independent):
 
-```wgsl
-fn light_vis(p: vec3<f32>, l: vec3<f32>) -> f32 {   // 1 = lit, 0 = shadowed
-    var t = t0;                       // skip off the surface
-    var vis = 1.0;
-    for (var i = 0; i < SHADOW_STEPS; i++) {
-        let d = map(p + l * t).d;
-        if (d < 0.001) { return 0.0; }               // hard hit
-        vis = min(vis, k * d / t);                    // penumbra estimate
-        t += clamp(d, t_min, t_max);
-        if (t > max_dist) { break; }
-    }
-    return smoothstep(0.0, 1.0, vis);
-}
-```
+- `light_vis(p, n, l)` marches the fused field **plus the proxy occluders**
+  from the surface point toward the sun, tracking `vis = min(vis, k·d/t)` —
+  the single `k` sweeps hard (≈64) → soft (≈2). Acne control: the ray starts
+  lifted off the surface by ~1.6 voxels (scaled up when the sun grazes the
+  surface, or noisy walls stripe), and the penumbra term only accumulates once
+  the ray clears the start surface's own noise floor (hard hits count from the
+  first step).
+- `sun_shadow(p, n, pix)` wraps it in the style pipeline: optional quantize
+  into N bands (+ optional Bayer 4×4 dither between bands at pixel `pix`),
+  then the result multiplies the sun toward
+  `mix(vec3(1), tint, strength·(1−vis))`.
+- The shadow term multiplies the **directional diffuse + specular only** —
+  ambient and point lights are the unshadowed fill (so full shadow is never
+  pitch black), emissive is untouched, and `unlit` matter ignores shadows
+  entirely. Both shading paths (raymarch terrain/blob branches, raster mesh
+  fragments) apply it identically.
 
-- `k` **is the softness dial**: k≈2 dreamy-soft … k≈64 razor-hard. One float
-  spans the whole style range — no PCF kernels, no PCSS estimator.
-- Terrain shadows terrain, hills shadow valleys, blobs shadow terrain and each
-  other — **all cross-shadowing falls out of the one `map()`**.
-- Large-world safe by construction (everything is already camera-relative;
-  no cascade fitting, ADR-0015 untouched).
-- At retro internal resolutions (240–480 rows) the extra march is cheap; at
-  full res it can drop to **half-res + blur-upsample** exactly like SSAO does.
+**Meshes receive:** the raster pipeline binds the raymarch pass's own globals
+buffer + distance atlas at group(2) (`Raymarch::field_bind`), so each mesh
+fragment marches the very field the raymarch pass draws. The raymarch pass
+draws (or on frames with nothing to raymarch, `upload_globals`-es) first, so
+the buffer always holds the frame's data. Standalone raster callers (asset
+previews, probes) pass no field and get a zeroed fallback — every field branch
+skips, zero cost.
 
-**The mesh problem, solved with what we already have.** Raster meshes aren't
-in the field, so they need two bridges:
+**Meshes cast — proxy occluders:** meshes aren't in the field, so the editor
+harvests up to 32 cheap analytic stand-ins per frame (`collect_shadow_proxies`)
+from what the scene already authors — **physics collider shapes**:
 
-1. **Meshes RECEIVE field shadows:** bind the same volume atlas + globals to
-   the raster pass and call `light_vis(world_pos, l)` in `raster.wgsl`'s
-   fragment — a character standing under a terrain arch is correctly darkened.
-   (Medium plumbing: share the raymarch bind group with the raster pipeline.)
-2. **Meshes CAST via proxy occluders:** inject cheap analytic SDFs — capsules /
-   boxes / spheres — into the shadow march only. And we already author them:
-   **a node's physics collider (RigidBody/Collidable shape) doubles as its
-   shadow proxy.** A capsule character casts a soft capsule shadow — which is
-   *exactly* the grounded-but-soft look retro-styled games want (a blob shadow
-   is literally a low-`k` capsule shadow). Static meshes can alternatively
-   bake real SDF volumes through the existing `mesh2sdf` path when their true
-   silhouette matters.
+- a `RigidBody` casts its body shape (sphere / capsule / oriented box);
+- a static `Collidable` primitive casts the same shape the physics build gives
+  it (Cube → 0.7·scale box, Sphere → 0.85·max-scale, Capsule → 0.5-sized);
+- trimesh colliders (Collidable **meshes**) have no cheap analytic stand-in —
+  give such a node a RigidBody box if it should cast;
+- blobs/terrain never need proxies (they're in the field itself).
 
-This is the philosophy call: **stay single-march, field-first** (light.md §11
-"no second geometry model") rather than bolting on a shadow-map pipeline that
-exists only to serve triangle silhouettes we mostly don't have. It also means
-Tier 2 *bent shadow rays* (shadows detached from casters — light.md §4) work
-on day one of Tier 2, because the shadow ray is already a field march — a
-shadow-map pipeline would have to be thrown away to get there.
+A capsule character casting a soft capsule shadow *is* the retro blob-shadow
+look — grounded but forgiving. Proxies are folded into the shadow march only
+(never the drawn surface or AO), a proxy containing the ray start is skipped
+(so a mesh doesn't blanket-shadow itself from inside its own capsule), hidden
+(`Visible(false)`) nodes don't cast, and every collider node has a
+**casts shadows** checkbox in the Inspector (`CastShadow(false)` opt-out —
+casting is the default, per-node opt-out serializes only when off).
 
-**What we give up** (honesty): pixel-exact silhouettes of complex *dynamic*
-meshes (a windmill's blades shadowing as blades, not as boxes). If a game
-someday needs that, a single non-cascaded shadow map for "hero casters" can be
-added *then*, rendered into the same `light_vis` term. Not in this plan's
-scope.
+## 3. The knobs (Lighting node, per scene)
 
-## 3. Developer-facing knobs (the customization ask)
+| Inspector | `Light` field | Range / meaning | Style it unlocks |
+|---|---|---|---|
+| sun shadows | `shadows` | on/off (default **on**) | — |
+| softness | `shadow_softness` | 0 hard … 1 soft (log-maps to `k` 64…2) | PS1-hard ↔ modern-soft |
+| strength | `shadow_strength` | 0..1 — how dark full shadow gets (default 1) | airy ↔ deep |
+| tint | `shadow_tint` | RGB — shadows darken *toward this color* | purple dusk, sepia, horror green |
+| quantize | `shadow_quantize` | smooth / 2–4 bands | posterized toon/retro penumbra |
+| dither | `shadow_dither` | Bayer-pattern the quantized penumbra | the PS1 edge; pairs with retro mode |
+| distance | `shadow_distance` | max march distance (perf fence) | open-world haze |
 
-Shadow settings live on the **Lighting node** (they belong to the light, not
-to post-processing), per scene like everything else:
+Serialized in `SceneDoc.lighting` (`LightDoc`, serde defaults — pre-shadow
+scenes load with the defaults above and just start casting).
 
-| Knob | Range / meaning | Style it unlocks |
-|---|---|---|
-| `enabled` | on/off | — |
-| `softness` | maps to `k` (hard 64 … soft 2) | PS1-hard ↔ modern-soft |
-| `strength` | 0..1 — how dark full shadow gets | airy ↔ pitch black |
-| `tint` | RGB — shadows multiply toward `tint×(1−strength)`, not black | purple dusk shadows, sepia, horror green |
-| `quantize` | 0 (smooth) / 2–4 bands | posterized toon/retro penumbra |
-| `dither` | off / Bayer pattern in the penumbra | the PS1 dither look, pairs with retro mode |
-| `distance` | max shadow march distance + fade | perf fence + open-world haze |
-| `proxies` | auto (from colliders) / off per-node | who casts |
+**Recipes** — same shader, different uniforms:
+- **PS1:** softness 0.2 + quantize 2 + dither on + retro 240p project mode.
+- **N64 blob:** softness 0.9 — proxies read as soft blobs under characters.
+- **Modern cozy:** softness 0.7, strength 0.6, warm tint.
+- **Toon:** softness 0.5 + quantize 3, no dither.
 
-`softness=hard + quantize=2 + dither=on + retro 240p` ≈ authentic PS1;
-`softness=soft + strength=0.6 + warm tint` ≈ modern cozy. Both are the same
-shader, different uniforms — the flexibility is free because the penumbra is
-analytic.
+## 4. Render plumbing (for whoever touches it next)
 
-## 4. Phased plan (thin slices, each PNG-probed)
+- Uniforms ride `RaymarchGlobals` (appended at the end, layout-compatible):
+  `shadow_params` [on, k, strength, max-dist], `shadow_tint` [rgb, quantize],
+  `shadow_extra` [dither], `prox_count` / `prox_a` / `prox_b` / `prox_rot`
+  (see `MAX_SHADOW_PROXIES`). The editor gathers them in `shadow_uniforms` +
+  `collect_shadow_proxies` at every render site (surface, camera preview,
+  split Game viewport).
+- `field.wgsl` also owns the `Globals` struct and all distance-only field
+  machinery (`map_d`, blob/volume distances, `field_eps`, SDF AO) — the
+  raymarch pass keeps only the color-carrying surface path, and its hot march
+  loop samples `map_d` (one color fetch per ray, at the hit).
+- Probes: `shadow_probe` renders the whole matrix (off / soft / hard / retro /
+  tint / full-with-AO) over a hill + shadowed cube (receive) + sunny cube and
+  capsule (proxy cast) + blob; `terrain_far_probe` stays bit-identical with
+  shadows off.
 
-1. **Sun shadows on SDF matter** — `light_vis` in `raymarch.wgsl`'s terrain +
-   blob shading (directional light only); knobs `enabled/softness/strength/
-   tint` on the Lighting node + Inspector. Probe: hills casting into a valley,
-   off/on. *(Smallest visible win; no new passes.)*
-2. **Meshes receive** — share the field bind group with `raster.wgsl`, call
-   `light_vis` per fragment (gate: skip when shadows off → zero cost).
-   Probe: mesh under a terrain overhang.
-3. **Proxy casters** — a `shadow_proxies` uniform array (capsule/box/sphere,
-   auto-harvested from colliders like the physics build already does); folded
-   into the shadow march only. Probe: character capsule grounding on terrain.
-4. **Retro pass** — `quantize` + `dither` + probe matrix of the style presets
-   (document as recipes: "PS1", "N64 blob", "modern soft", "toon").
-5. **Point-light shadows (deferred)** — same march per point light is N×cost;
-   decide later if any game needs it (rim/AO usually carries interiors).
-6. **Bent shadow rays** — arrives with light.md Tier 2, not this plan.
+## 5. Performance posture
 
-## 5. Open decisions (for Ty)
+Decision D (full-res first, measure, then optimize — renderer.md §6): the
+march runs per shaded fragment, ≤64 steps, and is gated hard — it never runs
+when shadows are off, on sun-averted fragments (`n·l ≤ 0`), on unlit matter,
+or past `shadow_distance`; empty scenes break out after one sample. At retro
+internal resolutions the cost is trivial. If a full-res scene ever burns here,
+the SSAO-style half-res + blur-upsample path is the known next lever.
 
-- **A. Field-first (recommended above) vs shadow maps vs both?** Shadow maps
-  buy exact dynamic-mesh silhouettes at the cost of a second pipeline,
-  cascades, and losing the bent-ray future. Recommendation: field-first.
-- **B. Settings home:** Lighting node (recommended — it's the sun's property)
-  vs the PostProcess node (keeps all "look" dials in one place).
-- **C. Proxy default:** every collidable node casts by default (grounded by
-  default, occasional surprises) vs opt-in per node (explicit, more setup).
-  Recommendation: default-on with a per-node "casts shadows" toggle.
-- **D. Half-res shadow term** from day one, or only if the heatmap says so?
-  Recommendation: full-res first (retro rows make it cheap), measure, then
-  optimize — renderer.md §6's posture.
+## 6. Not yet
 
-Sources consulted: iq's soft-shadow article (the `min(k·d/t)` penumbra +
+- **Point-light shadows** — same march per light is N× cost; rim/AO carries
+  interiors for now. Decide if a game needs it.
+- **Bent shadow rays** — arrives with light.md Tier 2 (the ray is already a
+  field march, so nothing here blocks it).
+- **Hero-caster shadow map** — only if exact dynamic-mesh silhouettes are ever
+  required; folds into the same visibility term.
+- **Lua control** — the Lighting node's shadow fields aren't scripted yet
+  (same gap as the PostProcess node; do both together).
+
+Sources consulted while designing: iq's soft-shadow article (`min(k·d/t)` +
 Sebastian Aaltonen's improved estimator), RTSDF (real-time SDF generation for
 soft shadows), classic retro techniques (blob shadows / geometry-baked
-shadows on N64-era hardware, per the polycount retro-3D FAQ and N64 homebrew
-writeups).
+shadows, polycount retro-3D FAQ, N64 homebrew writeups).

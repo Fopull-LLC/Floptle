@@ -65,7 +65,7 @@ fn main() {
         .collect();
 
     // Scene renders into the post input target, then the post chain → color_view.
-    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.04, 1.0]));
+    raster.draw_scene(&gpu, post.input_view(), gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.04, 1.0]), None);
     let settings = PostSettings {
         bloom: true,
         bloom_threshold: 0.6,

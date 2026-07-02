@@ -68,7 +68,7 @@ fn main() {
         })
         .collect();
 
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.04, 1.0]));
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.04, 1.0]), None);
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out} — one point light at center; spheres fade with distance/range");
 }

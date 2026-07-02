@@ -3,11 +3,14 @@
 //
 // Group 0 (shared, set once per frame): the camera/light globals.
 // Group 1 (per mesh/material): the base-color texture + its sampler (so each texture
-// chooses its own filtering / wrap mode). Per-vertex stream (buffer 0):
+// chooses its own filtering / wrap mode). Group 2 (shared): the raymarch pass's OWN
+// globals + distance atlas — the fused SDF field (see field.wgsl, concatenated onto
+// this module), so mesh fragments RECEIVE field sun-shadows and true SDF AO by
+// marching the very field the raymarch pass draws. Per-vertex stream (buffer 0):
 // pos/normal/uv. Per-instance stream (buffer 1): camera-relative model matrix
 // (locations 3..6), inverse-transpose normal matrix columns (7..9), tint (10).
 
-struct Globals {
+struct RasterGlobals {
     view_proj: mat4x4<f32>,
     light_dir: vec4<f32>,    // xyz = normalized world-space direction TO the light
     light_color: vec4<f32>,
@@ -17,9 +20,14 @@ struct Globals {
     point_color: array<vec4<f32>, 16>, // rgb = color * intensity
 };
 
-@group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(0) var<uniform> g: RasterGlobals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+// The shared SDF field (struct + all functions in field.wgsl): the raymarch
+// globals buffer and distance atlas, bound read-only here.
+@group(2) @binding(0) var<uniform> G: Globals;
+@group(2) @binding(1) var dist_tex: texture_3d<f32>;
+@group(2) @binding(2) var vol_samp: sampler;
 
 // Accumulated diffuse from the point lights at camera-relative position `pos_rel`
 // (same space as point_pos) with surface normal `n`. Smooth falloff to 0 at range.
@@ -106,8 +114,24 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(albedo + emissive, alpha);
     }
 
+    // Field sun-shadows + true SDF AO, received from the fused field at group(2).
+    // `in.view_pos` is camera-relative — the same space the field lives in
+    // (ADR-0015) — so the mesh fragment marches it directly. Both gate to zero
+    // work when their Lighting/PostProcess switches are off; only the DIRECTIONAL
+    // terms are shadowed (ambient + point lights stay as fill), matching the
+    // raymarch pass exactly.
+    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+    var sh = vec3<f32>(1.0);
+    if (ndl > 0.0) {
+        sh = sun_shadow(in.view_pos, n, pix);
+    }
+    var occ = 1.0;
+    if (G.ao_params.x > 0.5) {
+        occ = sdf_ao(in.view_pos, n);
+    }
+
     let ambient = g.ambient.rgb * in.params.w;
-    var lit = albedo * (ambient + g.light_color.rgb * ndl);
+    var lit = albedo * (ambient + g.light_color.rgb * ndl * sh);
     // Placeable point lights (camera-relative; in.view_pos is in the same space).
     lit += albedo * point_diffuse(in.view_pos, n);
 
@@ -115,13 +139,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let h = normalize(l + v);
     let shininess = max(in.params.x, 1.0);
     let spec = pow(max(dot(n, h), 0.0), shininess) * in.specular.a * select(0.0, 1.0, ndl > 0.0);
-    lit += in.specular.rgb * spec * g.light_color.rgb;
+    lit += in.specular.rgb * spec * g.light_color.rgb * sh;
 
     // Rim / fresnel — a cheap stylized edge glow.
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
 
-    return vec4<f32>(lit + emissive, alpha);
+    return vec4<f32>(lit * occ + emissive, alpha);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

@@ -128,10 +128,11 @@ fn normal(p: vec3<f32>) -> vec3<f32> {
 **Soft shadows & AO from the field** — soft shadows by marching toward the light
 and tracking the smallest `d/t` ratio (penumbra); ambient occlusion by sampling
 `map()` a few steps along the normal and accumulating the deficit. Both are pure
-SDF tricks: no shadow maps, no GI bake. *(The AO half shipped 2026-07-02 as the
+SDF tricks: no shadow maps, no GI bake. *(Both shipped 2026-07-02: AO as the
 scene PostProcess node's `SDF (true)` mode — see
-[`./post-processing.md`](./post-processing.md); shadows are planned in
-[`./shadows.md`](./shadows.md).)*
+[`./post-processing.md`](./post-processing.md) — and sun shadows from the
+Lighting node, with meshes receiving/casting via the shared field module —
+see [`./shadows.md`](./shadows.md).)*
 
 **Going inside.** "Fly inside a fractal" just means the camera origin `ro` lives
 *within* the field. We march from `near` (a small positive start, not the camera

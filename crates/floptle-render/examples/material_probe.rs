@@ -95,7 +95,7 @@ fn main() {
     let t = Transform::from_translation(DVec3::new(-5.5 + 5.0 * 2.2, 0.0, 0.0));
     instances.push((sphere, Some(grass_tex), instance_of_mat(t.render_matrix(cam.world_position), &grass)));
 
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.05, 1.0]));
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.02, 0.02, 0.05, 1.0]), None);
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out} — matte / emissive / specular / unlit / rim / textured");
 }

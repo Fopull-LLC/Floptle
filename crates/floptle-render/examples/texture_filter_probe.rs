@@ -86,7 +86,7 @@ fn main() {
         })
         .collect();
 
-    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.06, 0.07, 0.1, 1.0]));
+    raster.draw_scene(&gpu, &color_view, gpu.depth_view(), globals, &instances, Some([0.06, 0.07, 0.1, 1.0]), None);
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out} — Pixelated | Smooth | Smooth+Mipmaps (left→right)");
 }
