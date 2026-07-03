@@ -1,14 +1,31 @@
-//! Loose-image textures for materials — decode a PNG/JPEG on disk to the RGBA8
+//! Loose-image textures for materials — decode an image on disk to the RGBA8
 //! [`TextureData`] the renderer uploads, and save a decoded texture back out (used
 //! to extract a model's embedded textures into the project so they can be reused).
+//!
+//! Format is detected from the file's **content** (magic bytes), not its
+//! extension — VFX/game texture packs routinely ship a WebP or TGA under a `.png`
+//! name, and decoding by extension would hand those bytes to the wrong decoder
+//! and fail. See [`decode`].
 
 use std::path::Path;
 
 use floptle_render::TextureData;
 
-/// Decode an image file (PNG/JPEG) to tightly-packed RGBA8. `None` on any error.
+/// Decode an image file to a `DynamicImage`, guessing the format from its content
+/// so a mislabeled file (e.g. a WebP saved as `.png`) still loads. `None` on any
+/// I/O or decode error.
+fn decode(path: &Path) -> Option<image::DynamicImage> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()
+}
+
+/// Decode an image file to tightly-packed RGBA8. `None` on any error.
 pub fn load_texture(path: &Path) -> Option<TextureData> {
-    let img = image::open(path).ok()?.to_rgba8();
+    let img = decode(path)?.to_rgba8();
     let (width, height) = img.dimensions();
     Some(TextureData { pixels: img.into_raw(), width, height })
 }
@@ -16,7 +33,7 @@ pub fn load_texture(path: &Path) -> Option<TextureData> {
 /// Decode + resize an image to exactly `w`×`h` RGBA8 (for the terrain palette,
 /// whose layers must all share one size).
 pub fn load_texture_sized(path: &Path, w: u32, h: u32) -> Option<TextureData> {
-    let img = image::open(path).ok()?;
+    let img = decode(path)?;
     let out = img.resize_exact(w, h, image::imageops::FilterType::Triangle).to_rgba8();
     Some(TextureData { pixels: out.into_raw(), width: w, height: h })
 }
@@ -28,4 +45,28 @@ pub fn save_texture_png(tex: &TextureData, path: &Path) -> std::io::Result<()> {
     }
     image::save_buffer(path, &tex.pixels, tex.width, tex.height, image::ColorType::Rgba8)
         .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: a texture pack that ships a real PNG under a `.jpg` name (or a
+    /// WebP under `.png`, the case that hid VFX particle textures) must still load —
+    /// the decoder guesses format from content, not the extension.
+    #[test]
+    fn decodes_by_content_not_extension() {
+        let dir = std::env::temp_dir().join(format!("floptle-tex-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A 2×2 RGBA image saved as real PNG bytes...
+        let src = dir.join("real.png");
+        image::save_buffer(&src, &[255u8; 16], 2, 2, image::ColorType::Rgba8).unwrap();
+        // ...then given a lying `.jpg` name.
+        let lying = dir.join("actually_png.jpg");
+        std::fs::rename(&src, &lying).unwrap();
+
+        let t = load_texture(&lying).expect("must decode a PNG-in-.jpg-clothing by content");
+        assert_eq!((t.width, t.height), (2, 2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
