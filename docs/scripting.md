@@ -490,7 +490,12 @@ open it in the **Scripting** tab — a small but real code editor:
   unsaved changes asks first, and pressing **Play auto-saves** open edits so
   the run always matches what you see.
 - **Completion & docs** — typing suggests the engine API *and* identifiers
-  from the file (`Tab` accepts); hovering an API name shows its doc.
+  from the file, with the highlighted entry's doc shown right in the popup:
+  `↑`/`↓` choose, `Tab`/`Enter` accept, `Esc` hides it. It understands member
+  access on **any variable** — `rb.fri` offers `friction`, `anim:pl` offers
+  `play`, and `params.` offers this script's own `defaults` keys. Hovering an
+  API name in code shows its doc, and the **§ Docs** page has a search box
+  over the whole guide + API reference.
 
 The full shortcut list lives on the tab's **§ Docs** page.
 

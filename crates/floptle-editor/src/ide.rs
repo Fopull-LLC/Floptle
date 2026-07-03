@@ -49,6 +49,14 @@ pub(crate) struct IdeState {
     /// The identifier captured at the last right-click, so the context menu stays stable
     /// while it's open (the live hover position moves onto the menu and would flicker).
     pub(crate) rc_word: Option<String>,
+    /// Autocomplete popup state: the keyboard-selected row, the token it was
+    /// built for (selection resets when it changes), and an Esc dismissal that
+    /// holds until the token changes.
+    pub(crate) ac_sel: usize,
+    pub(crate) ac_token: String,
+    pub(crate) ac_dismissed: bool,
+    /// The Docs page's filter box.
+    pub(crate) docs_search: String,
 }
 
 /// One "find all references" result: the file, its display name, the 1-based line, and
@@ -80,6 +88,10 @@ impl Default for IdeState {
             refs: Vec::new(),
             refs_word: String::new(),
             rc_word: None,
+            ac_sel: 0,
+            ac_token: String::new(),
+            ac_dismissed: false,
+            docs_search: String::new(),
         }
     }
 }
@@ -454,13 +466,175 @@ fn ide_selection(ctx: &egui::Context, id: egui::Id) -> Option<(usize, usize, usi
 
 /// The token (run of identifier/`.` chars) ending at `cursor_char`, plus its start
 /// char index — what autocomplete matches against.
+/// The keys a script's `defaults = { … }` table declares, in order — used to
+/// complete `params.<key>` and for the tunables hint above the editor.
+fn defaults_keys(text: &str) -> Vec<String> {
+    let Some(start) = text.find("defaults") else { return Vec::new() };
+    let Some(open) = text[start..].find('{') else { return Vec::new() };
+    let body_start = start + open + 1;
+    let Some(close) = text[body_start..].find('}') else { return Vec::new() };
+    text[body_start..body_start + close]
+        .split(',')
+        .filter_map(|p| p.split('=').next())
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty() && k.bytes().all(is_ident_byte))
+        .collect()
+}
+
+/// Fields of the live component handles (`node:getcomponent(…)`), offered when
+/// completing after a `.` on any variable — `rb.fri` → `friction`.
+const HANDLE_FIELDS: &[(&str, &str)] = &[
+    ("friction", "RigidBody handle: surface friction 0..1 (0 = frictionless — ice)."),
+    ("restitution", "RigidBody handle: bounciness 0..1 (0 = no bounce)."),
+    ("gravity", "RigidBody handle: gravity pull on this body — assign true/false (reads back 1/0)."),
+    ("shape", "RigidBody handle: body shape — 0 sphere, 1 capsule, 2 box."),
+    ("radius", "RigidBody handle: sphere/capsule radius."),
+    ("height", "RigidBody handle: capsule total height."),
+    ("half_x", "RigidBody handle: box half-extent X."),
+    ("half_y", "RigidBody handle: box half-extent Y."),
+    ("half_z", "RigidBody handle: box half-extent Z."),
+    ("lock_x", "RigidBody handle: freeze world X translation (assign true/false)."),
+    ("lock_y", "RigidBody handle: freeze world Y translation."),
+    ("lock_z", "RigidBody handle: freeze world Z translation (e.g. for 2.5D)."),
+    ("lock_rot_x", "RigidBody handle: freeze rotation about X (keeps a body upright)."),
+    ("lock_rot_y", "RigidBody handle: freeze rotation about Y."),
+    ("lock_rot_z", "RigidBody handle: freeze rotation about Z."),
+    ("intensity", "PointLight handle: brightness multiplier."),
+    ("range", "PointLight handle: reach in world units."),
+    ("r", "PointLight handle: color red 0..1."),
+    ("g", "PointLight handle: color green 0..1."),
+    ("b", "PointLight handle: color blue 0..1."),
+];
+
+/// One ranked completion candidate. `keep` is how many chars of the typed token
+/// to keep (the insert replaces the rest) — 0 replaces the whole token, while a
+/// member completion keeps `base` + separator and replaces only the member.
+struct AcItem {
+    label: String,
+    insert: String,
+    keep: usize,
+    doc: Option<String>,
+    score: u8,
+}
+
+/// Rank completion candidates for `token` (the identifier being typed):
+/// 0 = full-label prefix / own `params.` key, 1 = member match on any base,
+/// 2 = handle fields + substring matches, 4 = identifiers from this file.
+fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
+    let lower = token.to_ascii_lowercase();
+    let mut items: Vec<AcItem> = Vec::new();
+    let push = |items: &mut Vec<AcItem>, it: AcItem| {
+        if !items.iter().any(|o| o.label == it.label && o.keep == it.keep) {
+            items.push(it);
+        }
+    };
+    let sep = token.rfind(['.', ':']);
+
+    // Plain words match full labels: by prefix first, then by substring.
+    // (Separator tokens use ONLY member matching below — a full-label insert
+    // would duplicate the row, and `anim:*` inserts are member-shaped.)
+    if sep.is_none() {
+        for e in LUA_API {
+            let l = e.label.to_ascii_lowercase();
+            if l.starts_with(&lower) && l != lower {
+                push(&mut items, AcItem {
+                    label: e.label.into(),
+                    insert: e.insert.into(),
+                    keep: 0,
+                    doc: Some(e.doc.into()),
+                    score: 0,
+                });
+            } else if lower.len() >= 3 && l.contains(&lower) {
+                push(&mut items, AcItem {
+                    label: e.label.into(),
+                    insert: e.insert.into(),
+                    keep: 0,
+                    doc: Some(e.doc.into()),
+                    score: 2,
+                });
+            }
+        }
+    }
+
+    // Member access: `<base>.<part>` / `<base>:<part>` on ANY variable name —
+    // match API entries by their member part, and complete just the member.
+    if let Some(s) = sep {
+        let sepc = token.as_bytes()[s] as char;
+        let base = &lower[..s];
+        let member = &lower[s + 1..];
+        for e in LUA_API {
+            let Some(es) = e.label.find(['.', ':']) else { continue };
+            if e.label.as_bytes()[es] as char != sepc {
+                continue;
+            }
+            let (ebase, emember) = (&e.label[..es], &e.label[es + 1..]);
+            let eml = emember.to_ascii_lowercase();
+            if eml.starts_with(member) && eml != member {
+                let insert =
+                    e.insert.find(['.', ':']).map(|i| &e.insert[i + 1..]).unwrap_or(e.insert);
+                push(&mut items, AcItem {
+                    label: e.label.into(),
+                    insert: insert.into(),
+                    keep: s + 1,
+                    doc: Some(e.doc.into()),
+                    score: if ebase.eq_ignore_ascii_case(base) { 0 } else { 1 },
+                });
+            }
+        }
+        if sepc == '.' {
+            // This script's own tunables complete after `params.`.
+            if base == "params" {
+                for k in defaults_keys(file_text) {
+                    if k.to_ascii_lowercase().starts_with(member) && k.to_ascii_lowercase() != member {
+                        push(&mut items, AcItem {
+                            label: format!("params.{k}"),
+                            insert: k.clone(),
+                            keep: s + 1,
+                            doc: Some("A tunable from this script's `defaults` (Inspector-editable).".into()),
+                            score: 0,
+                        });
+                    }
+                }
+            }
+            // Component-handle fields on any variable: rb.fri → friction.
+            for (f, d) in HANDLE_FIELDS {
+                if f.starts_with(member) && *f != member {
+                    push(&mut items, AcItem {
+                        label: (*f).into(),
+                        insert: (*f).into(),
+                        keep: s + 1,
+                        doc: Some((*d).into()),
+                        score: 2,
+                    });
+                }
+            }
+        }
+    } else {
+        // Identifiers from this file round the list out.
+        for w in doc_words(file_text, token, token) {
+            push(&mut items, AcItem {
+                label: w.clone(),
+                insert: w,
+                keep: 0,
+                doc: None,
+                score: 4,
+            });
+        }
+    }
+
+    items.sort_by(|a, b| (a.score, a.label.as_str()).cmp(&(b.score, b.label.as_str())));
+    items.truncate(10);
+    items
+}
+
 fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
     let chars: Vec<char> = text.chars().collect();
     let cur = cursor_char.min(chars.len());
     let mut start = cur;
     while start > 0 {
         let c = chars[start - 1];
-        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+        // `:` is a token char so method access (`node:getc…`, `anim:pl…`) completes.
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':' {
             start -= 1;
         } else {
             break;
@@ -469,7 +643,7 @@ fn current_token(text: &str, cursor_char: usize) -> (usize, String) {
     (start, chars[start..cur].iter().collect())
 }
 
-/// The full identifier (run of `[A-Za-z0-9_.]`) containing char index `idx`, or
+/// The full identifier (run of `[A-Za-z0-9_.:]`) containing char index `idx`, or
 /// empty if that char isn't part of one. Used for hover docs.
 fn word_at(text: &str, idx: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -477,7 +651,7 @@ fn word_at(text: &str, idx: usize) -> String {
         return String::new();
     }
     let i = idx.min(chars.len() - 1);
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.';
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == ':';
     if !is_word(chars[i]) {
         return String::new();
     }
@@ -763,28 +937,82 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// The Docs landing page: the scripting guide + API reference + IDE shortcuts.
+    /// The Docs landing page: a search box over the sectioned scripting guide +
+    /// the categorized API reference + IDE shortcuts.
     fn docs_page_ui(&mut self, ui: &mut egui::Ui) {
+        // A filter box up top: the guides and the API reference both narrow to
+        // matching entries, so devs can comb for exactly what they need.
+        ui.horizontal(|ui| {
+            ui.label("🔍");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.ide.docs_search)
+                    .hint_text("search the docs — try \"friction\", \"jump\", \"crossfade\", \"mouse\"")
+                    .desired_width(320.0),
+            );
+            if !self.ide.docs_search.is_empty() && ui.small_button("✕").clicked() {
+                self.ide.docs_search.clear();
+            }
+        });
+        ui.add_space(4.0);
+        let q = self.ide.docs_search.trim().to_ascii_lowercase();
+        let searching = !q.is_empty();
+        let mut hits = 0usize;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.monospace(SCRIPT_DOCS);
-            ui.add_space(12.0);
+            ui.strong("Guides");
+            for (n, (title, body)) in DOC_SECTIONS.iter().enumerate() {
+                if searching
+                    && !title.to_ascii_lowercase().contains(&q)
+                    && !body.to_ascii_lowercase().contains(&q)
+                {
+                    continue;
+                }
+                hits += 1;
+                let hdr = egui::CollapsingHeader::new(*title).id_salt(("doc_sec", n));
+                // While searching, matching sections open themselves.
+                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(n == 0) };
+                hdr.show(ui, |ui| ui.monospace(*body));
+            }
+            ui.add_space(10.0);
             ui.separator();
-            egui::CollapsingHeader::new("§ API reference")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.small("Hover an entry for details. (Inside a script, start typing for the same suggestions inline.)");
-                    ui.add_space(4.0);
-                    for e in LUA_API {
-                        ui.horizontal(|ui| {
-                            ui.monospace(
-                                egui::RichText::new(e.label)
-                                    .color(egui::Color32::from_rgb(78, 201, 176)),
-                            )
-                            .on_hover_text(e.doc);
-                            ui.small(e.doc);
-                        });
+            ui.strong("API reference");
+            ui.small("Everything here also pops up as you type in a script (Tab/Enter accepts, ↑↓ chooses).");
+            ui.add_space(4.0);
+            for cat in API_CATEGORIES {
+                let entries: Vec<&ApiEntry> = LUA_API
+                    .iter()
+                    .filter(|e| api_category(e.label) == *cat)
+                    .filter(|e| {
+                        !searching
+                            || e.label.to_ascii_lowercase().contains(&q)
+                            || e.doc.to_ascii_lowercase().contains(&q)
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    continue;
+                }
+                hits += entries.len();
+                let hdr = egui::CollapsingHeader::new(format!("{cat}  ({})", entries.len()))
+                    .id_salt(("api_cat", cat));
+                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(false) };
+                hdr.show(ui, |ui| {
+                    for e in entries {
+                        ui.monospace(
+                            egui::RichText::new(e.label)
+                                .color(egui::Color32::from_rgb(78, 201, 176)),
+                        );
+                        ui.indent(("api_doc", e.label), |ui| ui.small(e.doc));
+                        ui.add_space(2.0);
                     }
                 });
+            }
+            if searching && hits == 0 {
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "No matches for \"{}\" — try a broader word (e.g. \"move\", \"light\", \"spin\").",
+                    self.ide.docs_search.trim()
+                ));
+            }
+            ui.add_space(10.0);
             egui::CollapsingHeader::new("⌨ Editor shortcuts").default_open(false).show(ui, |ui| {
                 ui.monospace(IDE_SHORTCUTS);
             });
@@ -968,14 +1196,23 @@ impl EditorTabViewer<'_> {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        // Tab accepts the top completion: if the popup was open last frame,
-        // eat Tab *before* the editor runs so it doesn't shift focus instead.
+        // While the completion popup is open (last frame), it owns Tab/Enter
+        // (accept), the arrow keys (choose) and Esc (dismiss) — eat them *before*
+        // the editor runs so they don't indent / newline / move the caret.
         let ac_id = egui::Id::new(("ide_ac_open", editor_id));
         let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
-        let tab_accept =
-            ac_was_open && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+        let (mut ac_accept, mut ac_nav, mut ac_dismiss) = (false, 0i32, false);
+        if ac_was_open {
+            ui.input_mut(|inp| {
+                ac_accept = inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                    || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                ac_nav = inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as i32
+                    - (inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as i32);
+                ac_dismiss = inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+        }
 
-        self.editor_shortcuts(ui, i, editor_id, is_lua, tab_accept);
+        self.editor_shortcuts(ui, i, editor_id, is_lua, ac_accept);
 
         let line_count = self.ide.open[i].text.matches('\n').count() + 1;
         let goto = self.ide.goto.take();
@@ -1133,7 +1370,9 @@ impl EditorTabViewer<'_> {
             output.cursor_range,
             &output.galley,
             output.galley_pos,
-            tab_accept,
+            ac_accept,
+            ac_nav,
+            ac_dismiss,
         );
         ui.ctx().data_mut(|d| d.insert_temp(ac_id, ac_open));
 
@@ -1446,10 +1685,12 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// An autocomplete popup at the caret offering the engine API plus identifiers
-    /// from the current file. Click a row or press Tab (`tab_accept`) to insert;
-    /// hover a row for its doc. Returns whether the popup is showing (so the
-    /// caller can route Tab to it next frame).
+    /// An autocomplete popup at the caret: the engine API (full labels, member
+    /// access on any variable, `params.` keys, component-handle fields) plus
+    /// identifiers from the current file, ranked by [`ac_matches`]. ↑↓ choose,
+    /// Tab/Enter accept, Esc dismisses (until the token changes), a click
+    /// inserts too; the selected row's doc shows inside the popup. Returns
+    /// whether the popup is showing (so the caller routes keys to it next frame).
     #[allow(clippy::too_many_arguments)]
     fn ide_autocomplete(
         &mut self,
@@ -1460,7 +1701,9 @@ impl EditorTabViewer<'_> {
         cursor_range: Option<egui::text::CCursorRange>,
         galley: &egui::text::Galley,
         galley_pos: egui::Pos2,
-        tab_accept: bool,
+        accept: bool,
+        nav: i32,
+        dismiss: bool,
     ) -> bool {
         if !has_focus {
             return false;
@@ -1472,67 +1715,63 @@ impl EditorTabViewer<'_> {
         let cursor = range.primary.index.0;
         let (start, token) = current_token(&self.ide.open[i].text, cursor);
         // Pop only on a real prefix: ≥2 chars for a plain word, or any member access.
-        if token.len() < 2 && !token.contains('.') {
+        if token.len() < 2 && !token.contains(['.', ':']) {
             return false;
         }
-        let lower = token.to_ascii_lowercase();
-        // Engine API entries first, then identifiers from this file.
-        let mut items: Vec<(String, String, Option<&'static str>)> = LUA_API
-            .iter()
-            .filter(|e| {
-                let l = e.label.to_ascii_lowercase();
-                l.starts_with(&lower) && l != lower
-            })
-            .take(8)
-            .map(|e| (e.label.to_string(), e.insert.to_string(), Some(e.doc)))
-            .collect();
-        if items.len() < 8 && !token.contains('.') {
-            for w in doc_words(&self.ide.open[i].text, &token, &token) {
-                if items.len() >= 8 {
-                    break;
-                }
-                if !items.iter().any(|(l, ..)| *l == w) {
-                    items.push((w.clone(), w, None));
-                }
-            }
+        if token != self.ide.ac_token {
+            self.ide.ac_token = token.clone();
+            self.ide.ac_sel = 0;
+            self.ide.ac_dismissed = false;
         }
+        if dismiss {
+            self.ide.ac_dismissed = true;
+        }
+        if self.ide.ac_dismissed {
+            return false;
+        }
+        let items = ac_matches(&token, &self.ide.open[i].text);
         if items.is_empty() {
             return false;
         }
+        let sel = (self.ide.ac_sel as i32 + nav).rem_euclid(items.len() as i32) as usize;
+        self.ide.ac_sel = sel;
 
         let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
         let pos = galley_pos + caret.left_bottom().to_vec2();
-        // Tab inserts the top match; otherwise a click does.
-        let mut chosen: Option<String> = tab_accept.then(|| items[0].1.clone());
+        // Tab/Enter insert the selected match; otherwise a click does.
+        let mut chosen: Option<(usize, String)> =
+            accept.then(|| (items[sel].keep, items[sel].insert.clone()));
         egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
             .order(egui::Order::Foreground)
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(340.0);
-                    ui.small("Tab to accept");
-                    for (n, (label, insert, doc)) in items.iter().enumerate() {
-                        let rich = if n == 0 {
-                            egui::RichText::new(label).monospace().strong()
+                    ui.set_max_width(360.0);
+                    for (n, it) in items.iter().enumerate() {
+                        let rich = if n == sel {
+                            egui::RichText::new(&it.label).monospace().strong()
                         } else {
-                            egui::RichText::new(label).monospace()
+                            egui::RichText::new(&it.label).monospace()
                         };
-                        let resp = ui.selectable_label(false, rich);
-                        let resp = match doc {
-                            Some(d) => resp.on_hover_text(*d),
-                            None => resp.on_hover_text("(from this file)"),
-                        };
-                        if resp.clicked() {
-                            chosen = Some(insert.clone());
+                        if ui.selectable_label(n == sel, rich).clicked() {
+                            chosen = Some((it.keep, it.insert.clone()));
                         }
                     }
+                    ui.separator();
+                    // The selected entry's doc, right in the popup (no hover needed).
+                    ui.small(items[sel].doc.as_deref().unwrap_or("An identifier from this file."));
+                    ui.small(
+                        egui::RichText::new("⇥/⏎ accept · ↑↓ choose · esc hide")
+                            .color(ui.visuals().weak_text_color()),
+                    );
                 });
             });
 
-        if let Some(insert) = chosen {
-            replace_chars(&mut self.ide.open[i].text, start, cursor, &insert);
+        if let Some((keep, insert)) = chosen {
+            let from = start + keep;
+            replace_chars(&mut self.ide.open[i].text, from, cursor, &insert);
             self.ide.open[i].dirty = true;
-            let new_idx = start + insert.chars().count();
+            let new_idx = from + insert.chars().count();
             set_ide_caret(ui.ctx(), editor_id, new_idx);
             ui.ctx().memory_mut(|m| m.request_focus(editor_id));
             return false; // inserted — popup closes
@@ -1588,17 +1827,7 @@ const LUA_SNIPPETS: &[(&str, &str)] = &[
 /// A one-line hint listing the tunables a script declares (parsed from its
 /// `defaults = { ... }` table), shown above the code editor.
 fn script_hint(text: &str) -> String {
-    let Some(start) = text.find("defaults") else { return String::new() };
-    let Some(open) = text[start..].find('{') else { return String::new() };
-    let body_start = start + open + 1;
-    let Some(close) = text[body_start..].find('}') else { return String::new() };
-    let body = &text[body_start..body_start + close];
-    let keys: Vec<&str> = body
-        .split(',')
-        .filter_map(|p| p.split('=').next())
-        .map(|k| k.trim())
-        .filter(|k| !k.is_empty())
-        .collect();
+    let keys = defaults_keys(text);
     if keys.is_empty() {
         String::new()
     } else {
@@ -1616,6 +1845,7 @@ Ctrl+D          duplicate line     Ctrl+Shift+K   delete line
 Alt+Up / Down   move line(s)       Ctrl+/         toggle -- comment
 Tab / Shift+Tab indent / outdent the selected lines
 Ctrl+B          go to definition   right-click    definition / references
+completion:     ↑↓ choose · Tab/Enter accept · Esc hide
 Ctrl+W          close tab          Tab            accept completion";
 
 // ---- in-engine IDE: Lua syntax highlighting + autocomplete -----------------
@@ -1632,6 +1862,45 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets", "gizmo",
 ];
+
+/// The Docs page's API-reference groups, in display order.
+const API_CATEGORIES: &[&str] = &[
+    "script basics — lifecycle, params, log",
+    "node — transform & body fields",
+    "node — methods & handles",
+    "scene lookups & raycast",
+    "input — keyboard & mouse",
+    "components — getcomponent",
+    "animation — node:animator",
+    "assets",
+    "debug gizmos",
+    "lua stdlib",
+];
+
+/// Which Docs-page group an API entry belongs to (by its label shape).
+fn api_category(label: &str) -> &'static str {
+    if label == "node:getcomponent" {
+        "components — getcomponent"
+    } else if label.starts_with("node:") {
+        "node — methods & handles"
+    } else if label.starts_with("node.") {
+        "node — transform & body fields"
+    } else if label.starts_with("input") {
+        "input — keyboard & mouse"
+    } else if label.starts_with("gizmo") {
+        "debug gizmos"
+    } else if label.starts_with("assets") {
+        "assets"
+    } else if label.starts_with("anim") {
+        "animation — node:animator"
+    } else if label.starts_with("math") || label.starts_with("string") {
+        "lua stdlib"
+    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "raycast") {
+        "scene lookups & raycast"
+    } else {
+        "script basics — lifecycle, params, log"
+    }
+}
 
 /// One completion / docs entry for the in-engine IDE.
 struct ApiEntry {
@@ -1736,11 +2005,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "local", insert: "local ", doc: "Declare a local variable." },
 ];
 
-/// The built-in Scripting docs, shown on the IDE's Docs page.
-const SCRIPT_DOCS: &str = "\
-Floptle Scripting — Lua
-=======================
-
+/// The built-in Scripting docs, shown on the IDE's Docs page as searchable
+/// collapsible sections: (title, monospace body).
+const DOC_SECTIONS: &[(&str, &str)] = &[
+    (
+        "Getting started — your first script",
+        "\
 Game logic is written in Lua. A script is a `.lua` file in your project's
 `scripts/` folder; attach it to a node and it runs every frame while playing.
 A script defines plain functions and a `defaults` table:
@@ -1757,21 +2027,21 @@ A script defines plain functions and a `defaults` table:
 
 Each script keeps its own state across frames (set a variable in start, read it
 in update) and hot-reloads the moment you save the file. `+=  -=  *=  /=  ..=`
-and friends work too.
-
-
-1. THE NODE — transform
------------------------
+and friends work too.",
+    ),
+    (
+        "node — the transform",
+        "\
 `node` is synced from the node's transform before each call and read back after,
 so setting a field moves the object:
   • node.x, node.y, node.z              position (world units)
   • node.yaw, node.pitch, node.roll     rotation, in radians
   • node.scale                          uniform scale (shortcut)
-  • node.scale_x / scale_y / scale_z    per-axis scale
-
-
-2. THE NODE — physics body
---------------------------
+  • node.scale_x / scale_y / scale_z    per-axis scale",
+    ),
+    (
+        "node — the physics body",
+        "\
 These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
 ◆ Rigidbody). Drive the body by its velocity instead of teleporting it:
   • node.vx, node.vy, node.vz   velocity (m/s) — READ the current value, modify,
@@ -1781,11 +2051,40 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
                                 [0,1,0] on a flat world, RADIAL on a planet —
                                 move along it and you handle planets for free
   • node.height                 capsule standing height — write a smaller value
-                                to crouch (the engine shrinks it, feet planted)
+                                to crouch (the engine shrinks it, feet planted)",
+    ),
+    (
+        "Components — live tweaks: node:getcomponent",
+        "\
+Every tunable the Inspector shows on a Rigidbody or Point Light is scriptable.
+node:getcomponent(name) returns a live COMPONENT HANDLE (or nil if the node
+doesn't have that component): read a field to sample it, assign to change it.
+Writes land the same frame, and during play the physics sim re-reads the body
+tunables every step — no reset, no teleport.
 
+  local rb = node:getcomponent(\"RigidBody\")
+  • rb.friction                 surface friction 0..1 (0 = frictionless — ice)
+  • rb.restitution              bounciness 0..1 (0 = no bounce)
+  • rb.gravity                  assign true/false (reads back 1/0)
+  • rb.shape                    0 = sphere, 1 = capsule, 2 = box
+  • rb.radius / rb.height       sphere/capsule size
+  • rb.half_x / half_y / half_z box half-extents
+  • rb.lock_x / lock_y / lock_z freeze world-axis translation (2.5D: lock_z)
+  • rb.lock_rot_x / _y / _z     freeze rotation about an axis (stay upright)
 
-3. INPUT (play mode)
---------------------
+  local l = node:getcomponent(\"PointLight\")
+  • l.intensity / l.range       brightness / reach
+  • l.r, l.g, l.b               color, 0..1 per channel
+
+    -- an ice patch: slippery while on it
+    node:getcomponent(\"RigidBody\").friction = on_ice and 0.02 or 0.6
+
+Handles work cross-node too:
+    find(\"Crate\"):getcomponent(\"RigidBody\").restitution = 0.9",
+    ),
+    (
+        "input — keyboard & mouse",
+        "\
   • input.key(\"w\")          true while held. Names: a-z, 0-9, space, enter,
                             shift, ctrl, alt, left/right/up/down, escape, tab
   • input.pressed(\"space\")  true only on the frame it goes DOWN (an edge)
@@ -1795,11 +2094,11 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
   • input.clicked(1)        mouse button pressed this frame (an edge)
   • local dx, dy = input.mouse_delta()   mouse movement since last frame
   • local x, y  = input.mouse()          cursor position in pixels
-  • input.scroll()          wheel delta this frame
-
-
-4. RAYCAST
-----------
+  • input.scroll()          wheel delta this frame",
+    ),
+    (
+        "raycast — ground checks, line-of-sight, shooting",
+        "\
   • raycast(ox,oy,oz, dx,dy,dz, max)  cast a ray against the terrain + mesh
     colliders. Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
 
@@ -1807,11 +2106,11 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
     local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2)
     if h then  -- h.y is the ground height, h.ny the slope --  end
 
-  Use it for ground checks, line-of-sight, shooting, placing things on a surface.
-
-
-DEBUG GIZMOS (gizmo.*)
-----------------------
+  Use it for ground checks, line-of-sight, shooting, placing things on a surface.",
+    ),
+    (
+        "Debug gizmos — gizmo.line / ray / sphere / point",
+        "\
 Draw one-frame debug shapes over the viewport from code — Scene view only
 (the Game view stays clean), and the viewport's gizmos toggle hides them.
 Colors are optional 0–1 floats (default green). Immediate mode: call every
@@ -1823,11 +2122,11 @@ frame you want the shape visible.
 
     -- visualize a ground probe (see first_person.lua / third_person.lua:
     -- flip their debug_ray param to 1 in the Inspector for a live example)
-    gizmo.ray(node.x, node.y, node.z, 0, -1, 0, 1.5, 0.3, 1.0, 0.4)
-
-
-5. REFERENCING OTHER NODES & SCRIPTS
-------------------------------------
+    gizmo.ray(node.x, node.y, node.z, 0, -1, 0, 1.5, 0.3, 1.0, 0.4)",
+    ),
+    (
+        "Reaching other nodes & scripts — find, handles, managers",
+        "\
 Reach beyond your own node — traverse the hierarchy, find any node/script in
 the scene, and call into other scripts to build systems that span many files.
 
@@ -1858,11 +2157,11 @@ the scene, and call into other scripts to build systems that span many files.
 
 Inside a script's own functions, `node` is always ITS node, so a method called
 from elsewhere still acts on the right object. Handles stay valid across frames —
-cache a lookup in start() and reuse it.
-
-
-ASSETS, MODELS & MATERIALS
---------------------------
+cache a lookup in start() and reuse it.",
+    ),
+    (
+        "Assets, models & materials — swap things at runtime",
+        "\
 Reference files under Assets/ in code, and swap a node's components at runtime.
   • assets.getFile(\"models/x.glb\")   the file's path (or nil) — pass it to model/material
   • assets.getContents(\"models\")      array of EVERY file under a folder (recursive)
@@ -1873,21 +2172,44 @@ Reference files under Assets/ in code, and swap a node's components at runtime.
     -- equip a different model on a key press
     if input.pressed(\"e\") then node.model = assets.getFile(\"models/gold.glb\") end
 
-(Right-click an asset ▸ Copy asset path to grab the string to type.)
+(Right-click an asset ▸ Copy asset path to grab the string to type.)",
+    ),
+    (
+        "Animation — node:animator()",
+        "\
+node:animator() is the animation handle for a node's Animation Controller (or
+a rigged model's embedded clips). Drive states from gameplay:
 
+  local anim = node:animator()
+  • anim:play(\"Run\" [, fade [, layer]])   transition to a state (the controller
+                                          supplies fades; safe to call every frame)
+  • anim:restart(\"Attack\")               re-enter even if already playing (one-shots)
+  • anim:crossfade(\"Idle\", 0.3)          transition with an explicit fade (seconds)
+  • anim:stop([layer [, fade]])           stop a layer (base returns to its default)
+  • anim:setSpeed(2)                      playback speed multiplier
+  • anim:setLayerWeight(\"Attack\", 0.5)   blend a layer over the ones below
+  • anim:seek(t [, layer])                jump the current state's playhead
+  Getters: anim:state()  anim:time()  anim:finished()  anim:isPlaying([state])
+           anim:clips()  anim:layers()
 
-6. GLOBALS
-----------
+    -- walk/run from speed, one-shot attack on click
+    local speed = math.sqrt(node.vx ^ 2 + node.vz ^ 2)
+    anim:play(speed > 4 and \"Run\" or (speed > 0.1 and \"Walk\" or \"Idle\"))
+    if input.clicked(0) then anim:restart(\"Attack\") end",
+    ),
+    (
+        "Globals — params, time, dt, log",
+        "\
   • params   this instance's tunables — a table SEEDED from `defaults`, so
              `params.speed` works out of the box; the Inspector overrides them
   • time     seconds since play started
   • dt       seconds since the last frame (also passed to update)
   • log(\"...\")   print to the engine console
-  • the full Lua standard library (math, string, table, …)
-
-
-7. MAKING A CHARACTER YOU CAN WALK AROUND AS
---------------------------------------------
+  • the full Lua standard library (math, string, table, …)",
+    ),
+    (
+        "Recipe — a walkable character (first/third person)",
+        "\
 Two ready-made controller setups ship in scripts/ — no glue code needed:
 
 FIRST PERSON — attach `first_person.lua` to an Active Camera that has a
@@ -1911,11 +2233,11 @@ A minimal controller, to show the velocity loop:
       node.vx = -math.sin(node.yaw) * f * params.speed
       node.vz = -math.cos(node.yaw) * f * params.speed
       node.vy = vy
-    end
-
-
-ATTACHING & RUNNING
--------------------
+    end",
+    ),
+    (
+        "Attaching & running scripts",
+        "\
 • Drag a `.lua` from Assets onto a node, drop it on the Inspector's Scripting
   section, or use Inspector ⏵ Scripting ⏵ + Add Script.
 • F1 = ⏵ Play / ⏹ Stop, F2 = pause the clock. Stop restores the scene.
@@ -1924,7 +2246,9 @@ ATTACHING & RUNNING
 
 Bundled examples (in scripts/): first_person.lua + third_person.lua +
 third_person_camera.lua (see §7), freelook.lua (fly camera), rotate.lua,
-pulsate.lua, float.lua — open one for a working start.";
+pulsate.lua, float.lua — open one for a working start.",
+    ),
+];
 
 #[cfg(test)]
 mod tests {
@@ -2003,6 +2327,50 @@ mod tests {
         let end = t.chars().count();
         auto_indent_newline(&mut t, end, end);
         assert_eq!(t, "x = avocado\n");
+    }
+
+    #[test]
+    fn ac_member_completion_works_on_any_variable() {
+        // `node:getc` — base + colon member completes the method, keeping the base.
+        let items = ac_matches("node:getc", "");
+        assert!(items[0].label.starts_with("node:getc")); // getchild/getcomponent tie
+        let comp = items.iter().find(|i| i.label == "node:getcomponent").unwrap();
+        assert_eq!(comp.insert, "getcomponent(");
+        assert_eq!(comp.keep, 5); // "node:" kept, member replaced
+        // Any variable name works: `body:getc` ranks the same method next.
+        let items = ac_matches("body:getc", "");
+        assert!(items.iter().any(|i| i.label == "node:getcomponent" && i.keep == 5));
+        // `anim:pl` reaches the animator methods.
+        let items = ac_matches("anim:pl", "");
+        assert_eq!(items[0].label, "anim:play");
+        assert_eq!(items[0].insert, "play(");
+        // Component-handle fields complete after a dot on any variable.
+        let items = ac_matches("rb.fri", "");
+        assert!(items.iter().any(|i| i.label == "friction" && i.insert == "friction"));
+        // Typing the separator alone lists the members (discoverability).
+        assert!(!ac_matches("node:", "").is_empty());
+    }
+
+    #[test]
+    fn ac_params_keys_come_from_this_scripts_defaults() {
+        let src = "defaults = { speed = 6, jump_power = 7 }\n";
+        let items = ac_matches("params.ju", src);
+        assert_eq!(items[0].label, "params.jump_power");
+        assert_eq!(items[0].insert, "jump_power");
+        assert_eq!(items[0].keep, 7);
+        assert_eq!(defaults_keys(src), vec!["speed".to_string(), "jump_power".to_string()]);
+    }
+
+    #[test]
+    fn ac_plain_words_prefix_then_substring() {
+        // Prefix beats substring: "gro" → node.grounded via substring too.
+        let items = ac_matches("getcomp", "");
+        assert!(items.iter().any(|i| i.label == "node:getcomponent"), "substring should match");
+        let items = ac_matches("inp", "local input_speed = 1\n");
+        assert_eq!(items[0].label, "input"); // API prefix outranks buffer words
+        // A word with no API competition comes from the buffer.
+        let items = ac_matches("spd", "local spd_boost = 2\n");
+        assert!(items.iter().any(|i| i.label == "spd_boost"));
     }
 
     #[test]
