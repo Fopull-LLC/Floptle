@@ -270,8 +270,8 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `radius` | Sphere/capsule radius. |
 | `height` | Capsule total height. |
 | `half_x` `half_y` `half_z` | Box half-extents. |
-| `lock_x` `lock_y` `lock_z` | Freeze world-axis translation (e.g. lock Z for 2.5D). |
-| `lock_rot_x` `lock_rot_y` `lock_rot_z` | Freeze rotation about an axis (keep a body upright). |
+| `lock_x` `lock_y` `lock_z` | Freeze world-axis translation (e.g. lock Z for 2.5D). A lock engaging mid-play freezes the body **where it is right then**. |
+| `lock_rot_x` `lock_rot_y` `lock_rot_z` | Freeze rotation about an axis (keep a body upright). Holds the rotation the node has when the lock engages. |
 
 | `getcomponent("PointLight")` | Meaning (Inspector: ● Point Light) |
 |---|---|

@@ -21,7 +21,8 @@ struct BodyLink {
     entity: Entity,
     body: usize,
     lock_rot: [bool; 3],
-    /// Authored local rotation, restored on locked axes each writeback.
+    /// Local rotation restored on locked axes each writeback: the authored one,
+    /// re-captured when a rotation lock engages mid-play (freeze in place).
     rot0: Quat,
 }
 
@@ -185,12 +186,27 @@ impl Sim {
     /// friction, restitution, gravity on/off, position/rotation locks), WITHOUT resetting
     /// position or velocity. Lets the Inspector edit these live while playing — including
     /// dragging the radius/height/half-extents or switching shapes — with no teleport/reset.
+    /// A lock that turns ON here freezes the body where it IS: the restored position/
+    /// rotation re-captures from the current state, so toggling a lock mid-play (Inspector
+    /// or a script's `rig.lock_y = true`) never teleports the body back to its spawn.
     pub fn sync_dynamic_params(&mut self, ecs: &World) {
         for i in 0..self.map.len() {
             let (ent, bidx) = (self.map[i].entity, self.map[i].body);
             if let Some(rb) = ecs.get::<RigidBody>(ent) {
+                let newly_rot_locked =
+                    (0..3).any(|a| rb.lock_rot[a] && !self.map[i].lock_rot[a]);
+                if newly_rot_locked && let Some(t) = ecs.get::<Transform>(ent) {
+                    // Locked axes were held at rot0 anyway, so a full re-capture keeps
+                    // them while adopting the current angle on the newly-locked ones.
+                    self.map[i].rot0 = t.rotation;
+                }
                 self.map[i].lock_rot = rb.lock_rot;
                 let b = &mut self.world.bodies[bidx];
+                for a in 0..3 {
+                    if rb.lock_pos[a] && !b.lock_pos[a] {
+                        crate::body::set_axis(&mut b.home, a, crate::body::axis(b.pos, a));
+                    }
+                }
                 b.restitution = rb.restitution;
                 b.friction = rb.friction;
                 b.use_gravity = rb.gravity;

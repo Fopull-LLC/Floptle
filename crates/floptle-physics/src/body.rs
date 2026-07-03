@@ -45,7 +45,9 @@ pub struct Body {
     pub grounded: bool,
     /// The contact normal from the most recent resolved collision this step (telegraph).
     pub contact: Option<Vec3>,
-    pub(crate) home: Vec3, // captured spawn position, restored on locked axes
+    /// The position restored on locked axes: captured at spawn, re-captured per
+    /// axis at the moment its lock engages (so locking mid-play freezes in place).
+    pub(crate) home: Vec3,
 }
 
 impl Body {

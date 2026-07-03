@@ -49,7 +49,7 @@ pub use world::*;
 
 #[cfg(test)]
 mod tests {
-    use floptle_core::math::{DVec3, Quat, Vec3};
+    use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
     use floptle_core::transform::Transform;
     use floptle_core::{BodyKind, RigidBody, World};
     use floptle_field::Terrain;
@@ -577,5 +577,75 @@ mod tests {
         let t = ecs.get::<Transform>(e).unwrap().translation;
         assert!((t.y - 0.5).abs() < 0.15, "should rest on the terrain surface, y = {}", t.y);
         assert!((t.x - (far.x + 0.25)).abs() < 1e-3, "must not drift in x, x = {}", t.x);
+    }
+
+    #[test]
+    fn lock_from_start_freezes_at_spawn_not_zero() {
+        // Lock Y on a body spawned at (5, 7, 3): it must STAY at y=7 while gravity
+        // pulls — not snap to y=0 (locks restore `home`, which must be the spawn).
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(5.0, 7.0, 3.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, lock_pos: [false, true, false], ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        for _ in 0..60 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((t.y - 7.0).abs() < 1e-3, "locked Y should stay at 7, got {}", t.y);
+    }
+
+    #[test]
+    fn lock_toggled_mid_play_freezes_in_place() {
+        // A lock toggled DURING play (Inspector toggle or a script's `rig.lock_x =
+        // true`, both land via sync_dynamic_params) freezes the body where it IS —
+        // it must NOT teleport back to its spawn position.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(5.0, 7.0, 3.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, gravity: false, ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.world.bodies[0].vel = Vec3::new(1.0, 0.0, 0.0);
+        for _ in 0..30 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let x_before = ecs.get::<Transform>(e).unwrap().translation.x; // ~5.5
+        ecs.get_mut::<RigidBody>(e).unwrap().lock_pos[0] = true;
+        sim.sync_dynamic_params(&ecs);
+        for _ in 0..30 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = ecs.get::<Transform>(e).unwrap().translation;
+        assert!(
+            (t.x - x_before).abs() < 0.05,
+            "mid-play lock must freeze in place: was at x={x_before}, locked to x={}",
+            t.x
+        );
+    }
+
+    #[test]
+    fn rot_lock_toggled_mid_play_keeps_current_rotation() {
+        // Same for rotation: a script yaws the node during play, then locks rot Y —
+        // the writeback must hold the CURRENT yaw, not snap back to the authored 0.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, gravity: false, ..Default::default() });
+
+        let mut sim = Sim::build(&ecs, &[], GravityField::default(), DVec3::ZERO);
+        for _ in 0..5 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        // Play-time rotation (as a script would write), then the lock engages.
+        ecs.get_mut::<Transform>(e).unwrap().rotation = Quat::from_rotation_y(1.0);
+        ecs.get_mut::<RigidBody>(e).unwrap().lock_rot[1] = true;
+        sim.sync_dynamic_params(&ecs);
+        for _ in 0..5 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let (yaw, _, _) = ecs.get::<Transform>(e).unwrap().rotation.to_euler(EulerRot::YXZ);
+        assert!((yaw - 1.0).abs() < 1e-4, "locked yaw should hold at 1.0, got {yaw}");
     }
 }
