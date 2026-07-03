@@ -58,6 +58,9 @@ impl Editor {
                 self.world.insert(e, rb);
                 physics = true;
             }
+            ComponentClip::Particles(p) => {
+                self.world.insert(e, p);
+            }
             ComponentClip::Script(si) => {
                 let scripts = match self.world.get_mut::<Scripts>(e) {
                     Some(s) => s,
@@ -108,6 +111,10 @@ impl Editor {
             self.world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
             self.world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
+        let particles = self
+            .world
+            .get::<floptle_core::ParticleSystem>(e)
+            .map(floptle_scene::ParticleSystemDoc::from_component);
         Some(NodeDoc {
             name,
             transform,
@@ -120,6 +127,7 @@ impl Editor {
             visible,
             cast_shadow,
             anim_controller,
+            particles,
             parent: None,
         })
     }
@@ -159,6 +167,9 @@ impl Editor {
         if let Some(ctl) = &node.anim_controller {
             self.world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
         }
+        if let Some(p) = &node.particles {
+            self.world.insert(e, p.to_component());
+        }
         e
     }
 
@@ -182,6 +193,7 @@ impl Editor {
             visible: true,
             cast_shadow: true,
             anim_controller: None,
+            particles: None,
             parent: None,
         };
         let e = self.spawn_node(&node);
@@ -216,6 +228,7 @@ impl Editor {
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,
+                particles: None,
                 parent: None,
             };
             let e = self.spawn_node(&node);

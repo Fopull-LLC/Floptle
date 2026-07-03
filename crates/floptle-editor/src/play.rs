@@ -183,6 +183,8 @@ impl Editor {
         // Fresh animator runtimes both ways (Play binds against the live scene;
         // Stop drops them so the restored scene isn't posed by stale animators).
         self.anim.clear_instances();
+        // Same for particle instances — nothing emits outside Play (phase 1).
+        self.vfx.clear_instances();
         self.anim_ui.preview_playing = false;
         // Recording must never run during Play (gameplay motion would bake into
         // the clip asset), and stale queued animator commands must not leak
@@ -244,6 +246,8 @@ impl Editor {
                 && let Some(path) = dock.find_tab(&EditorTab::Game) {
                     let _ = dock.set_active_tab(path);
                 }
+            // Spawn play-on-start particle effects on their nodes.
+            self.vfx.start_play(&self.world);
             self.playing = true;
         }
     }

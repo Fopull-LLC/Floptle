@@ -37,7 +37,7 @@ pub use ecs::{Entity, World};
 pub use material::Material;
 pub use matter::{
     world_transform, AnimController, AoMode, BodyKind, CastShadow, Collidable, GravityMode, Light,
-    Matter, MeshCollider, Name, Parent, RigidBody, Shape, Spin, Visible,
+    Matter, MeshCollider, Name, Parent, ParticleSystem, RigidBody, Shape, Spin, Visible,
 };
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;

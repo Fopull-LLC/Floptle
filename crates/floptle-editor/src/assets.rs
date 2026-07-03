@@ -51,6 +51,11 @@ pub(crate) fn is_material(path: &str) -> bool {
 }
 
 /// A scene file (`scenes/<name>.ron`).
+/// A particle effect asset (`*.vfx.ron`).
+pub(crate) fn is_vfx(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(floptle_scene::VFX_EXT)
+}
+
 pub(crate) fn is_scene(path: &str) -> bool {
     let p = path.to_ascii_lowercase().replace('\\', "/");
     p.ends_with(".ron") && p.contains("scenes/")
@@ -79,6 +84,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("▶", egui::Color32::from_rgb(235, 200, 110)) // baked animation clip
     } else if anim_ui::is_anim_ctl(path) {
         ("◉", egui::Color32::from_rgb(180, 160, 250)) // animation controller
+    } else if is_vfx(path) {
+        ("❋", egui::Color32::from_rgb(250, 150, 190)) // particle effect
     } else if path.to_ascii_lowercase().ends_with(".ron") {
         ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
     } else if is_markdown(path) {

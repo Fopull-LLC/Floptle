@@ -111,6 +111,7 @@ impl Editor {
             Some(retro),
             Some(outline),
             Some(grid_render),
+            Some(particles),
             Some(post),
             Some(egui),
             Some(window),
@@ -121,6 +122,7 @@ impl Editor {
             self.retro.as_mut(),
             self.outline.as_ref(),
             self.grid_render.as_mut(),
+            self.particles.as_mut(),
             self.post.as_mut(),
             self.egui.as_mut(),
             self.window.as_ref(),
@@ -607,6 +609,19 @@ impl Editor {
         // is built — the ECS goes back to authored transforms before UI/undo/save.
         self.anim.restore_preview(&mut self.world);
 
+        // Live particle effects (play mode): pack every instance's billboards for
+        // this frame. Owned data — drawn after the grid, before post, so particles
+        // depth-test against the scene and inherit retro/post like everything else.
+        let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
+        let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
+        self.vfx.collect(
+            &self.world,
+            &cam,
+            &self.texture_registry,
+            &mut vfx_instances,
+            &mut vfx_batches,
+        );
+
         // Skybox: a Skybox node drives the environment background — a solid color, or an
         // equirect texture × tint, rotated by the node so a script can spin the sky.
         let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
@@ -875,6 +890,7 @@ impl Editor {
         let tool = self.tool;
         let context_menu = self.context_menu;
         let anim_sys = &mut self.anim;
+        let vfx_sys = &mut self.vfx;
         let anim_ui_state = &mut self.anim_ui;
         let mesh_registry = &self.mesh_registry;
         let mut cmd = EditorCmd::default();
@@ -1045,6 +1061,7 @@ impl Editor {
                 ppp,
                 code_theme,
                 anim: anim_sys,
+                vfx: vfx_sys,
                 anim_ui: anim_ui_state,
                 mesh_registry,
                 pointer_down,
@@ -1662,6 +1679,20 @@ impl Editor {
                         [c[0], c[1], c[2], self.grid.alpha],
                     );
                 }
+                // Live particles: after all opaque work (they depth-test against
+                // meshes AND raymarched matter), before post/retro — so they're
+                // AO'd/bloomed and pixelate with the scene.
+                if !vfx_batches.is_empty() {
+                    particles.draw(
+                        gpu,
+                        color,
+                        depth,
+                        crate::vfx::particle_globals(&cam, aspect),
+                        &vfx_instances,
+                        &vfx_batches,
+                        raster,
+                    );
+                }
                 // Post runs BEFORE any retro upscale, at the scene's composited
                 // resolution. SSAO reads whichever depth the scene rendered with;
                 // in retro mode the chain outputs into the retro color target so
@@ -2070,6 +2101,9 @@ impl Editor {
                 }
                 sim.advance(&mut self.world, sdt, focus);
             }
+            // Particles tick last: emitter node transforms are final for the frame
+            // (scripts → animation → physics → particles).
+            self.vfx.advance(&self.world, sdt);
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }
@@ -2310,6 +2344,52 @@ impl Editor {
             self.world.remove::<floptle_core::RigidBody>(e);
             self.rebuild_sim();
         }
+        if let Some((e, key)) = cmd.add_particles {
+            self.record();
+            self.world.insert(
+                e,
+                floptle_core::ParticleSystem { asset: key.clone(), play_on_start: true },
+            );
+            // Attached mid-play: start emitting right away (live-tweak discipline).
+            if self.playing {
+                self.vfx.spawn(e, &key);
+            }
+        }
+        if let Some(e) = cmd.new_particles {
+            // Write a starter effect asset (unique name), attach it, refresh assets.
+            let mut n = 0;
+            let (key, path) = loop {
+                let key = if n == 0 {
+                    "vfx/NewEffect".to_string()
+                } else {
+                    format!("vfx/NewEffect{n}")
+                };
+                let path = self.project_root.join(format!("{key}{}", floptle_scene::VFX_EXT));
+                if !path.exists() {
+                    break (key, path);
+                }
+                n += 1;
+            };
+            let doc = crate::vfx::starter_effect_doc(key.rsplit('/').next().unwrap_or(&key));
+            if let Err(err) = floptle_scene::save_vfx_effect(&doc, &path) {
+                eprintln!("  new effect {key} failed: {err}");
+            } else {
+                self.vfx.rescan(&self.project_root);
+                self.asset_tree = build_assets(&self.project_root);
+                self.record();
+                self.world.insert(
+                    e,
+                    floptle_core::ParticleSystem { asset: key.clone(), play_on_start: true },
+                );
+                if self.playing {
+                    self.vfx.spawn(e, &key);
+                }
+            }
+        }
+        if let Some(e) = cmd.remove_particles {
+            self.record();
+            self.world.remove::<floptle_core::ParticleSystem>(e);
+        }
         if let Some((e, on)) = cmd.set_mesh_collider {
             self.record();
             if on {
@@ -2549,6 +2629,7 @@ impl Editor {
         if cmd.refresh_assets {
             self.asset_tree = build_assets(&self.project_root);
             self.anim.rescan(&self.project_root);
+            self.vfx.rescan(&self.project_root);
             self.anim_ui.probes.clear(); // re-probe model animation lists
         }
         if let Some(dir) = cmd.new_folder_in {
@@ -2594,6 +2675,16 @@ impl Editor {
             .filter(|p| !self.texture_registry.contains_key(p))
             .collect();
         for p in tex_paths {
+            self.ensure_texture(&p);
+        }
+        // Same for particle track textures (registered effects reference them by path).
+        let vfx_paths: Vec<String> = self
+            .vfx
+            .texture_paths()
+            .into_iter()
+            .filter(|p| !self.texture_registry.contains_key(p))
+            .collect();
+        for p in vfx_paths {
             self.ensure_texture(&p);
         }
     }
@@ -2735,9 +2826,24 @@ impl Editor {
             g
         };
 
-        if let (Some(gpu), Some(raster), Some(raymarch)) =
-            (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
-        {
+        // Live particles render in offscreen views too (the split Game viewport
+        // must show what the game shows).
+        let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
+        let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
+        self.vfx.collect(
+            &self.world,
+            cam,
+            &self.texture_registry,
+            &mut vfx_instances,
+            &mut vfx_batches,
+        );
+
+        if let (Some(gpu), Some(raster), Some(raymarch), Some(particles)) = (
+            self.gpu.as_ref(),
+            self.raster.as_mut(),
+            self.raymarch.as_mut(),
+            self.particles.as_mut(),
+        ) {
             let raster_clear = if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
                 None
@@ -2751,6 +2857,17 @@ impl Editor {
                 gpu, color, depth, globals, &instances, raster_clear,
                 Some(raymarch.field_bind()),
             );
+            if !vfx_batches.is_empty() {
+                particles.draw(
+                    gpu,
+                    color,
+                    depth,
+                    crate::vfx::particle_globals(cam, aspect),
+                    &vfx_instances,
+                    &vfx_batches,
+                    raster,
+                );
+            }
         }
     }
 }
