@@ -17,6 +17,8 @@ pub(crate) enum EditorTab {
     Animation,
     /// The animation controller graph: states, transitions, fades, layers.
     AnimGraph,
+    /// The particle-effect timeline: tracks, clips, bursts, live preview.
+    Particles,
 }
 
 impl EditorTab {
@@ -32,6 +34,7 @@ impl EditorTab {
             EditorTab::Scripting => "Scripting",
             EditorTab::Animation => "✎ Animating",
             EditorTab::AnimGraph => "◉ Controller",
+            EditorTab::Particles => "❋ Particles",
         }
     }
 }
@@ -79,6 +82,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
             EditorTab::Console,
             EditorTab::Animation,
             EditorTab::AnimGraph,
+            EditorTab::Particles,
         ],
     );
     dock

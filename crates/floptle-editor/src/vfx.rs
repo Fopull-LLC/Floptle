@@ -29,16 +29,40 @@ use crate::anim::asset_key;
 /// The gravity particles feel in phase 1 — the default scene "Down" volume's
 /// pull. Per-instance sampling of the real gravity field comes with the GPU
 /// backend phase (where the field is a texture fetch anyway).
-const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
+pub(crate) const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
+
+/// One registered effect asset: the editable doc + its compiled runtime form.
+pub struct VfxAsset {
+    pub doc: VfxEffectDoc,
+    pub compiled: Arc<CompiledEffect>,
+}
+
+impl VfxAsset {
+    fn build(doc: VfxEffectDoc) -> Self {
+        let compiled = Arc::new(effect_from_doc(&doc).compile());
+        Self { doc, compiled }
+    }
+}
+
+/// The Particles tab's live preview: a deterministic instance driven by the
+/// tab's playhead, anchored to a scene node carrying the edited effect (or the
+/// world origin when none does).
+pub struct VfxPreview {
+    pub key: String,
+    pub inst: EffectInstance,
+    pub anchor: Option<Entity>,
+}
 
 /// Everything particles the editor owns. One field on `Editor`.
 #[derive(Default)]
 pub struct VfxSystem {
-    /// `*.vfx.ron` effect assets: (key, compiled), sorted by key.
-    pub effects: Vec<(String, Arc<CompiledEffect>)>,
+    /// `*.vfx.ron` effect assets: (key, doc + compiled), sorted by key.
+    pub effects: Vec<(String, VfxAsset)>,
     /// Live play-mode instances per emitter entity, with the asset key each was
     /// spawned from (an asset swap mid-play rebuilds the instance).
     pub instances: HashMap<Entity, (String, EffectInstance)>,
+    /// The Particles tab's edit-mode preview (drawn only outside Play).
+    pub preview: Option<VfxPreview>,
 }
 
 impl VfxSystem {
@@ -63,27 +87,66 @@ impl VfxSystem {
                 if fname.ends_with(VFX_EXT)
                     && let Ok(doc) = floptle_scene::load_vfx_effect(&p)
                 {
-                    let fx = Arc::new(effect_from_doc(&doc).compile());
-                    self.effects.push((asset_key(&p, &root, VFX_EXT), fx));
+                    self.effects.push((asset_key(&p, &root, VFX_EXT), VfxAsset::build(doc)));
                 }
             }
         }
         self.effects.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
-    /// Look up an effect by key, falling back to a unique file-stem match (the
-    /// anim-registry discipline: moving a file degrades gracefully).
-    pub fn effect(&self, key: &str) -> Option<Arc<CompiledEffect>> {
-        if let Some((_, fx)) = self.effects.iter().find(|(k, _)| k == key) {
-            return Some(Arc::clone(fx));
+    /// The registry key `key` resolves to: exact, else a unique file-stem match
+    /// (the anim-registry discipline: moving a file degrades gracefully).
+    fn resolve_key(&self, key: &str) -> Option<usize> {
+        if let Some(i) = self.effects.iter().position(|(k, _)| k == key) {
+            return Some(i);
         }
         let stem = key.rsplit('/').next()?;
-        let mut hits = self.effects.iter().filter(|(k, _)| k.rsplit('/').next() == Some(stem));
+        let mut hits = self
+            .effects
+            .iter()
+            .enumerate()
+            .filter(|(_, (k, _))| k.rsplit('/').next() == Some(stem));
         let first = hits.next()?;
         if hits.next().is_some() {
             return None; // ambiguous — require the full key
         }
-        Some(Arc::clone(&first.1))
+        Some(first.0)
+    }
+
+    /// Look up a compiled effect by key (with stem fallback).
+    pub fn effect(&self, key: &str) -> Option<Arc<CompiledEffect>> {
+        self.resolve_key(key).map(|i| Arc::clone(&self.effects[i].1.compiled))
+    }
+
+    /// Look up an editable doc by key (with stem fallback).
+    pub fn doc(&self, key: &str) -> Option<&VfxEffectDoc> {
+        self.resolve_key(key).map(|i| &self.effects[i].1.doc)
+    }
+
+    /// Save a doc back to disk + refresh the registry entry in place, and
+    /// re-spawn any live play-mode instances of it so edits land immediately.
+    pub fn save(&mut self, project_root: &Path, key: &str, doc: &VfxEffectDoc) {
+        let path = project_root.join(format!("{key}{VFX_EXT}"));
+        if let Err(e) = floptle_scene::save_vfx_effect(doc, &path) {
+            eprintln!("  save effect {key} failed: {e}");
+            return;
+        }
+        match self.effects.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = VfxAsset::build(doc.clone()),
+            None => {
+                self.effects.push((key.to_string(), VfxAsset::build(doc.clone())));
+                self.effects.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        let respawn: Vec<Entity> = self
+            .instances
+            .iter()
+            .filter(|(_, (k, _))| k == key)
+            .map(|(e, _)| *e)
+            .collect();
+        for e in respawn {
+            self.spawn(e, key);
+        }
     }
 
     /// Drop every live instance (Play start/stop, scene load).
@@ -135,20 +198,25 @@ impl VfxSystem {
         }
     }
 
-    /// Pack every live instance's billboards for this frame, resolving track
-    /// texture paths through the editor's registered-texture map.
+    /// Pack this frame's billboards — every live play instance plus (when
+    /// `include_preview`, i.e. outside Play) the Particles tab's preview —
+    /// resolving track texture paths through the editor's registered-texture map.
     pub fn collect(
         &self,
         world: &World,
         cam: &RenderCamera,
         textures: &HashMap<String, TexId>,
+        include_preview: bool,
         out_instances: &mut Vec<ParticleInstance>,
         out_batches: &mut Vec<ParticleBatch>,
     ) {
         let fwd = cam.rotation * Vec3::NEG_Z;
-        for (e, (_, inst)) in &self.instances {
-            let t = floptle_core::world_transform(world, *e);
-            let xf = t.render_matrix(cam.world_position);
+        let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
+            let xf = match anchor {
+                Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
+                None => floptle_core::transform::Transform::IDENTITY
+                    .render_matrix(cam.world_position),
+            };
             let mut draws = Vec::new();
             collect_billboards(inst, xf, fwd, out_instances, &mut draws);
             for d in draws {
@@ -158,14 +226,23 @@ impl VfxSystem {
                     range: d.range,
                 });
             }
+        };
+        for (e, (_, inst)) in &self.instances {
+            pack(inst, Some(*e));
+        }
+        if include_preview
+            && let Some(p) = &self.preview
+        {
+            pack(&p.inst, p.anchor);
         }
     }
 
     /// Every texture path any registered effect's billboard tracks reference —
-    /// for the editor's texture pre-warm.
+    /// for the editor's texture pre-warm. Includes the live preview's tracks so
+    /// a just-picked (unsaved) texture resolves next frame.
     pub fn texture_paths(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for (_, fx) in &self.effects {
+        let mut scan = |fx: &CompiledEffect| {
             for track in &fx.tracks {
                 if let RenderMode::Billboard { texture: Some(p) } = &track.look.render
                     && !out.contains(p)
@@ -173,6 +250,12 @@ impl VfxSystem {
                     out.push(p.clone());
                 }
             }
+        };
+        for (_, asset) in &self.effects {
+            scan(&asset.compiled);
+        }
+        if let Some(p) = &self.preview {
+            scan(&p.inst.effect);
         }
         out
     }
