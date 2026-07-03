@@ -412,6 +412,7 @@ pub(crate) fn curve_from_doc(c: &VfxCurveDoc) -> Curve {
 fn prop_from_doc(p: &VfxPropDoc) -> ValueOrCurve {
     match p {
         VfxPropDoc::Const(v) => ValueOrCurve::Const(value_from_doc(v)),
+        VfxPropDoc::Range(a, b) => ValueOrCurve::Range(value_from_doc(a), value_from_doc(b)),
         VfxPropDoc::Curve(c) => ValueOrCurve::Curve(curve_from_doc(c)),
     }
 }
