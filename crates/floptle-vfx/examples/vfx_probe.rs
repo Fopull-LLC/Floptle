@@ -154,7 +154,7 @@ impl Harness {
         let fwd = self.cam.rotation * Vec3::NEG_Z;
         let mut packed = Vec::new();
         let mut draws = Vec::new();
-        collect_billboards(&inst, xf, fwd, &mut packed, &mut draws);
+        collect_billboards(&inst, xf, xf, fwd, &mut packed, &mut draws);
         println!(
             "t={t}: alive={} packed={} draws={:?}",
             inst.alive(),

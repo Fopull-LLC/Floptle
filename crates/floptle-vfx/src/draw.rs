@@ -6,7 +6,7 @@
 //! raster [`TexId`](floptle_render::TexId) through its own registry, and issues one
 //! `Particles::draw`.
 
-use crate::effect::{Blend, RenderMode};
+use crate::effect::{Blend, RenderMode, Space};
 use crate::sim::EffectInstance;
 use floptle_core::math::{Mat4, Quat, Vec3};
 use floptle_render::particles::{ParticleBlend, ParticleInstance};
@@ -23,23 +23,27 @@ pub struct BillboardDraw {
 /// Pack every billboard track of `inst` into `instances`, appending one
 /// [`BillboardDraw`] per non-empty track.
 ///
-/// `xf` maps emitter-local space to camera-relative world space (the node's
-/// `render_matrix`, ADR-0015); billboard size scales by its mean axis scale.
-/// `cam_forward` is the camera's view direction in that same space — `Alpha`
-/// tracks are sorted back-to-front along it (`Additive` needs no order).
+/// `local_xf` maps emitter-local space to camera-relative world space (the node's
+/// `render_matrix`, ADR-0015) — used by `Space::Local` tracks; `world_xf` maps the
+/// instance's world anchor to camera-relative space — used by `Space::World` tracks
+/// (whose particles are already world-baked). Billboard size scales by the chosen
+/// transform's mean axis scale. `cam_forward` is the view direction — `Alpha` tracks
+/// sort back-to-front along it (`Additive` needs no order).
 pub fn collect_billboards(
     inst: &EffectInstance,
-    xf: Mat4,
+    local_xf: Mat4,
+    world_xf: Mat4,
     cam_forward: Vec3,
     instances: &mut Vec<ParticleInstance>,
     draws: &mut Vec<BillboardDraw>,
 ) {
-    let scale = {
-        let m = glam_mat3_scale(&xf);
-        (m.0 + m.1 + m.2) / 3.0
-    };
     for (ti, ct) in inst.billboard_tracks() {
         let RenderMode::Billboard { texture } = &ct.look.render else { continue };
+        let xf = if ct.space == Space::World { world_xf } else { local_xf };
+        let scale = {
+            let m = glam_mat3_scale(&xf);
+            (m.0 + m.1 + m.2) / 3.0
+        };
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
@@ -88,14 +92,16 @@ pub struct MeshDraw {
     pub instances: Vec<(Mat4, [f32; 4])>,
 }
 
-/// Collect every mesh-render track of `inst` into `out`. `xf` maps emitter space
-/// to camera-relative world space (the node's `render_matrix`); each particle
-/// becomes `translate(worldpos) · spinY(rotation) · scale(size · emitter_scale)`.
-pub fn collect_mesh_particles(inst: &EffectInstance, xf: Mat4, out: &mut Vec<MeshDraw>) {
-    let s = glam_mat3_scale(&xf);
-    let scale = (s.0 + s.1 + s.2) / 3.0;
+/// Collect every mesh-render track of `inst` into `out`. `local_xf`/`world_xf` map
+/// emitter-local / world-anchor space to camera-relative space (see
+/// [`collect_billboards`]); each particle becomes
+/// `translate(worldpos) · spinY(rotation) · scale(size · emitter_scale)`.
+pub fn collect_mesh_particles(inst: &EffectInstance, local_xf: Mat4, world_xf: Mat4, out: &mut Vec<MeshDraw>) {
     for (ti, ct) in inst.mesh_tracks() {
         let RenderMode::Mesh { asset_path } = &ct.look.render else { continue };
+        let xf = if ct.space == Space::World { world_xf } else { local_xf };
+        let s = glam_mat3_scale(&xf);
+        let scale = (s.0 + s.1 + s.2) / 3.0;
         let mut items = Vec::new();
         inst.sample_track(ti, |p| {
             let world = xf.transform_point3(p.pos);
@@ -151,7 +157,7 @@ mod tests {
         let mut packed = Vec::new();
         let mut draws = Vec::new();
         let fwd = Vec3::Z;
-        collect_billboards(&inst, Mat4::IDENTITY, fwd, &mut packed, &mut draws);
+        collect_billboards(&inst, Mat4::IDENTITY, Mat4::IDENTITY, fwd, &mut packed, &mut draws);
 
         assert_eq!(draws.len(), 1);
         assert_eq!(packed.len(), 20);
@@ -189,7 +195,7 @@ mod tests {
         inst.simulate_to(0.1, Vec3::ZERO);
 
         let mut out = Vec::new();
-        collect_mesh_particles(&inst, Mat4::IDENTITY, &mut out);
+        collect_mesh_particles(&inst, Mat4::IDENTITY, Mat4::IDENTITY, &mut out);
         assert_eq!(out.len(), 1, "one mesh track -> one MeshDraw (billboard track skipped)");
         assert_eq!(out[0].asset_path, "models/Spark.glb");
         assert_eq!(out[0].instances.len(), 5, "one model matrix per live particle");

@@ -452,12 +452,17 @@ impl EditorTabViewer<'_> {
             ui.ctx().request_repaint();
         }
 
+        // The preview emitter = the scene node carrying this effect (static while
+        // editing), so World-space tracks preview at the node rather than the origin.
+        let emitter = anchor_for(self.world, &key)
+            .map(|e| floptle_core::world_transform(self.world, e))
+            .unwrap_or(floptle_core::transform::Transform::IDENTITY);
         let stale = st.preview_rev != st.doc_rev
             || self.vfx.preview.as_ref().is_none_or(|p| p.key != key);
         if stale {
             let fx = Arc::new(effect_from_doc(&doc).compile());
             let mut inst = EffectInstance::new(fx, 1);
-            inst.simulate_to(st.playhead, VFX_GRAVITY);
+            inst.simulate_to_at(st.playhead, VFX_GRAVITY, emitter);
             self.vfx.preview = Some(VfxPreview { key: key.clone(), inst, anchor: None });
             st.preview_rev = st.doc_rev;
             st.sim_t = st.playhead;
@@ -465,11 +470,11 @@ impl EditorTabViewer<'_> {
             if st.playhead >= st.sim_t {
                 let d = st.playhead - st.sim_t;
                 if d > 0.0 {
-                    p.inst.advance(d, VFX_GRAVITY);
+                    p.inst.advance_at(d, VFX_GRAVITY, emitter);
                 }
             } else {
                 // Backward scrub / loop wrap: deterministic re-sim from zero.
-                p.inst.simulate_to(st.playhead, VFX_GRAVITY);
+                p.inst.simulate_to_at(st.playhead, VFX_GRAVITY, emitter);
             }
             st.sim_t = st.playhead;
         }
