@@ -491,7 +491,8 @@ open it in the **Scripting** tab — a small but real code editor:
   the run always matches what you see.
 - **Completion & docs** — typing suggests the engine API *and* identifiers
   from the file, with the highlighted entry's doc shown right in the popup:
-  `↑`/`↓` choose, `Tab`/`Enter` accept, `Esc` hides it. It understands member
+  `↑`/`↓` choose, `Tab` accepts, `Esc` hides it (`Enter` is always just a
+  newline — it never accepts a completion). It understands member
   access on **any variable** — `rb.fri` offers `friction`, `anim:pl` offers
   `play`, and `params.` offers this script's own `defaults` keys. Hovering an
   API name in code shows its doc, and the **§ Docs** page has a search box
