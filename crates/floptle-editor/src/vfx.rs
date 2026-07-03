@@ -517,6 +517,37 @@ mod tests {
     }
 
     #[test]
+    fn timeline_authored_lane_shapes_the_rate_over_seconds() {
+        // The DAW timeline authors automation keys in SECONDS spanning [0, dur]; the
+        // bake normalizes that onto the LUT (domain = lifetime). A Rate lane 1→3 over
+        // a 2 s effect must therefore read 2× at the mid-timeline. Guards that whole
+        // second-domain path from the editor doc through compile.
+        use floptle_scene::{
+            VfxCurveDoc, VfxExtrapolateDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
+            VfxValueDoc,
+        };
+        let mut doc = starter_effect_doc("Ramp");
+        doc.lifetime = 2.0;
+        let key = |t, v| VfxKeyDoc {
+            t,
+            v: VfxValueDoc::F32(v),
+            interp: VfxInterpDoc::Linear,
+            in_tan: 0.0,
+            out_tan: 0.0,
+        };
+        doc.tracks[0].automation.push(VfxLaneDoc {
+            target: VfxLaneTargetDoc::Rate,
+            curve: VfxCurveDoc {
+                keys: vec![key(0.0, 1.0), key(2.0, 3.0)],
+                extrapolate: VfxExtrapolateDoc::Clamp,
+            },
+        });
+        let fx = effect_from_doc(&doc).compile();
+        let m = fx.tracks[0].lane_rate.sample(0.5);
+        assert!((m - 2.0).abs() < 0.05, "rate ×{m} at mid-timeline; expected ≈2");
+    }
+
+    #[test]
     fn rescan_registers_effects_with_stem_fallback() {
         let dir = std::env::temp_dir().join(format!("floptle-vfx-rescan-{}", std::process::id()));
         floptle_scene::save_vfx_effect(
