@@ -46,6 +46,36 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_x number Physics: body up (−gravity) X — radial on a planet.
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
+---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|nil Live component handle (RigidBody / PointLight), nil if the node lacks it.
+
+---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
+---booleans may be written true/false and read back as 1/0.
+---@class RigidBodyHandle
+---@field friction number Surface friction 0..1 (0 = frictionless).
+---@field restitution number Bounciness 0..1 (0 = no bounce).
+---@field gravity number Gravity pull on this body (1/0; assign true/false).
+---@field shape number Body shape: 0 = sphere, 1 = capsule, 2 = box.
+---@field radius number Sphere/capsule radius.
+---@field height number Capsule total height.
+---@field half_x number Box half-extent X.
+---@field half_y number Box half-extent Y.
+---@field half_z number Box half-extent Z.
+---@field lock_x number Freeze world X translation (1/0).
+---@field lock_y number Freeze world Y translation (1/0).
+---@field lock_z number Freeze world Z translation (1/0).
+---@field lock_rot_x number Freeze rotation about X (1/0).
+---@field lock_rot_y number Freeze rotation about Y (1/0).
+---@field lock_rot_z number Freeze rotation about Z (1/0).
+
+---A Point Light's live tunables.
+---@class PointLightHandle
+---@field intensity number Brightness multiplier.
+---@field range number Reach in world units.
+---@field r number Color red 0..1.
+---@field g number Color green 0..1.
+---@field b number Color blue 0..1.
 
 ---This instance's tunables, seeded from the script's `defaults` table.
 ---@type table<string, number>

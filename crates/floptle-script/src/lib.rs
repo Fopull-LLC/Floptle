@@ -288,7 +288,7 @@ mod tests {
     use std::path::Path;
 
     use floptle_core::math::EulerRot;
-    use floptle_core::{Matter, Visible};
+    use floptle_core::{Matter, RigidBody, Visible};
 
     use super::*;
     use crate::env::*;
@@ -808,6 +808,56 @@ mod tests {
             }
             other => panic!("expected point light, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn script_tunes_every_rigidbody_field() {
+        // Every Inspector tunable on a Rigidbody is scriptable: read the mirror,
+        // assign new values (booleans allowed), and the ECS component reflects
+        // them after the same run() — which is what the live sim re-reads.
+        let dir = std::env::temp_dir().join("floptle_script_test_rigidbody");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "ice",
+            "function update(node, dt)\n\
+             local rb = node:getcomponent(\"RigidBody\")\n\
+             rb.friction = 0.02\n\
+             rb.restitution = 0.9\n\
+             rb.gravity = false\n\
+             rb.shape = 2\n\
+             rb.radius = 1.5\n\
+             rb.height = 3.0\n\
+             rb.half_x = 0.25\n\
+             rb.half_y = 0.5\n\
+             rb.half_z = 0.75\n\
+             rb.lock_z = true\n\
+             rb.lock_rot_x = true\n\
+             rb.lock_rot_z = 1\n\
+             if rb.lock_y > 0 then rb.friction = -1 end -- read-back sanity: must be 0\n\
+            end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, RigidBody::default());
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "ice".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let rb = world.get::<RigidBody>(e).unwrap();
+        assert!((rb.friction - 0.02).abs() < 1e-4, "friction = {}", rb.friction);
+        assert!((rb.restitution - 0.9).abs() < 1e-4);
+        assert!(!rb.gravity);
+        assert_eq!(rb.kind, floptle_core::BodyKind::Box);
+        assert!((rb.radius - 1.5).abs() < 1e-4);
+        assert!((rb.height - 3.0).abs() < 1e-4);
+        assert_eq!(rb.half_extents, [0.25, 0.5, 0.75]);
+        assert_eq!(rb.lock_pos, [false, false, true]);
+        assert_eq!(rb.lock_rot, [true, false, true]);
     }
 
     #[test]
