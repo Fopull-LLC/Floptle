@@ -355,7 +355,8 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
             ],
             extrapolate: Default::default(),
         }),
-        rotation: VfxPropDoc::Const(VfxValueDoc::F32(0.0)),
+        rotation: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0])),
+        angular_velocity: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0])),
         color: VfxPropDoc::Curve(VfxCurveDoc {
             keys: vec![
                 key_doc(0.0, VfxValueDoc::Rgba([1.0, 0.9, 0.5, 1.0])),
@@ -493,6 +494,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 velocity: prop_from_doc(&t.velocity),
                 size: prop_from_doc(&t.size),
                 rotation: prop_from_doc(&t.rotation),
+                angular_velocity: prop_from_doc(&t.angular_velocity),
                 color: prop_from_doc(&t.color),
                 gravity: t.gravity,
                 drag: t.drag,

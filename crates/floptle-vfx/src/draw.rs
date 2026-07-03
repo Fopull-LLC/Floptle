@@ -49,7 +49,8 @@ pub fn collect_billboards(
             let world = xf.transform_point3(s.pos);
             let size = s.size * scale;
             instances.push(ParticleInstance {
-                pos_rot: [world.x, world.y, world.z, s.rotation],
+                // Billboards face the camera, so only the roll (z) is a visible spin.
+                pos_rot: [world.x, world.y, world.z, s.rotation.z],
                 size: [size, size, 0.0, 0.0],
                 color: s.color,
             });
@@ -105,9 +106,13 @@ pub fn collect_mesh_particles(inst: &EffectInstance, local_xf: Mat4, world_xf: M
         let mut items = Vec::new();
         inst.sample_track(ti, |p| {
             let world = xf.transform_point3(p.pos);
+            // Full 3D orientation for meshes: yaw (y) · pitch (x) · roll (z).
+            let rot = Quat::from_rotation_y(p.rotation.y)
+                * Quat::from_rotation_x(p.rotation.x)
+                * Quat::from_rotation_z(p.rotation.z);
             let model = Mat4::from_scale_rotation_translation(
                 Vec3::splat((p.size * scale).max(1e-4)),
-                Quat::from_rotation_y(p.rotation),
+                rot,
                 world,
             );
             items.push((model, p.color));

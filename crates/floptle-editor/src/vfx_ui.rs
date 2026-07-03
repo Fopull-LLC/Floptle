@@ -232,11 +232,17 @@ pub(crate) enum LifeProp {
     Velocity,
     Size,
     Rotation,
+    AngularVelocity,
     Color,
 }
 
-const LIFE_PROPS: [LifeProp; 4] =
-    [LifeProp::Velocity, LifeProp::Size, LifeProp::Rotation, LifeProp::Color];
+const LIFE_PROPS: [LifeProp; 5] = [
+    LifeProp::Velocity,
+    LifeProp::Size,
+    LifeProp::Rotation,
+    LifeProp::AngularVelocity,
+    LifeProp::Color,
+];
 
 /// How a lane's value is drawn + edited.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -254,6 +260,7 @@ fn life_prop_name(p: LifeProp) -> &'static str {
         LifeProp::Velocity => "velocity",
         LifeProp::Size => "size",
         LifeProp::Rotation => "rotation",
+        LifeProp::AngularVelocity => "angular vel",
         LifeProp::Color => "colour",
     }
 }
@@ -263,6 +270,7 @@ fn life_prop_doc(track: &VfxTrackDoc, p: LifeProp) -> &VfxPropDoc {
         LifeProp::Velocity => &track.velocity,
         LifeProp::Size => &track.size,
         LifeProp::Rotation => &track.rotation,
+        LifeProp::AngularVelocity => &track.angular_velocity,
         LifeProp::Color => &track.color,
     }
 }
@@ -272,6 +280,7 @@ fn life_prop_doc_mut(track: &mut VfxTrackDoc, p: LifeProp) -> &mut VfxPropDoc {
         LifeProp::Velocity => &mut track.velocity,
         LifeProp::Size => &mut track.size,
         LifeProp::Rotation => &mut track.rotation,
+        LifeProp::AngularVelocity => &mut track.angular_velocity,
         LifeProp::Color => &mut track.color,
     }
 }

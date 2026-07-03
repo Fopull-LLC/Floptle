@@ -333,6 +333,8 @@ fn particle_section(
     *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr);
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
     *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr);
+    ui.small("rotation/angular are Euler radians (x=pitch, y=yaw, z=roll); billboards spin on z only.");
     *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr);
     ui.horizontal(|ui| {
         ui.label("gravity");

@@ -196,6 +196,8 @@ pub struct VfxTrackDoc {
     pub size: VfxPropDoc,
     #[serde(default = "default_rotation")]
     pub rotation: VfxPropDoc,
+    #[serde(default = "default_angular")]
+    pub angular_velocity: VfxPropDoc,
     #[serde(default = "default_color")]
     pub color: VfxPropDoc,
     #[serde(default)]
@@ -257,7 +259,28 @@ fn default_size() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::F32(0.25))
 }
 fn default_rotation() -> VfxPropDoc {
-    VfxPropDoc::Const(VfxValueDoc::F32(0.0))
+    VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0]))
+}
+fn default_angular() -> VfxPropDoc {
+    VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 0.0, 0.0]))
+}
+
+/// Legacy migration: an old scalar rotation (billboard spin) becomes the Vec3 Euler
+/// form with the value on Z (roll), so pre-Vec3 effects keep spinning as before.
+fn upgrade_rotation(prop: &mut VfxPropDoc) {
+    fn up(v: &mut VfxValueDoc) {
+        if let VfxValueDoc::F32(x) = *v {
+            *v = VfxValueDoc::Vec3([0.0, 0.0, x]);
+        }
+    }
+    match prop {
+        VfxPropDoc::Const(v) => up(v),
+        VfxPropDoc::Range(a, b) => {
+            up(a);
+            up(b);
+        }
+        VfxPropDoc::Curve(c) => c.keys.iter_mut().for_each(|k| up(&mut k.v)),
+    }
 }
 fn default_color() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::Rgba([1.0, 1.0, 1.0, 1.0]))
@@ -271,7 +294,11 @@ use std::path::Path;
 
 pub fn load_vfx_effect(path: &Path) -> Result<VfxEffectDoc, SceneError> {
     let text = std::fs::read_to_string(path).map_err(SceneError::Io)?;
-    ron::from_str(&text).map_err(SceneError::Ron)
+    let mut doc: VfxEffectDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
+    for t in &mut doc.tracks {
+        upgrade_rotation(&mut t.rotation); // legacy scalar spin → Vec3 Euler
+    }
+    Ok(doc)
 }
 
 pub fn save_vfx_effect(doc: &VfxEffectDoc, path: &Path) -> Result<(), SceneError> {
@@ -353,6 +380,7 @@ mod tests {
                     extrapolate: VfxExtrapolateDoc::Clamp,
                 }),
                 rotation: default_rotation(),
+                angular_velocity: default_angular(),
                 color: default_color(),
                 gravity: 0.5,
                 drag: 0.1,

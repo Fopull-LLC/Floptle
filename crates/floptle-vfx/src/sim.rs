@@ -60,6 +60,7 @@ const SALT_VELOCITY: u32 = 0x5EED_0001;
 const SALT_SIZE: u32 = 0x5EED_0002;
 const SALT_ROTATION: u32 = 0x5EED_0003;
 const SALT_COLOR: u32 = 0x5EED_0004;
+const SALT_ANGULAR: u32 = 0x5EED_0005;
 
 // ---------------------------------------------------------------------------
 // SoA particle storage
@@ -477,7 +478,9 @@ pub struct ParticleSample {
     /// Emitter-space position (`Space::Local`; the caller applies the node matrix).
     pub pos: Vec3,
     pub size: f32,
-    pub rotation: f32,
+    /// Euler rotation in radians `(x=pitch, y=yaw, z=roll)` — base rotation plus the
+    /// angular velocity integrated over the particle's age.
+    pub rotation: Vec3,
     pub color: [f32; 4],
 }
 
@@ -490,17 +493,21 @@ impl EffectInstance {
         let tint = ct.lane_tint.sample(self.t / self.effect.lifetime);
         for i in 0..p.count {
             let seed = p.seed[i];
-            let u = p.pos_age[i].w / p.vel_life[i].w;
+            let age = p.pos_age[i].w;
+            let u = age / p.vel_life[i].w;
             // Per-particle `Range` randoms resolve from the birth seed (stable over
             // life); `Const`/`Lut` properties ignore the random argument.
             let mut color = ct.color.sample_rand(u, rand01(seed, SALT_COLOR));
             for c in 0..4 {
                 color[c] *= tint[c];
             }
+            // Rotation = base Euler over life + angular velocity integrated over age.
+            let rotation = ct.rotation.sample_vec3_rand(u, rand01(seed, SALT_ROTATION))
+                + ct.angular_velocity.sample_vec3_rand(u, rand01(seed, SALT_ANGULAR)) * age;
             f(ParticleSample {
                 pos: p.pos_age[i].truncate(),
                 size: ct.size.sample_rand(u, rand01(seed, SALT_SIZE)) * p.misc[i].x,
-                rotation: ct.rotation.sample_rand(u, rand01(seed, SALT_ROTATION)),
+                rotation,
                 color,
             });
         }
@@ -763,6 +770,25 @@ mod tests {
         let mut sizes_b = Vec::new();
         b.sample_track(0, |s| sizes_b.push(s.size));
         assert_eq!(sizes_a, sizes_b, "same seed reproduces the same random sizes");
+    }
+
+    #[test]
+    fn angular_velocity_spins_particles_over_age() {
+        // A single particle with angular velocity (0, 2, 0) rad/s: at age t its yaw = 2t.
+        let track = Track {
+            rate: 0.0,
+            bursts: vec![Burst { t: 0.0, count: 1 }],
+            particle_lifetime: 10.0,
+            angular_velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::OneShot);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, NO_G);
+        let mut rot = Vec3::ZERO;
+        inst.sample_track(0, |s| rot = s.rotation);
+        assert!((rot.y - 1.0).abs() < 0.05, "yaw ~1.0 at age 0.5, got {}", rot.y);
+        assert_eq!((rot.x, rot.z), (0.0, 0.0), "only the y axis spins");
     }
 
     #[test]
