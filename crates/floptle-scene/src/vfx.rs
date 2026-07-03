@@ -57,10 +57,13 @@ pub struct VfxCurveDoc {
     pub extrapolate: VfxExtrapolateDoc,
 }
 
-/// A property: one constant OR a drawn curve — the value-or-curve union.
+/// A property: one constant, a per-particle random between two bounds, OR a drawn
+/// curve — the value-or-curve union.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum VfxPropDoc {
     Const(VfxValueDoc),
+    /// Uniform random per particle, resolved at birth and held for its life.
+    Range(VfxValueDoc, VfxValueDoc),
     Curve(VfxCurveDoc),
 }
 
@@ -358,6 +361,14 @@ mod tests {
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
         let back: VfxEffectDoc = ron::from_str(&text).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn range_prop_round_trips() {
+        let p = VfxPropDoc::Range(VfxValueDoc::F32(0.1), VfxValueDoc::F32(0.5));
+        let text = ron::ser::to_string_pretty(&p, Default::default()).unwrap();
+        let back: VfxPropDoc = ron::from_str(&text).unwrap();
+        assert_eq!(p, back);
     }
 
     #[test]

@@ -52,6 +52,14 @@ fn jitter_mul(seed: u32, salt: u32, amount: f32) -> f32 {
     (1.0 + amount * (rand01(seed, salt) * 2.0 - 1.0)).max(1e-3)
 }
 
+/// Per-property RNG salts for `ValueOrCurve::Range` birth values — distinct so a
+/// particle's random size, speed, rotation, and tint are drawn independently (and
+/// stay stable across its life, since they derive from the fixed birth seed).
+const SALT_VELOCITY: u32 = 0x5EED_0001;
+const SALT_SIZE: u32 = 0x5EED_0002;
+const SALT_ROTATION: u32 = 0x5EED_0003;
+const SALT_COLOR: u32 = 0x5EED_0004;
+
 // ---------------------------------------------------------------------------
 // SoA particle storage
 // ---------------------------------------------------------------------------
@@ -343,7 +351,8 @@ fn spawn(
 
     let speed_mul = ct.lane_speed.sample(un);
     let birth_size = ct.lane_size.sample(un);
-    let v0 = frame * ct.velocity.sample_vec3(0.0) * speed_mul;
+    // Birth velocity: value at life 0, resolving a per-particle `Range` from the seed.
+    let v0 = frame * ct.velocity.sample_vec3_rand(0.0, rand01(seed, SALT_VELOCITY)) * speed_mul;
 
     // Constant-velocity particles carry their full velocity in the integrated
     // state; kinematic (curve) ones carry only the gravity-accumulated part and
@@ -416,15 +425,18 @@ impl EffectInstance {
         let p = &self.tracks[track].particles;
         let tint = ct.lane_tint.sample(self.t / self.effect.lifetime);
         for i in 0..p.count {
+            let seed = p.seed[i];
             let u = p.pos_age[i].w / p.vel_life[i].w;
-            let mut color = ct.color.sample(u);
+            // Per-particle `Range` randoms resolve from the birth seed (stable over
+            // life); `Const`/`Lut` properties ignore the random argument.
+            let mut color = ct.color.sample_rand(u, rand01(seed, SALT_COLOR));
             for c in 0..4 {
                 color[c] *= tint[c];
             }
             f(ParticleSample {
                 pos: p.pos_age[i].truncate(),
-                size: ct.size.sample(u) * p.misc[i].x,
-                rotation: ct.rotation.sample(u),
+                size: ct.size.sample_rand(u, rand01(seed, SALT_SIZE)) * p.misc[i].x,
+                rotation: ct.rotation.sample_rand(u, rand01(seed, SALT_ROTATION)),
                 color,
             });
         }
@@ -654,6 +666,39 @@ mod tests {
         let y3 = inst.track_particles(0).pos_age[0].y;
         assert!(y1 > 0.0 && y2 > y1 && y3 > y2, "keeps rising: {y1} {y2} {y3}");
         assert!((y2 - y1) > (y3 - y2), "but decelerates");
+    }
+
+    #[test]
+    fn range_property_varies_per_particle_but_is_deterministic() {
+        // A burst of 32 with a random birth size in [0.1, 1.0]: sizes must spread
+        // across the range, stay inside it, and reproduce exactly for the same seed.
+        let mk = || {
+            one_track_effect(
+                Track {
+                    rate: 0.0,
+                    bursts: vec![Burst { t: 0.0, count: 32 }],
+                    particle_lifetime: 10.0,
+                    size: ValueOrCurve::Range(Value::F32(0.1), Value::F32(1.0)),
+                    ..Track::default()
+                },
+                1.0,
+                Playback::OneShot,
+            )
+        };
+        let mut a = EffectInstance::new(mk(), 7);
+        a.simulate_to(0.1, NO_G);
+        let mut sizes_a = Vec::new();
+        a.sample_track(0, |s| sizes_a.push(s.size));
+        assert_eq!(sizes_a.len(), 32);
+        assert!(sizes_a.iter().all(|&s| (0.1..=1.0).contains(&s)), "all inside the range");
+        let first = sizes_a[0];
+        assert!(sizes_a.iter().any(|&s| (s - first).abs() > 1e-3), "sizes must genuinely vary");
+
+        let mut b = EffectInstance::new(mk(), 7);
+        b.simulate_to(0.1, NO_G);
+        let mut sizes_b = Vec::new();
+        b.sample_track(0, |s| sizes_b.push(s.size));
+        assert_eq!(sizes_a, sizes_b, "same seed reproduces the same random sizes");
     }
 
     #[test]

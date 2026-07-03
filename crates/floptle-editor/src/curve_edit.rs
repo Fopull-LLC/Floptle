@@ -65,13 +65,23 @@ pub(crate) fn value_or_curve(
         match prop {
             VfxPropDoc::Const(v) => {
                 changed |= const_editor(ui, v);
-                if ui
+                // Both promote buttons render every frame; the value is read once
+                // afterwards so reassigning `prop` can't conflict with `v`'s borrow.
+                let to_range = ui
+                    .small_button("🎲")
+                    .on_hover_text("randomize per particle between two values")
+                    .clicked();
+                let to_curve = ui
                     .small_button("∿")
                     .on_hover_text("animate this over the particle's life (make a curve)")
-                    .clicked()
-                {
+                    .clicked();
+                let start = *v;
+                if to_range {
+                    // Seed both bounds at the current value; the artist widens the high one.
+                    *prop = VfxPropDoc::Range(start, start);
+                    changed = true;
+                } else if to_curve {
                     // Seed a flat curve at the current constant, first channel.
-                    let start = *v;
                     *prop = VfxPropDoc::Curve(VfxCurveDoc {
                         keys: vec![
                             VfxKeyDoc { t: 0.0, v: start, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 },
@@ -81,6 +91,21 @@ pub(crate) fn value_or_curve(
                     });
                     *expanded = Some(label.to_string());
                     *vrange = None;
+                    changed = true;
+                }
+            }
+            VfxPropDoc::Range(a, b) => {
+                changed |= const_editor(ui, a);
+                ui.label("🎲")
+                    .on_hover_text("random per particle between the low and high value");
+                changed |= const_editor(ui, b);
+                let demote = ui
+                    .small_button("→•")
+                    .on_hover_text("back to a single value (the low bound)")
+                    .clicked();
+                let low = *a;
+                if demote {
+                    *prop = VfxPropDoc::Const(low);
                     changed = true;
                 }
             }

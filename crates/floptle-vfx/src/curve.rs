@@ -134,11 +134,14 @@ impl Curve {
     }
 }
 
-/// A property that is a single constant OR a drawn curve. `Const` is the default;
-/// the inspector's hover-corner graph icon promotes it (proposal §6.4).
+/// A property that is a single constant, a per-particle random between two bounds,
+/// OR a drawn curve. `Const` is the default; the inspector promotes it to a `Range`
+/// (🎲) or a `Curve` (∿). A `Range` value is drawn once at the particle's birth from
+/// its seed and held for its whole life — "random size 0.1–0.4 per spark".
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValueOrCurve {
     Const(Value),
+    Range(Value, Value),
     Curve(Curve),
 }
 
@@ -152,10 +155,12 @@ impl ValueOrCurve {
 // Baked (compiled) properties — what the sim actually samples.
 // ---------------------------------------------------------------------------
 
-/// A baked scalar property: constant, or `LUT_N` samples over the domain `[0,1]`.
+/// A baked scalar property: constant, per-particle random `[min,max]`, or `LUT_N`
+/// samples over the domain `[0,1]`.
 #[derive(Clone, Debug)]
 pub enum Prop1 {
     Const(f32),
+    Range(f32, f32),
     Lut(Box<[f32; LUT_N]>),
 }
 
@@ -163,6 +168,7 @@ pub enum Prop1 {
 #[derive(Clone, Debug)]
 pub enum Prop4 {
     Const([f32; 4]),
+    Range([f32; 4], [f32; 4]),
     Lut(Box<[[f32; 4]; LUT_N]>),
 }
 
@@ -175,10 +181,21 @@ fn lut_pos(u: f32) -> (usize, usize, f32) {
 }
 
 impl Prop1 {
+    /// Sample with no per-particle randomness — for LUTs and constants (automation
+    /// lanes use this). A `Range` collapses to its midpoint; only per-particle
+    /// sampling ([`Prop1::sample_rand`]) resolves the random.
     #[inline]
     pub fn sample(&self, u: f32) -> f32 {
+        self.sample_rand(u, 0.5)
+    }
+
+    /// Sample at life-fraction `u` with a per-particle random `r ∈ [0,1)`. `Const`
+    /// and `Lut` ignore `r`; `Range` lerps between its bounds by it (ignoring `u`).
+    #[inline]
+    pub fn sample_rand(&self, u: f32, r: f32) -> f32 {
         match self {
             Prop1::Const(v) => *v,
+            Prop1::Range(a, b) => a + (b - a) * r,
             Prop1::Lut(s) => {
                 let (i, j, f) = lut_pos(u);
                 s[i] + (s[j] - s[i]) * f
@@ -188,10 +205,23 @@ impl Prop1 {
 }
 
 impl Prop4 {
+    /// See [`Prop1::sample`] — no per-particle randomness (midpoint for a `Range`).
     #[inline]
     pub fn sample(&self, u: f32) -> [f32; 4] {
+        self.sample_rand(u, 0.5)
+    }
+
+    /// Sample at `u` with a per-particle random `r` (see [`Prop1::sample_rand`]).
+    #[inline]
+    pub fn sample_rand(&self, u: f32, r: f32) -> [f32; 4] {
         match self {
             Prop4::Const(v) => *v,
+            Prop4::Range(a, b) => [
+                a[0] + (b[0] - a[0]) * r,
+                a[1] + (b[1] - a[1]) * r,
+                a[2] + (b[2] - a[2]) * r,
+                a[3] + (b[3] - a[3]) * r,
+            ],
             Prop4::Lut(s) => {
                 let (i, j, f) = lut_pos(u);
                 let (a, b) = (s[i], s[j]);
@@ -207,7 +237,12 @@ impl Prop4 {
 
     #[inline]
     pub fn sample_vec3(&self, u: f32) -> Vec3 {
-        let v = self.sample(u);
+        self.sample_vec3_rand(u, 0.5)
+    }
+
+    #[inline]
+    pub fn sample_vec3_rand(&self, u: f32, r: f32) -> Vec3 {
+        let v = self.sample_rand(u, r);
         Vec3::new(v[0], v[1], v[2])
     }
 }
@@ -218,6 +253,7 @@ impl Prop4 {
 pub fn bake1(p: &ValueOrCurve, domain: f32) -> Prop1 {
     match p {
         ValueOrCurve::Const(v) => Prop1::Const(v.channels()[0]),
+        ValueOrCurve::Range(a, b) => Prop1::Range(a.channels()[0], b.channels()[0]),
         ValueOrCurve::Curve(c) => {
             let mut s = Box::new([0.0f32; LUT_N]);
             for (i, out) in s.iter_mut().enumerate() {
@@ -233,6 +269,7 @@ pub fn bake1(p: &ValueOrCurve, domain: f32) -> Prop1 {
 pub fn bake4(p: &ValueOrCurve, domain: f32) -> Prop4 {
     match p {
         ValueOrCurve::Const(v) => Prop4::Const(v.channels()),
+        ValueOrCurve::Range(a, b) => Prop4::Range(a.channels(), b.channels()),
         ValueOrCurve::Curve(c) => {
             let mut s = Box::new([[0.0f32; 4]; LUT_N]);
             for (i, out) in s.iter_mut().enumerate() {
@@ -308,6 +345,28 @@ mod tests {
         let c = Curve { keys: vec![key(0.0, 0.0), key(2.0, 8.0)], extrapolate: Extrapolate::Clamp };
         let baked = bake1(&ValueOrCurve::Curve(c), 2.0);
         assert!((baked.sample(0.5) - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn range_prop_lerps_between_bounds_by_random() {
+        let p = bake1(&ValueOrCurve::Range(Value::F32(1.0), Value::F32(3.0)), 1.0);
+        assert_eq!(p.sample_rand(0.0, 0.0), 1.0);
+        assert_eq!(p.sample_rand(0.0, 1.0), 3.0);
+        assert!((p.sample_rand(0.0, 0.5) - 2.0).abs() < 1e-6);
+        // The life-fraction is ignored for a range (it's a birth constant)…
+        assert_eq!(p.sample_rand(0.9, 0.25), p.sample_rand(0.1, 0.25));
+        // …and the random-free sampler (lanes) collapses it to the midpoint.
+        assert!((p.sample(0.0) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn range_prop4_lerps_all_channels() {
+        let p = bake4(
+            &ValueOrCurve::Range(Value::Rgba([0.0; 4]), Value::Rgba([1.0, 2.0, 3.0, 4.0])),
+            1.0,
+        );
+        assert_eq!(p.sample_rand(0.0, 0.5), [0.5, 1.0, 1.5, 2.0]);
+        assert_eq!(p.sample_vec3_rand(0.0, 1.0), Vec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]
