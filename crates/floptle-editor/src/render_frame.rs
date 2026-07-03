@@ -53,121 +53,13 @@ impl Editor {
         let preview_view = self.preview_view();
 
         // Live Lua syntax check for the active IDE file (drives red squiggles).
-        self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
-            if f.path.ends_with(".lua") {
-                self.script_host.check_syntax(&f.text)
-            } else {
-                None
-            }
-        });
+        self.check_active_script_syntax();
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
-        // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
-        // when the globals are built. Only structural changes (add/edit/delete/resize)
-        // re-upload the volume set into the shared 3D atlas. Static collider MESHES
-        // join the same atlas as shadow-only occluder volumes (they cast, never draw).
-        let occluders_changed = self.refresh_mesh_occluders();
-        if self.terrain_gpu_dirty || occluders_changed {
-            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
-                // Deterministic slot order (by Matter::Terrain id) so the globals'
-                // per-frame fill always matches the atlas layout.
-                let mut items: Vec<(u32, Entity)> = self
-                    .terrains
-                    .keys()
-                    .map(|&e| {
-                        let id = match self.world.get::<Matter>(e) {
-                            Some(Matter::Terrain { id }) => *id,
-                            _ => 0,
-                        };
-                        (id, e)
-                    })
-                    .collect();
-                items.sort_by_key(|(id, _)| *id);
-                let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
-                // Occluders upload AFTER the terrains (stable order by asset + name,
-                // so identical content always lays out identically).
-                let mut occ_items: Vec<(String, Entity)> = self
-                    .mesh_occluders
-                    .iter()
-                    .map(|(&e, (key, _))| {
-                        let name =
-                            self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
-                        (format!("{}\u{1}{name}", key.0), e)
-                    })
-                    .collect();
-                occ_items.sort_by(|a, b| a.0.cmp(&b.0));
-                let occ_entities: Vec<Entity> = occ_items.iter().map(|(_, e)| *e).collect();
-                let mut baked: Vec<&floptle_field::BakedSdf> =
-                    entities.iter().map(|e| &self.terrains[e].baked).collect();
-                baked.extend(occ_entities.iter().map(|e| &*self.mesh_occluders[e].1));
-                let accepted = raymarch.set_volumes(gpu, &baked);
-                let total = entities.len() + occ_entities.len();
-                if accepted < total {
-                    // Never drop content silently: colliders still work, but say so.
-                    self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        format!(
-                            "{} volume(s) (terrain / mesh shadow occluders) exceed the GPU volume budget and won't render or cast (collision is unaffected)",
-                            total - accepted
-                        ),
-                        None,
-                    );
-                }
-                let t_kept = accepted.min(entities.len());
-                self.terrain_slots = entities[..t_kept].to_vec();
-                self.occluder_slots = occ_entities[..accepted - t_kept].to_vec();
-                self.terrain_gpu_dirty = false;
-                self.terrain_region_dirty = None; // the full upload supersedes any region
-                self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
-            }
-        } else if let Some((e, mn, mx, geom)) = self.terrain_region_dirty.take() {
-            // Fast paint/sculpt path: upload only the dabbed voxel box into this
-            // terrain's atlas slot — its field maps 1:1 at native resolution.
-            if let (Some(gpu), Some(raymarch), Some(t), Some(slot)) = (
-                self.gpu.as_ref(),
-                self.raymarch.as_mut(),
-                self.terrains.get(&e),
-                self.terrain_slots.iter().position(|&se| se == e),
-            ) {
-                raymarch.set_volume_region(gpu, slot, &t.baked, mn, mx);
-            }
-            if geom {
-                // Sculpt moved this terrain's surface — rebuild just its wireframe.
-                self.terrain_wire_world.retain(|(we, _)| *we != e);
-            }
-        }
-        // Re-upload the terrain texture palette when it changes. Each slot resolves
-        // to a 256² layer (empty / unreadable slots become white so indices align).
-        if self.terrain_textures_dirty {
-            let layers: Vec<floptle_render::TextureData> = self
-                .terrain_textures
-                .iter()
-                .map(|p| {
-                    if !p.is_empty()
-                        && let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
-                            return t;
-                        }
-                    floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
-                })
-                .collect();
-            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
-                raymarch.set_terrain_textures(gpu, &layers);
-            }
-            self.terrain_textures_dirty = false;
-        }
-        // Re-upload the skybox texture when the skybox node's texture path changes.
-        let sky_tex_path = self.world.query::<Matter>().find_map(|(_, m)| match m {
-            Matter::Skybox { texture, .. } => texture.clone(),
-            _ => None,
-        });
-        if sky_tex_path != self.sky_texture_loaded {
-            let data = sky_tex_path.as_ref().and_then(|p| floptle_assets::load_texture(Path::new(p)));
-            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
-                raymarch.set_sky_texture(gpu, data.as_ref());
-            }
-            self.sky_texture_loaded = sky_tex_path;
-        }
-
+        // terrain needs NO GPU work — only structural changes re-upload into the
+        // shared 3D atlas (where shadow-only mesh occluders also live).
+        self.sync_terrain_gpu();
+        self.sync_sky_texture();
         // Inspector camera POV preview: if a Camera node is selected, render the scene
         // from its viewpoint into the 16:9 offscreen target (before the destructure).
         let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
@@ -183,6 +75,34 @@ impl Editor {
         // when both tabs show, input goes to whichever viewport the mouse is over and the
         // Scene view stays fully interactive.
         let game_focused = self.game_view();
+
+        // Nothing to drive until the window + GPU stack exist. (The borrows
+        // themselves are taken per stage, and by the gather/draw core below.)
+        if self.gpu.is_none()
+            || self.raster.is_none()
+            || self.raymarch.is_none()
+            || self.retro.is_none()
+            || self.outline.is_none()
+            || self.grid_render.is_none()
+            || self.post.is_none()
+            || self.egui.is_none()
+            || self.window.is_none()
+        {
+            return;
+        }
+
+        let (dt, elapsed) = self.advance_clock(game_focused);
+        // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
+        // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
+        // so it only touches disjoint fields while gpu/egui are borrowed. Not while
+        // playing — script-driven transforms must not enter the undo history.
+        if !self.playing {
+            self.frame_snapshot =
+                Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
+        }
+
+        self.play_step(dt, game_focused);
+        self.finish_input_frame();
 
         let (
             Some(gpu),
@@ -208,248 +128,6 @@ impl Editor {
             return;
         };
         let window = window.clone();
-
-        let now = Instant::now();
-        let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
-        self.last = Some(now);
-        let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
-        // Don't drive the editor (Scene) camera while the Game viewport is focused — that
-        // input belongs to the game (e.g. the mouse is over the Game view in split mode).
-        if !game_focused {
-            self.camera.update(&self.input, dt);
-        }
-
-        // FPS in the window title (smoothed, refreshed a few times a second).
-        if dt > 0.0 {
-            let inst = 1.0 / dt;
-            self.fps = if self.fps > 0.0 { self.fps * 0.9 + inst * 0.1 } else { inst };
-            self.fps_timer += dt;
-            if self.fps_timer >= 0.4 {
-                self.fps_timer = 0.0;
-                window.set_title(&format!("Floptle Editor — {:.0} fps", self.fps));
-            }
-        }
-
-        // Glide an in-progress focus (F). Any WASD/Space/C input hands control back
-        // to the user immediately. Only the camera position eases; the view angle is
-        // left to mouse-look, so you can look around mid-glide.
-        if self.focus_anim.is_some() {
-            let moving = self.input.forward
-                || self.input.back
-                || self.input.left
-                || self.input.right
-                || self.input.up
-                || self.input.down;
-            if moving {
-                self.focus_anim = None;
-            } else {
-                let (from, to, t) = {
-                    let a = self.focus_anim.as_mut().unwrap();
-                    a.t += dt;
-                    (a.from, a.to, a.t)
-                };
-                let k = (t / FOCUS_SECS).clamp(0.0, 1.0);
-                let eased = 1.0 - (1.0 - k).powi(3); // ease-out cubic
-                self.camera.position = from.lerp(to, eased as f64);
-                if k >= 1.0 {
-                    self.focus_anim = None;
-                }
-            }
-        }
-
-        // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
-        // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
-        // so it only touches disjoint fields while gpu/egui are borrowed. Not while
-        // playing — script-driven transforms must not enter the undo history.
-        if !self.playing {
-            self.frame_snapshot =
-                Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
-        }
-
-        // Play mode: advance the (pausable) script clock and run the Lua scripts
-        // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
-        if self.playing {
-            // Pausing freezes the clock AND the frame delta scripts see, so
-            // dt-driven motion stops too (not just `time`-driven motion).
-            let sdt = if self.paused { 0.0 } else { dt };
-            self.play_t += sdt;
-            // Direct field access (not the `scripts_dir()` method) so we don't take
-            // a whole-`self` borrow while gpu/egui are mutably borrowed here.
-            let dir = self.project_root.join("scripts");
-            // Feed the physics body state to scripts so they can read node.grounded and
-            // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
-            if let Some(sim) = self.sim.as_ref() {
-                let mut states = HashMap::new();
-                for (e, vel, up, grounded, height) in sim.body_states() {
-                    states.insert(
-                        e.index(),
-                        floptle_script::BodyState {
-                            vel: [vel.x, vel.y, vel.z],
-                            up: [up.x, up.y, up.z],
-                            grounded,
-                            height,
-                        },
-                    );
-                }
-                self.script_host.set_bodies(states);
-            }
-            // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
-            // Game view is focused. In the Scene view you're editing, not playing, so the
-            // game gets neutral input (the character stops moving) even though physics
-            // keeps simulating.
-            self.script_host.set_input(if game_focused {
-                floptle_script::InputSnapshot {
-                    keys_down: self.input_keys.clone(),
-                    keys_pressed: self.input_keys_pressed.clone(),
-                    keys_released: self.input_keys_released.clone(),
-                    mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
-                    mouse_delta: self.input_mouse_delta,
-                    scroll: self.input_scroll,
-                    buttons_down: self.input_buttons,
-                    buttons_pressed: self.input_buttons_pressed,
-                }
-            } else {
-                floptle_script::InputSnapshot::default()
-            });
-            // Lend the sim's colliders to scripts so `raycast(...)` works this frame
-            // (physics doesn't step until after scripts, so this is safe). The sim
-            // origin rides along so ray coordinates convert world ↔ sim frame.
-            if let Some(sim) = self.sim.as_mut() {
-                self.script_host
-                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
-            }
-            // Lend the asset root (for `assets.getFile/getContents`) and the material
-            // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
-            self.script_host.set_project_root(self.project_root.clone());
-            self.script_host.set_materials(
-                self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
-            );
-            // Feed each animator's state (layers/current/time) so scripts can read
-            // anim:state()/:time()/:clips() this frame.
-            self.script_host.set_anim_info(anim::build_info(&self.anim));
-            self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
-            self.script_errors = self.script_host.errors().to_vec();
-            // Apply any mouse lock/unlock a script requested this frame (grab + hide the
-            // cursor for free-look, or release it). The state persists until changed/Stop.
-            // Script debug gizmos queued this frame (drawn by the viewport overlay).
-            self.script_gizmos = self.script_host.take_gizmos();
-            if let Some(want) = self.script_host.take_mouse_lock() {
-                self.script_mouse_lock = want;
-                if let Some(window) = self.window.as_ref() {
-                    self.cursor_lock_soft = grab_cursor(window, want);
-                }
-            }
-            // GPU-load any models a script swapped via `node.model` (the Matter is already
-            // updated by run; we re-import here so the new mesh renders THIS frame). Inlined
-            // with the in-scope `gpu`/`raster` borrows — `self.import_model` can't run while
-            // they're held.
-            for (_eid, path) in self.script_host.take_model_changes() {
-                if !self.mesh_registry.contains_key(&path) {
-                    // Rigged first (animated glTF keeps its node tree + clips).
-                    match floptle_assets::import_rigged(std::path::Path::new(&path)) {
-                        Ok(Some(model)) => {
-                            let parts = model
-                                .parts
-                                .iter()
-                                .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
-                                .collect();
-                            let rig = anim::rig_from_model(&model);
-                            self.mesh_registry.insert(
-                                path.clone(),
-                                MeshAsset { parts, size: model.size, rig: Some(rig) },
-                            );
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(e) => eprintln!("  rig swap-import {path} failed ({e}); trying static"),
-                    }
-                    match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
-                        Ok(model) => {
-                            let parts = model
-                                .parts
-                                .iter()
-                                .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
-                                .collect();
-                            self.mesh_registry
-                                .insert(path.clone(), MeshAsset { parts, size: model.size, rig: None });
-                        }
-                        Err(e) => eprintln!("  swap-import {path} failed: {e}"),
-                    }
-                }
-            }
-            // Animation: bind + apply queued Lua animator commands + advance every
-            // controller (ordering: scripts → animation → physics), then dispatch
-            // fired clip events back into the node's scripts.
-            let anim_cmds = self.script_host.take_anim_commands();
-            let fired = anim::advance_animators(
-                &mut self.anim,
-                &mut self.world,
-                &self.mesh_registry,
-                sdt,
-                anim_cmds,
-            );
-            for (eid, func) in fired {
-                self.script_host.call_function(&mut self.world, eid, &func);
-            }
-            // Animator warnings (e.g. play() on a state name the controller
-            // doesn't have) surface in the Console, once per name.
-            for msg in self.anim.warnings.drain(..) {
-                self.console.push(floptle_script::LogLevel::Warn, msg, None);
-            }
-            // Event handlers can log/raise — surface those in the Scripting tab
-            // (run() cleared + snapshotted errors before the dispatch above).
-            if !self.script_host.errors().is_empty() {
-                self.script_errors = self.script_host.errors().to_vec();
-            }
-            // Apply script velocity writes, then advance physics (writes transforms back).
-            // Gravity field is rebuilt from the scene's GravityVolume node(s) every frame
-            // (cheap scan) so tweaking mode/strength/radius — or moving the volume — takes
-            // effect immediately instead of needing a Stop/Play. The active camera is the
-            // floating-origin focus: drift far enough and the sim recenters on it.
-            let focus = self.world.query::<Matter>().find_map(|(e, m)| {
-                matches!(m, Matter::Camera { active: true, .. })
-                    .then(|| floptle_core::world_transform(&self.world, e).translation)
-            });
-            if let Some(sim) = self.sim.as_mut() {
-                sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
-                sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
-                // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
-                // restitution, gravity, pos/rot locks) into the running bodies each frame —
-                // no teleport.
-                sim.sync_dynamic_params(&self.world);
-                for (eid, v) in self.script_host.take_body_changes() {
-                    sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
-                }
-                for (eid, h) in self.script_host.take_body_height_changes() {
-                    sim.set_body_height(eid, h);
-                }
-                sim.advance(&mut self.world, sdt, focus);
-            }
-        } else if !self.script_errors.is_empty() {
-            self.script_errors.clear();
-        }
-        // Clear per-frame input edges after scripts consumed them.
-        self.input_keys_pressed.clear();
-        self.input_keys_released.clear();
-        self.input_buttons_pressed = [false; 3];
-        self.input_mouse_delta = (0.0, 0.0);
-        self.input_scroll = 0.0;
-        // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
-        // wander inside the window — pin it to the center ourselves while a
-        // look/lock is active. Look input reads RAW device motion, so this
-        // re-centering never pollutes the deltas.
-        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking)
-            && let Some(window) = self.window.as_ref() {
-                let sz = window.inner_size();
-                let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                    sz.width / 2,
-                    sz.height / 2,
-                ));
-            }
-        // Drain any script logs/errors into the Console (consecutive dups merge).
-        for l in self.script_host.drain_logs() {
-            self.console.push(l.level, l.msg, l.source);
-        }
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
@@ -2066,6 +1744,401 @@ impl Editor {
                 eprintln!("  save project failed: {e}");
             }
 
+        self.apply_frame_commands(cmd, frame_pointer_down);
+    }
+
+    /// Live Lua syntax check for the active IDE file (drives the red squiggle).
+    fn check_active_script_syntax(&mut self) {
+        // Live Lua syntax check for the active IDE file (drives red squiggles).
+        self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
+            if f.path.ends_with(".lua") {
+                self.script_host.check_syntax(&f.text)
+            } else {
+                None
+            }
+        });
+    }
+
+    /// Per-frame GPU sync for SDF matter: upload structurally-changed terrain
+    /// volumes + shadow-occluder bakes into the shared 3D atlas (or just the
+    /// dabbed region on the fast sculpt path), and refresh the texture palette.
+    fn sync_terrain_gpu(&mut self) {
+        // Terrain volumes render PER-VOLUME, each at native resolution: moving a
+        // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
+        // when the globals are built. Only structural changes (add/edit/delete/resize)
+        // re-upload the volume set into the shared 3D atlas. Static collider MESHES
+        // join the same atlas as shadow-only occluder volumes (they cast, never draw).
+        let occluders_changed = self.refresh_mesh_occluders();
+        if self.terrain_gpu_dirty || occluders_changed {
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                // Deterministic slot order (by Matter::Terrain id) so the globals'
+                // per-frame fill always matches the atlas layout.
+                let mut items: Vec<(u32, Entity)> = self
+                    .terrains
+                    .keys()
+                    .map(|&e| {
+                        let id = match self.world.get::<Matter>(e) {
+                            Some(Matter::Terrain { id }) => *id,
+                            _ => 0,
+                        };
+                        (id, e)
+                    })
+                    .collect();
+                items.sort_by_key(|(id, _)| *id);
+                let entities: Vec<Entity> = items.iter().map(|&(_, e)| e).collect();
+                // Occluders upload AFTER the terrains (stable order by asset + name,
+                // so identical content always lays out identically).
+                let mut occ_items: Vec<(String, Entity)> = self
+                    .mesh_occluders
+                    .iter()
+                    .map(|(&e, (key, _))| {
+                        let name =
+                            self.world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
+                        (format!("{}\u{1}{name}", key.0), e)
+                    })
+                    .collect();
+                occ_items.sort_by(|a, b| a.0.cmp(&b.0));
+                let occ_entities: Vec<Entity> = occ_items.iter().map(|(_, e)| *e).collect();
+                let mut baked: Vec<&floptle_field::BakedSdf> =
+                    entities.iter().map(|e| &self.terrains[e].baked).collect();
+                baked.extend(occ_entities.iter().map(|e| &*self.mesh_occluders[e].1));
+                let accepted = raymarch.set_volumes(gpu, &baked);
+                let total = entities.len() + occ_entities.len();
+                if accepted < total {
+                    // Never drop content silently: colliders still work, but say so.
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!(
+                            "{} volume(s) (terrain / mesh shadow occluders) exceed the GPU volume budget and won't render or cast (collision is unaffected)",
+                            total - accepted
+                        ),
+                        None,
+                    );
+                }
+                let t_kept = accepted.min(entities.len());
+                self.terrain_slots = entities[..t_kept].to_vec();
+                self.occluder_slots = occ_entities[..accepted - t_kept].to_vec();
+                self.terrain_gpu_dirty = false;
+                self.terrain_region_dirty = None; // the full upload supersedes any region
+                self.terrain_wire_world.clear(); // terrain changed → rebuild the wireframe
+            }
+        } else if let Some((e, mn, mx, geom)) = self.terrain_region_dirty.take() {
+            // Fast paint/sculpt path: upload only the dabbed voxel box into this
+            // terrain's atlas slot — its field maps 1:1 at native resolution.
+            if let (Some(gpu), Some(raymarch), Some(t), Some(slot)) = (
+                self.gpu.as_ref(),
+                self.raymarch.as_mut(),
+                self.terrains.get(&e),
+                self.terrain_slots.iter().position(|&se| se == e),
+            ) {
+                raymarch.set_volume_region(gpu, slot, &t.baked, mn, mx);
+            }
+            if geom {
+                // Sculpt moved this terrain's surface — rebuild just its wireframe.
+                self.terrain_wire_world.retain(|(we, _)| *we != e);
+            }
+        }
+        // Re-upload the terrain texture palette when it changes. Each slot resolves
+        // to a 256² layer (empty / unreadable slots become white so indices align).
+        if self.terrain_textures_dirty {
+            let layers: Vec<floptle_render::TextureData> = self
+                .terrain_textures
+                .iter()
+                .map(|p| {
+                    if !p.is_empty()
+                        && let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
+                            return t;
+                        }
+                    floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
+                })
+                .collect();
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                raymarch.set_terrain_textures(gpu, &layers);
+            }
+            self.terrain_textures_dirty = false;
+        }
+    }
+
+    /// (Re)upload the skybox equirect when the Skybox node's texture changes.
+    fn sync_sky_texture(&mut self) {
+        // Re-upload the skybox texture when the skybox node's texture path changes.
+        let sky_tex_path = self.world.query::<Matter>().find_map(|(_, m)| match m {
+            Matter::Skybox { texture, .. } => texture.clone(),
+            _ => None,
+        });
+        if sky_tex_path != self.sky_texture_loaded {
+            let data = sky_tex_path.as_ref().and_then(|p| floptle_assets::load_texture(Path::new(p)));
+            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                raymarch.set_sky_texture(gpu, data.as_ref());
+            }
+            self.sky_texture_loaded = sky_tex_path;
+        }
+    }
+
+    /// Advance the frame clock: `dt`/`elapsed`, the editor fly-camera (unless
+    /// the Game view owns input), the smoothed FPS title, and the F-key focus
+    /// glide. Returns `(dt, elapsed)`.
+    fn advance_clock(&mut self, game_focused: bool) -> (f32, f32) {
+        let now = Instant::now();
+        let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
+        self.last = Some(now);
+        let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
+        // Don't drive the editor (Scene) camera while the Game viewport is focused — that
+        // input belongs to the game (e.g. the mouse is over the Game view in split mode).
+        if !game_focused {
+            self.camera.update(&self.input, dt);
+        }
+
+        // FPS in the window title (smoothed, refreshed a few times a second).
+        if dt > 0.0 {
+            let inst = 1.0 / dt;
+            self.fps = if self.fps > 0.0 { self.fps * 0.9 + inst * 0.1 } else { inst };
+            self.fps_timer += dt;
+            if self.fps_timer >= 0.4 {
+                self.fps_timer = 0.0;
+                if let Some(window) = self.window.as_ref() {
+                    window.set_title(&format!("Floptle Editor — {:.0} fps", self.fps));
+                }
+            }
+        }
+
+        // Glide an in-progress focus (F). Any WASD/Space/C input hands control back
+        // to the user immediately. Only the camera position eases; the view angle is
+        // left to mouse-look, so you can look around mid-glide.
+        if self.focus_anim.is_some() {
+            let moving = self.input.forward
+                || self.input.back
+                || self.input.left
+                || self.input.right
+                || self.input.up
+                || self.input.down;
+            if moving {
+                self.focus_anim = None;
+            } else {
+                let (from, to, t) = {
+                    let a = self.focus_anim.as_mut().unwrap();
+                    a.t += dt;
+                    (a.from, a.to, a.t)
+                };
+                let k = (t / FOCUS_SECS).clamp(0.0, 1.0);
+                let eased = 1.0 - (1.0 - k).powi(3); // ease-out cubic
+                self.camera.position = from.lerp(to, eased as f64);
+                if k >= 1.0 {
+                    self.focus_anim = None;
+                }
+            }
+        }
+        (dt, elapsed)
+    }
+
+    /// One play-mode step (ordering: scripts → animation → physics): feed body
+    /// state / input / assets / animator info to the script host, run the Lua
+    /// scripts, apply their writes (models, mouse lock, velocities, heights),
+    /// advance the animators, then step the sim. Clears stale script errors
+    /// when not playing.
+    fn play_step(&mut self, dt: f32, game_focused: bool) {
+        // Play mode: advance the (pausable) script clock and run the Lua scripts
+        // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
+        if self.playing {
+            // Pausing freezes the clock AND the frame delta scripts see, so
+            // dt-driven motion stops too (not just `time`-driven motion).
+            let sdt = if self.paused { 0.0 } else { dt };
+            self.play_t += sdt;
+            // Direct field access (not the `scripts_dir()` method) so we don't take
+            // a whole-`self` borrow while gpu/egui are mutably borrowed here.
+            let dir = self.project_root.join("scripts");
+            // Feed the physics body state to scripts so they can read node.grounded and
+            // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
+            if let Some(sim) = self.sim.as_ref() {
+                let mut states = HashMap::new();
+                for (e, vel, up, grounded, height) in sim.body_states() {
+                    states.insert(
+                        e.index(),
+                        floptle_script::BodyState {
+                            vel: [vel.x, vel.y, vel.z],
+                            up: [up.x, up.y, up.z],
+                            grounded,
+                            height,
+                        },
+                    );
+                }
+                self.script_host.set_bodies(states);
+            }
+            // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
+            // Game view is focused. In the Scene view you're editing, not playing, so the
+            // game gets neutral input (the character stops moving) even though physics
+            // keeps simulating.
+            self.script_host.set_input(if game_focused {
+                floptle_script::InputSnapshot {
+                    keys_down: self.input_keys.clone(),
+                    keys_pressed: self.input_keys_pressed.clone(),
+                    keys_released: self.input_keys_released.clone(),
+                    mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
+                    mouse_delta: self.input_mouse_delta,
+                    scroll: self.input_scroll,
+                    buttons_down: self.input_buttons,
+                    buttons_pressed: self.input_buttons_pressed,
+                }
+            } else {
+                floptle_script::InputSnapshot::default()
+            });
+            // Lend the sim's colliders to scripts so `raycast(...)` works this frame
+            // (physics doesn't step until after scripts, so this is safe). The sim
+            // origin rides along so ray coordinates convert world ↔ sim frame.
+            if let Some(sim) = self.sim.as_mut() {
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+            }
+            // Lend the asset root (for `assets.getFile/getContents`) and the material
+            // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
+            self.script_host.set_project_root(self.project_root.clone());
+            self.script_host.set_materials(
+                self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
+            );
+            // Feed each animator's state (layers/current/time) so scripts can read
+            // anim:state()/:time()/:clips() this frame.
+            self.script_host.set_anim_info(anim::build_info(&self.anim));
+            self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
+            self.script_errors = self.script_host.errors().to_vec();
+            // Apply any mouse lock/unlock a script requested this frame (grab + hide the
+            // cursor for free-look, or release it). The state persists until changed/Stop.
+            // Script debug gizmos queued this frame (drawn by the viewport overlay).
+            self.script_gizmos = self.script_host.take_gizmos();
+            if let Some(want) = self.script_host.take_mouse_lock() {
+                self.script_mouse_lock = want;
+                if let Some(window) = self.window.as_ref() {
+                    self.cursor_lock_soft = grab_cursor(window, want);
+                }
+            }
+            // GPU-load any models a script swapped via `node.model` (the Matter is
+            // already updated by run; re-importing here means the new mesh renders
+            // THIS frame).
+            self.load_script_swapped_models();
+            // Animation: bind + apply queued Lua animator commands + advance every
+            // controller (ordering: scripts → animation → physics), then dispatch
+            // fired clip events back into the node's scripts.
+            let anim_cmds = self.script_host.take_anim_commands();
+            let fired = anim::advance_animators(
+                &mut self.anim,
+                &mut self.world,
+                &self.mesh_registry,
+                sdt,
+                anim_cmds,
+            );
+            for (eid, func) in fired {
+                self.script_host.call_function(&mut self.world, eid, &func);
+            }
+            // Animator warnings (e.g. play() on a state name the controller
+            // doesn't have) surface in the Console, once per name.
+            for msg in self.anim.warnings.drain(..) {
+                self.console.push(floptle_script::LogLevel::Warn, msg, None);
+            }
+            // Event handlers can log/raise — surface those in the Scripting tab
+            // (run() cleared + snapshotted errors before the dispatch above).
+            if !self.script_host.errors().is_empty() {
+                self.script_errors = self.script_host.errors().to_vec();
+            }
+            // Apply script velocity writes, then advance physics (writes transforms back).
+            // Gravity field is rebuilt from the scene's GravityVolume node(s) every frame
+            // (cheap scan) so tweaking mode/strength/radius — or moving the volume — takes
+            // effect immediately instead of needing a Stop/Play. The active camera is the
+            // floating-origin focus: drift far enough and the sim recenters on it.
+            let focus = self.world.query::<Matter>().find_map(|(e, m)| {
+                matches!(m, Matter::Camera { active: true, .. })
+                    .then(|| floptle_core::world_transform(&self.world, e).translation)
+            });
+            if let Some(sim) = self.sim.as_mut() {
+                sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
+                sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
+                // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
+                // restitution, gravity, pos/rot locks) into the running bodies each frame —
+                // no teleport.
+                sim.sync_dynamic_params(&self.world);
+                for (eid, v) in self.script_host.take_body_changes() {
+                    sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                }
+                for (eid, h) in self.script_host.take_body_height_changes() {
+                    sim.set_body_height(eid, h);
+                }
+                sim.advance(&mut self.world, sdt, focus);
+            }
+        } else if !self.script_errors.is_empty() {
+            self.script_errors.clear();
+        }
+    }
+
+    /// GPU-load models a script swapped via `node.model` so they render this
+    /// frame (rigged import first, static fallback).
+    fn load_script_swapped_models(&mut self) {
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+            return;
+        };
+        for (_eid, path) in self.script_host.take_model_changes() {
+            if !self.mesh_registry.contains_key(&path) {
+                // Rigged first (animated glTF keeps its node tree + clips).
+                match floptle_assets::import_rigged(std::path::Path::new(&path)) {
+                    Ok(Some(model)) => {
+                        let parts = model
+                            .parts
+                            .iter()
+                            .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                            .collect();
+                        let rig = anim::rig_from_model(&model);
+                        self.mesh_registry.insert(
+                            path.clone(),
+                            MeshAsset { parts, size: model.size, rig: Some(rig) },
+                        );
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => eprintln!("  rig swap-import {path} failed ({e}); trying static"),
+                }
+                match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
+                    Ok(model) => {
+                        let parts = model
+                            .parts
+                            .iter()
+                            .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
+                            .collect();
+                        self.mesh_registry
+                            .insert(path.clone(), MeshAsset { parts, size: model.size, rig: None });
+                    }
+                    Err(e) => eprintln!("  swap-import {path} failed: {e}"),
+                }
+            }
+        }
+    }
+
+    /// End-of-input bookkeeping: clear the per-frame key/button edges, re-pin a
+    /// CONFINE-only cursor grab, and drain script logs into the Console.
+    fn finish_input_frame(&mut self) {
+        // Clear per-frame input edges after scripts consumed them.
+        self.input_keys_pressed.clear();
+        self.input_keys_released.clear();
+        self.input_buttons_pressed = [false; 3];
+        self.input_mouse_delta = (0.0, 0.0);
+        self.input_scroll = 0.0;
+        // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
+        // wander inside the window — pin it to the center ourselves while a
+        // look/lock is active. Look input reads RAW device motion, so this
+        // re-centering never pollutes the deltas.
+        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking)
+            && let Some(window) = self.window.as_ref() {
+                let sz = window.inner_size();
+                let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                    sz.width / 2,
+                    sz.height / 2,
+                ));
+            }
+        // Drain any script logs/errors into the Console (consecutive dups merge).
+        for l in self.script_host.drain_logs() {
+            self.console.push(l.level, l.msg, l.source);
+        }
+    }
+
+    /// Apply the frame's deferred [`EditorCmd`] intents — runs after every
+    /// gpu/egui borrow has ended, so `self` is fully free again.
+    fn apply_frame_commands(&mut self, mut cmd: EditorCmd, frame_pointer_down: bool) {
         // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
         if let Some(action) = cmd.project_action {
             match action {
@@ -2516,6 +2589,7 @@ impl Editor {
             self.ensure_texture(&p);
         }
     }
+
 
     /// Render the whole scene from `cam` (at `aspect`) into offscreen color+depth views —
     /// the shared body behind the Inspector camera preview and the split-view Game render.
