@@ -35,6 +35,9 @@ impl Editor {
     pub(crate) fn select_single(&mut self, e: Entity) {
         self.selection.clear();
         self.selection.push(e);
+        // Picking a scene node drops any particle-track selection, so the Inspector
+        // reverts from the track editor to this node.
+        self.vfx_ui.sel_track = None;
     }
 
     pub(crate) fn select_toggle(&mut self, e: Entity) {
@@ -43,6 +46,7 @@ impl Editor {
         } else {
             self.selection.push(e);
         }
+        self.vfx_ui.sel_track = None;
     }
 
     pub(crate) fn select_all(&mut self) {

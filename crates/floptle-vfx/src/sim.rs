@@ -440,6 +440,15 @@ impl EffectInstance {
                 ct.enabled && matches!(ct.look.render, RenderMode::Billboard { .. })
             })
     }
+
+    /// Iterate the tracks that draw as instanced meshes.
+    pub fn mesh_tracks(&self) -> impl Iterator<Item = (usize, &CompiledTrack)> {
+        self.effect
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, ct)| ct.enabled && matches!(ct.look.render, RenderMode::Mesh { .. }))
+    }
 }
 
 #[cfg(test)]
