@@ -219,7 +219,7 @@ pub fn bake_occluder(positions: &[[f32; 3]], indices: &[u32], res: u32) -> Baked
 
     // Chamfer distance transform: forward + backward sweeps over the 26-neighbour
     // half-masks propagate the seeded surface distances through the whole grid.
-    let w = [voxel, voxel * 1.41421356, voxel * 1.73205081];
+    let w = [voxel, voxel * std::f32::consts::SQRT_2, voxel * 3.0f32.sqrt()];
     let mut mask: Vec<([i32; 3], f32)> = Vec::with_capacity(13);
     for dk in -1i32..=1 {
         for dj in -1i32..=1 {

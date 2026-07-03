@@ -1,0 +1,89 @@
+//! The editor's catalog of node "types" (`Matter` kinds): default constructors
+//! for the spawn menus, human labels + Inspector glyphs, and the Add Component
+//! type-switch list.
+
+use floptle_core::{Matter, Shape};
+use floptle_scene::{MatterDoc, ShapeDoc};
+
+pub(crate) fn new_cube() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
+}
+
+/// The default node name for a matter kind.
+pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
+    match m {
+        MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
+        MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
+        MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
+        MatterDoc::Blob { .. } => "Blob",
+        MatterDoc::Mesh { .. } => "Mesh",
+        MatterDoc::Empty => "Empty",
+        MatterDoc::Terrain { .. } => "Terrain",
+        MatterDoc::Camera { .. } => "Camera",
+        MatterDoc::PointLight { .. } => "Point Light",
+        MatterDoc::GravityVolume { .. } => "Gravity Volume",
+        MatterDoc::Skybox { .. } => "Skybox",
+        MatterDoc::PostProcess { .. } => "Post Processing",
+    }
+}
+pub(crate) fn new_sphere() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.6, 0.9] }
+}
+pub(crate) fn new_capsule() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Capsule, color: [0.5, 0.85, 0.6] }
+}
+
+/// A short human label for a node's runtime `Matter` "type".
+pub(crate) fn matter_kind_label(m: &Matter) -> &'static str {
+    match m {
+        Matter::Primitive { shape: Shape::Cube, .. } => "Cube",
+        Matter::Primitive { shape: Shape::Sphere, .. } => "Sphere",
+        Matter::Primitive { shape: Shape::Capsule, .. } => "Capsule",
+        Matter::Blob { .. } => "Blob",
+        Matter::Mesh { .. } => "Mesh",
+        Matter::Empty => "Empty",
+        Matter::Terrain { .. } => "Terrain",
+        Matter::Camera { .. } => "Camera",
+        Matter::PointLight { .. } => "Point Light",
+        Matter::GravityVolume { .. } => "Gravity Volume",
+        Matter::Skybox { .. } => "Skybox",
+        Matter::PostProcess { .. } => "Post Processing",
+    }
+}
+
+/// The little glyph shown beside a node's type in the Inspector header.
+pub(crate) fn matter_icon(m: &Matter) -> &'static str {
+    match m {
+        Matter::Primitive { shape: Shape::Cube, .. } => "■",
+        Matter::Primitive { shape: Shape::Sphere, .. } => "○",
+        Matter::Primitive { shape: Shape::Capsule, .. } => "⬭",
+        Matter::Blob { .. } => "◑",
+        Matter::Mesh { .. } => "✦",
+        Matter::Empty => "🗀",
+        Matter::Terrain { .. } => "Δ",
+        Matter::Camera { .. } => "⌖",
+        Matter::PointLight { .. } => "●",
+        Matter::GravityVolume { .. } => "⬇",
+        Matter::Skybox { .. } => "◐",
+        Matter::PostProcess { .. } => "✨",
+    }
+}
+
+/// The set of node "types" the Inspector's Add Component menu can switch a node to
+/// (icon-labeled). Mutually exclusive — picking one replaces the node's current
+/// `Matter`. Terrain (a special SDF field) and Mesh (needs an asset) are omitted,
+/// as is PostProcess (the mandatory per-scene node — every scene already has one).
+pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
+    use floptle_core::GravityMode;
+    vec![
+        ("■  Cube", Matter::Primitive { shape: Shape::Cube, color: [0.8, 0.5, 0.4] }),
+        ("○  Sphere", Matter::Primitive { shape: Shape::Sphere, color: [0.4, 0.6, 0.9] }),
+        ("⬭  Capsule", Matter::Primitive { shape: Shape::Capsule, color: [0.5, 0.85, 0.6] }),
+        ("◑  Blob", Matter::Blob { scale: 1.0 }),
+        ("🗀  Empty", Matter::Empty),
+        ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),
+        ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
+        ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
+        ("◐  Skybox", Matter::default_skybox()),
+    ]
+}
