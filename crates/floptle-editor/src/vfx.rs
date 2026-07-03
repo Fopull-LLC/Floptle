@@ -1,0 +1,399 @@
+//! Editor-side particle glue: the `.vfx.ron` effect registry, doc → runtime
+//! compilation, live play-mode instances, and per-frame billboard packing.
+//!
+//! The pure runtime lives in `floptle-vfx`; the serializable assets in
+//! `floptle-scene::vfx`. This module connects them to the live editor world —
+//! the same layering as [`crate::anim`]. Phase 1 (see the proposal §8): effects
+//! play on nodes during Play mode; the timeline editor tab arrives in phase 2.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use floptle_core::math::Vec3;
+use floptle_core::{Entity, ParticleSystem, World};
+use floptle_render::particles::{ParticleBatch, ParticleGlobals};
+use floptle_render::{ParticleInstance, RenderCamera, TexId};
+use floptle_scene::{
+    VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxInterpDoc, VfxLaneTargetDoc, VfxPlaybackDoc,
+    VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
+};
+use floptle_vfx::{
+    Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape, EndBehavior,
+    Extrapolate, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback, RenderMode,
+    Space, Track, Value, ValueOrCurve, collect_billboards,
+};
+
+use crate::anim::asset_key;
+
+/// The gravity particles feel in phase 1 — the default scene "Down" volume's
+/// pull. Per-instance sampling of the real gravity field comes with the GPU
+/// backend phase (where the field is a texture fetch anyway).
+const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
+
+/// Everything particles the editor owns. One field on `Editor`.
+#[derive(Default)]
+pub struct VfxSystem {
+    /// `*.vfx.ron` effect assets: (key, compiled), sorted by key.
+    pub effects: Vec<(String, Arc<CompiledEffect>)>,
+    /// Live play-mode instances per emitter entity, with the asset key each was
+    /// spawned from (an asset swap mid-play rebuilds the instance).
+    pub instances: HashMap<Entity, (String, EffectInstance)>,
+}
+
+impl VfxSystem {
+    /// Re-scan `assets/` for particle effects (compiling curves to LUTs).
+    pub fn rescan(&mut self, project_root: &Path) {
+        self.effects.clear();
+        let root = project_root.to_path_buf();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if !name.starts_with('.') && name != "target" {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                let Some(fname) = p.file_name().and_then(|s| s.to_str()) else { continue };
+                if fname.ends_with(VFX_EXT)
+                    && let Ok(doc) = floptle_scene::load_vfx_effect(&p)
+                {
+                    let fx = Arc::new(effect_from_doc(&doc).compile());
+                    self.effects.push((asset_key(&p, &root, VFX_EXT), fx));
+                }
+            }
+        }
+        self.effects.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// Look up an effect by key, falling back to a unique file-stem match (the
+    /// anim-registry discipline: moving a file degrades gracefully).
+    pub fn effect(&self, key: &str) -> Option<Arc<CompiledEffect>> {
+        if let Some((_, fx)) = self.effects.iter().find(|(k, _)| k == key) {
+            return Some(Arc::clone(fx));
+        }
+        let stem = key.rsplit('/').next()?;
+        let mut hits = self.effects.iter().filter(|(k, _)| k.rsplit('/').next() == Some(stem));
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None; // ambiguous — require the full key
+        }
+        Some(Arc::clone(&first.1))
+    }
+
+    /// Drop every live instance (Play start/stop, scene load).
+    pub fn clear_instances(&mut self) {
+        self.instances.clear();
+    }
+
+    /// Spawn instances for every `play_on_start` particle system in the scene.
+    pub fn start_play(&mut self, world: &World) {
+        self.clear_instances();
+        let systems: Vec<(Entity, ParticleSystem)> =
+            world.query::<ParticleSystem>().map(|(e, p)| (e, p.clone())).collect();
+        for (e, ps) in systems {
+            if ps.play_on_start {
+                self.spawn(e, &ps.asset);
+            }
+        }
+    }
+
+    /// Spawn (or replace) the instance on `entity` from the effect at `key`.
+    /// Seeded by the entity index so two campfires don't march in lockstep.
+    pub fn spawn(&mut self, entity: Entity, key: &str) {
+        if let Some(fx) = self.effect(key) {
+            let inst = EffectInstance::new(fx, entity.index().wrapping_add(1));
+            self.instances.insert(entity, (key.to_string(), inst));
+        }
+    }
+
+    /// Advance every live instance one play frame. Instances whose node lost its
+    /// component or swapped its asset are dropped (a swap re-spawns below — the
+    /// physics live-sync discipline). Finished one-shots stay as inert entries so
+    /// the re-spawn scan can't resurrect them into a loop.
+    pub fn advance(&mut self, world: &World, dt: f32) {
+        self.instances.retain(|e, (key, _)| {
+            world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
+        });
+        for (_, inst) in self.instances.values_mut() {
+            inst.advance(dt, VFX_GRAVITY);
+        }
+        // Spawn for play-on-start systems without an instance: an asset swapped
+        // mid-play, or a component attached mid-play.
+        let missing: Vec<(Entity, String)> = world
+            .query::<ParticleSystem>()
+            .filter(|(e, ps)| ps.play_on_start && !self.instances.contains_key(e))
+            .map(|(e, ps)| (e, ps.asset.clone()))
+            .collect();
+        for (e, key) in missing {
+            self.spawn(e, &key);
+        }
+    }
+
+    /// Pack every live instance's billboards for this frame, resolving track
+    /// texture paths through the editor's registered-texture map.
+    pub fn collect(
+        &self,
+        world: &World,
+        cam: &RenderCamera,
+        textures: &HashMap<String, TexId>,
+        out_instances: &mut Vec<ParticleInstance>,
+        out_batches: &mut Vec<ParticleBatch>,
+    ) {
+        let fwd = cam.rotation * Vec3::NEG_Z;
+        for (e, (_, inst)) in &self.instances {
+            let t = floptle_core::world_transform(world, *e);
+            let xf = t.render_matrix(cam.world_position);
+            let mut draws = Vec::new();
+            collect_billboards(inst, xf, fwd, out_instances, &mut draws);
+            for d in draws {
+                out_batches.push(ParticleBatch {
+                    texture: d.texture.as_deref().and_then(|p| textures.get(p).copied()),
+                    blend: d.blend,
+                    range: d.range,
+                });
+            }
+        }
+    }
+
+    /// Every texture path any registered effect's billboard tracks reference —
+    /// for the editor's texture pre-warm.
+    pub fn texture_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (_, fx) in &self.effects {
+            for track in &fx.tracks {
+                if let RenderMode::Billboard { texture: Some(p) } = &track.look.render
+                    && !out.contains(p)
+                {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The particle pass's frame globals for `cam` (billboard basis from its rotation).
+pub fn particle_globals(cam: &RenderCamera, aspect: f32) -> ParticleGlobals {
+    let (r, u) = (cam.rotation * Vec3::X, cam.rotation * Vec3::Y);
+    ParticleGlobals {
+        view_proj: cam.view_proj(aspect).to_cols_array_2d(),
+        cam_right: [r.x, r.y, r.z, 0.0],
+        cam_up: [u.x, u.y, u.z, 0.0],
+    }
+}
+
+/// A starter effect for "Add Component → Particle System (new)": a small looping
+/// fountain so the node visibly emits the moment Play starts.
+pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
+    let tracks = vec![floptle_scene::VfxTrackDoc {
+        name: "Fountain".into(),
+        enabled: true,
+        render: VfxRenderDoc::Billboard { texture: None },
+        blend: VfxBlendDoc::Additive,
+        lit: false,
+        cast_shadows: false,
+        space: floptle_scene::VfxSpaceDoc::Local,
+        clips: vec![floptle_scene::VfxClipDoc { start: 0.0, end: 2.0 }],
+        bursts: Vec::new(),
+        automation: Vec::new(),
+        rate: 40.0,
+        shape: VfxShapeDoc::Cone { angle: 25.0, radius: 0.1 },
+        particle_lifetime: 1.0,
+        lifetime_jitter: 0.4,
+        max_alive: None,
+        velocity: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 3.0, 0.0])),
+        size: VfxPropDoc::Curve(VfxCurveDoc {
+            keys: vec![
+                key_doc(0.0, VfxValueDoc::F32(0.12)),
+                key_doc(1.0, VfxValueDoc::F32(0.0)),
+            ],
+            extrapolate: Default::default(),
+        }),
+        rotation: VfxPropDoc::Const(VfxValueDoc::F32(0.0)),
+        color: VfxPropDoc::Curve(VfxCurveDoc {
+            keys: vec![
+                key_doc(0.0, VfxValueDoc::Rgba([1.0, 0.9, 0.5, 1.0])),
+                key_doc(1.0, VfxValueDoc::Rgba([0.9, 0.3, 0.1, 0.0])),
+            ],
+            extrapolate: Default::default(),
+        }),
+        gravity: 0.6,
+        drag: 0.0,
+    }];
+    VfxEffectDoc {
+        name: name.into(),
+        lifetime: 2.0,
+        playback: VfxPlaybackDoc::Looping,
+        end: Default::default(),
+        tracks,
+        seed: 1,
+    }
+}
+
+fn key_doc(t: f32, v: VfxValueDoc) -> floptle_scene::VfxKeyDoc {
+    floptle_scene::VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 }
+}
+
+// ---- doc → runtime conversion ------------------------------------------------
+
+fn value_from_doc(v: &VfxValueDoc) -> Value {
+    match v {
+        VfxValueDoc::F32(x) => Value::F32(*x),
+        VfxValueDoc::Vec3(x) => Value::Vec3(Vec3::from_array(*x)),
+        VfxValueDoc::Rgba(x) => Value::Rgba(*x),
+    }
+}
+
+fn curve_from_doc(c: &VfxCurveDoc) -> Curve {
+    Curve {
+        keys: c
+            .keys
+            .iter()
+            .map(|k| Key {
+                t: k.t,
+                v: value_from_doc(&k.v),
+                interp: match k.interp {
+                    VfxInterpDoc::Constant => Interp::Constant,
+                    VfxInterpDoc::Linear => Interp::Linear,
+                    VfxInterpDoc::Bezier => Interp::Bezier,
+                },
+                in_tan: k.in_tan,
+                out_tan: k.out_tan,
+            })
+            .collect(),
+        extrapolate: match c.extrapolate {
+            floptle_scene::VfxExtrapolateDoc::Clamp => Extrapolate::Clamp,
+            floptle_scene::VfxExtrapolateDoc::Repeat => Extrapolate::Repeat,
+        },
+    }
+}
+
+fn prop_from_doc(p: &VfxPropDoc) -> ValueOrCurve {
+    match p {
+        VfxPropDoc::Const(v) => ValueOrCurve::Const(value_from_doc(v)),
+        VfxPropDoc::Curve(c) => ValueOrCurve::Curve(curve_from_doc(c)),
+    }
+}
+
+/// Build the authoring-model effect from its RON doc (compile separately).
+pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
+    ParticleEffect {
+        name: doc.name.clone(),
+        lifetime: doc.lifetime,
+        playback: match doc.playback {
+            VfxPlaybackDoc::Looping => Playback::Looping,
+            VfxPlaybackDoc::OneShot => Playback::OneShot,
+        },
+        end: match doc.end {
+            floptle_scene::VfxEndDoc::Destroy => EndBehavior::Destroy,
+            floptle_scene::VfxEndDoc::Persist => EndBehavior::Persist,
+        },
+        seed: doc.seed,
+        tracks: doc
+            .tracks
+            .iter()
+            .map(|t| Track {
+                name: t.name.clone(),
+                enabled: t.enabled,
+                look: Look {
+                    render: match &t.render {
+                        VfxRenderDoc::Billboard { texture } => {
+                            RenderMode::Billboard { texture: texture.clone() }
+                        }
+                        VfxRenderDoc::Mesh { asset_path } => {
+                            RenderMode::Mesh { asset_path: asset_path.clone() }
+                        }
+                    },
+                    blend: match t.blend {
+                        VfxBlendDoc::Alpha => Blend::Alpha,
+                        VfxBlendDoc::Additive => Blend::Additive,
+                    },
+                    lit: t.lit,
+                    cast_shadows: t.cast_shadows,
+                },
+                space: match t.space {
+                    floptle_scene::VfxSpaceDoc::Local => Space::Local,
+                    floptle_scene::VfxSpaceDoc::World => Space::World,
+                },
+                clips: t.clips.iter().map(|c| Clip { start: c.start, end: c.end }).collect(),
+                bursts: t.bursts.iter().map(|b| Burst { t: b.t, count: b.count }).collect(),
+                automation: t
+                    .automation
+                    .iter()
+                    .map(|l| Lane {
+                        target: match l.target {
+                            VfxLaneTargetDoc::Rate => LaneTarget::Rate,
+                            VfxLaneTargetDoc::Count => LaneTarget::Count,
+                            VfxLaneTargetDoc::Speed => LaneTarget::Speed,
+                            VfxLaneTargetDoc::Size => LaneTarget::Size,
+                            VfxLaneTargetDoc::Tint => LaneTarget::Tint,
+                            VfxLaneTargetDoc::ShapeScale => LaneTarget::ShapeScale,
+                        },
+                        curve: curve_from_doc(&l.curve),
+                    })
+                    .collect(),
+                rate: t.rate,
+                shape: match t.shape {
+                    VfxShapeDoc::Point => EmitShape::Point,
+                    VfxShapeDoc::Cone { angle, radius } => EmitShape::Cone { angle, radius },
+                    VfxShapeDoc::Sphere { radius, shell } => EmitShape::Sphere { radius, shell },
+                    VfxShapeDoc::Edge { length } => EmitShape::Edge { length },
+                    VfxShapeDoc::Ring { radius } => EmitShape::Ring { radius },
+                },
+                particle_lifetime: t.particle_lifetime,
+                lifetime_jitter: t.lifetime_jitter,
+                max_alive: t.max_alive,
+                velocity: prop_from_doc(&t.velocity),
+                size: prop_from_doc(&t.size),
+                rotation: prop_from_doc(&t.rotation),
+                color: prop_from_doc(&t.color),
+                gravity: t.gravity,
+                drag: t.drag,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starter_effect_round_trips_and_emits() {
+        let dir = std::env::temp_dir().join(format!("floptle-vfx-starter-{}", std::process::id()));
+        let path = dir.join("Starter.vfx.ron");
+        let doc = starter_effect_doc("Starter");
+        floptle_scene::save_vfx_effect(&doc, &path).unwrap();
+        let back = floptle_scene::load_vfx_effect(&path).unwrap();
+        assert_eq!(doc, back, "starter effect must RON round-trip exactly");
+
+        let fx = Arc::new(effect_from_doc(&back).compile());
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, VFX_GRAVITY);
+        assert!(inst.alive() > 5, "starter fountain must emit (got {})", inst.alive());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rescan_registers_effects_with_stem_fallback() {
+        let dir = std::env::temp_dir().join(format!("floptle-vfx-rescan-{}", std::process::id()));
+        floptle_scene::save_vfx_effect(
+            &starter_effect_doc("Spark"),
+            &dir.join("vfx").join("Spark.vfx.ron"),
+        )
+        .unwrap();
+        let mut sys = VfxSystem::default();
+        sys.rescan(&dir);
+        assert_eq!(sys.effects.len(), 1);
+        assert!(sys.effect("vfx/Spark").is_some(), "exact key");
+        assert!(sys.effect("Spark").is_some(), "stem fallback (moved-file grace)");
+        assert!(sys.effect("vfx/Nope").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

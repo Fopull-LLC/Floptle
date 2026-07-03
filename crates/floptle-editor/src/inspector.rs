@@ -25,6 +25,7 @@ pub(crate) enum ComponentClip {
     Matter(Matter),
     Material(Box<Material>),
     RigidBody(floptle_core::RigidBody),
+    Particles(floptle_core::ParticleSystem),
     /// A single attached script (its kind, enabled flag, and tuned params).
     Script(floptle_core::ScriptInst),
 }
@@ -37,6 +38,7 @@ impl ComponentClip {
             ComponentClip::Matter(_) => "Type".into(),
             ComponentClip::Material(_) => "Material".into(),
             ComponentClip::RigidBody(_) => "Rigidbody".into(),
+            ComponentClip::Particles(_) => "Particle System".into(),
             ComponentClip::Script(s) => format!("Script: {}", s.kind),
         }
     }
@@ -722,6 +724,60 @@ impl EditorTabViewer<'_> {
                     });
                 }
 
+                // ===== Particle System (only when the node has one) =====
+                if world.get::<floptle_core::ParticleSystem>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "❋ Particle System",
+                        matches!(clip, Some(ComponentClip::Particles(_))),
+                        true,
+                    );
+                    if copy
+                        && let Some(ps) = world.get::<floptle_core::ParticleSystem>(e) {
+                            cmd.copy_component = Some(ComponentClip::Particles(ps.clone()));
+                        }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_particles = Some(e);
+                    }
+                    let effect_keys: Vec<String> =
+                        self.vfx.effects.iter().map(|(k, _)| k.clone()).collect();
+                    ui.indent("particles_props", |ui| {
+                        if let Some(ps) = world.get_mut::<floptle_core::ParticleSystem>(e) {
+                            egui::ComboBox::from_label("Effect")
+                                .selected_text(if ps.asset.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    ps.asset.clone()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for k in &effect_keys {
+                                        if ui
+                                            .selectable_label(*k == ps.asset, k)
+                                            .clicked()
+                                        {
+                                            ps.asset = k.clone();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut ps.play_on_start, "Play on start")
+                                .on_hover_text(
+                                    "Start emitting the moment Play begins \
+                                     (off = a script triggers it)",
+                                )
+                                .changed();
+                            if !self.playing {
+                                ui.small("plays in Play mode — timeline editor coming next");
+                            }
+                        }
+                    });
+                }
+
                 // ===== Rigidbody (only when the node has one) =====
                 if world.get::<floptle_core::RigidBody>(e).is_some() {
                     ui.separator();
@@ -1009,6 +1065,8 @@ impl EditorTabViewer<'_> {
                         Type(Matter),
                         AnimCtl(String),
                         AnimNew,
+                        Particles(String),
+                        ParticlesNew,
                     }
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
@@ -1031,6 +1089,14 @@ impl EditorTabViewer<'_> {
                         ));
                         for (k, _) in self.anim.controllers.iter() {
                             items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
+                        }
+                    }
+                    // Particle System: attach an existing effect asset, or create a
+                    // starter effect (a small looping fountain to shape from).
+                    if world.get::<floptle_core::ParticleSystem>(e).is_none() {
+                        items.push(("Effects", "❋  Particle System (new)".into(), Add::ParticlesNew));
+                        for (k, _) in self.vfx.effects.iter() {
+                            items.push(("Effects", format!("❋  {k}"), Add::Particles(k.clone())));
                         }
                     }
                     for (name, _) in self.materials {
@@ -1081,6 +1147,9 @@ impl EditorTabViewer<'_> {
                             let can = match c {
                                 ComponentClip::Material(_) => !has_mat,
                                 ComponentClip::RigidBody(_) => !has_rb,
+                                ComponentClip::Particles(_) => {
+                                    world.get::<floptle_core::ParticleSystem>(e).is_none()
+                                }
                                 ComponentClip::Script(_) => true,
                                 ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
                             };
@@ -1097,6 +1166,7 @@ impl EditorTabViewer<'_> {
                         for cat in [
                             "Physics",
                             "Rendering",
+                            "Effects",
                             "Animation",
                             "Scripts",
                             "Type — replaces current",
@@ -1124,6 +1194,10 @@ impl EditorTabViewer<'_> {
                                             cmd.set_anim_controller = Some((e, Some(k.clone())))
                                         }
                                         Add::AnimNew => cmd.new_anim_controller = Some(Some(e)),
+                                        Add::Particles(k) => {
+                                            cmd.add_particles = Some((e, k.clone()))
+                                        }
+                                        Add::ParticlesNew => cmd.new_particles = Some(e),
                                     }
                                     picked = true;
                                     ui.close();

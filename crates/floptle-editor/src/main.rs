@@ -55,6 +55,7 @@ mod shading;
 mod terrain_edit;
 mod terrain_ui;
 mod theme;
+mod vfx;
 mod viewports;
 mod viz;
 
@@ -100,6 +101,11 @@ struct EditorCmd {
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
+    /// Attach a ParticleSystem component referencing an existing effect asset.
+    add_particles: Option<(Entity, String)>,
+    /// Create a starter `.vfx.ron` effect and attach it to this entity.
+    new_particles: Option<Entity>,
+    remove_particles: Option<Entity>,
     /// Toggle the static MeshCollider marker on a Mesh node (`true` = add, `false` = remove).
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
@@ -372,6 +378,8 @@ struct EditorTabViewer<'a> {
     code_theme: usize,
     /// Animation registries + live runtimes (the animation UI reads/edits them).
     anim: &'a mut anim::AnimSystem,
+    /// Particle effect registry (the inspector lists its keys).
+    vfx: &'a mut vfx::VfxSystem,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: &'a mut anim_ui::AnimUiState,
     /// Registered models — rig lookups for the animation UI.
@@ -488,6 +496,8 @@ struct Editor {
     outline: Option<Outline>,
     /// Editor reference-grid renderer.
     grid_render: Option<Grid>,
+    /// Billboard particle pass (the VFX sim's draw arm).
+    particles: Option<floptle_render::Particles>,
     egui: Option<Egui>,
     camera: FlyCamera,
     input: Input,
@@ -730,6 +740,8 @@ struct Editor {
     script_host: ScriptHost,
     /// Animation: clip/controller registries + live per-entity runtimes.
     anim: anim::AnimSystem,
+    /// Particles: effect registry + live play-mode instances.
+    vfx: vfx::VfxSystem,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: anim_ui::AnimUiState,
     /// Errors from the most recent script frame, shown in the Scripting tab.
@@ -884,12 +896,14 @@ impl ApplicationHandler for Editor {
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
         self.anim.rescan(&self.project_root);
+        self.vfx.rescan(&self.project_root);
         self.load_texture_settings();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
         self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
+        self.particles = Some(floptle_render::Particles::new(&gpu));
 
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(

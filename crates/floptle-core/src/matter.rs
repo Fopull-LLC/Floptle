@@ -104,6 +104,18 @@ pub struct AnimController {
     pub asset: String,
 }
 
+/// Attaches a particle effect asset (`*.vfx.ron`) to a node — the node becomes
+/// the effect's emitter transform. Same reference discipline as [`AnimController`]:
+/// the timeline/sim runtime lives editor/runtime-side (`floptle-vfx`); this is
+/// just the asset key plus how playback starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParticleSystem {
+    /// Effect asset key: project-relative path without extension (`vfx/360Slash`).
+    pub asset: String,
+    /// Start playing the moment Play begins (`false` = a script triggers it).
+    pub play_on_start: bool,
+}
+
 /// Whether a node's geometry is drawn. A node with **no** `Visible` component renders
 /// normally (visible is the default); attaching `Visible(false)` hides its mesh/shape
 /// (it still has a transform, physics, and children). Scripts toggle it with

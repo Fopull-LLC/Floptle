@@ -616,6 +616,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         visible: true,
         cast_shadow: true,
         anim_controller: None,
+        particles: None,
         parent: None,
     }
 }
@@ -647,6 +648,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,
+                particles: None,
                 parent: None,
             },
             NodeDoc {
@@ -661,6 +663,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,
+                particles: None,
                 parent: None,
             },
             NodeDoc {
@@ -675,6 +678,7 @@ fn default_scene() -> floptle_scene::SceneDoc {
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,
+                particles: None,
                 parent: None,
             },
             default_camera_node(),

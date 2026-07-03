@@ -23,6 +23,13 @@ pub use anim::{
     AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimLayerDoc, AnimStateDoc, AnimTrackDoc3,
     AnimTrackDoc4, AnimTransitionDoc, ANIM_CLIP_EXT, ANIM_CTL_EXT,
 };
+pub mod vfx;
+pub use vfx::{
+    load_vfx_effect, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
+    VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc,
+    VfxLaneTargetDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc,
+    VfxTrackDoc, VfxValueDoc, VFX_EXT,
+};
 
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
 /// nodes in it. Project-wide render settings live separately in [`ProjectConfigDoc`].
@@ -67,10 +74,36 @@ pub struct NodeDoc {
     /// See [`floptle_core::AnimController`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anim_controller: Option<String>,
+    /// Particle effect on this node (`None` = no particle system).
+    /// See [`floptle_core::ParticleSystem`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub particles: Option<ParticleSystemDoc>,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
+}
+
+/// Serializable particle-system component, mirroring [`floptle_core::ParticleSystem`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ParticleSystemDoc {
+    /// Effect asset key: project-relative path without extension (`vfx/360Slash`).
+    pub asset: String,
+    #[serde(default = "true_bool")]
+    pub play_on_start: bool,
+}
+
+impl ParticleSystemDoc {
+    pub fn to_component(&self) -> floptle_core::ParticleSystem {
+        floptle_core::ParticleSystem {
+            asset: self.asset.clone(),
+            play_on_start: self.play_on_start,
+        }
+    }
+
+    pub fn from_component(p: &floptle_core::ParticleSystem) -> Self {
+        Self { asset: p.asset.clone(), play_on_start: p.play_on_start }
+    }
 }
 
 /// Serializable physics rigidbody, mirroring [`floptle_core::RigidBody`].
@@ -860,6 +893,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if let Some(ctl) = &node.anim_controller {
             world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
         }
+        if let Some(p) = &node.particles {
+            world.insert(e, p.to_component());
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -930,6 +966,9 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
             world.get::<floptle_core::AnimController>(e).map(|c| c.asset.clone());
+        let particles = world
+            .get::<floptle_core::ParticleSystem>(e)
+            .map(ParticleSystemDoc::from_component);
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -943,6 +982,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             visible,
             cast_shadow,
             anim_controller,
+            particles,
             parent,
         });
     }
@@ -1001,6 +1041,10 @@ mod tests {
                     visible: false,      // exercise the visible round-trip
                     cast_shadow: false,  // exercise the cast-shadow opt-out round-trip
                     anim_controller: Some("animation_controllers/Test".into()),
+                    particles: Some(ParticleSystemDoc {
+                        asset: "vfx/Test".into(),
+                        play_on_start: false, // exercise the non-default round-trip
+                    }),
                     parent: None,
                 },
                 NodeDoc {
@@ -1015,6 +1059,7 @@ mod tests {
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,
+                    particles: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
                 },
                 NodeDoc {
@@ -1029,6 +1074,7 @@ mod tests {
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,
+                    particles: None,
                     parent: None,
                 },
                 NodeDoc {
@@ -1043,6 +1089,7 @@ mod tests {
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,
+                    particles: None,
                     parent: None,
                 },
             ],
