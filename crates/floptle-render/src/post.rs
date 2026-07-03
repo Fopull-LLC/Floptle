@@ -1,11 +1,13 @@
-//! Post-processing stack — full-screen color effects that run after the scene is
-//! composited but before the retro downsample, so they "fit the look". The chain
-//! is **SSAO** (screen-space ambient occlusion from the depth buffer, half-res +
-//! blur, multiplied over the scene), **bloom** (bright-pass → separable Gaussian
-//! blur → additive composite) and a **vignette**. Each pass is the same shape as
-//! [`crate::retro::Retro::blit`]: a one-triangle fragment pass reading one texture
-//! and writing another, ping-ponging between targets. Settings come from the
-//! scene's PostProcess node (per-scene, not per-project).
+//! Post-processing stack — full-screen color effects that run at the same
+//! resolution the scene was composited at: full frame res normally, the retro
+//! internal res in retro mode (the chain runs BEFORE the nearest-neighbor
+//! upscale, so every effect goes chunky with the same pixels as the scene). The
+//! chain is **SSAO** (screen-space ambient occlusion from the depth buffer,
+//! half-res + blur, multiplied over the scene), **bloom** (bright-pass →
+//! separable Gaussian blur → additive composite) and a **vignette**. Each pass is
+//! the same shape as [`crate::retro::Retro::blit`]: a one-triangle fragment pass
+//! reading one texture and writing another, ping-ponging between targets.
+//! Settings come from the scene's PostProcess node (per-scene, not per-project).
 
 use crate::device::Gpu;
 
@@ -83,6 +85,12 @@ pub struct PostStack {
     ao_bind1: wgpu::BindGroup, // ao_a as the fs_ssao_apply group(1) input
     width: u32,
     height: u32,
+    /// Pixel-perfect mode (retro): the AO factor is computed at FULL chain res —
+    /// one value per (retro) pixel — with a tightened blur, instead of the
+    /// half-res + wide-blur combo that suits big framebuffers. At retro sizes the
+    /// half-res buffer is so coarse and the fixed ±4-texel blur so wide (in
+    /// screen fractions) that contact shadows wash out entirely.
+    pixel_perfect: bool,
     params_buf: wgpu::Buffer,
     ssao_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
@@ -329,6 +337,7 @@ impl PostStack {
             ao_bind1,
             width,
             height,
+            pixel_perfect: false,
             params_buf,
             ssao_buf,
             sampler,
@@ -350,6 +359,7 @@ impl PostStack {
         let fmt = gpu.surface_format();
         let (width, height) = (width.max(1), height.max(1));
         let (hw, hh) = ((width / 2).max(1), (height / 2).max(1));
+        let (aw, ah) = Self::ao_size(width, height, self.pixel_perfect);
         let mk =
             |w, h, f| Target::new(gpu, &self.bind_layout, &self.sampler, &self.params_buf, f, w, h);
         self.scene = mk(width, height, fmt);
@@ -357,11 +367,35 @@ impl PostStack {
         self.pong = mk(width, height, fmt);
         self.bloom_a = mk(hw, hh, fmt);
         self.bloom_b = mk(hw, hh, fmt);
-        self.ao_a = mk(hw, hh, wgpu::TextureFormat::R8Unorm);
-        self.ao_b = mk(hw, hh, wgpu::TextureFormat::R8Unorm);
+        self.ao_a = mk(aw, ah, wgpu::TextureFormat::R8Unorm);
+        self.ao_b = mk(aw, ah, wgpu::TextureFormat::R8Unorm);
         self.ao_bind1 = Self::make_ao_bind(gpu, &self.ao_layout, &self.ao_a, &self.sampler);
         self.width = width;
         self.height = height;
+    }
+
+    /// Per-frame idempotent (re)configuration: retargets the chain to `width` ×
+    /// `height` in the given pixel-perfect mode, rebuilding targets only when
+    /// something actually changed. The editor calls this every frame with the
+    /// retro internal res + `pixel_perfect = true` in retro mode, or the frame
+    /// res + `false` otherwise.
+    pub fn configure(&mut self, gpu: &Gpu, width: u32, height: u32, pixel_perfect: bool) {
+        let (width, height) = (width.max(1), height.max(1));
+        if (self.width, self.height, self.pixel_perfect) == (width, height, pixel_perfect) {
+            return;
+        }
+        self.pixel_perfect = pixel_perfect;
+        self.resize(gpu, width, height);
+    }
+
+    /// The AO factor's resolution: full chain res in pixel-perfect mode (one AO
+    /// value per pixel), half res otherwise (plenty at frame res, and 4× cheaper).
+    fn ao_size(width: u32, height: u32, pixel_perfect: bool) -> (u32, u32) {
+        if pixel_perfect {
+            (width, height)
+        } else {
+            ((width / 2).max(1), (height / 2).max(1))
+        }
     }
 
     /// The group(1) bind for `fs_ssao_apply`: the (blurred) AO factor in `ao_a`.
@@ -381,10 +415,16 @@ impl PostStack {
         })
     }
 
-    /// The full-res target the scene must render into when post is enabled (instead
-    /// of the swapchain frame).
+    /// The target the scene must render into when post is enabled (instead of the
+    /// swapchain frame). Sized by `new`/`resize` — full frame res normally, the
+    /// retro internal res in retro mode.
     pub fn input_view(&self) -> &wgpu::TextureView {
         &self.scene.view
+    }
+
+    /// Current chain resolution (the size `new`/`resize` was given).
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
 
     /// Run the enabled effect chain reading `input_view()` and writing the final
@@ -403,8 +443,14 @@ impl PostStack {
         let mut cur: &Target = &self.scene;
 
         if let (true, Some(f)) = (ssao_on, ssao) {
-            // AO factor: depth → half-res ao_a, then a separable blur (A→B→A) to
-            // wash out the sampling noise, then multiply it over the scene.
+            // AO factor: depth → ao_a (half res, or full res in pixel-perfect
+            // mode), then a separable blur (A→B→A) to wash out the sampling
+            // noise, then multiply it over the scene. Pixel-perfect tightens the
+            // blur step to half a texel — at retro resolutions the full ±4-texel
+            // kernel spans so much of the screen it dilutes contact shadows away.
+            let (aw, ah) = Self::ao_size(self.width, self.height, self.pixel_perfect);
+            let atexel = [1.0 / aw as f32, 1.0 / ah as f32];
+            let astep = if self.pixel_perfect { 0.5 } else { 1.0 };
             let bias = 0.02f32.max(0.03 * s.ssao_radius);
             self.write_ssao(gpu, SsaoParams {
                 proj: f.proj,
@@ -420,9 +466,9 @@ impl PostStack {
                 ],
             });
             self.pass(gpu, &self.ssao_pipeline, &depth_bind, &self.ao_a.view, wgpu::LoadOp::Clear(BLACK));
-            self.write_params(gpu, PostParams { a: [htexel[0], htexel[1], 0.0, 0.0], b: [0.0, 0.0, 1.0, 0.0] });
+            self.write_params(gpu, PostParams { a: [atexel[0], atexel[1], 0.0, 0.0], b: [0.0, 0.0, astep, 0.0] });
             self.pass(gpu, &self.ao_blur_pipeline, &self.ao_a.bind, &self.ao_b.view, wgpu::LoadOp::Clear(BLACK));
-            self.write_params(gpu, PostParams { a: [htexel[0], htexel[1], 0.0, 0.0], b: [0.0, 0.0, 0.0, 1.0] });
+            self.write_params(gpu, PostParams { a: [atexel[0], atexel[1], 0.0, 0.0], b: [0.0, 0.0, 0.0, astep] });
             self.pass(gpu, &self.ao_blur_pipeline, &self.ao_b.bind, &self.ao_a.view, wgpu::LoadOp::Clear(BLACK));
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });
             self.pass2(

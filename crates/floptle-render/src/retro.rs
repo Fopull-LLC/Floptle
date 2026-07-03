@@ -194,8 +194,8 @@ fn make_targets(
         dimension: wgpu::TextureDimension::D2,
         format: Gpu::DEPTH_FORMAT,
         // TEXTURE_BINDING so SSAO can sample the low-res depth in retro mode
-        // (post runs full-res AFTER the retro upscale; nearest-neighbor blocks map
-        // 1:1 onto low-res depth texels, so AO just goes chunky with the pixels).
+        // (the post chain runs AT this resolution, before the upscale, so AO —
+        // like every other effect — goes chunky with the pixels).
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
