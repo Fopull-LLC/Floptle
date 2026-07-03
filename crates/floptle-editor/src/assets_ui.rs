@@ -1,0 +1,472 @@
+//! The Assets dock tab: the folder grid browser (tiles, drag sources, create/
+//! rename/delete menus), the tree fallback, the Inspector-side asset preview,
+//! and the per-texture / material-preset asset editors.
+
+use std::path::{Path, PathBuf};
+
+use floptle_scene::MaterialDoc;
+
+use crate::assets::{
+    asset_kind_icon, asset_rel_path, is_markdown, is_model, is_scene, is_script,
+    reveal_in_explorer, truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
+};
+use crate::inspector::material_props_ui;
+use crate::{anim, anim_ui, EditorTabViewer, PreviewView};
+
+impl<'a> EditorTabViewer<'a> {
+    pub(crate) fn assets_ui(&mut self, ui: &mut egui::Ui) {
+        let root = self.project_root.to_path_buf();
+        ui.horizontal(|ui| {
+            ui.strong("Assets");
+            if ui.small_button("⟳").on_hover_text("rescan").clicked() {
+                self.cmd.refresh_assets = true;
+            }
+            ui.menu_button("✚ New", |ui| {
+                self.new_asset_menu(ui, &root);
+            });
+            ui.separator();
+            // Tree / Grid view toggle.
+            if ui.selectable_label(!*self.assets_grid, "☰").on_hover_text("file tree").clicked() {
+                *self.assets_grid = false;
+            }
+            if ui.selectable_label(*self.assets_grid, "⊞").on_hover_text("icon grid").clicked() {
+                *self.assets_grid = true;
+            }
+            ui.separator();
+            ui.small("right-click for New · double-click a script/folder to open · drag onto the scene");
+        });
+        ui.separator();
+        if *self.assets_grid {
+            self.assets_grid_ui(ui, &root);
+            return;
+        }
+        let tree = self.asset_tree; // Copy the slice ref so the recursion can &mut self.
+        let resp = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.asset_node_ui(ui, tree, &root);
+                // Catch right-clicks on the empty space below the list so New
+                // Folder / New Script is reachable even when the tree is short.
+                ui.allocate_response(ui.available_size(), egui::Sense::click())
+            })
+            .inner;
+        resp.context_menu(|ui| {
+            self.new_asset_menu(ui, &root);
+        });
+    }
+
+    /// Find the asset entries inside `dir` (absolute, under the project root) by
+    /// walking the cached tree. The returned slice borrows the tree (lifetime `'a`),
+    /// not `self`, so the caller can still `&mut self` while iterating it.
+    pub(crate) fn grid_entries(&self, dir: &Path) -> Option<&'a [AssetEntry]> {
+        let rel = dir.strip_prefix(self.project_root).ok()?;
+        let mut cur: &'a [AssetEntry] = self.asset_tree;
+        for comp in rel.components() {
+            let name = comp.as_os_str().to_string_lossy();
+            cur = cur.iter().find_map(|e| match e {
+                AssetEntry::Dir(n, kids) if n.as_str() == name => Some(kids.as_slice()),
+                _ => None,
+            })?;
+        }
+        Some(cur)
+    }
+
+    /// The icon-grid asset browser: a wrapped flow of tiles for the current folder.
+    /// Folders descend on double-click; files select / open / drag like the tree.
+    pub(crate) fn assets_grid_ui(&mut self, ui: &mut egui::Ui, root: &Path) {
+        // Keep the grid folder valid (e.g. after switching projects).
+        if !self.assets_grid_dir.starts_with(root) {
+            *self.assets_grid_dir = root.to_path_buf();
+        }
+        let dir = self.assets_grid_dir.clone();
+
+        // Breadcrumb row: up button + relative path.
+        ui.horizontal(|ui| {
+            let at_root = dir == root;
+            if ui.add_enabled(!at_root, egui::Button::new("⏶")).on_hover_text("up").clicked() {
+                if let Some(p) = dir.parent() {
+                    *self.assets_grid_dir = p.to_path_buf();
+                }
+            }
+            let rel = dir.strip_prefix(root).ok().map(|p| p.to_string_lossy().to_string());
+            let crumb = match rel.as_deref() {
+                Some("") | None => "assets".to_string(),
+                Some(r) => format!("assets/{r}"),
+            };
+            ui.weak(crumb);
+        });
+        ui.separator();
+
+        let Some(entries) = self.grid_entries(&dir) else {
+            ui.weak("(empty)");
+            return;
+        };
+        let mut enter: Option<PathBuf> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for entry in entries {
+                    match entry {
+                        AssetEntry::Dir(name, _) => {
+                            if self.asset_tile(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name.as_str(), None) {
+                                enter = Some(dir.join(name));
+                            }
+                        }
+                        AssetEntry::File { name, path } => {
+                            let (icon, color) = asset_kind_icon(path.as_str());
+                            self.asset_file_tile(ui, icon, color, name.as_str(), path.as_str());
+                        }
+                    }
+                }
+            });
+            // Right-click empty space ⏵ New menu.
+            let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
+            bg.context_menu(|ui| self.new_asset_menu(ui, &dir));
+        });
+        if let Some(d) = enter {
+            *self.assets_grid_dir = d;
+        }
+    }
+
+    /// A bare clickable tile (icon + name). Returns true on double-click (used for
+    /// folders ⏵ descend). 84-pt wide so several fit per row.
+    pub(crate) fn asset_tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        icon: &str,
+        color: egui::Color32,
+        name: &str,
+        _path: Option<&str>,
+    ) -> bool {
+        let resp = self.tile_frame(ui, icon, color, name, false);
+        resp.double_clicked()
+    }
+
+    /// A file tile: select on click, open on double-click (scripts/markdown), drag a
+    /// payload (models/scripts), and the shared context menu.
+    pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str) {
+        let selected = self.selected_asset.as_deref() == Some(path);
+        let draggable = is_model(path) || is_script(path) || anim_ui::is_anim_clip(path);
+        let resp = self.tile_frame(ui, icon, color, name, selected);
+        if draggable {
+            resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
+        }
+        if resp.clicked() {
+            *self.selected_asset = Some(path.to_string());
+        }
+        let openable = is_script(path) || is_markdown(path);
+        if resp.double_clicked() {
+            if is_scene(path) {
+                self.cmd.open_scene = Some(path.to_string());
+            } else if anim_ui::is_anim_ctl(path) {
+                self.cmd.open_anim_graph = Some(anim::asset_key(
+                    Path::new(path),
+                    self.project_root,
+                    floptle_scene::ANIM_CTL_EXT,
+                ));
+            } else if openable {
+                self.cmd.open_script_pref = Some(path.to_string());
+            }
+        }
+        let dir = Path::new(path).parent().map(|p| p.to_path_buf());
+        resp.context_menu(|ui| {
+            if openable && ui.button("🖊 Open in Scripting tab").clicked() {
+                self.cmd.open_script = Some(path.to_string());
+                self.cmd.focus_scripting = true;
+                ui.close();
+            }
+            if ui.button("🗀 Open in file explorer").clicked() {
+                reveal_in_explorer(Path::new(path));
+                ui.close();
+            }
+            if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
+                ui.ctx().copy_text(asset_rel_path(path, self.project_root));
+                ui.close();
+            }
+            if ui.button("⎘ Copy full path").clicked() {
+                ui.ctx().copy_text(path.to_string());
+                ui.close();
+            }
+            if ui.button("🖊 Rename…").clicked() {
+                self.cmd.rename_asset = Some(path.to_string());
+                ui.close();
+            }
+            if ui.button("🗑 Delete").clicked() {
+                self.cmd.delete_asset = Some(path.to_string());
+                ui.close();
+            }
+            if let Some(d) = &dir {
+                ui.separator();
+                self.new_asset_menu(ui, d);
+            }
+        });
+    }
+
+    /// Paint one tile (a framed icon over a name), returning its click_and_drag
+    /// response. Highlights when `selected`.
+    pub(crate) fn tile_frame(
+        &self,
+        ui: &mut egui::Ui,
+        icon: &str,
+        color: egui::Color32,
+        name: &str,
+        selected: bool,
+    ) -> egui::Response {
+        let size = egui::vec2(86.0, 84.0);
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        let bg = if selected {
+            ui.visuals().selection.bg_fill.gamma_multiply(0.5)
+        } else if resp.hovered() {
+            ui.visuals().widgets.hovered.bg_fill
+        } else {
+            ui.visuals().faint_bg_color
+        };
+        p.rect_filled(rect.shrink(2.0), 5.0, bg);
+        if selected {
+            p.rect_stroke(rect.shrink(2.0), 5.0, egui::Stroke::new(1.5, ui.visuals().selection.stroke.color), egui::StrokeKind::Inside);
+        }
+        // Icon glyph centered in the upper part.
+        let icon_pos = egui::pos2(rect.center().x, rect.top() + 30.0);
+        p.text(icon_pos, egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(30.0), color);
+        // Name, truncated to two-ish lines at the bottom.
+        let short = truncate_label(name, 22);
+        p.text(
+            egui::pos2(rect.center().x, rect.bottom() - 16.0),
+            egui::Align2::CENTER_CENTER,
+            short,
+            egui::FontId::proportional(11.0),
+            ui.visuals().text_color(),
+        );
+        resp.on_hover_text(name)
+    }
+
+    /// The shared "New Folder / New Script" submenu, targeting `dir`.
+    pub(crate) fn new_asset_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
+        if ui.button("🗀 New Folder").clicked() {
+            self.cmd.new_folder_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        if ui.button("🖊 New Lua Script").clicked() {
+            self.cmd.new_script_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        if ui.button("⎙ New Scene").clicked() {
+            self.cmd.open_new_scene = true;
+            ui.close();
+        }
+        if ui.button("◉ New Animation Controller").clicked() {
+            self.cmd.new_anim_controller = Some(None);
+            self.cmd.new_anim_controller_dir = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+    }
+
+    pub(crate) fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry], dir: &Path) {
+        for entry in entries {
+            match entry {
+                AssetEntry::Dir(name, children) => {
+                    let child_dir = dir.join(name);
+                    let header = egui::CollapsingHeader::new(format!("🗀 {name}"))
+                        .id_salt(name)
+                        .show(ui, |ui| {
+                            self.asset_node_ui(ui, children, &child_dir);
+                        });
+                    header.header_response.context_menu(|ui| {
+                        self.new_asset_menu(ui, &child_dir);
+                        ui.separator();
+                        if ui.button("🗑 Delete folder").clicked() {
+                            self.cmd.delete_asset = Some(child_dir.to_string_lossy().to_string());
+                            ui.close();
+                        }
+                    });
+                }
+                AssetEntry::File { name, path } => {
+                    let model = is_model(path);
+                    let script = is_script(path);
+                    let draggable = model || script || anim_ui::is_anim_clip(path);
+                    let selected = self.selected_asset.as_deref() == Some(path.as_str());
+                    let (icon, _) = asset_kind_icon(path);
+                    let grip = if draggable { "¦" } else { " " };
+                    let label = format!("{grip} {icon} {name}");
+                    // A single widget that senses BOTH click and drag. (The old
+                    // dnd_drag_source layered a drag-sense interaction over the label,
+                    // and the drag sense swallowed double-clicks — so a script could
+                    // only be dragged, never opened.) One click_and_drag widget lets
+                    // egui tell a tap from a drag cleanly: tap ⏵ select / double-tap
+                    // ⏵ open; press-and-move ⏵ drag a payload onto the scene or a node.
+                    let resp = if draggable {
+                        let text = if selected {
+                            egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::RichText::new(label)
+                        };
+                        let r = ui.add(
+                            egui::Label::new(text)
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+                        r.dnd_set_drag_payload(AssetPayload { path: path.clone() });
+                        r
+                    } else {
+                        ui.selectable_label(selected, label)
+                    };
+                    if resp.clicked() {
+                        *self.selected_asset = Some(path.clone());
+                    }
+                    let openable = script || is_markdown(path);
+                    if resp.double_clicked() {
+                        if is_scene(path) {
+                            self.cmd.open_scene = Some(path.clone());
+                        } else if anim_ui::is_anim_ctl(path) {
+                            self.cmd.open_anim_graph = Some(anim::asset_key(
+                                Path::new(path),
+                                self.project_root,
+                                floptle_scene::ANIM_CTL_EXT,
+                            ));
+                        } else if openable {
+                            self.cmd.open_script_pref = Some(path.clone());
+                        }
+                    }
+                    resp.context_menu(|ui| {
+                        if openable && ui.button("🖊 Open in Scripting tab").clicked() {
+                            self.cmd.open_script = Some(path.clone());
+                            self.cmd.focus_scripting = true;
+                            ui.close();
+                        }
+                        if ui.button("🗀 Open in file explorer").clicked() {
+                            reveal_in_explorer(Path::new(path));
+                            ui.close();
+                        }
+                        if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
+                            ui.ctx().copy_text(asset_rel_path(path, self.project_root));
+                            ui.close();
+                        }
+                        if ui.button("⎘ Copy full path").clicked() {
+                            ui.ctx().copy_text(path.clone());
+                            ui.close();
+                        }
+                        if ui.button("🖊 Rename…").clicked() {
+                            self.cmd.rename_asset = Some(path.clone());
+                            ui.close();
+                        }
+                        if ui.button("🗑 Delete").clicked() {
+                            self.cmd.delete_asset = Some(path.clone());
+                            ui.close();
+                        }
+                        ui.separator();
+                        self.new_asset_menu(ui, dir);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Draw the selected asset's preview: a spinning model/material render (drag to
+    /// orbit, scroll to zoom, with spin + zoom controls) or a texture image.
+    pub(crate) fn asset_preview_ui(&mut self, ui: &mut egui::Ui) {
+        match self.preview.clone() {
+            Some(PreviewView::Rendered(id)) => {
+                let size = egui::vec2(240.0, 240.0);
+                let resp = ui.add(
+                    egui::Image::new((id, size))
+                        .sense(egui::Sense::click_and_drag())
+                        .corner_radius(4.0),
+                );
+                // Drag to orbit (pauses auto-spin); scroll over the image to zoom.
+                if resp.dragged() {
+                    *self.preview_spinning = false;
+                    *self.preview_spin += resp.drag_delta().x * 0.01;
+                }
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if resp.hovered() && scroll != 0.0 {
+                    *self.preview_zoom = (*self.preview_zoom * (1.0 - scroll * 0.002)).clamp(0.4, 4.0);
+                }
+                ui.horizontal(|ui| {
+                    ui.toggle_value(self.preview_spinning, "⟲ spin");
+                    ui.add(egui::Slider::new(self.preview_zoom, 0.4..=4.0).text("zoom"));
+                });
+            }
+            Some(PreviewView::Image(handle, dims)) => {
+                let max = 256.0;
+                let (w, h) = (dims[0].max(1) as f32, dims[1].max(1) as f32);
+                let s = (max / w.max(h)).min(1.0);
+                ui.add(
+                    egui::Image::new(&handle)
+                        .fit_to_exact_size(egui::vec2(w * s, h * s))
+                        .corner_radius(4.0),
+                );
+                ui.small(format!("{}×{} px", dims[0], dims[1]));
+            }
+            None => {
+                ui.weak("(building preview…)");
+            }
+        }
+    }
+
+    /// Editable properties for a selected material preset, with a Save back to its
+    /// `.ron`. Edits mutate the live preview material, so the sphere updates as you go.
+    /// Per-texture sampling controls (filter + wrap), shown when a texture asset is
+    /// selected. Changes are recorded on `cmd` and applied (persist + re-register)
+    /// after the frame.
+    pub(crate) fn texture_settings_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        ui.separator();
+        ui.strong("Sampling");
+        let mut s = self.texture_settings.get(path).copied().unwrap_or_default();
+        let before = s;
+        egui::Grid::new("tex-sampling").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label("filter");
+            egui::ComboBox::from_id_salt("tex-filter")
+                .selected_text(match s.filter {
+                    FilterMode::Pixelated => "Pixelated",
+                    FilterMode::Smooth => "Smooth",
+                    FilterMode::SmoothMipmaps => "Smooth + Mipmaps",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.filter, FilterMode::Pixelated, "Pixelated");
+                    ui.selectable_value(&mut s.filter, FilterMode::Smooth, "Smooth");
+                    ui.selectable_value(&mut s.filter, FilterMode::SmoothMipmaps, "Smooth + Mipmaps");
+                });
+            ui.end_row();
+            ui.label("wrap");
+            egui::ComboBox::from_id_salt("tex-wrap")
+                .selected_text(match s.wrap {
+                    WrapMode::Repeat => "Repeat",
+                    WrapMode::Clamp => "Clamp",
+                    WrapMode::Mirror => "Mirror",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut s.wrap, WrapMode::Repeat, "Repeat");
+                    ui.selectable_value(&mut s.wrap, WrapMode::Clamp, "Clamp");
+                    ui.selectable_value(&mut s.wrap, WrapMode::Mirror, "Mirror");
+                });
+            ui.end_row();
+        });
+        ui.small("Pixelated = crisp · Smooth = bilinear · +Mipmaps = no shimmer at distance.");
+        if s != before {
+            self.cmd.set_texture_setting = Some((path.to_string(), s));
+        }
+    }
+
+    pub(crate) fn material_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        let Some((mpath, mat)) = self.preview_material.as_mut() else { return };
+        if mpath != path {
+            return;
+        }
+        ui.separator();
+        let r = material_props_ui(ui, mat, self.materials, &[], self.mat_name_buf);
+        if let Some(name) = r.save_as {
+            if !name.is_empty() {
+                self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));
+            }
+        }
+        if ui.button("Save to this preset").clicked() {
+            let stem = Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !stem.is_empty() {
+                self.cmd.save_material = Some((stem, MaterialDoc::from_material(mat)));
+            }
+        }
+    }
+}

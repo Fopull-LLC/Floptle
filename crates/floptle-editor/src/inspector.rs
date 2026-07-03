@@ -1,0 +1,1203 @@
+//! The Inspector dock tab: the selected node's modular components (Type /
+//! Transform / Material / Rigidbody / Collider / Scripts / Animation), the
+//! component clipboard, and the material property editors shared with the
+//! floating Material Editor window.
+
+use std::path::Path;
+
+use floptle_core::math::{EulerRot, Quat};
+use floptle_core::transform::Transform;
+use floptle_core::{Light, Material, Matter, Name, Scripts, Shape};
+
+use crate::assets::{
+    collect_model_paths, collect_script_names, collect_texture_paths, is_material, is_model,
+    is_script, is_texture, AssetPayload,
+};
+use crate::matter_catalog::{matter_icon, matter_kind_label, type_catalog};
+use crate::{anim_ui, EditorTabViewer};
+
+/// A copied component's values, held on the editor clipboard so they can be pasted
+/// onto another component of the same kind (Inspector ⎘ copy / 📋 paste).
+#[derive(Clone)]
+pub(crate) enum ComponentClip {
+    Transform(Transform),
+    /// The node's "type" component (geometry / camera / light / …).
+    Matter(Matter),
+    Material(Box<Material>),
+    RigidBody(floptle_core::RigidBody),
+    /// A single attached script (its kind, enabled flag, and tuned params).
+    Script(floptle_core::ScriptInst),
+}
+
+impl ComponentClip {
+    /// A short human label for the clipboard's current contents.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            ComponentClip::Transform(_) => "Transform".into(),
+            ComponentClip::Matter(_) => "Type".into(),
+            ComponentClip::Material(_) => "Material".into(),
+            ComponentClip::RigidBody(_) => "Rigidbody".into(),
+            ComponentClip::Script(s) => format!("Script: {}", s.kind),
+        }
+    }
+}
+/// A component section header row: bold title on the left, a right-aligned `⋮`
+/// overflow menu (Copy ⎘ always; Paste 📋 when `can_paste`; Remove 🗑 when
+/// `can_remove`). Returns `(copy, paste, remove)` — which item was clicked.
+pub(crate) fn component_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    can_paste: bool,
+    can_remove: bool,
+) -> (bool, bool, bool) {
+    let mut copy = false;
+    let mut paste = false;
+    let mut remove = false;
+    ui.horizontal(|ui| {
+        ui.strong(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("…", |ui| {
+                if ui.button("⎘  Copy values").clicked() {
+                    copy = true;
+                    ui.close();
+                }
+                if can_paste && ui.button("📋  Paste values").clicked() {
+                    paste = true;
+                    ui.close();
+                }
+                if can_remove {
+                    ui.separator();
+                    if ui.button("🗑  Remove component").clicked() {
+                        remove = true;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("component options");
+        });
+    });
+    (copy, paste, remove)
+}
+/// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
+#[derive(Default)]
+pub(crate) struct MatEditResult {
+    pub(crate) changed: bool,
+    pub(crate) remove: bool,
+    pub(crate) save_as: Option<String>,
+}
+/// In-depth material property editors — shared by the Inspector's Material section
+/// and the floating Material Editor window. Edits `m` in place (so undo coalesces
+/// via `inspector_changed`); preset apply/save/remove come back as intents.
+pub(crate) fn material_props_ui(
+    ui: &mut egui::Ui,
+    m: &mut Material,
+    presets: &[(String, floptle_scene::MaterialDoc)],
+    textures: &[String],
+    name_buf: &mut String,
+) -> MatEditResult {
+    let mut r = MatEditResult::default();
+
+    egui::Grid::new("mat_top").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+        ui.label("base color");
+        r.changed |= ui.color_edit_button_rgb(&mut m.color).changed();
+        ui.end_row();
+        ui.label("texture");
+        let cur = m
+            .texture
+            .as_deref()
+            .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+            .unwrap_or_else(|| "none".into());
+        egui::ComboBox::from_id_salt("mat_tex").selected_text(cur).show_ui(ui, |ui| {
+            if ui.selectable_label(m.texture.is_none(), "none").clicked() {
+                m.texture = None;
+                r.changed = true;
+            }
+            for path in textures {
+                let name =
+                    Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                if ui.selectable_label(m.texture.as_deref() == Some(path.as_str()), name).clicked() {
+                    m.texture = Some(path.clone());
+                    r.changed = true;
+                }
+            }
+        });
+        ui.end_row();
+        ui.label("emissive");
+        ui.horizontal(|ui| {
+            r.changed |= ui.color_edit_button_rgb(&mut m.emissive).changed();
+            r.changed |= ui
+                .add(egui::DragValue::new(&mut m.emissive_strength).speed(0.02).range(0.0..=20.0).prefix("×"))
+                .on_hover_text("emissive strength")
+                .changed();
+        });
+        ui.end_row();
+        ui.label("unlit");
+        r.changed |= ui.checkbox(&mut m.unlit, "fullbright / flat").changed();
+        ui.end_row();
+    });
+
+    // These only affect the lit path, so grey them out when unlit.
+    ui.add_enabled_ui(!m.unlit, |ui| {
+        egui::Grid::new("mat_lit").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+            ui.label("specular");
+            ui.horizontal(|ui| {
+                r.changed |= ui.color_edit_button_rgb(&mut m.specular).changed();
+                r.changed |= ui
+                    .add(egui::DragValue::new(&mut m.specular_strength).speed(0.02).range(0.0..=8.0).prefix("×"))
+                    .on_hover_text("specular strength")
+                    .changed();
+            });
+            ui.end_row();
+            ui.label("shininess");
+            r.changed |= ui.add(egui::Slider::new(&mut m.shininess, 1.0..=256.0).logarithmic(true)).changed();
+            ui.end_row();
+            ui.label("rim");
+            ui.horizontal(|ui| {
+                r.changed |= ui.color_edit_button_rgb(&mut m.rim).changed();
+                r.changed |= ui
+                    .add(egui::DragValue::new(&mut m.rim_strength).speed(0.02).range(0.0..=8.0).prefix("×"))
+                    .on_hover_text("rim / fresnel strength")
+                    .changed();
+            });
+            ui.end_row();
+            ui.label("ambient");
+            r.changed |= ui.add(egui::Slider::new(&mut m.ambient, 0.0..=4.0)).changed();
+            ui.end_row();
+            ui.label("opacity");
+            r.changed |= ui
+                .add(egui::Slider::new(&mut m.alpha, 0.0..=1.0))
+                .on_hover_text("1 = opaque; below 1 alpha-blends over the scene (drawn after opaque objects)")
+                .changed();
+            ui.end_row();
+        });
+    });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        if !presets.is_empty() {
+            ui.menu_button("Apply preset", |ui| {
+                for (name, doc) in presets {
+                    if ui.button(name).clicked() {
+                        *m = doc.to_material();
+                        r.changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        }
+        ui.add(egui::TextEdit::singleline(name_buf).desired_width(100.0).hint_text("preset name"));
+        if ui.button("Save preset").clicked() && !name_buf.trim().is_empty() {
+            r.save_as = Some(name_buf.trim().to_string());
+        }
+    });
+    if ui.button("🗑 Remove material").clicked() {
+        r.remove = true;
+    }
+    r
+}
+impl EditorTabViewer<'_> {
+    pub(crate) fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        // The Inspector shows *only* the current selection (the scene name + save
+        // live in the Hierarchy header). An asset selected in the browser shows here.
+        if let Some(path) = self.selected_asset.clone() {
+            ui.strong("Asset");
+            let name_resp = ui.selectable_label(false, &path);
+            if is_model(&path) {
+                ui.label("glTF model — drag onto the scene to place it.");
+                self.asset_preview_ui(ui);
+                self.model_asset_anim_ui(ui, &path);
+            } else if anim_ui::is_anim_clip(&path) {
+                self.clip_asset_ui(ui, &path);
+            } else if anim_ui::is_anim_ctl(&path) {
+                self.ctl_asset_ui(ui, &path);
+            } else if is_material(&path) {
+                ui.label("material preset");
+                self.asset_preview_ui(ui);
+                self.material_asset_ui(ui, &path);
+            } else if is_texture(&path) {
+                self.asset_preview_ui(ui);
+                self.texture_settings_ui(ui, &path);
+            } else if is_script(&path) {
+                ui.label("script — drag onto a node, double-click, or:");
+                if ui.button("🖊  Open in Scripting").clicked() {
+                    self.cmd.open_script = Some(path.clone());
+                    self.cmd.focus_scripting = true;
+                }
+                if name_resp.double_clicked() {
+                    self.cmd.open_script_pref = Some(path.clone());
+                }
+            }
+            ui.separator();
+        }
+
+        let primary = self.selection.last().copied();
+        if self.selection.len() > 1 {
+            ui.small(format!("{} selected", self.selection.len()));
+        }
+        let cmd = &mut *self.cmd;
+        let world = &mut *self.world;
+        match primary {
+            Some(e) if world.get::<Light>(e).is_some() => {
+                if let Some(l) = world.get_mut::<Light>(e) {
+                    ui.label("Lighting node");
+                    ui.label("direction");
+                    ui.horizontal(|ui| {
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
+                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("light");
+                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();
+                        ui.label("ambient");
+                        cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
+                    });
+                    cmd.inspector_changed |=
+                        ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity")).changed();
+
+                    ui.separator();
+                    cmd.inspector_changed |= ui
+                        .checkbox(&mut l.shadows, "sun shadows")
+                        .on_hover_text(
+                            "march the SDF field toward the sun — analytically soft shadows, \
+                             no shadow maps. Terrain and blobs cast on everything; meshes cast \
+                             via their collider shapes and receive like everything else.",
+                        )
+                        .changed();
+                    ui.add_enabled_ui(l.shadows, |ui| {
+                        cmd.inspector_changed |= ui
+                            .add(egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0).text("softness"))
+                            .on_hover_text("0 = razor-hard edge (retro), 1 = dreamy-soft penumbra")
+                            .changed();
+                        cmd.inspector_changed |= ui
+                            .add(egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0).text("strength"))
+                            .on_hover_text("how dark full shadow gets — ambient light still fills, so 1.0 isn't pitch black")
+                            .changed();
+                        ui.horizontal(|ui| {
+                            ui.label("tint");
+                            cmd.inspector_changed |= ui
+                                .color_edit_button_rgb(&mut l.shadow_tint)
+                                .on_hover_text("shadows darken toward this color — black is neutral; try purple dusk or sepia")
+                                .changed();
+                            ui.label("quantize");
+                            let qlabel = match l.shadow_quantize {
+                                0 => "smooth".to_string(),
+                                n => format!("{n} bands"),
+                            };
+                            egui::ComboBox::from_id_salt("shadow_quantize")
+                                .selected_text(qlabel)
+                                .show_ui(ui, |ui| {
+                                    cmd.inspector_changed |=
+                                        ui.selectable_value(&mut l.shadow_quantize, 0, "smooth").clicked();
+                                    for nb in 2..=4u32 {
+                                        cmd.inspector_changed |= ui
+                                            .selectable_value(&mut l.shadow_quantize, nb, format!("{nb} bands"))
+                                            .clicked();
+                                    }
+                                });
+                        });
+                        ui.add_enabled_ui(l.shadow_quantize >= 2, |ui| {
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut l.shadow_dither, "dither the penumbra")
+                                .on_hover_text("Bayer-pattern the quantized penumbra — the PS1 shadow edge; pairs with retro mode")
+                                .changed();
+                        });
+                        cmd.inspector_changed |= ui
+                            .add(
+                                egui::Slider::new(&mut l.shadow_distance, 10.0..=1000.0)
+                                    .logarithmic(true)
+                                    .text("distance"),
+                            )
+                            .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
+                            .changed();
+                    });
+                }
+            }
+            Some(e) if world.get::<Transform>(e).is_some() => {
+                if let Some(n) = world.get_mut::<Name>(e) {
+                    ui.horizontal(|ui| {
+                        ui.label("name");
+                        cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
+                    });
+                }
+                // The component clipboard (read-only); copy/paste route through `cmd`.
+                let clip = self.component_clip.as_ref();
+
+                // ===== Type — the node's primary kind (mutually exclusive). =====
+                {
+                    let (icon, label, is_terrain) = match world.get::<Matter>(e) {
+                        Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
+                        None => ("◈", "Type", false),
+                    };
+                    let (copy, paste, _) = component_header(
+                        ui,
+                        &format!("{icon} {label}"),
+                        !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
+                        false,
+                    );
+                    if copy && !is_terrain {
+                        if let Some(m) = world.get::<Matter>(e) {
+                            cmd.copy_component = Some(ComponentClip::Matter(m.clone()));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                }
+                ui.indent("type_props", |ui| {
+                    if let Some(m) = world.get_mut::<Matter>(e) {
+                        match m {
+                            Matter::Primitive { shape, color } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("shape");
+                                    egui::ComboBox::from_id_salt("shape")
+                                        .selected_text(format!("{shape:?}"))
+                                        .show_ui(ui, |ui| {
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
+                                        });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("color");
+                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                    ui.small("(base color — add a Material below for emissive, specular, …)");
+                                });
+                            }
+                            Matter::Blob { scale } => {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
+                                    .changed();
+                            }
+                            Matter::Mesh { asset_path } => {
+                                ui.label("imported mesh");
+                                // Swap the model freely — pick any model in the project.
+                                let mut models = Vec::new();
+                                collect_model_paths(self.asset_tree, &mut models);
+                                let file_label = |p: &str| {
+                                    Path::new(p)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| p.to_string())
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label("model");
+                                    egui::ComboBox::from_id_salt("mesh-model")
+                                        .selected_text(file_label(asset_path))
+                                        .show_ui(ui, |ui| {
+                                            for p in &models {
+                                                if ui.selectable_label(asset_path == p, file_label(p)).clicked()
+                                                    && asset_path != p
+                                                {
+                                                    *asset_path = p.clone();
+                                                    cmd.import_model = Some(p.clone());
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.small(asset_path.as_str());
+                                if ui
+                                    .button("⏏ Extract textures")
+                                    .on_hover_text("Save this model's embedded textures to assets/textures/ so you can build materials from them")
+                                    .clicked()
+                                {
+                                    cmd.extract_textures = Some(asset_path.clone());
+                                }
+                            }
+                            Matter::Empty => {
+                                ui.label("group / empty");
+                                ui.small("a folder — organizes child nodes; has a transform but no geometry");
+                            }
+                            Matter::Terrain { .. } => {
+                                ui.label("editable terrain");
+                                ui.small("a sculptable SDF field — move it with the transform below");
+                                if ui.button("Δ Open Terrain tools").clicked() {
+                                    cmd.focus_terrain = true;
+                                }
+                            }
+                            Matter::Camera { fov_y, active } => {
+                                ui.label("camera");
+                                ui.small("a viewpoint — play mode renders from the active camera");
+                                // Live preview of what this camera sees.
+                                if let Some(tex) = self.cam_preview {
+                                    let w = ui.available_width().min(300.0);
+                                    let size = egui::vec2(w, w * 9.0 / 16.0);
+                                    ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
+                                    ui.small("preview — what this camera sees");
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label("field of view");
+                                    let mut deg = fov_y.to_degrees();
+                                    if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
+                                        *fov_y = deg.to_radians();
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                if *active {
+                                    ui.colored_label(egui::Color32::from_rgb(120, 200, 140), "⌖ active camera");
+                                } else if ui.button("⌖ Make active camera").clicked() {
+                                    cmd.set_active_camera = Some(e);
+                                }
+                                if ui.button("⎙ Snap to this view").on_hover_text("move the camera to the current editor viewpoint").clicked() {
+                                    cmd.camera_from_view = Some(e);
+                                }
+                            }
+                            Matter::PointLight { color, intensity, range } => {
+                                ui.label("point light");
+                                ui.small("an omni light — position comes from the transform below");
+                                ui.horizontal(|ui| {
+                                    ui.label("color");
+                                    cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                });
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
+                            }
+                            Matter::GravityVolume { mode, strength, radius } => {
+                                use floptle_core::GravityMode;
+                                ui.label("gravity volume");
+                                ui.small("level physics gravity — Down (normal) or Radial (planet)");
+                                ui.horizontal(|ui| {
+                                    let mut radial = *mode == GravityMode::Radial;
+                                    if ui.selectable_label(!radial, "⬇ Down").clicked() {
+                                        radial = false;
+                                    }
+                                    if ui.selectable_label(radial, "◎ Radial (planet)").clicked() {
+                                        radial = true;
+                                    }
+                                    let new =
+                                        if radial { GravityMode::Radial } else { GravityMode::Down };
+                                    if new != *mode {
+                                        *mode = new;
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(strength, 0.0..=60.0).text("strength")).changed();
+                                if *mode == GravityMode::Radial {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
+                                        .changed();
+                                }
+                            }
+                            Matter::Skybox { color, size, texture, tint } => {
+                                ui.label("skybox");
+                                ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+                                let mut textured = texture.is_some();
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
+                                        *texture = None;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if ui.selectable_label(textured, "▦ Texture").clicked() && !textured {
+                                        let mut tl = Vec::new();
+                                        collect_texture_paths(self.asset_tree, &mut tl);
+                                        *texture = Some(tl.first().cloned().unwrap_or_default());
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                textured = texture.is_some();
+                                if !textured {
+                                    ui.horizontal(|ui| {
+                                        ui.label("color");
+                                        cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
+                                    });
+                                } else {
+                                    let mut tl = Vec::new();
+                                    collect_texture_paths(self.asset_tree, &mut tl);
+                                    let cur = texture.clone().unwrap_or_default();
+                                    let label = |p: &str| {
+                                        Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label("texture");
+                                        egui::ComboBox::from_id_salt("sky-tex")
+                                            .selected_text(if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) })
+                                            .show_ui(ui, |ui| {
+                                                for p in &tl {
+                                                    if ui.selectable_label(&cur == p, label(p)).clicked() {
+                                                        *texture = Some(p.clone());
+                                                        cmd.inspector_changed = true;
+                                                    }
+                                                }
+                                            });
+                                    });
+                                    ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
+                                    ui.horizontal(|ui| {
+                                        ui.label("tint");
+                                        cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
+                                    });
+                                }
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
+                                    .changed();
+                            }
+                            Matter::PostProcess {
+                                enabled,
+                                bloom,
+                                bloom_threshold,
+                                bloom_intensity,
+                                vignette,
+                                vignette_strength,
+                                vignette_radius,
+                                ao,
+                                ao_strength,
+                                ao_radius,
+                            } => {
+                                use floptle_core::AoMode;
+                                ui.label("post processing");
+                                ui.small("this scene's full-screen effect chain — every scene has its own (the settings travel with the scene, not the project)");
+                                cmd.inspector_changed |= ui
+                                    .checkbox(enabled, "enabled")
+                                    .on_hover_text("master switch for the whole chain")
+                                    .changed();
+                                ui.add_enabled_ui(*enabled, |ui| {
+                                    ui.separator();
+                                    ui.label("Ambient occlusion");
+                                    ui.horizontal(|ui| {
+                                        let mut m = *ao;
+                                        if ui.selectable_label(m == AoMode::Off, "Off").clicked() {
+                                            m = AoMode::Off;
+                                        }
+                                        if ui
+                                            .selectable_label(m == AoMode::ScreenSpace, "Screen space")
+                                            .on_hover_text("SSAO — cheap, from the depth buffer; shades everything on screen (meshes and terrain)")
+                                            .clicked()
+                                        {
+                                            m = AoMode::ScreenSpace;
+                                        }
+                                        if ui
+                                            .selectable_label(m == AoMode::Sdf, "SDF (true)")
+                                            .on_hover_text("samples the real distance field — no screen-space artifacts; everything receives it, but only SDF matter (terrain/blobs) occludes — meshes are not in the field")
+                                            .clicked()
+                                        {
+                                            m = AoMode::Sdf;
+                                        }
+                                        if m != *ao {
+                                            *ao = m;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                    if *ao != AoMode::Off {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(ao_strength, 0.0..=1.0).text("strength"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true).text("radius (m)"))
+                                            .changed();
+                                    }
+                                    ui.separator();
+                                    cmd.inspector_changed |= ui.checkbox(bloom, "Bloom").changed();
+                                    if *bloom {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(bloom_threshold, 0.0..=2.0).text("threshold"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(bloom_intensity, 0.0..=2.0).text("intensity"))
+                                            .changed();
+                                    }
+                                    cmd.inspector_changed |= ui.checkbox(vignette, "Vignette").changed();
+                                    if *vignette {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(vignette_strength, 0.0..=1.0).text("strength"))
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::Slider::new(vignette_radius, 0.3..=1.0).text("radius"))
+                                            .changed();
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+                // Visibility (geometry nodes) — hide the node's visual without deleting it.
+                if matches!(
+                    world.get::<Matter>(e),
+                    Some(Matter::Mesh { .. } | Matter::Primitive { .. } | Matter::Blob { .. })
+                ) {
+                    ui.indent("visible_toggle", |ui| {
+                        let mut vis =
+                            world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
+                        if ui
+                            .checkbox(&mut vis, "👁 visible")
+                            .on_hover_text("uncheck to hide this node's geometry (scripts: node.visible = true/false)")
+                            .changed()
+                        {
+                            cmd.set_visible = Some((e, vis));
+                            cmd.inspector_changed = true;
+                        }
+                    });
+                }
+
+                // ===== Transform (always present) =====
+                ui.separator();
+                {
+                    let (copy, paste, _) = component_header(
+                        ui,
+                        "✛ Transform",
+                        matches!(clip, Some(ComponentClip::Transform(_))),
+                        false,
+                    );
+                    if copy {
+                        if let Some(t) = world.get::<Transform>(e) {
+                            cmd.copy_component = Some(ComponentClip::Transform(*t));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                }
+                ui.indent("xform_props", |ui| {
+                    if let Some(t) = world.get_mut::<Transform>(e) {
+                        ui.label("translation");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.x).speed(0.05).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.y).speed(0.05).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.translation.z).speed(0.05).prefix("z ")).changed();
+                        });
+                        ui.label("rotation (deg)");
+                        let (ey, ex, ez) = t.rotation.to_euler(EulerRot::YXZ);
+                        let mut deg = [ey.to_degrees(), ex.to_degrees(), ez.to_degrees()];
+                        let mut rot_changed = false;
+                        ui.horizontal(|ui| {
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[0]).speed(1.0).prefix("y ")).changed();
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[1]).speed(1.0).prefix("x ")).changed();
+                            rot_changed |= ui.add(egui::DragValue::new(&mut deg[2]).speed(1.0).prefix("z ")).changed();
+                        });
+                        if rot_changed {
+                            t.rotation = Quat::from_euler(
+                                EulerRot::YXZ,
+                                deg[0].to_radians(),
+                                deg[1].to_radians(),
+                                deg[2].to_radians(),
+                            );
+                            cmd.inspector_changed = true;
+                        }
+                        ui.label("scale");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.x).speed(0.02).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.y).speed(0.02).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut t.scale.z).speed(0.02).prefix("z ")).changed();
+                        });
+                    }
+                });
+
+                // ===== Material (only when the node has one) =====
+                if world.get::<Material>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "◑ Material",
+                        matches!(clip, Some(ComponentClip::Material(_))),
+                        true,
+                    );
+                    if copy {
+                        if let Some(mat) = world.get::<Material>(e) {
+                            cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_material = Some(e);
+                    }
+                    let mut tex_list = Vec::new();
+                    collect_texture_paths(self.asset_tree, &mut tex_list);
+                    ui.indent("material_props", |ui| {
+                        if let Some(mat) = world.get_mut::<Material>(e) {
+                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
+                            cmd.inspector_changed |= res.changed;
+                            if res.remove {
+                                cmd.remove_material = Some(e);
+                            }
+                            if let Some(name) = res.save_as {
+                                cmd.save_material =
+                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                            }
+                            if ui.button("⛶ Open in Material Editor").clicked() {
+                                *self.show_material_editor = true;
+                            }
+                        }
+                    });
+                }
+
+                // ===== Rigidbody (only when the node has one) =====
+                if world.get::<floptle_core::RigidBody>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "◆ Rigidbody",
+                        matches!(clip, Some(ComponentClip::RigidBody(_))),
+                        true,
+                    );
+                    if copy {
+                        if let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
+                            cmd.copy_component = Some(ComponentClip::RigidBody(*rb));
+                        }
+                    }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_rigidbody = Some(e);
+                    }
+                    ui.indent("rb_props", |ui| {
+                        if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
+                            use floptle_core::BodyKind;
+                            ui.horizontal(|ui| {
+                                ui.label("shape");
+                                egui::ComboBox::from_id_salt("rb-shape")
+                                    .selected_text(match rb.kind {
+                                        BodyKind::Sphere => "Sphere",
+                                        BodyKind::Capsule => "Capsule",
+                                        BodyKind::Box => "Box",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Sphere, "Sphere").changed();
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Capsule, "Capsule").changed();
+                                        cmd.inspector_changed |=
+                                            ui.selectable_value(&mut rb.kind, BodyKind::Box, "Box").changed();
+                                    });
+                            });
+                            if rb.kind == BodyKind::Box {
+                                ui.label("half-extents");
+                                ui.horizontal(|ui| {
+                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                        cmd.inspector_changed |= ui
+                                            .add(egui::DragValue::new(&mut rb.half_extents[i]).speed(0.02).range(0.02..=50.0).prefix(format!("{ax} ")))
+                                            .changed();
+                                    }
+                                });
+                            } else {
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                                if rb.kind == BodyKind::Capsule {
+                                    cmd.inspector_changed |=
+                                        ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                                }
+                            }
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
+                            cmd.inspector_changed |=
+                                ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rb.gravity, "affected by gravity")
+                                .on_hover_text("off = floats (still collides; a script can still move it)")
+                                .changed();
+                            ui.horizontal(|ui| {
+                                ui.label("freeze pos");
+                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("freeze rot");
+                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
+                                }
+                            });
+                        }
+                    });
+                    // The body shape doubles as the node's sun-shadow proxy (see the
+                    // Lighting node) — casting is the default; the component only
+                    // exists to record an opt-out.
+                    let mut casts =
+                        world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
+                    if ui
+                        .checkbox(&mut casts, "casts shadows")
+                        .on_hover_text("this body shape stands in for the mesh in the sun-shadow march — untick to stop this node casting")
+                        .changed()
+                    {
+                        if casts {
+                            world.remove::<floptle_core::CastShadow>(e);
+                        } else {
+                            world.insert(e, floptle_core::CastShadow(false));
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                }
+
+                // ===== Collider (static collision; only when the node has one) =====
+                // Auto-shaped from the node's geometry (Cube → box, Sphere → sphere,
+                // Capsule → capsule, Mesh → its triangles). A legacy MeshCollider counts.
+                {
+                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
+                        || world.get::<floptle_core::MeshCollider>(e).is_some();
+                    if has_collidable {
+                        let kind = match world.get::<Matter>(e) {
+                            Some(Matter::Mesh { .. }) => "triangle mesh",
+                            Some(Matter::Primitive { shape, .. }) => match shape {
+                                floptle_core::Shape::Cube => "box",
+                                floptle_core::Shape::Sphere => "sphere",
+                                floptle_core::Shape::Capsule => "capsule",
+                            },
+                            _ => "mesh",
+                        };
+                        ui.separator();
+                        let (_, _, remove) = component_header(ui, "▦ Collider", false, true);
+                        ui.small(format!(
+                            "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
+                        ));
+                        if world.get::<floptle_core::RigidBody>(e).is_some() {
+                            ui.small("⚠ This node also has a Rigidbody, so on Play it's a dynamic body (it falls / gets moved) and this static Collider is ignored. To make it a solid obstacle the player bumps into, remove the Rigidbody so it becomes static world geometry (the solver has no body-vs-body pass, so two dynamic bodies pass through each other).");
+                        } else {
+                            // The collider doubles as the node's sun-shadow caster:
+                            // primitives stand in as analytic proxy shapes, and a
+                            // Collidable MESH is baked into a shadow-only occluder
+                            // volume (its true silhouette — interiors go dark).
+                            let mut casts = world
+                                .get::<floptle_core::CastShadow>(e)
+                                .map(|c| c.0)
+                                .unwrap_or(true);
+                            if ui
+                                .checkbox(&mut casts, "casts shadows")
+                                .on_hover_text("this collider stands in for the node in the sun-shadow march (primitives as proxy shapes, meshes as a baked occluder volume) — untick to stop this node casting")
+                                .changed()
+                            {
+                                if casts {
+                                    world.remove::<floptle_core::CastShadow>(e);
+                                } else {
+                                    world.insert(e, floptle_core::CastShadow(false));
+                                }
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                        if remove {
+                            cmd.set_collidable = Some((e, false));
+                            cmd.inspector_changed = true;
+                        }
+                    }
+                }
+
+                // ===== Scripts =====
+                ui.separator();
+                // Always-available drop target: drag a script here to attach it.
+                {
+                    let (_, dropped) = ui.dnd_drop_zone::<AssetPayload, ()>(
+                        egui::Frame::group(ui.style()),
+                        |ui| {
+                            ui.set_min_height(18.0);
+                            ui.small("⚙  drop a script here to attach (or use ➕ Add Component)");
+                        },
+                    );
+                    if let Some(p) = dropped {
+                        if is_script(&p.path) {
+                            cmd.drop_script_on = Some((p.path.clone(), e));
+                        }
+                    }
+                }
+                if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
+                    ui.horizontal(|ui| {
+                        ui.strong("⚙ Scripts");
+                        if matches!(clip, Some(ComponentClip::Script(_))) {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.menu_button("…", |ui| {
+                                    if ui.button("📋  Paste script").clicked() {
+                                        cmd.paste_component = Some(e);
+                                        ui.close();
+                                    }
+                                })
+                                .response
+                                .on_hover_text("adds the copied script, or updates a matching one");
+                            });
+                        }
+                    });
+                    let mut remove: Option<usize> = None;
+                    let mut copy_idx: Option<usize> = None;
+                    ui.indent("script_list", |ui| {
+                        if let Some(scr) = world.get_mut::<Scripts>(e) {
+                            for (i, inst) in scr.0.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
+                                    ui.strong(&inst.kind);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.menu_button("…", |ui| {
+                                            if ui.button("⎘  Copy values").clicked() {
+                                                copy_idx = Some(i);
+                                                ui.close();
+                                            }
+                                            if ui.button("🖊  Edit script").clicked() {
+                                                let p = self
+                                                    .project_root
+                                                    .join("scripts")
+                                                    .join(format!("{}.lua", inst.kind));
+                                                cmd.open_script_pref = Some(p.to_string_lossy().to_string());
+                                                ui.close();
+                                            }
+                                            ui.separator();
+                                            if ui.button("🗑  Remove").clicked() {
+                                                remove = Some(i);
+                                                ui.close();
+                                            }
+                                        });
+                                    });
+                                });
+                                for (k, v) in inst.params.iter_mut() {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
+                                        .changed();
+                                }
+                                ui.add_space(4.0);
+                            }
+                            if let Some(i) = copy_idx {
+                                cmd.copy_component = Some(ComponentClip::Script(scr.0[i].clone()));
+                            }
+                            if let Some(i) = remove {
+                                scr.0.remove(i);
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                    });
+                }
+
+                // ===== Animation Controller (when attached) =====
+                anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
+
+                // ===== ➕ Add Component (searchable, icon'd) =====
+                ui.separator();
+                ui.add_space(2.0);
+                let add_btn = ui.button("➕  Add Component");
+                let add_popup_id = egui::Popup::default_response_id(&add_btn);
+                // True only on the frame the menu transitions closed → open, so we
+                // focus the search box exactly once (start typing immediately).
+                let add_opening =
+                    add_btn.clicked() && !egui::Popup::is_id_open(ui.ctx(), add_popup_id);
+                // CloseOnClickOutside (not the menu default CloseOnClick) so clicking
+                // the search field doesn't dismiss the menu.
+                egui::Popup::menu(&add_btn)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .width(236.0)
+                    .show(|ui| {
+                    let filter = &mut *self.add_component_filter;
+                    let search = ui.add(
+                        egui::TextEdit::singleline(filter)
+                            .hint_text("🔍 search components…")
+                            .desired_width(212.0),
+                    );
+                    if add_opening {
+                        search.request_focus();
+                    }
+                    let f = filter.trim().to_lowercase();
+                    let hit = |s: &str| f.is_empty() || s.to_lowercase().contains(&f);
+
+                    // What the node already has decides what's offered.
+                    let cur = world.get::<Matter>(e);
+                    let is_terrain = matches!(cur, Some(Matter::Terrain { .. }));
+                    let has_mat = world.get::<Material>(e).is_some();
+                    let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
+                    let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
+                        || world.get::<floptle_core::MeshCollider>(e).is_some();
+                    let collider_kind = match cur {
+                        Some(Matter::Mesh { .. }) => Some("triangle mesh"),
+                        Some(Matter::Primitive { shape, .. }) => Some(match shape {
+                            floptle_core::Shape::Cube => "box",
+                            floptle_core::Shape::Sphere => "sphere",
+                            floptle_core::Shape::Capsule => "capsule",
+                        }),
+                        _ => None,
+                    };
+                    let cur_kind = cur.map(matter_kind_label);
+
+                    // One catalog of (category, label, action) — built from current state.
+                    enum Add {
+                        Rb,
+                        Coll,
+                        Mat,
+                        Preset(String),
+                        Script(String),
+                        Type(Matter),
+                        AnimCtl(String),
+                        AnimNew,
+                    }
+                    let mut items: Vec<(&str, String, Add)> = Vec::new();
+                    if !has_rb {
+                        items.push(("Physics", "◆  Rigidbody".into(), Add::Rb));
+                    }
+                    if !has_collidable {
+                        if let Some(k) = collider_kind {
+                            items.push(("Physics", format!("▦  Collider ({k})"), Add::Coll));
+                        }
+                    }
+                    if !has_mat {
+                        items.push(("Rendering", "◑  Material".into(), Add::Mat));
+                    }
+                    // Animation Controller: attach an existing controller asset, or
+                    // create a fresh one (opens the graph editor).
+                    if world.get::<floptle_core::AnimController>(e).is_none() {
+                        items.push((
+                            "Animation",
+                            "▶  Animation Controller (new)".into(),
+                            Add::AnimNew,
+                        ));
+                        for (k, _) in self.anim.controllers.iter() {
+                            items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
+                        }
+                    }
+                    for (name, _) in self.materials {
+                        items.push(("Rendering", format!("◑  {name}  (preset)"), Add::Preset(name.clone())));
+                    }
+                    // Scripts not already attached.
+                    let attached: std::collections::HashSet<String> = world
+                        .get::<Scripts>(e)
+                        .map(|s| s.0.iter().map(|i| i.kind.clone()).collect())
+                        .unwrap_or_default();
+                    let mut snames = Vec::new();
+                    collect_script_names(self.asset_tree, &mut snames);
+                    for n in snames {
+                        if !attached.contains(&n) {
+                            items.push(("Scripts", format!("⚙  {n}"), Add::Script(n)));
+                        }
+                    }
+                    // Type switch (mutually exclusive). Terrain is special — leave it be.
+                    if !is_terrain {
+                        for (lbl, mt) in type_catalog() {
+                            if cur_kind != Some(matter_kind_label(&mt)) {
+                                items.push(("Type — replaces current", lbl.to_string(), Add::Type(mt)));
+                            }
+                        }
+                        // Each importable model is a Mesh type you can become.
+                        let mut models = Vec::new();
+                        collect_model_paths(self.asset_tree, &mut models);
+                        for p in models {
+                            let name = Path::new(&p)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| p.clone());
+                            let is_cur = matches!(cur, Some(Matter::Mesh { asset_path }) if *asset_path == p);
+                            if !is_cur {
+                                items.push((
+                                    "Mesh — replaces type",
+                                    format!("✦  {name}"),
+                                    Add::Type(Matter::Mesh { asset_path: p }),
+                                ));
+                            }
+                        }
+                    }
+
+                    let mut picked = false;
+                    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                        // Paste the clipboard onto a component the node doesn't have yet.
+                        if let Some(c) = clip {
+                            let can = match c {
+                                ComponentClip::Material(_) => !has_mat,
+                                ComponentClip::RigidBody(_) => !has_rb,
+                                ComponentClip::Script(_) => true,
+                                ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
+                            };
+                            if can {
+                                let lbl = format!("📋  Paste {}", c.label());
+                                if hit(&lbl) && ui.button(lbl).clicked() {
+                                    cmd.paste_component = Some(e);
+                                    picked = true;
+                                    ui.close();
+                                }
+                            }
+                        }
+                        let mut shown = false;
+                        for cat in [
+                            "Physics",
+                            "Rendering",
+                            "Animation",
+                            "Scripts",
+                            "Type — replaces current",
+                            "Mesh — replaces type",
+                        ] {
+                            if !items.iter().any(|(c, l, _)| *c == cat && hit(l)) {
+                                continue;
+                            }
+                            ui.add_space(4.0);
+                            ui.weak(cat);
+                            for (c, l, a) in &items {
+                                if *c != cat || !hit(l) {
+                                    continue;
+                                }
+                                shown = true;
+                                if ui.button(l).clicked() {
+                                    match a {
+                                        Add::Rb => cmd.add_rigidbody = Some(e),
+                                        Add::Coll => cmd.set_collidable = Some((e, true)),
+                                        Add::Mat => cmd.add_material = Some(e),
+                                        Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
+                                        Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),
+                                        Add::Type(mt) => cmd.set_matter = Some((e, mt.clone())),
+                                        Add::AnimCtl(k) => {
+                                            cmd.set_anim_controller = Some((e, Some(k.clone())))
+                                        }
+                                        Add::AnimNew => cmd.new_anim_controller = Some(Some(e)),
+                                    }
+                                    picked = true;
+                                    ui.close();
+                                }
+                            }
+                        }
+                        if !shown && !f.is_empty() {
+                            ui.weak("no matching components");
+                        }
+                    });
+                    // Reset the search for next open once something's been added.
+                    if picked {
+                        filter.clear();
+                    }
+                });
+            }
+            Some(_) => {
+                ui.label("(no editable properties)");
+            }
+            None => {
+                if self.selected_asset.is_none() {
+                    ui.weak("Nothing selected. Click an object, or a node in the Hierarchy.");
+                }
+            }
+        }
+
+        // ---- floating Material Editor window (edits the primary selection) ----
+        if *self.show_material_editor {
+            let mut open = true;
+            egui::Window::new("◑ Material Editor")
+                .open(&mut open)
+                .default_width(300.0)
+                .show(ui.ctx(), |ui| match self.selection.last().copied() {
+                    Some(e) if world.get::<Matter>(e).is_some() => {
+                        let nm = self
+                            .entity_names
+                            .iter()
+                            .find(|(x, _)| *x == e)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_default();
+                        ui.label(format!("editing: {nm}"));
+                        ui.separator();
+                        let mut tex_list = Vec::new();
+                        collect_texture_paths(self.asset_tree, &mut tex_list);
+                        if let Some(mat) = world.get_mut::<Material>(e) {
+                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
+                            cmd.inspector_changed |= res.changed;
+                            if res.remove {
+                                cmd.remove_material = Some(e);
+                            }
+                            if let Some(name) = res.save_as {
+                                cmd.save_material =
+                                    Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                            }
+                        } else {
+                            ui.label("This object uses the default look.");
+                            if ui.button("✚ Add material").clicked() {
+                                cmd.add_material = Some(e);
+                            }
+                        }
+                    }
+                    _ => {
+                        ui.label("Select an object to edit its material.");
+                    }
+                });
+            if !open {
+                *self.show_material_editor = false;
+            }
+        }
+    }
+}
