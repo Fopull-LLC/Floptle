@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+/// Editor reference-grid display + snapping settings.
 #[derive(Clone, Copy)]
 pub(crate) struct GridConfig {
     pub(crate) show: bool,
