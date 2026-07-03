@@ -612,12 +612,20 @@ impl Editor {
         // Live particle effects (play mode): pack every instance's billboards for
         // this frame. Owned data — drawn after the grid, before post, so particles
         // depth-test against the scene and inherit retro/post like everything else.
+        // The tab's preview draws only while the Particles tab is actually up
+        // (front of its dock leaf) and we're not in Play.
+        let vfx_preview_on = !self.playing
+            && self
+                .dock_state
+                .as_ref()
+                .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
         self.vfx.collect(
             &self.world,
             &cam,
             &self.texture_registry,
+            vfx_preview_on,
             &mut vfx_instances,
             &mut vfx_batches,
         );
@@ -891,6 +899,7 @@ impl Editor {
         let context_menu = self.context_menu;
         let anim_sys = &mut self.anim;
         let vfx_sys = &mut self.vfx;
+        let vfx_ui_state = &mut self.vfx_ui;
         let anim_ui_state = &mut self.anim_ui;
         let mesh_registry = &self.mesh_registry;
         let mut cmd = EditorCmd::default();
@@ -1062,6 +1071,7 @@ impl Editor {
                 code_theme,
                 anim: anim_sys,
                 vfx: vfx_sys,
+                vfx_ui: vfx_ui_state,
                 anim_ui: anim_ui_state,
                 mesh_registry,
                 pointer_down,
@@ -2384,6 +2394,8 @@ impl Editor {
                 if self.playing {
                     self.vfx.spawn(e, &key);
                 }
+                // Fresh effect → straight into the timeline editor.
+                cmd.open_particle_editor = Some(key);
             }
         }
         if let Some(e) = cmd.remove_particles {
@@ -2503,6 +2515,18 @@ impl Editor {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
             });
         }
+        if let Some(key) = cmd.open_particle_editor {
+            cmd.focus_particles = true;
+            self.vfx_ui.open(key);
+        }
+        if cmd.focus_particles
+            && let Some(dock) = self.dock_state.as_mut() {
+                if let Some(path) = dock.find_tab(&EditorTab::Particles) {
+                    let _ = dock.set_active_tab(path);
+                } else {
+                    dock.push_to_focused_leaf(EditorTab::Particles);
+                }
+            }
         if cmd.focus_animating
             && let Some(dock) = self.dock_state.as_mut() {
                 if let Some(path) = dock.find_tab(&EditorTab::Animation) {
@@ -2828,12 +2852,18 @@ impl Editor {
 
         // Live particles render in offscreen views too (the split Game viewport
         // must show what the game shows).
+        let vfx_preview_on = !self.playing
+            && self
+                .dock_state
+                .as_ref()
+                .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Particles));
         let mut vfx_instances: Vec<floptle_render::ParticleInstance> = Vec::new();
         let mut vfx_batches: Vec<floptle_render::ParticleBatch> = Vec::new();
         self.vfx.collect(
             &self.world,
             cam,
             &self.texture_registry,
+            vfx_preview_on,
             &mut vfx_instances,
             &mut vfx_batches,
         );

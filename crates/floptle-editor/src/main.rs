@@ -57,6 +57,7 @@ mod terrain_ui;
 mod theme;
 mod timeline;
 mod vfx;
+mod vfx_ui;
 mod viewports;
 mod viz;
 
@@ -107,6 +108,10 @@ struct EditorCmd {
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
     new_particles: Option<Entity>,
     remove_particles: Option<Entity>,
+    /// Open an effect (by key) in the Particles tab and focus it.
+    open_particle_editor: Option<String>,
+    /// Bring the Particles tab to the front (re-adding it if closed).
+    focus_particles: bool,
     /// Toggle the static MeshCollider marker on a Mesh node (`true` = add, `false` = remove).
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
@@ -379,8 +384,10 @@ struct EditorTabViewer<'a> {
     code_theme: usize,
     /// Animation registries + live runtimes (the animation UI reads/edits them).
     anim: &'a mut anim::AnimSystem,
-    /// Particle effect registry (the inspector lists its keys).
+    /// Particle effect registry + preview (the inspector and Particles tab).
     vfx: &'a mut vfx::VfxSystem,
+    /// Particles tab UI state.
+    vfx_ui: &'a mut vfx_ui::VfxUiState,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: &'a mut anim_ui::AnimUiState,
     /// Registered models — rig lookups for the animation UI.
@@ -440,6 +447,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Scripting => self.scripting_ui(ui),
             EditorTab::Animation => self.animating_ui(ui),
             EditorTab::AnimGraph => self.anim_graph_tab_ui(ui),
+            EditorTab::Particles => self.particles_ui(ui),
         }
     }
 }
@@ -743,6 +751,8 @@ struct Editor {
     anim: anim::AnimSystem,
     /// Particles: effect registry + live play-mode instances.
     vfx: vfx::VfxSystem,
+    /// Particles tab UI state (open effect, playhead, selections).
+    vfx_ui: vfx_ui::VfxUiState,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: anim_ui::AnimUiState,
     /// Errors from the most recent script frame, shown in the Scripting tab.

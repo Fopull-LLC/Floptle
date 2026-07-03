@@ -162,6 +162,12 @@ impl<'a> EditorTabViewer<'a> {
                     self.project_root,
                     floptle_scene::ANIM_CTL_EXT,
                 ));
+            } else if crate::assets::is_vfx(path) {
+                self.cmd.open_particle_editor = Some(anim::asset_key(
+                    Path::new(path),
+                    self.project_root,
+                    floptle_scene::VFX_EXT,
+                ));
             } else if openable {
                 self.cmd.open_script_pref = Some(path.to_string());
             }
@@ -321,6 +327,12 @@ impl<'a> EditorTabViewer<'a> {
                                 Path::new(path),
                                 self.project_root,
                                 floptle_scene::ANIM_CTL_EXT,
+                            ));
+                        } else if crate::assets::is_vfx(path) {
+                            self.cmd.open_particle_editor = Some(anim::asset_key(
+                                Path::new(path),
+                                self.project_root,
+                                floptle_scene::VFX_EXT,
                             ));
                         } else if openable {
                             self.cmd.open_script_pref = Some(path.clone());

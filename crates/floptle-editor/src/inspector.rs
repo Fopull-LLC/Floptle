@@ -771,8 +771,12 @@ impl EditorTabViewer<'_> {
                                      (off = a script triggers it)",
                                 )
                                 .changed();
-                            if !self.playing {
-                                ui.small("plays in Play mode — timeline editor coming next");
+                            let edit_key =
+                                (!ps.asset.is_empty()).then(|| ps.asset.clone());
+                            if let Some(k) = edit_key
+                                && ui.button("✎ Edit effect").clicked()
+                            {
+                                cmd.open_particle_editor = Some(k);
                             }
                         }
                     });
