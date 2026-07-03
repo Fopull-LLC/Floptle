@@ -160,8 +160,12 @@ pub struct Track {
     /// [`EmitShape`]). A curve makes velocity kinematic over the particle's life.
     pub velocity: ValueOrCurve,
     pub size: ValueOrCurve,
-    /// Billboard spin in radians (a 0→2π curve is one revolution per lifetime).
+    /// Euler rotation in radians `(x=pitch, y=yaw, z=roll)`. Billboards use only the
+    /// roll (z, the screen-facing spin); meshes use all three.
     pub rotation: ValueOrCurve,
+    /// Angular velocity in radians/sec `(x=pitch, y=yaw, z=roll)`, integrated over the
+    /// particle's age — how fast it spins after birth (constant, random, or curved).
+    pub angular_velocity: ValueOrCurve,
     pub color: ValueOrCurve,
     /// 0 = weightless, 1 = full gravity.
     pub gravity: f32,
@@ -185,7 +189,8 @@ impl Default for Track {
             max_alive: None,
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 1.0, 0.0))),
             size: ValueOrCurve::constant(0.25),
-            rotation: ValueOrCurve::constant(0.0),
+            rotation: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            angular_velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             color: ValueOrCurve::Const(Value::Rgba([1.0; 4])),
             gravity: 0.0,
             drag: 0.0,
@@ -247,7 +252,10 @@ pub struct CompiledTrack {
     /// True when `velocity` was authored as a curve (kinematic velocity-over-life).
     pub velocity_is_curve: bool,
     pub size: Prop1,
-    pub rotation: Prop1,
+    /// Euler rotation `(x=pitch, y=yaw, z=roll)`; billboards use z, meshes use all.
+    pub rotation: Prop4,
+    /// Angular velocity `(x,y,z)` rad/sec, integrated over age.
+    pub angular_velocity: Prop4,
     pub color: Prop4,
     pub gravity: f32,
     pub drag: f32,
@@ -339,7 +347,8 @@ impl Track {
             velocity: bake4(&self.velocity, 1.0),
             velocity_is_curve: matches!(self.velocity, ValueOrCurve::Curve(_)),
             size: bake1(&self.size, 1.0),
-            rotation: bake1(&self.rotation, 1.0),
+            rotation: bake4(&self.rotation, 1.0),
+            angular_velocity: bake4(&self.angular_velocity, 1.0),
             color: bake4(&self.color, 1.0),
             gravity: self.gravity,
             drag: self.drag.max(0.0),

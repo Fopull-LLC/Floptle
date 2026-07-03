@@ -60,7 +60,14 @@ fn fountain_effect() -> ParticleEffect {
         lifetime_jitter: 0.3,
         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
         size: scalar_curve(&[(0.0, 0.35), (1.0, 1.3)]),
-        rotation: scalar_curve(&[(0.0, 0.0), (1.0, 1.4)]),
+        // Roll (z) — the screen-facing spin for billboards, now that rotation is Euler.
+        rotation: ValueOrCurve::Curve(Curve {
+            keys: vec![
+                Key::new(0.0, Value::Vec3(Vec3::ZERO)),
+                Key::new(1.0, Value::Vec3(Vec3::new(0.0, 0.0, 1.4))),
+            ],
+            extrapolate: Default::default(),
+        }),
         color: rgba_curve(&[
             (0.0, [0.85, 0.85, 0.92, 0.0]),
             (0.25, [0.8, 0.8, 0.88, 0.65]),
