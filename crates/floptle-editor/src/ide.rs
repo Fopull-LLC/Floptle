@@ -21,6 +21,7 @@ pub(crate) struct OpenScript {
 
 /// State of the Scripting-tab IDE: the open files and which one is shown
 /// (`None` = the built-in Docs page).
+#[derive(Default)]
 pub(crate) struct IdeState {
     pub(crate) open: Vec<OpenScript>,
     pub(crate) active: Option<usize>,
@@ -68,33 +69,6 @@ pub(crate) struct RefHit {
     pub(crate) text: String,
 }
 
-impl Default for IdeState {
-    fn default() -> Self {
-        Self {
-            open: Vec::new(),
-            active: None,
-            goto: None,
-            find_open: false,
-            find_query: String::new(),
-            find_focus: false,
-            find_case: false,
-            find_idx: 0,
-            replace_open: false,
-            replace_buf: String::new(),
-            goto_line_open: false,
-            goto_line_buf: String::new(),
-            goto_line_focus: false,
-            close_confirm: None,
-            refs: Vec::new(),
-            refs_word: String::new(),
-            rc_word: None,
-            ac_sel: 0,
-            ac_token: String::new(),
-            ac_dismissed: false,
-            docs_search: String::new(),
-        }
-    }
-}
 
 impl IdeState {
     /// Open `path` in the IDE (or focus it if already open). Returns false on read error.
@@ -253,11 +227,10 @@ fn find_definition_line(text: &str, word: &str) -> Option<usize> {
         // Global assignment `word = ...` at line start (whole identifier, not `==`).
         if let Some(rest) = line.strip_prefix(word) {
             let rest = rest.trim_start();
-            if let Some(after) = rest.strip_prefix('=') {
-                if !after.starts_with('=') {
+            if let Some(after) = rest.strip_prefix('=')
+                && !after.starts_with('=') {
                     return Some(n + 1);
                 }
-            }
         }
     }
     None
@@ -785,12 +758,11 @@ impl EditorTabViewer<'_> {
     /// definition is found (so Ctrl+B / the menu item always does something useful).
     pub(crate) fn goto_definition(&mut self, word: &str) {
         let active = self.ide.active.filter(|&a| a < self.ide.open.len());
-        if let Some(a) = active {
-            if let Some(line) = find_definition_line(&self.ide.open[a].text, word) {
+        if let Some(a) = active
+            && let Some(line) = find_definition_line(&self.ide.open[a].text, word) {
                 self.ide.goto = Some(line);
                 return;
             }
-        }
         // Other already-open files.
         let others: Vec<(String, String)> = self
             .ide
@@ -824,14 +796,13 @@ impl EditorTabViewer<'_> {
                 if open_paths.contains(&ps) {
                     continue;
                 }
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if let Some(line) = find_definition_line(&text, word) {
+                if let Ok(text) = std::fs::read_to_string(&p)
+                    && let Some(line) = find_definition_line(&text, word) {
                         if self.ide.open_file(&ps) {
                             self.ide.goto = Some(line);
                         }
                         return;
                     }
-                }
             }
         }
         // No definition found — show references so Ctrl+B still helps.
@@ -1086,11 +1057,10 @@ impl EditorTabViewer<'_> {
             }
             self.cmd.refresh_assets = true;
         }
-        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::S)) {
-            if self.ide.save_file(i) {
+        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::S))
+            && self.ide.save_file(i) {
                 self.cmd.refresh_assets = true;
             }
-        }
         if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::W)) {
             self.request_close_tab(i);
             return; // the tab may be gone — draw fresh next frame
@@ -1104,8 +1074,8 @@ impl EditorTabViewer<'_> {
             if open_replace {
                 self.ide.replace_open = true;
             }
-            if let Some((a, b, _)) = ide_selection(ui.ctx(), editor_id) {
-                if a != b && b - a <= 200 {
+            if let Some((a, b, _)) = ide_selection(ui.ctx(), editor_id)
+                && a != b && b - a <= 200 {
                     let text = &self.ide.open[i].text;
                     let (ba, bb) =
                         (line_edit::byte_of_char(text, a), line_edit::byte_of_char(text, b));
@@ -1114,7 +1084,6 @@ impl EditorTabViewer<'_> {
                         self.ide.find_query = sel.to_string();
                     }
                 }
-            }
         }
         if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::G)) {
             self.ide.goto_line_open = true;
@@ -1250,8 +1219,8 @@ impl EditorTabViewer<'_> {
                 let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
                 let text = &self.ide.open[i].text;
                 // Current-line wash.
-                if out.response.response.has_focus() {
-                    if let Some(cr) = out.cursor_range {
+                if out.response.response.has_focus()
+                    && let Some(cr) = out.cursor_range {
                         let caret = cr.primary.index.0;
                         let row = text.chars().take(caret).filter(|&c| c == '\n').count();
                         if let Some(r) = out.galley.rows.get(row) {
@@ -1264,7 +1233,6 @@ impl EditorTabViewer<'_> {
                             painter.rect_filled(rect, 0.0, theme.cur_line32());
                         }
                     }
-                }
                 // Find matches: all in amber, the CURRENT one brighter + outlined.
                 if let Some((query, case, idx)) = &find_hl {
                     let hl = egui::Color32::from_rgba_unmultiplied(255, 210, 0, 45);
@@ -1413,11 +1381,10 @@ impl EditorTabViewer<'_> {
                     }
                 }
             });
-            if let Some((path, line)) = jump {
-                if self.ide.open_file(&path) {
+            if let Some((path, line)) = jump
+                && self.ide.open_file(&path) {
                     self.ide.goto = Some(line);
                 }
-            }
         }
     }
 
@@ -1629,12 +1596,11 @@ impl EditorTabViewer<'_> {
         }
         // Alt+Up / Alt+Down → move the current line / selected lines.
         for (key, up) in [(egui::Key::ArrowUp, true), (egui::Key::ArrowDown, false)] {
-            if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::ALT, key)) {
-                if let Some((a, b)) = move_lines(&mut self.ide.open[i].text, sel_a, sel_b, up) {
+            if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::ALT, key))
+                && let Some((a, b)) = move_lines(&mut self.ide.open[i].text, sel_a, sel_b, up) {
                     self.ide.open[i].dirty = true;
                     set_ide_selection(ui.ctx(), editor_id, a, b);
                 }
-            }
         }
         // Ctrl+/ → toggle line comments (Lua files) over the selection.
         if is_lua && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::Slash)) {

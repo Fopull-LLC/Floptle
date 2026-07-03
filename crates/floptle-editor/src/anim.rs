@@ -118,11 +118,10 @@ impl AnimSystem {
                     if let Ok(doc) = floptle_scene::load_anim_clip(&p) {
                         self.clips.push((asset_key(&p, &root, ANIM_CLIP_EXT), doc));
                     }
-                } else if fname.ends_with(ANIM_CTL_EXT) {
-                    if let Ok(doc) = floptle_scene::load_anim_controller(&p) {
+                } else if fname.ends_with(ANIM_CTL_EXT)
+                    && let Ok(doc) = floptle_scene::load_anim_controller(&p) {
                         self.controllers.push((asset_key(&p, &root, ANIM_CTL_EXT), doc));
                     }
-                }
             }
         }
         self.clips.sort_by(|a, b| a.0.cmp(&b.0));
@@ -359,11 +358,10 @@ pub fn extract_clips(
         }
         // Re-extraction preserves hand-authored events (glTF clips carry none,
         // so anything on the existing file was added in the Animating tab).
-        if let Some((_, existing)) = system.clips.iter().find(|(k, _)| *k == key) {
-            if !existing.events.is_empty() {
+        if let Some((_, existing)) = system.clips.iter().find(|(k, _)| *k == key)
+            && !existing.events.is_empty() {
                 doc.events = existing.events.clone();
             }
-        }
         system.save_clip(project_root, &key, &doc);
         written.push(key);
     }
@@ -414,7 +412,6 @@ fn scene_skeleton(world: &World, root: Entity) -> (Skeleton, Vec<Entity>) {
     // Duplicate names bind to the FIRST occurrence — make later ones unique so
     // the name map stays deterministic.
     let mut seen = HashSet::new();
-    let mut nodes = nodes;
     for n in nodes.iter_mut() {
         if !seen.insert(n.name.clone()) {
             let mut i = 2;
@@ -572,13 +569,12 @@ pub fn bind_entity(
 fn animated_entities(world: &World, mesh_registry: &HashMap<String, MeshAsset>) -> Vec<Entity> {
     let mut out: Vec<Entity> = world.query::<AnimController>().map(|(e, _)| e).collect();
     for (e, m) in world.query::<Matter>() {
-        if let Matter::Mesh { asset_path } = m {
-            if mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some())
+        if let Matter::Mesh { asset_path } = m
+            && mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some())
                 && !out.contains(&e)
             {
                 out.push(e);
             }
-        }
     }
     out
 }
@@ -706,28 +702,25 @@ pub fn preview_pose(
         }
     }
     // Snapshot transforms a scene binding will write (once per target).
-    if system.preview_restore.is_empty() {
-        if let Some(AnimInstance { binding: AnimBinding::Nodes { entities, covered }, .. }) =
+    if system.preview_restore.is_empty()
+        && let Some(AnimInstance { binding: AnimBinding::Nodes { entities, covered }, .. }) =
             system.instances.get(&e)
         {
             for &n in covered {
-                if let Some(Some(ent)) = entities.get(n) {
-                    if let Some(tr) = world.get::<Transform>(*ent) {
+                if let Some(Some(ent)) = entities.get(n)
+                    && let Some(tr) = world.get::<Transform>(*ent) {
                         system.preview_restore.push((*ent, *tr));
                     }
-                }
             }
         }
-    }
-    if let Some(inst) = system.instances.get_mut(&e) {
-        if let Some((li, si)) = inst.ctl.find_state(state, None) {
+    if let Some(inst) = system.instances.get_mut(&e)
+        && let Some((li, si)) = inst.ctl.find_state(state, None) {
             // Snap straight to the state (no fade) and seek.
             inst.ctl.restart(li, si, Some(0.0));
             inst.ctl.seek(li, t);
             inst.ctl.advance(0.0);
             let _ = inst.ctl.take_fired(); // previews don't fire gameplay events
         }
-    }
     apply_instance(system, world, mesh_registry, e);
 }
 

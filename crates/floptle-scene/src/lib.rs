@@ -660,12 +660,11 @@ fn migrate_ron(text: &str) -> String {
         let ws_end = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
         out.push_str(&rest[..ws_end]); // preserve the whitespace as-is
         rest = &rest[ws_end..];
-        if let Some(after) = rest.strip_prefix("Terrain") {
-            if !after.starts_with('(') {
+        if let Some(after) = rest.strip_prefix("Terrain")
+            && !after.starts_with('(') {
                 out.push_str("Terrain(id: 0)");
                 rest = after;
             }
-        }
     }
     out.push_str(rest);
     out
@@ -793,11 +792,10 @@ pub fn load_materials(dir: &Path) -> Vec<(String, MaterialDoc)> {
             continue;
         }
         let Some(name) = p.file_stem().map(|s| s.to_string_lossy().to_string()) else { continue };
-        if let Ok(mat) = std::fs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose() {
-            if let Some(mat) = mat {
+        if let Ok(mat) = std::fs::read_to_string(&p).ok().map(|t| ron::from_str(&t)).transpose()
+            && let Some(mat) = mat {
                 out.push((name, mat));
             }
-        }
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -866,11 +864,10 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     }
     // Second pass: link parents (skip out-of-range / self references).
     for (i, node) in doc.nodes.iter().enumerate() {
-        if let Some(p) = node.parent {
-            if p < ents.len() && p != i {
+        if let Some(p) = node.parent
+            && p < ents.len() && p != i {
                 world.insert(ents[i], floptle_core::Parent(ents[p]));
             }
-        }
     }
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));

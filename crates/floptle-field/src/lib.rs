@@ -14,16 +14,16 @@
 //! Planned modules:
 //! - `sdf`      : SDF trait + analytic primitives (box/sphere/capsule/…/fractals).
 //! - `ops`      : CSG/blend operators — union/intersect/subtract and their
-//!                **smooth** variants `smin`/`smax(k)` (clean merging = "soup"),
-//!                plus per-pair blend *rules* (merge / mix / reject).
+//!   **smooth** variants `smin`/`smax(k)` (clean merging = "soup"),
+//!   plus per-pair blend *rules* (merge / mix / reject).
 //! - `mesh2sdf` : robust mesh -> SDF (fast/generalized winding number + BVH) so
-//!                developer meshes join the field world.
+//!   developer meshes join the field world.
 //! - `sdf2mesh` : field -> mesh (surface nets / dual contouring / marching cubes)
-//!                when an actual triangle mesh is needed.
+//!   when an actual triangle mesh is needed.
 //! - `field`    : baked sparse distance field (brickmap) — cheap shared cache.
 //! - `scalar`   : general scalar/vector spatial fields sampled on the brickmap —
-//!                density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
-//!                (ADR-0014).
+//!   density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
+//!   (ADR-0014).
 
 pub mod mesh2sdf;
 pub mod terrain;

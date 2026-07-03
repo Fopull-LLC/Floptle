@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn capsule_is_well_formed() {
         let m = capsule(0.5, 0.6, 8, 12);
-        assert!(!m.vertices.is_empty() && m.indices.len() % 3 == 0);
+        assert!(!m.vertices.is_empty() && m.indices.len().is_multiple_of(3));
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
         // total half-height along Y is radius + half_height
         let max_y = m.vertices.iter().fold(f32::MIN, |a, v| a.max(v.pos[1]));

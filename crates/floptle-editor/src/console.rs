@@ -40,12 +40,11 @@ impl ConsoleState {
     /// Append a line, merging it into the previous row if identical (so a per-frame
     /// repeat becomes a count, not a flood). Caps retained history.
     pub(crate) fn push(&mut self, level: floptle_script::LogLevel, msg: String, source: Option<(String, u32)>) {
-        if let Some(last) = self.entries.last_mut() {
-            if last.level == level && last.msg == msg {
+        if let Some(last) = self.entries.last_mut()
+            && last.level == level && last.msg == msg {
                 last.count += 1;
                 return;
             }
-        }
         self.entries.push(ConsoleEntry { level, msg, source, count: 1 });
         const MAX: usize = 2000;
         if self.entries.len() > MAX {
@@ -117,8 +116,9 @@ impl EditorTabViewer<'_> {
             e.msg.to_ascii_lowercase().contains(&needle)
                 || e.source.as_ref().is_some_and(|(n, _)| n.to_ascii_lowercase().contains(&needle))
         };
-        // (level, msg, source, count)
-        let mut rows: Vec<(LogLevel, &str, Option<&(String, u32)>, u32)> = Vec::new();
+        /// One visible row: (level, message, jump-to source, merged count).
+        type Row<'a> = (LogLevel, &'a str, Option<&'a (String, u32)>, u32);
+        let mut rows: Vec<Row> = Vec::new();
         if c.collapse {
             // Merge identical messages across the whole feed into one counted row.
             let mut idx: std::collections::HashMap<(u8, &str), usize> = std::collections::HashMap::new();
@@ -213,11 +213,10 @@ impl EditorTabViewer<'_> {
                             egui::Color32::from_gray(140),
                         );
                     }
-                    if resp.double_clicked() {
-                        if let Some((name, line)) = src {
+                    if resp.double_clicked()
+                        && let Some((name, line)) = src {
                             jump = Some(((*name).clone(), *line));
                         }
-                    }
                     resp.on_hover_text("click the file:line to open the source (or double-click the row)");
                 }
             });

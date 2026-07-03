@@ -218,7 +218,7 @@ mod tests {
             w.insert(e, Hp(i));
         }
         let total: i32 = w.query::<Hp>().map(|(_, h)| h.0).sum();
-        assert_eq!(total, 0 + 1 + 2);
+        assert_eq!(total, 1 + 2);
         for (_, h) in w.query_mut::<Hp>() {
             h.0 += 10;
         }

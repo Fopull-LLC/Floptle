@@ -158,13 +158,13 @@ impl EditorTabViewer<'_> {
             ui.label("Texture palette");
             let mut tex_list = Vec::new();
             collect_texture_paths(asset_tree, &mut tex_list);
-            for slot in 0..terrain_textures.len() {
+            for (slot, tex) in terrain_textures.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     let sel = terrain_brush.tex_slot == slot as i32;
-                    let label = if terrain_textures[slot].is_empty() {
+                    let label = if tex.is_empty() {
                         format!("slot {}", slot + 1)
                     } else {
-                        Path::new(&terrain_textures[slot])
+                        Path::new(tex.as_str())
                             .file_name()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default()
@@ -177,7 +177,7 @@ impl EditorTabViewer<'_> {
                         .width(70.0)
                         .show_ui(ui, |ui| {
                             if ui.selectable_label(false, "(none)").clicked() {
-                                terrain_textures[slot].clear();
+                                tex.clear();
                                 cmd.terrain_palette_changed = true;
                             }
                             for p in &tex_list {
@@ -185,8 +185,8 @@ impl EditorTabViewer<'_> {
                                     .file_name()
                                     .map(|s| s.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                if ui.selectable_label(terrain_textures[slot] == *p, n).clicked() {
-                                    terrain_textures[slot] = p.clone();
+                                if ui.selectable_label(*tex == *p, n).clicked() {
+                                    *tex = p.clone();
                                     cmd.terrain_palette_changed = true;
                                 }
                             }

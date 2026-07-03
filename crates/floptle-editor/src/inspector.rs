@@ -336,11 +336,10 @@ impl EditorTabViewer<'_> {
                         !is_terrain && matches!(clip, Some(ComponentClip::Matter(_))),
                         false,
                     );
-                    if copy && !is_terrain {
-                        if let Some(m) = world.get::<Matter>(e) {
+                    if copy && !is_terrain
+                        && let Some(m) = world.get::<Matter>(e) {
                             cmd.copy_component = Some(ComponentClip::Matter(m.clone()));
                         }
-                    }
                     if paste {
                         cmd.paste_component = Some(e);
                     }
@@ -641,11 +640,10 @@ impl EditorTabViewer<'_> {
                         matches!(clip, Some(ComponentClip::Transform(_))),
                         false,
                     );
-                    if copy {
-                        if let Some(t) = world.get::<Transform>(e) {
+                    if copy
+                        && let Some(t) = world.get::<Transform>(e) {
                             cmd.copy_component = Some(ComponentClip::Transform(*t));
                         }
-                    }
                     if paste {
                         cmd.paste_component = Some(e);
                     }
@@ -694,11 +692,10 @@ impl EditorTabViewer<'_> {
                         matches!(clip, Some(ComponentClip::Material(_))),
                         true,
                     );
-                    if copy {
-                        if let Some(mat) = world.get::<Material>(e) {
+                    if copy
+                        && let Some(mat) = world.get::<Material>(e) {
                             cmd.copy_component = Some(ComponentClip::Material(Box::new(mat.clone())));
                         }
-                    }
                     if paste {
                         cmd.paste_component = Some(e);
                     }
@@ -734,11 +731,10 @@ impl EditorTabViewer<'_> {
                         matches!(clip, Some(ComponentClip::RigidBody(_))),
                         true,
                     );
-                    if copy {
-                        if let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
+                    if copy
+                        && let Some(rb) = world.get::<floptle_core::RigidBody>(e) {
                             cmd.copy_component = Some(ComponentClip::RigidBody(*rb));
                         }
-                    }
                     if paste {
                         cmd.paste_component = Some(e);
                     }
@@ -886,11 +882,10 @@ impl EditorTabViewer<'_> {
                             ui.small("⚙  drop a script here to attach (or use ➕ Add Component)");
                         },
                     );
-                    if let Some(p) = dropped {
-                        if is_script(&p.path) {
+                    if let Some(p) = dropped
+                        && is_script(&p.path) {
                             cmd.drop_script_on = Some((p.path.clone(), e));
                         }
-                    }
                 }
                 if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
                     ui.horizontal(|ui| {
@@ -1019,11 +1014,10 @@ impl EditorTabViewer<'_> {
                     if !has_rb {
                         items.push(("Physics", "◆  Rigidbody".into(), Add::Rb));
                     }
-                    if !has_collidable {
-                        if let Some(k) = collider_kind {
+                    if !has_collidable
+                        && let Some(k) = collider_kind {
                             items.push(("Physics", format!("▦  Collider ({k})"), Add::Coll));
                         }
-                    }
                     if !has_mat {
                         items.push(("Rendering", "◑  Material".into(), Add::Mat));
                     }

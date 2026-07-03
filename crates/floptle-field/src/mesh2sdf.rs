@@ -443,7 +443,7 @@ mod tests {
         let (pos, idx, _) = unit_cube();
         let baked = bake_occluder(&pos, &idx, 32);
         // dims follow the (cubic) AABB + padding
-        assert!(baked.dims.iter().all(|&d| d >= 32 && d <= 40), "dims {:?}", baked.dims);
+        assert!(baked.dims.iter().all(|&d| (32..=40).contains(&d)), "dims {:?}", baked.dims);
         let [dx, dy, dz] = baked.dims;
         let half = Vec3::from(baked.half_extent);
         let center = Vec3::from(baked.center);

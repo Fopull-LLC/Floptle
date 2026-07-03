@@ -200,6 +200,7 @@ impl PhysicsWorld {
                         let pen = radius - self.colliders[ci].distance(c);
                         // `!(pen > 0.0)` also rejects NaN/Inf (a degenerate collider),
                         // so a bad distance can never push the body to a non-finite pos.
+                        #[allow(clippy::neg_cmp_op_on_partial_ord)]
                         if !(pen > 0.0) {
                             continue;
                         }

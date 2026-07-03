@@ -317,11 +317,10 @@ impl Editor {
     /// Re-parent `child` under `parent` (or make it a root if `None`), preserving
     /// its world placement. Rejects cycles (can't parent under your own descendant).
     pub(crate) fn reparent(&mut self, child: Entity, parent: Option<Entity>) {
-        if let Some(p) = parent {
-            if self.is_descendant(p, child) {
+        if let Some(p) = parent
+            && self.is_descendant(p, child) {
                 return;
             }
-        }
         self.record();
         let world = floptle_core::world_transform(&self.world, child);
         match parent {

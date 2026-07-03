@@ -83,11 +83,10 @@ impl<'a> EditorTabViewer<'a> {
         // Breadcrumb row: up button + relative path.
         ui.horizontal(|ui| {
             let at_root = dir == root;
-            if ui.add_enabled(!at_root, egui::Button::new("⏶")).on_hover_text("up").clicked() {
-                if let Some(p) = dir.parent() {
+            if ui.add_enabled(!at_root, egui::Button::new("⏶")).on_hover_text("up").clicked()
+                && let Some(p) = dir.parent() {
                     *self.assets_grid_dir = p.to_path_buf();
                 }
-            }
             let rel = dir.strip_prefix(root).ok().map(|p| p.to_string_lossy().to_string());
             let crumb = match rel.as_deref() {
                 Some("") | None => "assets".to_string(),
@@ -454,11 +453,10 @@ impl<'a> EditorTabViewer<'a> {
         }
         ui.separator();
         let r = material_props_ui(ui, mat, self.materials, &[], self.mat_name_buf);
-        if let Some(name) = r.save_as {
-            if !name.is_empty() {
+        if let Some(name) = r.save_as
+            && !name.is_empty() {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));
             }
-        }
         if ui.button("Save to this preset").clicked() {
             let stem = Path::new(path)
                 .file_stem()

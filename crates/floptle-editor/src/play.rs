@@ -240,11 +240,10 @@ impl Editor {
             }
             // Press Play → bring the Game tab to the front (active-camera view), so it's
             // clear you're testing the game, not the editor scene view.
-            if let Some(dock) = self.dock_state.as_mut() {
-                if let Some(path) = dock.find_tab(&EditorTab::Game) {
+            if let Some(dock) = self.dock_state.as_mut()
+                && let Some(path) = dock.find_tab(&EditorTab::Game) {
                     let _ = dock.set_active_tab(path);
                 }
-            }
             self.playing = true;
         }
     }
@@ -262,11 +261,10 @@ impl Editor {
         let path = self.project_root.join("scripts").join(format!("{name}.lua"));
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let key = name.to_string();
-        if let (Some(mt), Some((cached_mt, vals))) = (mtime, self.script_defaults_cache.get(&key)) {
-            if *cached_mt == mt {
+        if let (Some(mt), Some((cached_mt, vals))) = (mtime, self.script_defaults_cache.get(&key))
+            && *cached_mt == mt {
                 return vals.clone();
             }
-        }
         let vals = self.script_host.script_defaults(&path);
         if let Some(mt) = mtime {
             self.script_defaults_cache.insert(key, (mt, vals.clone()));

@@ -166,7 +166,8 @@ fn main() {
 
     // (name, shadow_params [on, k, strength, dist], shadow_tint [rgb, quantize],
     //  shadow_extra [dither], ao on?)
-    let frames: [(&str, [f32; 4], [f32; 4], f32, bool); 6] = [
+    type Frame = (&'static str, [f32; 4], [f32; 4], f32, bool);
+    let frames: [Frame; 6] = [
         ("shadow_off.png", [0.0, 12.0, 1.0, 150.0], [0.0, 0.0, 0.0, 0.0], 0.0, false),
         ("shadow_soft.png", [1.0, 4.0, 1.0, 150.0], [0.0, 0.0, 0.0, 0.0], 0.0, false),
         ("shadow_hard.png", [1.0, 64.0, 1.0, 150.0], [0.0, 0.0, 0.0, 0.0], 0.0, false),

@@ -13,7 +13,7 @@
 //! Planned modules (the deformation tiers, cheapest → heaviest):
 //! - `model`    : the `MatterModel` component — declares behavior + budget.
 //! - `material` : physical material — density (→ mass `m=ρ·V` & gravity emission,
-//!                ADR-0014), bulk modulus & yield (→ can it be crushed or resist?).
+//!   ADR-0014), bulk modulus & yield (→ can it be crushed or resist?).
 //! - `morph`    : GPU vertex/field displacement (noise/curves/field) — ~free.
 //! - `csg`      : field blend/mix/reject between objects (smin/smax + rules).
 //! - `softbody` : XPBD constraint solver (distance/volume/shape-match).
