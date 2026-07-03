@@ -12,7 +12,7 @@ use floptle_core::math::{DVec3, Mat4, Quat, Vec2, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, World};
 
-use crate::project;
+use crate::viz::project;
 
 /// Handle length on screen, in physical pixels (kept roughly constant with depth).
 pub(crate) const GIZMO_PX: f32 = 90.0;
