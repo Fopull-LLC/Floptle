@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use floptle_core::math::Vec3;
+use floptle_core::math::{Mat4, Vec3};
 use floptle_core::{Entity, ParticleSystem, World};
 use floptle_render::particles::{ParticleBatch, ParticleGlobals};
 use floptle_render::{ParticleInstance, RenderCamera, TexId};
@@ -183,8 +183,10 @@ impl VfxSystem {
         self.instances.retain(|e, (key, _)| {
             world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
         });
-        for (_, inst) in self.instances.values_mut() {
-            inst.advance(dt, VFX_GRAVITY);
+        for (e, (_, inst)) in self.instances.iter_mut() {
+            // Feed the emitter's world transform so World-space tracks anchor correctly.
+            let emitter = floptle_core::world_transform(world, *e);
+            inst.advance_at(dt, VFX_GRAVITY, emitter);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
         // mid-play, or a component attached mid-play.
@@ -212,13 +214,15 @@ impl VfxSystem {
     ) {
         let fwd = cam.rotation * Vec3::NEG_Z;
         let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
-            let xf = match anchor {
+            let local_xf = match anchor {
                 Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
                 None => floptle_core::transform::Transform::IDENTITY
                     .render_matrix(cam.world_position),
             };
+            // World-space tracks live at the instance's world anchor (camera-relative).
+            let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
             let mut draws = Vec::new();
-            collect_billboards(inst, xf, fwd, out_instances, &mut draws);
+            collect_billboards(inst, local_xf, world_xf, fwd, out_instances, &mut draws);
             for d in draws {
                 out_batches.push(ParticleBatch {
                     texture: d.texture.as_deref().and_then(|p| textures.get(p).copied()),
@@ -294,12 +298,13 @@ impl VfxSystem {
     ) -> Vec<floptle_vfx::MeshDraw> {
         let mut out = Vec::new();
         let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
-            let xf = match anchor {
+            let local_xf = match anchor {
                 Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
                 None => floptle_core::transform::Transform::IDENTITY
                     .render_matrix(cam.world_position),
             };
-            floptle_vfx::collect_mesh_particles(inst, xf, &mut out);
+            let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
+            floptle_vfx::collect_mesh_particles(inst, local_xf, world_xf, &mut out);
         };
         for (e, (_, inst)) in &self.instances {
             pack(inst, Some(*e));

@@ -11,8 +11,9 @@
 //! aliases this layout instead of inventing its own. Births stay CPU-side forever
 //! (timeline logic — tiny and exact); aging is the part that will move on-device.
 
-use crate::effect::{CompiledEffect, CompiledTrack, EmitShape, Playback, RenderMode};
-use floptle_core::math::{Quat, Vec3, Vec4};
+use crate::effect::{CompiledEffect, CompiledTrack, EmitShape, Playback, RenderMode, Space};
+use floptle_core::math::{DVec3, Quat, Vec3, Vec4};
+use floptle_core::transform::Transform;
 use std::sync::Arc;
 
 /// Fixed step for editor scrubbing / deterministic re-simulation (matches the
@@ -141,6 +142,12 @@ pub struct EffectInstance {
     pub playing: bool,
     instance_seed: u32,
     tracks: Vec<TrackState>,
+    /// World anchor for `Space::World` tracks (the emitter's last world position).
+    /// World particles are stored relative to it and it tracks the emitter, so they
+    /// stay put in the world as the node moves — the f64 anchor keeps precision far
+    /// from the origin. `anchored` guards the first advance (no shift on birth).
+    anchor: DVec3,
+    anchored: bool,
 }
 
 /// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
@@ -158,13 +165,29 @@ impl EffectInstance {
                 emit_counter: 0,
             })
             .collect();
-        Self { effect, t: 0.0, prev_t: START_EPS, playing: true, instance_seed, tracks }
+        Self {
+            effect,
+            t: 0.0,
+            prev_t: START_EPS,
+            playing: true,
+            instance_seed,
+            tracks,
+            anchor: DVec3::ZERO,
+            anchored: false,
+        }
+    }
+
+    /// The world anchor `Space::World` particles are stored relative to (the emitter's
+    /// last world position). The render caller maps this to camera-relative space.
+    pub fn anchor(&self) -> DVec3 {
+        self.anchor
     }
 
     /// Back to `t = 0` with no live particles — the scrub / restart baseline.
     pub fn reset(&mut self) {
         self.t = 0.0;
         self.prev_t = START_EPS;
+        self.anchored = false;
         for ts in &mut self.tracks {
             ts.particles.clear();
             ts.acc = 0.0;
@@ -191,23 +214,55 @@ impl EffectInstance {
 
     /// Deterministic scrub: re-simulate from zero to `target` in fixed steps.
     pub fn simulate_to(&mut self, target: f32, gravity: Vec3) {
+        self.simulate_to_at(target, gravity, Transform::IDENTITY);
+    }
+
+    /// [`simulate_to`] with the emitter's world transform (for `Space::World` tracks).
+    pub fn simulate_to_at(&mut self, target: f32, gravity: Vec3, emitter: Transform) {
         self.reset();
         let mut sim_t = 0.0;
         while sim_t + SCRUB_STEP <= target {
-            self.advance(SCRUB_STEP, gravity);
+            self.advance_at(SCRUB_STEP, gravity, emitter);
             sim_t += SCRUB_STEP;
         }
         if target > sim_t {
-            self.advance(target - sim_t, gravity);
+            self.advance_at(target - sim_t, gravity, emitter);
         }
     }
 
-    /// Advance the playhead by `dt`, firing crossed clips/bursts and aging every
-    /// particle. `gravity` is the scene's gravity acceleration (emitter space).
+    /// Advance with the emitter at the world origin — for tests and static previews.
     pub fn advance(&mut self, dt: f32, gravity: Vec3) {
+        self.advance_at(dt, gravity, Transform::IDENTITY);
+    }
+
+    /// Advance the playhead by `dt`, firing crossed clips/bursts and aging every
+    /// particle. `gravity` is the scene's gravity (world down); `emitter` is the node's
+    /// world transform — `Space::World` particles bake into world orientation at birth
+    /// and re-anchor to it, so they stay put in the world as the node moves.
+    pub fn advance_at(&mut self, dt: f32, gravity: Vec3, emitter: Transform) {
         if !self.playing || dt <= 0.0 {
             return;
         }
+        // Re-anchor World tracks: hold their absolute world positions fixed while the
+        // anchor follows the emitter (so f32 offsets stay small near the action).
+        let anchor_now = emitter.translation;
+        if self.anchored {
+            let delta = (anchor_now - self.anchor).as_vec3();
+            if delta != Vec3::ZERO {
+                let effect = Arc::clone(&self.effect);
+                for (ti, ct) in effect.tracks.iter().enumerate() {
+                    if ct.space == Space::World {
+                        for pa in &mut self.tracks[ti].particles.pos_age {
+                            let np = pa.truncate() - delta;
+                            *pa = np.extend(pa.w);
+                        }
+                    }
+                }
+            }
+        }
+        self.anchor = anchor_now;
+        self.anchored = true;
+
         // Age existing particles first; newborns then age only their partial step.
         self.integrate(dt, gravity);
 
@@ -217,7 +272,7 @@ impl EffectInstance {
             let step_end = (self.t + remaining).min(lifetime);
             let seg = remaining.min(lifetime - self.t);
             let (prev, now) = (self.prev_t, step_end);
-            self.emit_segment(prev, now, gravity);
+            self.emit_segment(prev, now, gravity, &emitter);
             self.t = step_end;
             self.prev_t = step_end;
             remaining -= seg.max(0.0);
@@ -238,7 +293,7 @@ impl EffectInstance {
     }
 
     /// Fire every clip overlap and burst crossing in `(prev, now]`.
-    fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3) {
+    fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3, emitter: &Transform) {
         let effect = Arc::clone(&self.effect);
         let inst_seed = hash(self.instance_seed ^ hash(effect.seed));
         let lifetime = effect.lifetime;
@@ -253,7 +308,7 @@ impl EffectInstance {
                     let mul = ct.lane_count.sample(b.t / lifetime);
                     let n = (b.count as f32 * mul).round().max(0.0) as u32;
                     for _ in 0..n {
-                        spawn(ts, ct, ti as u32, inst_seed, b.t, now, lifetime, gravity);
+                        spawn(ts, ct, ti as u32, inst_seed, b.t, now, lifetime, gravity, emitter);
                     }
                 }
             }
@@ -281,7 +336,7 @@ impl EffectInstance {
                     // Reconstruct the exact accumulator-crossing time so birth
                     // spacing is even regardless of frame boundaries.
                     let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                    spawn(ts, ct, ti as u32, inst_seed, tau, now, lifetime, gravity);
+                    spawn(ts, ct, ti as u32, inst_seed, tau, now, lifetime, gravity, emitter);
                 }
             }
         }
@@ -330,6 +385,7 @@ fn spawn(
     now: f32,
     lifetime: f32,
     gravity: Vec3,
+    emitter: &Transform,
 ) {
     if ts.particles.count as u32 >= ct.capacity {
         return; // pool full — drop, never reallocate mid-play
@@ -340,7 +396,15 @@ fn spawn(
 
     let un = tau / lifetime; // normalized effect time for lane sampling
     let shape_scale = ct.lane_shape.sample(un);
-    let (offset, dir) = sample_shape(ct.shape, shape_scale, seed);
+    let (mut offset, mut dir) = sample_shape(ct.shape, shape_scale, seed);
+    // A World-space track bakes the birth offset + emit direction into WORLD
+    // orientation (the emitter's rotation/scale); the anchor carries translation, so
+    // the particle stops riding the node. Local tracks stay emitter-local (the node
+    // matrix is applied at render).
+    if ct.space == Space::World {
+        offset = emitter.rotation * (emitter.scale * offset);
+        dir = emitter.rotation * dir;
+    }
     let frame = Quat::from_rotation_arc(Vec3::Y, dir);
 
     let life = ct.particle_lifetime * jitter_mul(seed, 0xA11FE, ct.lifetime_jitter);
@@ -699,6 +763,49 @@ mod tests {
         let mut sizes_b = Vec::new();
         b.sample_track(0, |s| sizes_b.push(s.size));
         assert_eq!(sizes_a, sizes_b, "same seed reproduces the same random sizes");
+    }
+
+    #[test]
+    fn world_space_particles_reanchor_when_the_emitter_moves() {
+        use crate::effect::Space;
+        // A World-space burst with zero velocity/gravity: once born, moving the emitter
+        // must NOT drag the particles along — their stored offset re-anchors by the
+        // emitter delta so the absolute world position stays fixed.
+        let mut track = Track {
+            rate: 0.0,
+            bursts: vec![Burst { t: 0.0, count: 4 }],
+            particle_lifetime: 100.0,
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            ..Track::default()
+        };
+        track.space = Space::World;
+        let fx = one_track_effect(track, 1.0, Playback::Looping);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.advance_at(0.05, NO_G, Transform::IDENTITY); // birth at the origin
+        let p0 = inst.track_particles(0).pos_age[0].truncate();
+        inst.advance_at(0.05, NO_G, Transform::from_translation(DVec3::new(10.0, 0.0, 0.0)));
+        let p1 = inst.track_particles(0).pos_age[0].truncate();
+        assert!((p1.x - (p0.x - 10.0)).abs() < 1e-3, "offset must re-anchor by the delta: {p0} -> {p1}");
+    }
+
+    #[test]
+    fn local_space_particles_are_untouched_by_emitter_motion() {
+        // The Local counterpart: the sim never re-anchors them (the node matrix moves
+        // them at render), so their stored positions are identical whatever the emitter.
+        let track = Track {
+            rate: 0.0,
+            bursts: vec![Burst { t: 0.0, count: 4 }],
+            particle_lifetime: 100.0,
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            ..Track::default() // Space::Local by default
+        };
+        let fx = one_track_effect(track, 1.0, Playback::Looping);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.advance_at(0.05, NO_G, Transform::IDENTITY);
+        let p0 = inst.track_particles(0).pos_age[0].truncate();
+        inst.advance_at(0.05, NO_G, Transform::from_translation(DVec3::new(10.0, 0.0, 0.0)));
+        let p1 = inst.track_particles(0).pos_age[0].truncate();
+        assert_eq!(p0, p1, "local particles' stored positions don't move with the emitter");
     }
 
     #[test]
