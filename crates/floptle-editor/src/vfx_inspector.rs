@@ -6,13 +6,13 @@
 //! [`crate::curve_edit`]); automation lanes shape birth values over effect time.
 
 use floptle_scene::{
-    VfxBlendDoc, VfxCurveDoc, VfxExtrapolateDoc, VfxKeyDoc, VfxInterpDoc, VfxLaneDoc,
-    VfxLaneTargetDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
+    VfxBlendDoc, VfxInterpDoc, VfxLaneTargetDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
 use crate::assets::{collect_model_paths, collect_texture_paths};
-use crate::curve_edit::{CurveKind, curve_editor, sparkline, value_or_curve};
+use crate::curve_edit::value_or_curve;
+use crate::vfx_ui::{lane_label, lane_vrange};
 
 impl EditorTabViewer<'_> {
     /// True when the Inspector should show the selected particle track instead of
@@ -45,6 +45,7 @@ impl EditorTabViewer<'_> {
         }
         let effect_name = doc.name.clone();
         let n_tracks = doc.tracks.len();
+        let dur = doc.lifetime.max(0.01);
         let mut dirty = false;
 
         ui.horizontal(|ui| {
@@ -98,7 +99,7 @@ impl EditorTabViewer<'_> {
             ui.separator();
             particle_section(ui, track, st, &mut dirty);
             ui.separator();
-            automation_section(ui, track, st, &mut dirty);
+            automation_point_section(ui, ti, track, st, dur, &mut dirty);
         });
 
         st.doc = Some(doc);
@@ -341,88 +342,80 @@ fn particle_section(
     });
 }
 
-fn automation_section(
+/// The Inspector's automation area. Lanes are *shaped* on the timeline (DAW-style);
+/// here we point the artist there and, when a breakpoint is selected, give a precise
+/// editor for its exact time + value/colour (drag is approximate; this dials it in).
+fn automation_point_section(
     ui: &mut egui::Ui,
+    ti: usize,
     track: &mut floptle_scene::VfxTrackDoc,
     st: &mut crate::vfx_ui::VfxUiState,
+    dur: f32,
     dirty: &mut bool,
 ) {
     ui.horizontal(|ui| {
         ui.strong("Automation");
-        ui.small("(over the effect's timeline)");
+        ui.small("(shape lanes on the timeline — expand a track with ▾)");
     });
-    let mut remove: Option<usize> = None;
-    for (li, lane) in track.automation.iter_mut().enumerate() {
-        let label = format!("lane:{li}");
-        ui.horizontal(|ui| {
-            ui.label(lane_label(lane.target));
-            let rect = ui.allocate_exact_size(egui::vec2(70.0, 16.0), egui::Sense::click());
-            sparkline(ui, &lane.curve, CurveKind::Scalar, rect.0);
-            if rect.1.on_hover_text("click to edit").clicked() {
-                st.expanded_prop = if st.expanded_prop.as_deref() == Some(&label) {
-                    None
-                } else {
-                    st.sel_key = None;
-                    Some(label.clone())
-                };
+    let Some((ati, ali, aki)) = st.auto_sel else {
+        if track.automation.is_empty() {
+            ui.small("Right-click the track on the timeline to add an automation lane.");
+        } else {
+            ui.small("Click a breakpoint on a lane to fine-tune its value here.");
+        }
+        return;
+    };
+    if ati != ti {
+        return; // the selected point is on a different track
+    }
+    let Some(lane) = track.automation.get_mut(ali) else {
+        st.auto_sel = None;
+        return;
+    };
+    let target = lane.target;
+    let is_tint = target == VfxLaneTargetDoc::Tint;
+    // Neighbour times bound the selected key so editing it can't reorder the curve.
+    let n = lane.curve.keys.len();
+    let tmin = if aki > 0 { lane.curve.keys[aki - 1].t } else { 0.0 };
+    let tmax = if aki + 1 < n { lane.curve.keys[aki + 1].t } else { dur };
+    let (tmin, tmax) = (tmin.min(tmax), tmin.max(tmax));
+    let (vlo, vhi) = lane_vrange(target);
+    let Some(k) = lane.curve.keys.get_mut(aki) else {
+        st.auto_sel = None;
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.small(format!("◆ {}", lane_label(target)));
+        ui.label("t");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut k.t).speed(0.01).range(tmin..=tmax).suffix("s"))
+            .changed();
+        match &mut k.v {
+            VfxValueDoc::F32(x) => {
+                ui.label("×");
+                *dirty |= ui.add(egui::DragValue::new(x).speed(0.01).range(vlo..=vhi)).changed();
             }
-            if ui.small_button("🗑").clicked() {
-                remove = Some(li);
+            VfxValueDoc::Rgba(c) => {
+                ui.label("colour");
+                *dirty |= ui.color_edit_button_rgba_unmultiplied(c).changed();
+            }
+            VfxValueDoc::Vec3(_) => {}
+        }
+    });
+    if !is_tint {
+        ui.horizontal(|ui| {
+            ui.small("interp");
+            for (iv, lbl) in [
+                (VfxInterpDoc::Constant, "hold"),
+                (VfxInterpDoc::Linear, "linear"),
+                (VfxInterpDoc::Bezier, "smooth"),
+            ] {
+                if ui.selectable_label(k.interp == iv, lbl).clicked() && k.interp != iv {
+                    k.interp = iv;
+                    *dirty = true;
+                }
             }
         });
-        if st.expanded_prop.as_deref() == Some(&label) {
-            *dirty |= curve_editor(ui, &mut lane.curve, &mut st.sel_key, &mut st.curve_vrange);
-        }
-    }
-    if let Some(li) = remove {
-        track.automation.remove(li);
-        *dirty = true;
-    }
-    // Add a lane for a target not already present.
-    let present: Vec<VfxLaneTargetDoc> = track.automation.iter().map(|l| l.target).collect();
-    let avail: Vec<VfxLaneTargetDoc> = ALL_TARGETS.iter().copied().filter(|t| !present.contains(t)).collect();
-    if !avail.is_empty() {
-        egui::ComboBox::from_id_salt("vfx_add_lane")
-            .selected_text("＋ add automation")
-            .show_ui(ui, |ui| {
-                for t in avail {
-                    if ui.selectable_label(false, lane_label(t)).clicked() {
-                        track.automation.push(VfxLaneDoc { target: t, curve: flat_lane_curve() });
-                        *dirty = true;
-                    }
-                }
-            });
-    }
-}
-
-const ALL_TARGETS: [VfxLaneTargetDoc; 6] = [
-    VfxLaneTargetDoc::Rate,
-    VfxLaneTargetDoc::Count,
-    VfxLaneTargetDoc::Speed,
-    VfxLaneTargetDoc::Size,
-    VfxLaneTargetDoc::Tint,
-    VfxLaneTargetDoc::ShapeScale,
-];
-
-fn lane_label(t: VfxLaneTargetDoc) -> &'static str {
-    match t {
-        VfxLaneTargetDoc::Rate => "× rate",
-        VfxLaneTargetDoc::Count => "× burst count",
-        VfxLaneTargetDoc::Speed => "× speed",
-        VfxLaneTargetDoc::Size => "× size",
-        VfxLaneTargetDoc::Tint => "× tint",
-        VfxLaneTargetDoc::ShapeScale => "× shape scale",
-    }
-}
-
-/// A flat multiplier-1 curve — an automation lane starts as a no-op you shape.
-fn flat_lane_curve() -> VfxCurveDoc {
-    VfxCurveDoc {
-        keys: vec![
-            VfxKeyDoc { t: 0.0, v: VfxValueDoc::F32(1.0), interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 },
-            VfxKeyDoc { t: 1.0, v: VfxValueDoc::F32(1.0), interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 },
-        ],
-        extrapolate: VfxExtrapolateDoc::Clamp,
     }
 }
 

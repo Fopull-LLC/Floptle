@@ -9,15 +9,19 @@
 //! discipline). Curve drawing and automation-lane UI arrive in phase 3.
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use floptle_core::ParticleSystem;
 use floptle_core::World;
-use floptle_scene::{VfxBurstDoc, VfxClipDoc, VfxEffectDoc, VfxEndDoc, VfxPlaybackDoc, VfxTrackDoc};
+use floptle_scene::{
+    VfxBurstDoc, VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc,
+    VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxPlaybackDoc, VfxTrackDoc, VfxValueDoc,
+};
 use floptle_vfx::EffectInstance;
 
-use crate::timeline::{draw_ruler, snap_time, TimelineView, ACCENT, EVENT_COLOR, PLAYHEAD};
-use crate::vfx::{effect_from_doc, starter_effect_doc, VfxPreview, VFX_GRAVITY};
+use crate::timeline::{draw_ruler, snap_time, TimelineView, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
+use crate::vfx::{curve_from_doc, effect_from_doc, starter_effect_doc, VfxPreview, VFX_GRAVITY};
 use crate::EditorTabViewer;
 
 /// What's selected on the timeline (drives the side panel's detail section).
@@ -68,6 +72,11 @@ pub(crate) struct VfxUiState {
     /// The curve editor's frozen value-axis range, held for the duration of a key
     /// drag so the auto-fit can't feed back on itself (see `curve_edit`).
     pub curve_vrange: Option<(f32, f32)>,
+    /// Tracks whose DAW-style automation lanes are drawn (expanded) on the timeline.
+    pub expanded_tracks: HashSet<usize>,
+    /// The selected automation breakpoint `(track, lane, key)` — highlighted on the
+    /// timeline; its exact value/colour edits in the Inspector.
+    pub auto_sel: Option<(usize, usize, usize)>,
 }
 
 impl Default for VfxUiState {
@@ -90,6 +99,8 @@ impl Default for VfxUiState {
             expanded_prop: None,
             sel_key: None,
             curve_vrange: None,
+            expanded_tracks: HashSet::new(),
+            auto_sel: None,
         }
     }
 }
@@ -109,6 +120,8 @@ impl VfxUiState {
             self.expanded_prop = None;
             self.sel_key = None;
             self.curve_vrange = None;
+            self.expanded_tracks.clear();
+            self.auto_sel = None;
             self.bump();
         }
     }
@@ -133,6 +146,72 @@ const RULER_H: f32 = 22.0;
 const EDGE_W: f32 = 6.0;
 const CLIP_FILL: Color32 = Color32::from_rgb(80, 130, 190);
 const CLIP_MIN_LEN: f32 = 0.02;
+
+/// One automation-lane strip's height (drawn under an expanded track).
+const LANE_H: f32 = 36.0;
+const LANE_PAD: f32 = 3.0;
+
+/// Every automation target, for the track's "Add automation" menu.
+const ALL_TARGETS: [VfxLaneTargetDoc; 6] = [
+    VfxLaneTargetDoc::Rate,
+    VfxLaneTargetDoc::Count,
+    VfxLaneTargetDoc::Speed,
+    VfxLaneTargetDoc::Size,
+    VfxLaneTargetDoc::Tint,
+    VfxLaneTargetDoc::ShapeScale,
+];
+
+/// A human label for an automation target (shared with the Inspector's point editor).
+pub(crate) fn lane_label(t: VfxLaneTargetDoc) -> &'static str {
+    match t {
+        VfxLaneTargetDoc::Rate => "× rate",
+        VfxLaneTargetDoc::Count => "× burst count",
+        VfxLaneTargetDoc::Speed => "× speed",
+        VfxLaneTargetDoc::Size => "× size",
+        VfxLaneTargetDoc::Tint => "× tint",
+        VfxLaneTargetDoc::ShapeScale => "× shape scale",
+    }
+}
+
+/// The FIXED vertical range of a scalar automation lane. Being fixed (not auto-fit)
+/// is what makes the timeline DAW-like — and structurally rules out the value-axis
+/// feedback loop that crashed the old inspector curve editor. Shared with the
+/// Inspector's precise point editor so both clamp identically.
+pub(crate) fn lane_vrange(t: VfxLaneTargetDoc) -> (f32, f32) {
+    match t {
+        VfxLaneTargetDoc::Rate | VfxLaneTargetDoc::Count => (0.0, 4.0),
+        VfxLaneTargetDoc::Speed | VfxLaneTargetDoc::Size | VfxLaneTargetDoc::ShapeScale => {
+            (0.0, 3.0)
+        }
+        VfxLaneTargetDoc::Tint => (0.0, 1.0),
+    }
+}
+
+/// A fresh flat lane — a no-op multiplier of 1 (white for tint) spanning the timeline,
+/// which the artist then shapes by dragging its breakpoints.
+fn starter_lane(target: VfxLaneTargetDoc, dur: f32) -> VfxLaneDoc {
+    let v = if target == VfxLaneTargetDoc::Tint {
+        VfxValueDoc::Rgba([1.0, 1.0, 1.0, 1.0])
+    } else {
+        VfxValueDoc::F32(1.0)
+    };
+    let key = |t: f32| VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 };
+    VfxLaneDoc {
+        target,
+        curve: VfxCurveDoc { keys: vec![key(0.0), key(dur.max(CLIP_MIN_LEN))], extrapolate: VfxExtrapolateDoc::Clamp },
+    }
+}
+
+/// The pixel height a track occupies, including its expanded automation lanes.
+fn track_block_h(track: &VfxTrackDoc, expanded: bool) -> f32 {
+    ROW_H
+        + if expanded {
+            // At least one row so an empty expanded track shows its "add" hint.
+            track.automation.len().max(1) as f32 * (LANE_H + LANE_PAD) + LANE_PAD
+        } else {
+            0.0
+        }
+}
 
 impl EditorTabViewer<'_> {
     pub(crate) fn particles_ui(&mut self, ui: &mut egui::Ui) {
@@ -390,8 +469,15 @@ fn starter_track(doc: &VfxEffectDoc) -> VfxTrackDoc {
 fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
     let dur = doc.lifetime.max(0.01);
     let px = st.zoom;
-    let n_rows = doc.tracks.len();
-    let body_h = RULER_H + (n_rows.max(1) as f32) * ROW_H + 8.0;
+    let body_h = RULER_H
+        + doc
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(ti, t)| track_block_h(t, st.expanded_tracks.contains(&ti)))
+            .sum::<f32>()
+            .max(ROW_H)
+        + 8.0;
 
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
         let want_w = (LABEL_W + dur * px + 140.0).max(ui.available_width());
@@ -417,9 +503,10 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
 
         // ---- track rows ----
         let rows_top = full.top() + RULER_H;
+        let mut y = rows_top;
         let mut deferred: Option<DeferredEdit> = None;
         for (ti, track) in doc.tracks.iter().enumerate() {
-            let y = rows_top + ti as f32 * ROW_H;
+            let expanded = st.expanded_tracks.contains(&ti);
             let row = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(full.width(), ROW_H));
             let selected = st.sel_track == Some(ti);
             if selected {
@@ -432,8 +519,26 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 );
             }
 
+            // Expand toggle (▾/▸) — reveals this track's automation lanes below it.
+            let tri = Rect::from_min_size(Pos2::new(full.left() + 2.0, y), egui::vec2(14.0, ROW_H));
+            let tresp = ui.interact(tri, ui.id().with(("vfx-expand", ti)), Sense::click());
+            painter.text(
+                tri.center(),
+                Align2::CENTER_CENTER,
+                if expanded { "▾" } else { "▸" },
+                FontId::proportional(11.0),
+                if track.automation.is_empty() && !expanded {
+                    ui.visuals().weak_text_color()
+                } else {
+                    ui.visuals().text_color()
+                },
+            );
+            if tresp.clicked() {
+                deferred = Some(DeferredEdit::ToggleExpand(ti));
+            }
+
             // Label area: mute toggle + name (click selects the track).
-            let mute = Rect::from_min_size(Pos2::new(full.left() + 4.0, y + 7.0), egui::vec2(16.0, 16.0));
+            let mute = Rect::from_min_size(Pos2::new(full.left() + 18.0, y + 7.0), egui::vec2(16.0, 16.0));
             let mresp = ui.interact(mute, ui.id().with(("vfx-mute", ti)), Sense::click());
             painter.text(
                 mute.center(),
@@ -447,7 +552,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             }
             let label = Rect::from_min_size(
                 Pos2::new(mute.right() + 4.0, y),
-                egui::vec2(LABEL_W - 28.0, ROW_H),
+                egui::vec2(LABEL_W - 42.0, ROW_H),
             );
             let lresp = ui.interact(label, ui.id().with(("vfx-label", ti)), Sense::click());
             let name_col = if selected {
@@ -486,11 +591,27 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 st.ctx_t = snap_time(view.x_to_time(p.x), st.snap_fps);
             }
             let ctx_t = st.ctx_t;
+            let present: Vec<VfxLaneTargetDoc> = track.automation.iter().map(|l| l.target).collect();
             lane_resp.context_menu(|ui| {
                 if ui.button("✦ Add burst here").clicked() {
                     deferred = Some(DeferredEdit::AddBurst(ti, ctx_t));
                     ui.close();
                 }
+                ui.separator();
+                ui.weak("📈 Add automation");
+                let avail = ALL_TARGETS.iter().copied().filter(|t| !present.contains(t));
+                let mut any = false;
+                for t in avail {
+                    any = true;
+                    if ui.button(lane_label(t)).clicked() {
+                        deferred = Some(DeferredEdit::AddLane(ti, t));
+                        ui.close();
+                    }
+                }
+                if !any {
+                    ui.weak("  (all lanes added)");
+                }
+                ui.separator();
                 if ui.button("⧉ Duplicate track").clicked() {
                     deferred = Some(DeferredEdit::DupTrack(ti));
                     ui.close();
@@ -611,6 +732,35 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                     }
                 });
             }
+
+            // ---- expanded automation lanes (DAW-style, drawn under the track) ----
+            if expanded {
+                let mut ly = y + ROW_H + LANE_PAD;
+                if track.automation.is_empty() {
+                    painter.text(
+                        Pos2::new(view.left + 8.0, ly + LANE_H * 0.5),
+                        Align2::LEFT_CENTER,
+                        "no automation — right-click the track to add a lane",
+                        FontId::proportional(10.5),
+                        ui.visuals().weak_text_color(),
+                    );
+                } else {
+                    for (li, ln) in track.automation.iter().enumerate() {
+                        let label_area = Rect::from_min_size(
+                            Pos2::new(full.left() + 18.0, ly),
+                            egui::vec2(LABEL_W - 20.0, LANE_H),
+                        );
+                        let strip = Rect::from_min_size(
+                            Pos2::new(view.left, ly + 2.0),
+                            egui::vec2(dur * px, LANE_H - 4.0),
+                        );
+                        automation_lane_ui(ui, &painter, &view, st, ti, li, ln, label_area, strip, dur, &mut deferred);
+                        ly += LANE_H + LANE_PAD;
+                    }
+                }
+            }
+
+            y += track_block_h(track, expanded);
         }
 
         if doc.tracks.is_empty() {
@@ -702,15 +852,177 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
     });
 }
 
+/// Draw + edit ONE automation lane strip over the timeline (DAW-style). Scalar
+/// targets show a breakpoint curve on a FIXED vertical range (drag a point to move
+/// it, double-click empty to add, right-click a point for interp / delete); the
+/// Tint target shows a colour gradient with draggable stops. All edits are deferred
+/// (the caller owns `doc`); the selected point's exact value edits in the Inspector.
+#[allow(clippy::too_many_arguments)]
+fn automation_lane_ui(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    view: &TimelineView,
+    st: &mut VfxUiState,
+    ti: usize,
+    li: usize,
+    lane: &VfxLaneDoc,
+    label_area: Rect,
+    strip: Rect,
+    dur: f32,
+    deferred: &mut Option<DeferredEdit>,
+) {
+    let is_tint = lane.target == VfxLaneTargetDoc::Tint;
+    let (lo, hi) = lane_vrange(lane.target);
+    let rt = curve_from_doc(&lane.curve);
+    let to_x = |t: f32| strip.left() + (t / dur).clamp(0.0, 1.0) * strip.width();
+    let v_to_y = |v: f32| strip.bottom() - ((v - lo) / (hi - lo)) * strip.height();
+
+    // ---- left label: target name + delete-lane ----
+    painter.text(
+        Pos2::new(label_area.left() + 2.0, label_area.center().y),
+        Align2::LEFT_CENTER,
+        lane_label(lane.target),
+        FontId::proportional(10.5),
+        ui.visuals().text_color(),
+    );
+    let del = Rect::from_min_size(
+        Pos2::new(label_area.right() - 16.0, label_area.center().y - 8.0),
+        egui::vec2(14.0, 16.0),
+    );
+    let dresp = ui.interact(del, ui.id().with(("vfx-lane-del", ti, li)), Sense::click());
+    painter.text(
+        del.center(),
+        Align2::CENTER_CENTER,
+        "🗑",
+        FontId::proportional(11.0),
+        if dresp.hovered() { ACCENT } else { ui.visuals().weak_text_color() },
+    );
+    if dresp.clicked() {
+        *deferred = Some(DeferredEdit::DelLane(ti, li));
+    }
+
+    // ---- strip background + empty double-click-to-add (registered BEFORE the
+    // handles so the handles, drawn after, win the pointer where they overlap) ----
+    painter.rect_filled(strip, 3.0, ui.visuals().extreme_bg_color);
+    let sresp = ui.interact(strip, ui.id().with(("vfx-lane-strip", ti, li)), Sense::click());
+    if sresp.double_clicked()
+        && let Some(p) = sresp.interact_pointer_pos()
+    {
+        let t = snap_time(view.x_to_time(p.x), st.snap_fps).clamp(0.0, dur);
+        let v = if is_tint {
+            let c = rt.eval(t);
+            VfxValueDoc::Rgba([c[0], c[1], c[2], c[3]])
+        } else {
+            let vy = (lo + (strip.bottom() - p.y) / strip.height() * (hi - lo)).clamp(lo, hi);
+            VfxValueDoc::F32(vy)
+        };
+        *deferred = Some(DeferredEdit::AddAutoKey(ti, li, t, v));
+    }
+
+    // ---- the curve / gradient ----
+    if is_tint {
+        let n = strip.width().max(2.0) as usize;
+        for i in 0..n {
+            let u = i as f32 / (n - 1).max(1) as f32;
+            let c = rt.eval(u * dur);
+            let x = strip.left() + u * strip.width();
+            painter.line_segment(
+                [Pos2::new(x, strip.top()), Pos2::new(x, strip.bottom())],
+                Stroke::new(1.5, Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)),
+            );
+        }
+    } else {
+        if lo < 1.0 && hi > 1.0 {
+            let y1 = v_to_y(1.0);
+            painter.line_segment(
+                [Pos2::new(strip.left(), y1), Pos2::new(strip.right(), y1)],
+                Stroke::new(0.5, ui.visuals().weak_text_color().gamma_multiply(0.4)),
+            );
+        }
+        let mut pts = Vec::new();
+        let n = 48;
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let v = rt.eval(u * dur)[0];
+            pts.push(Pos2::new(strip.left() + u * strip.width(), v_to_y(v).clamp(strip.top(), strip.bottom())));
+        }
+        painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
+    }
+
+    // ---- breakpoints / stops ----
+    for (ki, k) in lane.curve.keys.iter().enumerate() {
+        let x = to_x(k.t.clamp(0.0, dur));
+        let sel = st.auto_sel == Some((ti, li, ki));
+        let hit = if is_tint {
+            painter.line_segment(
+                [Pos2::new(x, strip.top()), Pos2::new(x, strip.bottom())],
+                Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { ACCENT } else { Color32::from_black_alpha(150) }),
+            );
+            painter.circle(Pos2::new(x, strip.bottom()), if sel { 4.0 } else { 3.0 }, if sel { ACCENT } else { KEY_COLOR }, Stroke::new(1.0, Color32::from_black_alpha(160)));
+            Rect::from_center_size(Pos2::new(x, strip.center().y), egui::vec2(12.0, strip.height()))
+        } else {
+            let v = match k.v {
+                VfxValueDoc::F32(x) => x,
+                _ => 0.0,
+            };
+            let c = Pos2::new(x, v_to_y(v).clamp(strip.top(), strip.bottom()));
+            painter.circle(c, if sel { 5.0 } else { 4.0 }, if sel { ACCENT } else { KEY_COLOR }, Stroke::new(1.0, Color32::from_black_alpha(160)));
+            Rect::from_center_size(c, egui::vec2(12.0, 12.0))
+        };
+        let resp = ui.interact(hit, ui.id().with(("vfx-auto-key", ti, li, ki)), Sense::click_and_drag());
+        if resp.clicked() || resp.drag_started() {
+            st.auto_sel = Some((ti, li, ki));
+            st.sel_track = Some(ti);
+        }
+        if resp.dragged()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let t = snap_time(view.x_to_time(p.x), st.snap_fps).clamp(0.0, dur);
+            let v = if is_tint {
+                k.v // colour is unchanged by a time drag
+            } else {
+                VfxValueDoc::F32((lo + (strip.bottom() - p.y) / strip.height() * (hi - lo)).clamp(lo, hi))
+            };
+            *deferred = Some(DeferredEdit::MoveAutoKey(ti, li, ki, t, v));
+        }
+        resp.context_menu(|ui| {
+            if !is_tint {
+                for (iv, lbl) in [
+                    (VfxInterpDoc::Constant, "hold"),
+                    (VfxInterpDoc::Linear, "linear"),
+                    (VfxInterpDoc::Bezier, "smooth"),
+                ] {
+                    if ui.button(lbl).clicked() {
+                        *deferred = Some(DeferredEdit::SetAutoInterp(ti, li, ki, iv));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+            }
+            if lane.curve.keys.len() > 1 && ui.button("🗑 delete point").clicked() {
+                *deferred = Some(DeferredEdit::DelAutoKey(ti, li, ki));
+                ui.close();
+            }
+        });
+    }
+}
+
 /// Structural edits deferred out of the per-track iteration borrow.
 enum DeferredEdit {
     ToggleMute(usize),
+    ToggleExpand(usize),
     AddClip(usize, f32),
     AddBurst(usize, f32),
     DelClip(usize, usize),
     DelBurst(usize, usize),
     DupTrack(usize),
     DelTrack(usize),
+    AddLane(usize, VfxLaneTargetDoc),
+    DelLane(usize, usize),
+    AddAutoKey(usize, usize, f32, VfxValueDoc),
+    MoveAutoKey(usize, usize, usize, f32, VfxValueDoc),
+    DelAutoKey(usize, usize, usize),
+    SetAutoInterp(usize, usize, usize, VfxInterpDoc),
 }
 
 fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dur: f32) {
@@ -718,6 +1030,11 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
         DeferredEdit::ToggleMute(ti) => {
             if let Some(t) = doc.tracks.get_mut(ti) {
                 t.enabled = !t.enabled;
+            }
+        }
+        DeferredEdit::ToggleExpand(ti) => {
+            if !st.expanded_tracks.remove(&ti) {
+                st.expanded_tracks.insert(ti);
             }
         }
         DeferredEdit::AddClip(ti, t0) => {
@@ -763,6 +1080,9 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                 doc.tracks.insert(ti + 1, c);
                 st.sel_track = Some(ti + 1);
                 st.sel = None;
+                // Track indices shifted — collapse lanes so no stale index draws.
+                st.expanded_tracks.clear();
+                st.auto_sel = None;
             }
         }
         DeferredEdit::DelTrack(ti) => {
@@ -770,8 +1090,100 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                 doc.tracks.remove(ti);
                 st.sel_track = None;
                 st.sel = None;
+                st.expanded_tracks.clear();
+                st.auto_sel = None;
             }
         }
+        DeferredEdit::AddLane(ti, target) => {
+            if let Some(t) = doc.tracks.get_mut(ti) {
+                t.automation.push(starter_lane(target, dur));
+                st.expanded_tracks.insert(ti); // reveal it so the artist can shape it
+            }
+        }
+        DeferredEdit::DelLane(ti, li) => {
+            if let Some(t) = doc.tracks.get_mut(ti)
+                && li < t.automation.len()
+            {
+                t.automation.remove(li);
+                if matches!(st.auto_sel, Some((a, b, _)) if a == ti && b == li) {
+                    st.auto_sel = None;
+                }
+            }
+        }
+        DeferredEdit::AddAutoKey(ti, li, t, v) => {
+            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li)) {
+                l.curve.keys.push(VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 });
+                l.curve.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+                st.auto_sel = l.curve.keys.iter().position(|k| k.t == t).map(|ki| (ti, li, ki));
+            }
+        }
+        DeferredEdit::MoveAutoKey(ti, li, ki, t, v) => {
+            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li)) {
+                // Clamp between neighbours so keys never reorder mid-drag — the key
+                // index stays valid, so no re-sort (and no selection jump) is needed.
+                let n = l.curve.keys.len();
+                let lo = if ki > 0 { l.curve.keys[ki - 1].t + 1e-3 } else { 0.0 };
+                let hi = if ki + 1 < n { l.curve.keys[ki + 1].t - 1e-3 } else { dur };
+                let (a, b) = (lo.min(hi), lo.max(hi));
+                if let Some(k) = l.curve.keys.get_mut(ki) {
+                    k.t = t.clamp(a, b);
+                    k.v = v;
+                }
+            }
+        }
+        DeferredEdit::DelAutoKey(ti, li, ki) => {
+            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li))
+                && ki < l.curve.keys.len()
+                && l.curve.keys.len() > 1
+            {
+                l.curve.keys.remove(ki);
+                st.auto_sel = None;
+            }
+        }
+        DeferredEdit::SetAutoInterp(ti, li, ki, iv) => {
+            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li))
+                && let Some(k) = l.curve.keys.get_mut(ki)
+            {
+                k.interp = iv;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_block_h_grows_with_expanded_lanes() {
+        let mut t = starter_effect_doc("x").tracks.remove(0);
+        let collapsed = track_block_h(&t, false);
+        assert_eq!(collapsed, ROW_H, "a collapsed track is exactly one row");
+        let expanded_empty = track_block_h(&t, true);
+        assert!(expanded_empty > collapsed, "expanding an empty track reserves its add-hint row");
+        t.automation.push(starter_lane(VfxLaneTargetDoc::Rate, 2.0));
+        t.automation.push(starter_lane(VfxLaneTargetDoc::Size, 2.0));
+        assert!(track_block_h(&t, true) > expanded_empty, "each lane adds a strip's height");
+    }
+
+    #[test]
+    fn starter_lane_spans_the_timeline_and_is_a_flat_no_op() {
+        // Keys authored in SECONDS across [0, dur] — the domain the bake expects.
+        let l = starter_lane(VfxLaneTargetDoc::Rate, 2.0);
+        assert_eq!(l.curve.keys.len(), 2);
+        assert_eq!(l.curve.keys[0].t, 0.0);
+        assert_eq!(l.curve.keys[1].t, 2.0);
+        assert!(matches!(l.curve.keys[0].v, VfxValueDoc::F32(v) if v == 1.0), "flat ×1 (no-op)");
+        // A tint lane starts white so it multiplies colour by 1 until shaped.
+        let tint = starter_lane(VfxLaneTargetDoc::Tint, 1.0);
+        assert!(matches!(tint.curve.keys[0].v, VfxValueDoc::Rgba(c) if c == [1.0; 4]));
+    }
+
+    #[test]
+    fn scalar_lane_ranges_are_fixed_and_tint_is_unit() {
+        assert_eq!(lane_vrange(VfxLaneTargetDoc::Rate), (0.0, 4.0));
+        assert_eq!(lane_vrange(VfxLaneTargetDoc::Size), (0.0, 3.0));
+        assert_eq!(lane_vrange(VfxLaneTargetDoc::Tint), (0.0, 1.0));
     }
 }
 
