@@ -328,11 +328,11 @@ fn particle_section(
 ) {
     ui.strong("Over each particle's life");
     ui.small("hover the value, tap ∿ to animate it into a curve");
-    let (exp, sk) = (&mut st.expanded_prop, &mut st.sel_key);
-    *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk);
-    *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk);
-    *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk);
-    *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk);
+    let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
+    *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr);
     ui.horizontal(|ui| {
         ui.label("gravity");
         *dirty |= ui.add(egui::Slider::new(&mut track.gravity, 0.0..=2.0)).changed();
@@ -371,7 +371,7 @@ fn automation_section(
             }
         });
         if st.expanded_prop.as_deref() == Some(&label) {
-            *dirty |= curve_editor(ui, &mut lane.curve, &mut st.sel_key);
+            *dirty |= curve_editor(ui, &mut lane.curve, &mut st.sel_key, &mut st.curve_vrange);
         }
     }
     if let Some(li) = remove {

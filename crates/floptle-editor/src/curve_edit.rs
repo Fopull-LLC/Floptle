@@ -57,6 +57,7 @@ pub(crate) fn value_or_curve(
     prop: &mut VfxPropDoc,
     expanded: &mut Option<String>,
     sel_key: &mut Option<usize>,
+    vrange: &mut Option<(f32, f32)>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -79,6 +80,7 @@ pub(crate) fn value_or_curve(
                         extrapolate: VfxExtrapolateDoc::Clamp,
                     });
                     *expanded = Some(label.to_string());
+                    *vrange = None;
                     changed = true;
                 }
             }
@@ -87,6 +89,7 @@ pub(crate) fn value_or_curve(
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(90.0, 18.0), Sense::click());
                 sparkline(ui, c, kind, rect);
                 if resp.on_hover_text("click to edit the curve").clicked() {
+                    *vrange = None;
                     *expanded = if expanded.as_deref() == Some(label) {
                         None
                     } else {
@@ -108,7 +111,7 @@ pub(crate) fn value_or_curve(
     if let VfxPropDoc::Curve(c) = prop
         && expanded.as_deref() == Some(label)
     {
-        changed |= curve_editor(ui, c, sel_key);
+        changed |= curve_editor(ui, c, sel_key, vrange);
     }
     changed
 }
@@ -181,13 +184,21 @@ fn value_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
     if !lo.is_finite() || !hi.is_finite() {
         return (0.0, 1.0);
     }
-    let pad = ((hi - lo) * 0.1).max(0.05);
+    // A generous minimum span keeps flat/near-flat curves comfortably draggable
+    // (a tiny fitted range would otherwise map the whole graph height to a sliver
+    // of value, making the key feel stuck).
+    let pad = ((hi - lo) * 0.15).max(0.25);
     (lo - pad, hi + pad)
 }
 
 /// The full graph editor for one curve. Domain is the normalized `[0,1]`; the
 /// value axis auto-fits. Colour curves add a gradient strip + colour-stop row.
-pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut VfxCurveDoc, sel_key: &mut Option<usize>) -> bool {
+pub(crate) fn curve_editor(
+    ui: &mut egui::Ui,
+    curve: &mut VfxCurveDoc,
+    sel_key: &mut Option<usize>,
+    vrange: &mut Option<(f32, f32)>,
+) -> bool {
     let mut changed = false;
     let kind = curve.keys.first().map(|k| kind_of(&k.v)).unwrap_or(CurveKind::Scalar);
 
@@ -266,9 +277,21 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut VfxCurveDoc, sel_key: 
         CurveKind::Color => vec![3],
         CurveKind::Vector => vec![0, 1, 2],
     };
+    // The value axis auto-fits — but ONLY while the pointer is up. During a drag we
+    // reuse the frozen range so lifting a key can't expand the axis, which would
+    // remap the same pointer position to an ever-larger value (a positive-feedback
+    // runaway that overflowed to a NaN screen coord and panicked the tessellator).
+    let pointer_down = ui.input(|i| i.pointer.any_down());
     let (lo, hi) = match kind {
         CurveKind::Color => (0.0, 1.0),
-        _ => value_range(&rt, plot_chans.len()),
+        _ => match (pointer_down, *vrange) {
+            (true, Some(r)) => r,
+            _ => {
+                let r = value_range(&rt, plot_chans.len());
+                *vrange = Some(r);
+                r
+            }
+        },
     };
     let to_y = |val: f32| graph.bottom() - ((val - lo) / (hi - lo).max(1e-4)) * graph.height();
     let to_x = |t: f32| graph.left() + t.clamp(0.0, 1.0) * graph.width();
@@ -336,9 +359,11 @@ pub(crate) fn curve_editor(ui: &mut egui::Ui, curve: &mut VfxCurveDoc, sel_key: 
             && let Some(p) = resp.interact_pointer_pos()
         {
             let nt = x_to_t(p.x);
+            // Finite clamp is a backstop against a NaN/inf ever reaching the DTO
+            // (the frozen range above is the real fix; this just guarantees sanity).
             let nv = (lo + (graph.bottom() - p.y) / graph.height() * (hi - lo)).clamp(
-                if kind == CurveKind::Color { 0.0 } else { f32::MIN },
-                if kind == CurveKind::Color { 1.0 } else { f32::MAX },
+                if kind == CurveKind::Color { 0.0 } else { -1.0e6 },
+                if kind == CurveKind::Color { 1.0 } else { 1.0e6 },
             );
             let k = &mut curve.keys[i];
             let mut ch = channels_of(&k.v);

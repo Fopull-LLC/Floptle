@@ -65,6 +65,9 @@ pub(crate) struct VfxUiState {
     /// the selected key within it — the value-or-curve affordance's state.
     pub expanded_prop: Option<String>,
     pub sel_key: Option<usize>,
+    /// The curve editor's frozen value-axis range, held for the duration of a key
+    /// drag so the auto-fit can't feed back on itself (see `curve_edit`).
+    pub curve_vrange: Option<(f32, f32)>,
 }
 
 impl Default for VfxUiState {
@@ -86,6 +89,7 @@ impl Default for VfxUiState {
             ctx_t: 0.0,
             expanded_prop: None,
             sel_key: None,
+            curve_vrange: None,
         }
     }
 }
@@ -102,6 +106,9 @@ impl VfxUiState {
             self.sel_track = None;
             self.sel = None;
             self.drag = None;
+            self.expanded_prop = None;
+            self.sel_key = None;
+            self.curve_vrange = None;
             self.bump();
         }
     }
