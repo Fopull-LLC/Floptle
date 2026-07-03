@@ -24,7 +24,7 @@ impl<'a> EditorTabViewer<'a> {
                 self.cmd.save_scene = true;
             }
             ui.label("?").on_hover_text(
-                "Right-click here for New ▸ Cube / Sphere / Folder / Terrain / Camera …\n\
+                "Right-click here for New ⏵ Cube / Sphere / Folder / Terrain / Camera …\n\
                  Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt\n\
                  F focus · Q unselect · G grid · ⏶/⏷ step selection · Del delete\n\
                  F1 play · F2 pause · Ctrl+S save · Ctrl+Z/Y undo/redo\n\
@@ -85,7 +85,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(new_sphere());
             ui.close();
         }
-        if ui.button("⬭ Capsule").on_hover_text("a capsule primitive (ideal for a physics character body)").clicked() {
+        if ui.button("▪ Capsule").on_hover_text("a capsule primitive (ideal for a physics character body)").clicked() {
             pick = Some(new_capsule());
             ui.close();
         }
@@ -118,7 +118,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::GravityVolume { radial: false, strength: 9.81, radius: 20.0 });
             ui.close();
         }
-        if ui.button("◐ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
+        if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();
         }
@@ -157,7 +157,7 @@ impl EditorTabViewer<'_> {
         } else if matches!(matter, Some(Matter::GravityVolume { .. })) {
             "⬇"
         } else if matches!(matter, Some(Matter::Skybox { .. })) {
-            "◐"
+            "◎"
         } else if matches!(matter, Some(Matter::PostProcess { .. })) {
             "✨"
         } else if has_kids {

@@ -323,7 +323,7 @@ pub fn particle_globals(cam: &RenderCamera, aspect: f32) -> ParticleGlobals {
     }
 }
 
-/// A starter effect for "Add Component → Particle System (new)": a small looping
+/// A starter effect for "Add Component › Particle System (new)": a small looping
 /// fountain so the node visibly emits the moment Play starts.
 pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
     let tracks = vec![floptle_scene::VfxTrackDoc {

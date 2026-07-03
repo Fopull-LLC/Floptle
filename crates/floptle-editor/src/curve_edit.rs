@@ -3,7 +3,7 @@
 //!
 //! A property is a constant OR a curve over a normalized domain (`[0,1]` — the
 //! particle's life, or effect time for automation lanes). Constants edit inline;
-//! a `∿` promotes to a curve, which shows a sparkline that expands into the graph
+//! a `📈` promotes to a curve, which shows a sparkline that expands into the graph
 //! editor: draggable keys, per-key interpolation (constant / linear / bezier with
 //! tangent handles), click-empty to add, right-click to delete. Colour curves get
 //! a gradient strip so colour-shift and alpha-fade edit in one place.
@@ -48,7 +48,7 @@ fn kind_of(v: &VfxValueDoc) -> CurveKind {
     }
 }
 
-/// The inline value-or-curve row: label + constant editor + `∿` promote, or a
+/// The inline value-or-curve row: label + constant editor + `📈` promote, or a
 /// sparkline + `→const` demote when it's a curve. When expanded (its label is in
 /// `expanded`), the full graph editor is shown below. Returns whether it changed.
 pub(crate) fn value_or_curve(
@@ -72,7 +72,7 @@ pub(crate) fn value_or_curve(
                     .on_hover_text("randomize per particle between two values")
                     .clicked();
                 let to_curve = ui
-                    .small_button("∿")
+                    .small_button("📈")
                     .on_hover_text("animate this over the particle's life (make a curve)")
                     .clicked();
                 let start = *v;
@@ -100,7 +100,7 @@ pub(crate) fn value_or_curve(
                     .on_hover_text("random per particle between the low and high value");
                 changed |= const_editor(ui, b);
                 let demote = ui
-                    .small_button("→•")
+                    .small_button("•")
                     .on_hover_text("back to a single value (the low bound)")
                     .clicked();
                 let low = *a;
@@ -122,7 +122,7 @@ pub(crate) fn value_or_curve(
                         Some(label.to_string())
                     };
                 }
-                if ui.small_button("→•").on_hover_text("back to a constant (value at t=0)").clicked() {
+                if ui.small_button("•").on_hover_text("back to a constant (value at t=0)").clicked() {
                     let v0 = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
                     *prop = VfxPropDoc::Const(v0);
                     if expanded.as_deref() == Some(label) {

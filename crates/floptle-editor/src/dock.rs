@@ -32,9 +32,9 @@ impl EditorTab {
             EditorTab::Scene => "⌖ Scene",
             EditorTab::Game => "⏵ Game",
             EditorTab::Scripting => "Scripting",
-            EditorTab::Animation => "✎ Animating",
-            EditorTab::AnimGraph => "◉ Controller",
-            EditorTab::Particles => "❋ Particles",
+            EditorTab::Animation => "✏ Animating",
+            EditorTab::AnimGraph => "◎ Controller",
+            EditorTab::Particles => "✨ Particles",
         }
     }
 }
