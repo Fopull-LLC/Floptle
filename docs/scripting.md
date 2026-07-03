@@ -99,6 +99,10 @@ Because `node.up_*` is the surface normal of gravity, a controller that moves al
 it and jumps along it works on **flat worlds and on spherical planets** with no extra
 code (see the character recipe below).
 
+The body's **tunables** — friction, bounciness, gravity on/off, shape/size, axis
+locks — are scriptable too, via `node:getcomponent("RigidBody")` (see
+[§7](#7-assets--swapping-models--materials)).
+
 ## 5. `input` — keyboard & mouse
 
 Available while playing.
@@ -248,6 +252,46 @@ if input.pressed("h") then node.visible = not node.visible end
 
 > These work through the **node handle** too, so a manager script can re-skin any node it
 > reaches: `find("Player"):getchild("Body").model = assets.getFile("models/hurt.glb")`.
+
+### `node:getcomponent(name)` — tweak component fields live
+
+Every tunable the Inspector shows on a **Rigidbody** or **Point Light** is also
+scriptable. `node:getcomponent(name)` returns a **component handle** (or `nil` if the
+node doesn't have that component): read a field to sample it, assign one to change it.
+Writes apply the same frame — during Play the physics sim re-reads the body tunables
+every step, so a change takes effect immediately with no reset or teleport.
+
+| `getcomponent("RigidBody")` | Meaning (Inspector: ◆ Rigidbody) |
+|---|---|
+| `friction` | Surface friction 0..1 (0 = frictionless — ice). |
+| `restitution` | Bounciness 0..1 (0 = no bounce). |
+| `gravity` | Gravity pull on this body (assign `true`/`false`; reads back 1/0). |
+| `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box. |
+| `radius` | Sphere/capsule radius. |
+| `height` | Capsule total height. |
+| `half_x` `half_y` `half_z` | Box half-extents. |
+| `lock_x` `lock_y` `lock_z` | Freeze world-axis translation (e.g. lock Z for 2.5D). |
+| `lock_rot_x` `lock_rot_y` `lock_rot_z` | Freeze rotation about an axis (keep a body upright). |
+
+| `getcomponent("PointLight")` | Meaning (Inspector: ● Point Light) |
+|---|---|
+| `intensity` / `range` | Brightness multiplier / reach in world units. |
+| `r` `g` `b` | Light color, 0..1 per channel. |
+
+Booleans can be written as `true`/`false` (they read back as 1/0). All fields are
+numbers — anything else raises a script error naming the field.
+
+```lua
+function update(node, dt)
+  local rb = node:getcomponent("RigidBody")
+  if rb then
+    rb.friction = on_ice and 0.02 or 0.6   -- slide across the frozen lake
+    if input.pressed("g") then rb.gravity = not (rb.gravity > 0) end
+  end
+end
+```
+
+> Handles work cross-node too: `find("Crate"):getcomponent("RigidBody").restitution = 0.9`.
 
 ## 8. Referencing other nodes & scripts
 

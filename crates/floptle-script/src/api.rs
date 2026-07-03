@@ -31,14 +31,30 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
         );
     }
     if let Some(rb) = world.get::<RigidBody>(e) {
+        let b = |v: bool| if v { 1.0 } else { 0.0 };
         out.insert(
             "RigidBody".to_string(),
             HashMap::from([
                 ("friction".to_string(), rb.friction as f64),
                 ("restitution".to_string(), rb.restitution as f64),
-                ("gravity".to_string(), if rb.gravity { 1.0 } else { 0.0 }),
+                ("gravity".to_string(), b(rb.gravity)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
+                // Shape kind: 0 = sphere, 1 = capsule, 2 = box.
+                ("shape".to_string(), match rb.kind {
+                    floptle_core::BodyKind::Sphere => 0.0,
+                    floptle_core::BodyKind::Capsule => 1.0,
+                    floptle_core::BodyKind::Box => 2.0,
+                }),
+                ("half_x".to_string(), rb.half_extents[0] as f64),
+                ("half_y".to_string(), rb.half_extents[1] as f64),
+                ("half_z".to_string(), rb.half_extents[2] as f64),
+                ("lock_x".to_string(), b(rb.lock_pos[0])),
+                ("lock_y".to_string(), b(rb.lock_pos[1])),
+                ("lock_z".to_string(), b(rb.lock_pos[2])),
+                ("lock_rot_x".to_string(), b(rb.lock_rot[0])),
+                ("lock_rot_y".to_string(), b(rb.lock_rot[1])),
+                ("lock_rot_z".to_string(), b(rb.lock_rot[2])),
             ]),
         );
     }
@@ -69,6 +85,22 @@ pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, 
                     "gravity" => rb.gravity = val != 0.0,
                     "radius" => rb.radius = val as f32,
                     "height" => rb.height = val as f32,
+                    "shape" => {
+                        rb.kind = match val as i64 {
+                            0 => floptle_core::BodyKind::Sphere,
+                            1 => floptle_core::BodyKind::Capsule,
+                            _ => floptle_core::BodyKind::Box,
+                        }
+                    }
+                    "half_x" => rb.half_extents[0] = val as f32,
+                    "half_y" => rb.half_extents[1] = val as f32,
+                    "half_z" => rb.half_extents[2] = val as f32,
+                    "lock_x" => rb.lock_pos[0] = val != 0.0,
+                    "lock_y" => rb.lock_pos[1] = val != 0.0,
+                    "lock_z" => rb.lock_pos[2] = val != 0.0,
+                    "lock_rot_x" => rb.lock_rot[0] = val != 0.0,
+                    "lock_rot_y" => rb.lock_rot[1] = val != 0.0,
+                    "lock_rot_z" => rb.lock_rot[2] = val != 0.0,
                     _ => {}
                 }
             }
