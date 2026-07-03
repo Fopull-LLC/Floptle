@@ -1,0 +1,696 @@
+//! The data-oriented particle simulation.
+//!
+//! Deterministic by construction: every particle's whole life derives from its birth
+//! record (birth time, counter-hashed seed, lane-sampled birth values), so scrubbing
+//! the editor playhead re-simulates from `t = 0` and lands on the exact same state,
+//! and probe renders are bit-stable. RNG is a pure integer hash of `(seed, counter)`
+//! — no state, bit-exact in Rust and WGSL alike.
+//!
+//! Layout is structure-of-arrays with vec4-aligned fields: the CPU loop is tight and
+//! the arrays are std430-compatible, so the GPU compute backend (proposal §8 phase 5)
+//! aliases this layout instead of inventing its own. Births stay CPU-side forever
+//! (timeline logic — tiny and exact); aging is the part that will move on-device.
+
+use crate::effect::{CompiledEffect, CompiledTrack, EmitShape, Playback, RenderMode};
+use floptle_core::math::{Quat, Vec3, Vec4};
+use std::sync::Arc;
+
+/// Fixed step for editor scrubbing / deterministic re-simulation (matches the
+/// physics fixed-step discipline). In-game playback advances by real `dt`.
+pub const SCRUB_STEP: f32 = 1.0 / 120.0;
+
+// ---------------------------------------------------------------------------
+// Deterministic RNG — integer hashing, WGSL-portable.
+// ---------------------------------------------------------------------------
+
+/// Lowbias32 integer hash — the per-particle RNG. Pure, stateless, exact.
+#[inline]
+pub fn hash(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+
+#[inline]
+fn hash3(a: u32, b: u32, c: u32) -> u32 {
+    hash(a ^ hash(b ^ hash(c)))
+}
+
+/// A uniform float in `[0, 1)` from a hash, salted so one particle seed yields
+/// many independent values.
+#[inline]
+fn rand01(seed: u32, salt: u32) -> f32 {
+    (hash(seed ^ hash(salt)) >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Symmetric jitter multiplier: `1 ± amount` (clamped positive).
+#[inline]
+fn jitter_mul(seed: u32, salt: u32, amount: f32) -> f32 {
+    (1.0 + amount * (rand01(seed, salt) * 2.0 - 1.0)).max(1e-3)
+}
+
+// ---------------------------------------------------------------------------
+// SoA particle storage
+// ---------------------------------------------------------------------------
+
+/// Live particles of one track — structure-of-arrays, capacity-allocated once,
+/// retired by swap-remove so the arrays stay dense. Field packing is std430-ready:
+/// `pos_age` = position.xyz + age, `vel_life` = velocity.xyz + total lifetime,
+/// `frame` = birth-orientation quaternion, `misc` = [birth_size, speed_mul, spare, spare].
+pub struct TrackParticles {
+    pub pos_age: Vec<Vec4>,
+    pub vel_life: Vec<Vec4>,
+    pub frame: Vec<Vec4>,
+    pub misc: Vec<Vec4>,
+    pub seed: Vec<u32>,
+    pub count: usize,
+}
+
+impl TrackParticles {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            pos_age: Vec::with_capacity(cap),
+            vel_life: Vec::with_capacity(cap),
+            frame: Vec::with_capacity(cap),
+            misc: Vec::with_capacity(cap),
+            seed: Vec::with_capacity(cap),
+            count: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pos_age.clear();
+        self.vel_life.clear();
+        self.frame.clear();
+        self.misc.clear();
+        self.seed.clear();
+        self.count = 0;
+    }
+
+    fn swap_remove(&mut self, i: usize) {
+        self.pos_age.swap_remove(i);
+        self.vel_life.swap_remove(i);
+        self.frame.swap_remove(i);
+        self.misc.swap_remove(i);
+        self.seed.swap_remove(i);
+        self.count -= 1;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push(&mut self, pos: Vec3, age: f32, vel: Vec3, life: f32, frame: Quat, misc: Vec4, seed: u32) {
+        self.pos_age.push(pos.extend(age));
+        self.vel_life.push(vel.extend(life));
+        self.frame.push(Vec4::new(frame.x, frame.y, frame.z, frame.w));
+        self.misc.push(misc);
+        self.seed.push(seed);
+        self.count += 1;
+    }
+}
+
+/// Per-track live state inside an instance.
+struct TrackState {
+    particles: TrackParticles,
+    /// Fractional-emission accumulator; resets when the playhead enters a clip.
+    acc: f32,
+    /// Monotonic birth counter — the RNG stream position. Never resets mid-play.
+    emit_counter: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Effect instance
+// ---------------------------------------------------------------------------
+
+/// A live, playing copy of a compiled effect. Owns its particles; shares the
+/// compiled data. Deterministic given (`effect.seed`, `instance_seed`, step sizes).
+pub struct EffectInstance {
+    pub effect: Arc<CompiledEffect>,
+    /// Playhead in seconds. `prev_t` trails it for crossing tests.
+    pub t: f32,
+    prev_t: f32,
+    pub playing: bool,
+    instance_seed: u32,
+    tracks: Vec<TrackState>,
+}
+
+/// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
+/// fire on the first step (crossings are half-open `(prev_t, t]`).
+const START_EPS: f32 = -1.0e-6;
+
+impl EffectInstance {
+    pub fn new(effect: Arc<CompiledEffect>, instance_seed: u32) -> Self {
+        let tracks = effect
+            .tracks
+            .iter()
+            .map(|ct| TrackState {
+                particles: TrackParticles::with_capacity(ct.capacity as usize),
+                acc: 0.0,
+                emit_counter: 0,
+            })
+            .collect();
+        Self { effect, t: 0.0, prev_t: START_EPS, playing: true, instance_seed, tracks }
+    }
+
+    /// Back to `t = 0` with no live particles — the scrub / restart baseline.
+    pub fn reset(&mut self) {
+        self.t = 0.0;
+        self.prev_t = START_EPS;
+        for ts in &mut self.tracks {
+            ts.particles.clear();
+            ts.acc = 0.0;
+            ts.emit_counter = 0;
+        }
+    }
+
+    /// Total live particles across all tracks.
+    pub fn alive(&self) -> usize {
+        self.tracks.iter().map(|ts| ts.particles.count).sum()
+    }
+
+    /// Live particles of one track (render collection reads the SoA directly).
+    pub fn track_particles(&self, track: usize) -> &TrackParticles {
+        &self.tracks[track].particles
+    }
+
+    /// A one-shot that has finished emitting and drained its particles.
+    pub fn is_done(&self) -> bool {
+        self.effect.playback == Playback::OneShot
+            && self.t >= self.effect.lifetime
+            && self.alive() == 0
+    }
+
+    /// Deterministic scrub: re-simulate from zero to `target` in fixed steps.
+    pub fn simulate_to(&mut self, target: f32, gravity: Vec3) {
+        self.reset();
+        let mut sim_t = 0.0;
+        while sim_t + SCRUB_STEP <= target {
+            self.advance(SCRUB_STEP, gravity);
+            sim_t += SCRUB_STEP;
+        }
+        if target > sim_t {
+            self.advance(target - sim_t, gravity);
+        }
+    }
+
+    /// Advance the playhead by `dt`, firing crossed clips/bursts and aging every
+    /// particle. `gravity` is the scene's gravity acceleration (emitter space).
+    pub fn advance(&mut self, dt: f32, gravity: Vec3) {
+        if !self.playing || dt <= 0.0 {
+            return;
+        }
+        // Age existing particles first; newborns then age only their partial step.
+        self.integrate(dt, gravity);
+
+        let lifetime = self.effect.lifetime;
+        let mut remaining = dt;
+        while remaining > 0.0 {
+            let step_end = (self.t + remaining).min(lifetime);
+            let seg = remaining.min(lifetime - self.t);
+            let (prev, now) = (self.prev_t, step_end);
+            self.emit_segment(prev, now, gravity);
+            self.t = step_end;
+            self.prev_t = step_end;
+            remaining -= seg.max(0.0);
+            if self.t >= lifetime {
+                match self.effect.playback {
+                    Playback::Looping => {
+                        self.t = 0.0;
+                        self.prev_t = START_EPS;
+                        // Guard: a dt many lifetimes long must still terminate.
+                        if seg <= 0.0 {
+                            break;
+                        }
+                    }
+                    Playback::OneShot => break,
+                }
+            }
+        }
+    }
+
+    /// Fire every clip overlap and burst crossing in `(prev, now]`.
+    fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3) {
+        let effect = Arc::clone(&self.effect);
+        let inst_seed = hash(self.instance_seed ^ hash(effect.seed));
+        let lifetime = effect.lifetime;
+        for (ti, ct) in effect.tracks.iter().enumerate() {
+            if !ct.enabled {
+                continue;
+            }
+            let ts = &mut self.tracks[ti];
+
+            for b in &ct.bursts {
+                if prev < b.t && b.t <= now {
+                    let mul = ct.lane_count.sample(b.t / lifetime);
+                    let n = (b.count as f32 * mul).round().max(0.0) as u32;
+                    for _ in 0..n {
+                        spawn(ts, ct, ti as u32, inst_seed, b.t, now, lifetime, gravity);
+                    }
+                }
+            }
+
+            for clip in &ct.clips {
+                // Entering a clip resets the fractional accumulator: each span
+                // starts its emission phase fresh (deterministic across scrubs).
+                if prev < clip.start && clip.start <= now {
+                    ts.acc = 0.0;
+                }
+                let (s, e) = (prev.max(clip.start), now.min(clip.end));
+                if e <= s || ct.rate <= 0.0 {
+                    continue;
+                }
+                let mid = 0.5 * (s + e);
+                let rate_eff = ct.rate * ct.lane_rate.sample(mid / lifetime);
+                if rate_eff <= 0.0 {
+                    continue;
+                }
+                let acc0 = ts.acc;
+                ts.acc += rate_eff * (e - s);
+                let n = ts.acc.floor() as u32;
+                ts.acc -= n as f32;
+                for k in 1..=n {
+                    // Reconstruct the exact accumulator-crossing time so birth
+                    // spacing is even regardless of frame boundaries.
+                    let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
+                    spawn(ts, ct, ti as u32, inst_seed, tau, now, lifetime, gravity);
+                }
+            }
+        }
+    }
+
+    /// Age, gravity, drag, retire. Kinematic-velocity tracks sample their LUT.
+    fn integrate(&mut self, dt: f32, gravity: Vec3) {
+        for (ti, ct) in self.effect.tracks.iter().enumerate() {
+            let p = &mut self.tracks[ti].particles;
+            let damp = (-ct.drag * dt).exp();
+            let g = gravity * ct.gravity * dt;
+            let mut i = 0;
+            while i < p.count {
+                let age = p.pos_age[i].w + dt;
+                let life = p.vel_life[i].w;
+                if age >= life {
+                    p.swap_remove(i);
+                    continue;
+                }
+                let mut vel = p.vel_life[i].truncate();
+                vel = vel * damp + g;
+                let base = if ct.velocity_is_curve {
+                    let q = p.frame[i];
+                    let frame = Quat::from_xyzw(q.x, q.y, q.z, q.w);
+                    frame * ct.velocity.sample_vec3(age / life) * p.misc[i].y
+                } else {
+                    Vec3::ZERO
+                };
+                let pos = p.pos_age[i].truncate() + (vel + base) * dt;
+                p.pos_age[i] = pos.extend(age);
+                p.vel_life[i] = vel.extend(life);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Birth one particle at effect-time `tau`, aged forward to `now`.
+#[allow(clippy::too_many_arguments)]
+fn spawn(
+    ts: &mut TrackState,
+    ct: &CompiledTrack,
+    track_idx: u32,
+    inst_seed: u32,
+    tau: f32,
+    now: f32,
+    lifetime: f32,
+    gravity: Vec3,
+) {
+    if ts.particles.count as u32 >= ct.capacity {
+        return; // pool full — drop, never reallocate mid-play
+    }
+    let counter = ts.emit_counter;
+    ts.emit_counter = ts.emit_counter.wrapping_add(1);
+    let seed = hash3(inst_seed, track_idx, counter);
+
+    let un = tau / lifetime; // normalized effect time for lane sampling
+    let shape_scale = ct.lane_shape.sample(un);
+    let (offset, dir) = sample_shape(ct.shape, shape_scale, seed);
+    let frame = Quat::from_rotation_arc(Vec3::Y, dir);
+
+    let life = ct.particle_lifetime * jitter_mul(seed, 0xA11FE, ct.lifetime_jitter);
+    let age0 = (now - tau).max(0.0);
+    if age0 >= life {
+        return; // born and expired within one (enormous) step
+    }
+
+    let speed_mul = ct.lane_speed.sample(un);
+    let birth_size = ct.lane_size.sample(un);
+    let v0 = frame * ct.velocity.sample_vec3(0.0) * speed_mul;
+
+    // Constant-velocity particles carry their full velocity in the integrated
+    // state; kinematic (curve) ones carry only the gravity-accumulated part and
+    // re-sample their base velocity each step.
+    let g0 = gravity * ct.gravity * age0;
+    let (vel, carried) = if ct.velocity_is_curve { (g0, v0) } else { (v0 + g0, v0) };
+    let pos = offset + carried * age0;
+
+    let misc = Vec4::new(birth_size, speed_mul, 0.0, 0.0);
+    ts.particles.push(pos, age0, vel, life, frame, misc, seed);
+}
+
+/// Deterministic shape sample: birth offset (emitter space) + unit emit direction.
+/// The velocity value's +Y aligns to the returned direction (proposal §3).
+fn sample_shape(shape: EmitShape, scale: f32, seed: u32) -> (Vec3, Vec3) {
+    let (r0, r1, r2) = (rand01(seed, 1), rand01(seed, 2), rand01(seed, 3));
+    match shape {
+        EmitShape::Point => (Vec3::ZERO, Vec3::Y),
+        EmitShape::Cone { angle, radius } => {
+            let a = r0 * std::f32::consts::TAU;
+            let rad = radius * scale * r1.sqrt();
+            let offset = Vec3::new(a.cos() * rad, 0.0, a.sin() * rad);
+            // Uniform direction within `angle` degrees of +Y.
+            let half = angle.to_radians().clamp(0.0, std::f32::consts::PI);
+            let cos_t = 1.0 - r2 * (1.0 - half.cos());
+            let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+            let phi = rand01(seed, 4) * std::f32::consts::TAU;
+            let dir = Vec3::new(sin_t * phi.cos(), cos_t, sin_t * phi.sin());
+            (offset, dir.normalize())
+        }
+        EmitShape::Sphere { radius, shell } => {
+            // Uniform direction via z + azimuth; radius by cube-root for volume.
+            let z = r0 * 2.0 - 1.0;
+            let a = r1 * std::f32::consts::TAU;
+            let xy = (1.0 - z * z).max(0.0).sqrt();
+            let dir = Vec3::new(xy * a.cos(), z, xy * a.sin());
+            let rad = radius * scale * if shell { 1.0 } else { r2.cbrt() };
+            (dir * rad, dir)
+        }
+        EmitShape::Edge { length } => {
+            (Vec3::new((r0 - 0.5) * length * scale, 0.0, 0.0), Vec3::Z)
+        }
+        EmitShape::Ring { radius } => {
+            let a = r0 * std::f32::consts::TAU;
+            let dir = Vec3::new(a.cos(), 0.0, a.sin());
+            (dir * radius * scale, dir)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render-facing sampling
+// ---------------------------------------------------------------------------
+
+/// One particle's drawable state, sampled from the SoA + LUTs at collect time.
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleSample {
+    /// Emitter-space position (`Space::Local`; the caller applies the node matrix).
+    pub pos: Vec3,
+    pub size: f32,
+    pub rotation: f32,
+    pub color: [f32; 4],
+}
+
+impl EffectInstance {
+    /// Sample every live particle of `track` for drawing. Size/rotation/color come
+    /// from the life-curve LUTs at `age/life`, scaled by the birth-lane snapshot.
+    pub fn sample_track(&self, track: usize, mut f: impl FnMut(ParticleSample)) {
+        let ct = &self.effect.tracks[track];
+        let p = &self.tracks[track].particles;
+        let tint = ct.lane_tint.sample(self.t / self.effect.lifetime);
+        for i in 0..p.count {
+            let u = p.pos_age[i].w / p.vel_life[i].w;
+            let mut color = ct.color.sample(u);
+            for c in 0..4 {
+                color[c] *= tint[c];
+            }
+            f(ParticleSample {
+                pos: p.pos_age[i].truncate(),
+                size: ct.size.sample(u) * p.misc[i].x,
+                rotation: ct.rotation.sample(u),
+                color,
+            });
+        }
+    }
+
+    /// Iterate the tracks that draw as billboards, with their look data.
+    pub fn billboard_tracks(&self) -> impl Iterator<Item = (usize, &CompiledTrack)> {
+        self.effect
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, ct)| {
+                ct.enabled && matches!(ct.look.render, RenderMode::Billboard { .. })
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::curve::{Curve, Key, Value, ValueOrCurve};
+    use crate::effect::{Burst, Clip, ParticleEffect, Playback, Track};
+
+    const NO_G: Vec3 = Vec3::ZERO;
+
+    fn one_track_effect(track: Track, lifetime: f32, playback: Playback) -> Arc<CompiledEffect> {
+        Arc::new(
+            ParticleEffect {
+                lifetime,
+                playback,
+                tracks: vec![track],
+                ..ParticleEffect::default()
+            }
+            .compile(),
+        )
+    }
+
+    #[test]
+    fn burst_at_zero_fires_exactly_once() {
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.0, count: 7 }],
+                particle_lifetime: 10.0,
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 42);
+        inst.advance(0.1, NO_G);
+        assert_eq!(inst.alive(), 7);
+        inst.advance(0.1, NO_G);
+        assert_eq!(inst.alive(), 7, "burst must not re-fire");
+    }
+
+    #[test]
+    fn clip_gated_rate_emits_exact_count() {
+        // 10/s inside a [0.0, 0.55] clip = exactly 5 particles, none outside it
+        // (crossings at 0.1..0.5; the clip edge is deliberately NOT a crossing so
+        // float accumulation can't fencepost the count).
+        let fx = one_track_effect(
+            Track {
+                rate: 10.0,
+                clips: vec![Clip { start: 0.0, end: 0.55 }],
+                particle_lifetime: 10.0,
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 1);
+        for _ in 0..100 {
+            inst.advance(0.01, NO_G);
+        }
+        assert_eq!(inst.alive(), 5);
+    }
+
+    #[test]
+    fn looping_rearms_clips_and_keeps_live_particles_across_wrap() {
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.5, count: 3 }],
+                particle_lifetime: 0.9, // outlives the 1 s wrap when born at 0.5
+                ..Track::default()
+            },
+            1.0,
+            Playback::Looping,
+        );
+        let mut inst = EffectInstance::new(fx, 9);
+        inst.simulate_to(0.6, NO_G);
+        assert_eq!(inst.alive(), 3);
+        // Cross the wrap to 1.3: originals (age 0.8) still alive, no re-fire yet.
+        inst.simulate_to(1.3, NO_G);
+        assert_eq!(inst.alive(), 3);
+        // At 1.6 the loop's second burst fired; originals (age 1.1 > 0.9) retired.
+        inst.simulate_to(1.6, NO_G);
+        assert_eq!(inst.alive(), 3);
+        assert!((inst.t - 0.6).abs() < 1e-4, "playhead wraps into the next loop");
+    }
+
+    #[test]
+    fn oneshot_finishes_and_reports_done() {
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.1, count: 2 }],
+                particle_lifetime: 0.2,
+                ..Track::default()
+            },
+            0.5,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 3);
+        inst.simulate_to(0.2, NO_G);
+        assert!(!inst.is_done());
+        inst.simulate_to(2.0, NO_G);
+        assert!(inst.is_done());
+    }
+
+    #[test]
+    fn scrub_is_bit_deterministic() {
+        let fx = one_track_effect(
+            Track {
+                rate: 40.0,
+                clips: vec![Clip { start: 0.0, end: 1.0 }],
+                bursts: vec![Burst { t: 0.33, count: 5 }],
+                particle_lifetime: 0.6,
+                lifetime_jitter: 0.5,
+                ..Track::default()
+            },
+            1.0,
+            Playback::Looping,
+        );
+        let mut a = EffectInstance::new(Arc::clone(&fx), 77);
+        let mut b = EffectInstance::new(fx, 77);
+        a.simulate_to(0.85, Vec3::new(0.0, -9.81, 0.0));
+        b.simulate_to(0.85, Vec3::new(0.0, -9.81, 0.0));
+        assert_eq!(a.alive(), b.alive());
+        let (pa, pb) = (a.track_particles(0), b.track_particles(0));
+        for i in 0..pa.count {
+            assert_eq!(pa.pos_age[i], pb.pos_age[i], "particle {i} diverged");
+            assert_eq!(pa.seed[i], pb.seed[i]);
+        }
+        assert!(pa.count > 10, "test should exercise a real population");
+    }
+
+    #[test]
+    fn different_instance_seeds_diverge() {
+        let fx = one_track_effect(
+            Track {
+                rate: 30.0,
+                clips: vec![Clip { start: 0.0, end: 1.0 }],
+                particle_lifetime: 1.0,
+                shape: crate::effect::EmitShape::Sphere { radius: 1.0, shell: false },
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut a = EffectInstance::new(Arc::clone(&fx), 1);
+        let mut b = EffectInstance::new(fx, 2);
+        a.simulate_to(0.5, NO_G);
+        b.simulate_to(0.5, NO_G);
+        let (pa, pb) = (a.track_particles(0), b.track_particles(0));
+        assert_eq!(pa.count, pb.count, "emission timing is seed-independent");
+        assert_ne!(pa.pos_age[0], pb.pos_age[0], "positions must differ by seed");
+    }
+
+    #[test]
+    fn capacity_caps_live_particles_without_realloc() {
+        let fx = one_track_effect(
+            Track {
+                rate: 10_000.0,
+                clips: vec![Clip { start: 0.0, end: 1.0 }],
+                particle_lifetime: 5.0,
+                max_alive: Some(64),
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 5);
+        inst.simulate_to(0.9, NO_G);
+        assert_eq!(inst.alive(), 64);
+        assert_eq!(inst.track_particles(0).pos_age.capacity(), 64);
+    }
+
+    #[test]
+    fn velocity_curve_drives_kinematic_motion() {
+        // Speed 2 → 0 over life, direction +Y (Point shape): a particle born at 0
+        // decelerates; its Y strictly increases but by less each step.
+        let vel = ValueOrCurve::Curve(Curve {
+            keys: vec![
+                Key::new(0.0, Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
+                Key::new(1.0, Value::Vec3(Vec3::ZERO)),
+            ],
+            extrapolate: Default::default(),
+        });
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.0, count: 1 }],
+                particle_lifetime: 1.0,
+                velocity: vel,
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 8);
+        inst.simulate_to(0.25, NO_G);
+        let y1 = inst.track_particles(0).pos_age[0].y;
+        inst.simulate_to(0.5, NO_G);
+        let y2 = inst.track_particles(0).pos_age[0].y;
+        inst.simulate_to(0.75, NO_G);
+        let y3 = inst.track_particles(0).pos_age[0].y;
+        assert!(y1 > 0.0 && y2 > y1 && y3 > y2, "keeps rising: {y1} {y2} {y3}");
+        assert!((y2 - y1) > (y3 - y2), "but decelerates");
+    }
+
+    #[test]
+    fn gravity_pulls_particles_down() {
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.0, count: 1 }],
+                particle_lifetime: 2.0,
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                gravity: 1.0,
+                ..Track::default()
+            },
+            2.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 4);
+        inst.simulate_to(1.0, Vec3::new(0.0, -10.0, 0.0));
+        let y = inst.track_particles(0).pos_age[0].y;
+        // Analytic: −½·g·t² = −5; fixed-step integration lands close.
+        assert!((-5.5..=-4.5).contains(&y), "fell to {y}");
+    }
+
+    #[test]
+    fn sample_track_applies_life_curves_and_birth_size() {
+        let size = ValueOrCurve::Curve(Curve {
+            keys: vec![Key::new(0.0, Value::F32(1.0)), Key::new(1.0, Value::F32(0.0))],
+            extrapolate: Default::default(),
+        });
+        let fx = one_track_effect(
+            Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.0, count: 1 }],
+                particle_lifetime: 1.0,
+                size,
+                ..Track::default()
+            },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst = EffectInstance::new(fx, 2);
+        inst.simulate_to(0.5, NO_G);
+        let mut got = None;
+        inst.sample_track(0, |s| got = Some(s));
+        let s = got.expect("one live particle");
+        assert!((s.size - 0.5).abs() < 0.03, "size halfway through life, got {}", s.size);
+        assert_eq!(s.color[3], 1.0);
+    }
+}

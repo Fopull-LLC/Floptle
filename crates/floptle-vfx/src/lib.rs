@@ -1,26 +1,26 @@
 //! # floptle-vfx
 //!
 //! The particle system you actually *want* to use. A particle **effect** (e.g.
-//! "360Slash") owns a timeline spanning its lifetime. On the timeline you place
-//! particle **groups** (e.g. "Crescents", "Smoke"), each with its own behavior
-//! and `Emit` events — either auto-generated from an emission rate or hand-
-//! placed. Every property is a constant OR a curve over the particle's life.
-//! See `docs/subsystems/particles-vfx.md` — this is the spec'd, opinionated flow.
+//! "360Slash") is a container of **tracks** arranged on a video-editor timeline:
+//! each track is one visual layer with its own look, carrying draggable **clips**
+//! (ranged emission spans), **bursts** (instant emits), and **automation lanes**
+//! (curves over effect time). Every per-particle property is a constant OR a curve
+//! over the particle's own life. Design: `docs/particle-system-proposal.md`.
 //!
-//! Planned modules:
-//! - `effect`   : ParticleEffect (name, lifetime, loop/oneshot, end behavior).
-//! - `timeline` : events, tracks, the `Emit` event, playback cursor.
-//! - `group`    : ParticleGroup behavior + property set.
-//! - `curve`    : value-OR-curve property type; the graph editor backing data.
-//! - `sim`      : the data-oriented particle simulation (GPU-friendly).
+//! Layering: authoring types ([`ParticleEffect`]) are what the editor edits and RON
+//! round-trips; [`CompiledEffect`] is the LUT-baked form the deterministic SoA sim
+//! ([`EffectInstance`]) runs. The sim is CPU today and GPU-ready by construction
+//! (proposal §4.4): LUT curves, births-on-CPU, vec4-aligned SoA, stateless hash RNG.
 
-/// How an effect behaves when its lifetime elapses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndBehavior {
-    /// One-shot effect that despawns itself once the last particle dies.
-    Destroy,
-    /// One-shot effect that persists (frozen) after its lifetime.
-    Persist,
-    /// Looping effect — restarts at t=0; `EndBehavior` is not offered in UI.
-    Loop,
-}
+pub mod curve;
+pub mod draw;
+pub mod effect;
+pub mod sim;
+
+pub use curve::{Curve, Extrapolate, Interp, Key, Value, ValueOrCurve};
+pub use draw::{BillboardDraw, collect_billboards};
+pub use effect::{
+    Blend, Burst, Clip, CompiledEffect, CompiledTrack, EmitShape, EndBehavior, Lane, LaneTarget,
+    Look, ParticleEffect, Playback, RenderMode, Space, Track,
+};
+pub use sim::{EffectInstance, ParticleSample, SCRUB_STEP};

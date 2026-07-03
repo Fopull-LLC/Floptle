@@ -27,6 +27,7 @@ pub mod graph;
 pub mod grid;
 pub mod mesh;
 pub mod outline;
+pub mod particles;
 pub mod post;
 pub mod raster;
 pub mod raymarch;
@@ -38,6 +39,7 @@ pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
 pub use mesh::{capsule, cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
 pub use outline::Outline;
+pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{PostSettings, PostStack, SsaoFrame};
 pub use raster::{
     instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId,
