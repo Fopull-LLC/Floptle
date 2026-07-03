@@ -16,7 +16,7 @@ use floptle_core::ParticleSystem;
 use floptle_core::World;
 use floptle_scene::{
     VfxBurstDoc, VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc,
-    VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxPlaybackDoc, VfxTrackDoc, VfxValueDoc,
+    VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxPlaybackDoc, VfxPropDoc, VfxTrackDoc, VfxValueDoc,
 };
 use floptle_vfx::EffectInstance;
 
@@ -72,11 +72,15 @@ pub(crate) struct VfxUiState {
     /// The curve editor's frozen value-axis range, held for the duration of a key
     /// drag so the auto-fit can't feed back on itself (see `curve_edit`).
     pub curve_vrange: Option<(f32, f32)>,
-    /// Tracks whose DAW-style automation lanes are drawn (expanded) on the timeline.
+    /// Tracks whose lanes are drawn (expanded) on the timeline.
     pub expanded_tracks: HashSet<usize>,
-    /// The selected automation breakpoint `(track, lane, key)` — highlighted on the
-    /// timeline; its exact value/colour edits in the Inspector.
-    pub auto_sel: Option<(usize, usize, usize)>,
+    /// The selected breakpoint `(track, lane, key)` — highlighted on the timeline;
+    /// its exact value/colour edits in the Inspector.
+    pub auto_sel: Option<(usize, LaneRef, usize)>,
+    /// The lane whose scalar point is mid-drag, and the value-axis range frozen for
+    /// that drag (auto-fit lanes only — so lifting a point can't stretch the axis).
+    pub lane_drag: Option<(usize, LaneRef)>,
+    pub lane_vrange: Option<(f32, f32)>,
 }
 
 impl Default for VfxUiState {
@@ -101,6 +105,8 @@ impl Default for VfxUiState {
             curve_vrange: None,
             expanded_tracks: HashSet::new(),
             auto_sel: None,
+            lane_drag: None,
+            lane_vrange: None,
         }
     }
 }
@@ -122,6 +128,8 @@ impl VfxUiState {
             self.curve_vrange = None;
             self.expanded_tracks.clear();
             self.auto_sel = None;
+            self.lane_drag = None;
+            self.lane_vrange = None;
             self.bump();
         }
     }
@@ -202,12 +210,176 @@ fn starter_lane(target: VfxLaneTargetDoc, dur: f32) -> VfxLaneDoc {
     }
 }
 
-/// The pixel height a track occupies, including its expanded automation lanes.
+// ---------------------------------------------------------------------------
+// Unified timeline lanes: a track's animatable curves, whether they shape a
+// particle over its LIFE (velocity/size/rotation/colour) or the emitter over the
+// effect's TIMELINE (the automation multipliers). Both are `VfxCurveDoc`s; the
+// timeline draws and edits them the same way, differing only in x-domain + range.
+// ---------------------------------------------------------------------------
+
+/// A curve-shaped property of a track, addressable as one timeline lane.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum LaneRef {
+    /// A per-particle life-curve (x-domain = the particle's life, 0→1).
+    Life(LifeProp),
+    /// An automation multiplier over effect time (index into `track.automation`).
+    Auto(usize),
+}
+
+/// Which per-particle property a [`LaneRef::Life`] shapes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum LifeProp {
+    Velocity,
+    Size,
+    Rotation,
+    Color,
+}
+
+const LIFE_PROPS: [LifeProp; 4] =
+    [LifeProp::Velocity, LifeProp::Size, LifeProp::Rotation, LifeProp::Color];
+
+/// How a lane's value is drawn + edited.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaneVis {
+    /// One value: a draggable point curve (y = value).
+    Scalar,
+    /// A 3-vector: three channel lines + time-only stops (value edits in Inspector).
+    Vec3,
+    /// RGBA: a gradient strip + time-only stops (colour edits in Inspector).
+    Color,
+}
+
+fn life_prop_name(p: LifeProp) -> &'static str {
+    match p {
+        LifeProp::Velocity => "velocity",
+        LifeProp::Size => "size",
+        LifeProp::Rotation => "rotation",
+        LifeProp::Color => "colour",
+    }
+}
+
+fn life_prop_doc(track: &VfxTrackDoc, p: LifeProp) -> &VfxPropDoc {
+    match p {
+        LifeProp::Velocity => &track.velocity,
+        LifeProp::Size => &track.size,
+        LifeProp::Rotation => &track.rotation,
+        LifeProp::Color => &track.color,
+    }
+}
+
+fn life_prop_doc_mut(track: &mut VfxTrackDoc, p: LifeProp) -> &mut VfxPropDoc {
+    match p {
+        LifeProp::Velocity => &mut track.velocity,
+        LifeProp::Size => &mut track.size,
+        LifeProp::Rotation => &mut track.rotation,
+        LifeProp::Color => &mut track.color,
+    }
+}
+
+fn value_kind(v: &VfxValueDoc) -> LaneVis {
+    match v {
+        VfxValueDoc::F32(_) => LaneVis::Scalar,
+        VfxValueDoc::Vec3(_) => LaneVis::Vec3,
+        VfxValueDoc::Rgba(_) => LaneVis::Color,
+    }
+}
+
+/// The lanes shown under an expanded track, in draw order: life-curves first
+/// (only those actually animated, i.e. currently a `Curve`), then automation.
+fn visible_lanes(track: &VfxTrackDoc) -> Vec<LaneRef> {
+    let mut out = Vec::new();
+    for p in LIFE_PROPS {
+        if matches!(life_prop_doc(track, p), VfxPropDoc::Curve(_)) {
+            out.push(LaneRef::Life(p));
+        }
+    }
+    out.extend((0..track.automation.len()).map(LaneRef::Auto));
+    out
+}
+
+/// The curve backing a lane (read) — `None` if a life prop isn't a curve yet.
+fn lane_curve(track: &VfxTrackDoc, lref: LaneRef) -> Option<&VfxCurveDoc> {
+    match lref {
+        LaneRef::Auto(i) => track.automation.get(i).map(|l| &l.curve),
+        LaneRef::Life(p) => match life_prop_doc(track, p) {
+            VfxPropDoc::Curve(c) => Some(c),
+            _ => None,
+        },
+    }
+}
+
+pub(crate) fn lane_curve_mut(track: &mut VfxTrackDoc, lref: LaneRef) -> Option<&mut VfxCurveDoc> {
+    match lref {
+        LaneRef::Auto(i) => track.automation.get_mut(i).map(|l| &mut l.curve),
+        LaneRef::Life(p) => match life_prop_doc_mut(track, p) {
+            VfxPropDoc::Curve(c) => Some(c),
+            _ => None,
+        },
+    }
+}
+
+/// A lane's display label (with its x-domain, so `life` vs `time` reads clearly).
+pub(crate) fn lane_ref_label(track: &VfxTrackDoc, lref: LaneRef) -> String {
+    match lref {
+        LaneRef::Auto(i) => {
+            format!("{} · time", track.automation.get(i).map(|l| lane_label(l.target)).unwrap_or(""))
+        }
+        LaneRef::Life(p) => format!("{} · life", life_prop_name(p)),
+    }
+}
+
+/// Automation lanes run over effect time; life-curves over the particle's life.
+fn lane_is_time(lref: LaneRef) -> bool {
+    matches!(lref, LaneRef::Auto(_))
+}
+
+/// The fixed value range of a lane, or `None` to auto-fit (life scalars have
+/// arbitrary magnitude — e.g. rotation in radians — so they can't be pinned).
+pub(crate) fn lane_fixed_range(track: &VfxTrackDoc, lref: LaneRef) -> Option<(f32, f32)> {
+    match lref {
+        LaneRef::Auto(i) => track.automation.get(i).map(|l| lane_vrange(l.target)),
+        LaneRef::Life(_) => None,
+    }
+}
+
+/// Auto-fit a curve's value range across `chans` channels, sampled, with padding.
+fn auto_fit_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for i in 0..=24 {
+        let c = rt.eval(i as f32 / 24.0);
+        for &v in c.iter().take(chans) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return (0.0, 1.0);
+    }
+    let pad = ((hi - lo) * 0.15).max(0.25);
+    (lo - pad, hi + pad)
+}
+
+/// A fresh flat life-curve at the property's current constant (domain = life 0→1),
+/// so promoting a property to a lane starts as a visible no-op the artist shapes.
+fn promote_to_curve(prop: &mut VfxPropDoc) {
+    let seed = match prop {
+        VfxPropDoc::Const(v) => *v,
+        VfxPropDoc::Range(a, _) => *a,
+        VfxPropDoc::Curve(_) => return,
+    };
+    let key = |t: f32| VfxKeyDoc { t, v: seed, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 };
+    *prop = VfxPropDoc::Curve(VfxCurveDoc {
+        keys: vec![key(0.0), key(1.0)],
+        extrapolate: VfxExtrapolateDoc::Clamp,
+    });
+}
+
+/// The pixel height a track occupies, including its expanded lanes.
 fn track_block_h(track: &VfxTrackDoc, expanded: bool) -> f32 {
     ROW_H
         + if expanded {
             // At least one row so an empty expanded track shows its "add" hint.
-            track.automation.len().max(1) as f32 * (LANE_H + LANE_PAD) + LANE_PAD
+            visible_lanes(track).len().max(1) as f32 * (LANE_H + LANE_PAD) + LANE_PAD
         } else {
             0.0
         }
@@ -592,23 +764,34 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             }
             let ctx_t = st.ctx_t;
             let present: Vec<VfxLaneTargetDoc> = track.automation.iter().map(|l| l.target).collect();
+            let life_avail: Vec<LifeProp> = LIFE_PROPS
+                .iter()
+                .copied()
+                .filter(|&p| !matches!(life_prop_doc(track, p), VfxPropDoc::Curve(_)))
+                .collect();
             lane_resp.context_menu(|ui| {
                 if ui.button("✳ Add burst here").clicked() {
                     deferred = Some(DeferredEdit::AddBurst(ti, ctx_t));
                     ui.close();
                 }
                 ui.separator();
-                ui.weak("📈 Add automation");
-                let avail = ALL_TARGETS.iter().copied().filter(|t| !present.contains(t));
-                let mut any = false;
-                for t in avail {
-                    any = true;
-                    if ui.button(lane_label(t)).clicked() {
-                        deferred = Some(DeferredEdit::AddLane(ti, t));
+                ui.weak("📈 Animate over each particle's life");
+                for p in &life_avail {
+                    if ui.button(format!("{} · life", life_prop_name(*p))).clicked() {
+                        deferred = Some(DeferredEdit::AddLifeLane(ti, *p));
                         ui.close();
                     }
                 }
-                if !any {
+                ui.weak("📈 Automate over the timeline");
+                let avail: Vec<VfxLaneTargetDoc> =
+                    ALL_TARGETS.iter().copied().filter(|t| !present.contains(t)).collect();
+                for t in &avail {
+                    if ui.button(format!("{} · time", lane_label(*t))).clicked() {
+                        deferred = Some(DeferredEdit::AddAutoLane(ti, *t));
+                        ui.close();
+                    }
+                }
+                if avail.is_empty() && life_avail.is_empty() {
                     ui.weak("  (all lanes added)");
                 }
                 ui.separator();
@@ -733,19 +916,20 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 });
             }
 
-            // ---- expanded automation lanes (DAW-style, drawn under the track) ----
+            // ---- expanded lanes: every animated curve of this track ----
             if expanded {
+                let lanes = visible_lanes(track);
                 let mut ly = y + ROW_H + LANE_PAD;
-                if track.automation.is_empty() {
+                if lanes.is_empty() {
                     painter.text(
                         Pos2::new(view.left + 8.0, ly + LANE_H * 0.5),
                         Align2::LEFT_CENTER,
-                        "no automation — right-click the track to add a lane",
+                        "no curves — animate a property in the Inspector (📈), or right-click the track to add a lane",
                         FontId::proportional(10.5),
                         ui.visuals().weak_text_color(),
                     );
                 } else {
-                    for (li, ln) in track.automation.iter().enumerate() {
+                    for lref in lanes {
                         let label_area = Rect::from_min_size(
                             Pos2::new(full.left() + 18.0, ly),
                             egui::vec2(LABEL_W - 20.0, LANE_H),
@@ -754,7 +938,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                             Pos2::new(view.left, ly + 2.0),
                             egui::vec2(dur * px, LANE_H - 4.0),
                         );
-                        automation_lane_ui(ui, &painter, &view, st, ti, li, ln, label_area, strip, dur, &mut deferred);
+                        curve_lane_ui(ui, &painter, &view, st, ti, lref, track, label_area, strip, dur, &mut deferred);
                         ly += LANE_H + LANE_PAD;
                     }
                 }
@@ -826,6 +1010,11 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             st.sel = None; // indices may have shifted under the sort
             *dirty = true;
         }
+        if released {
+            // End any lane-point drag: let the value axis re-fit again next frame.
+            st.lane_drag = None;
+            st.lane_vrange = None;
+        }
 
         if let Some(edit) = deferred {
             apply_deferred(edit, st, doc, dur);
@@ -852,44 +1041,84 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
     });
 }
 
-/// Draw + edit ONE automation lane strip over the timeline (DAW-style). Scalar
-/// targets show a breakpoint curve on a FIXED vertical range (drag a point to move
-/// it, double-click empty to add, right-click a point for interp / delete); the
-/// Tint target shows a colour gradient with draggable stops. All edits are deferred
-/// (the caller owns `doc`); the selected point's exact value edits in the Inspector.
+/// Draw + edit ONE lane over the timeline (DAW-style) — a property shaped over the
+/// particle's LIFE (velocity/size/rotation/colour) or an automation multiplier over
+/// the effect TIMELINE. Scalar lanes are a draggable point-curve on a fixed (auto)
+/// or auto-fit (life) range; vector/colour lanes draw their channels/gradient with
+/// time-only stops (exact values edit in the Inspector). All edits are deferred (the
+/// caller owns `doc`); the 🔑 button drops a keyframe at the playhead.
 #[allow(clippy::too_many_arguments)]
-fn automation_lane_ui(
+fn curve_lane_ui(
     ui: &egui::Ui,
     painter: &egui::Painter,
     view: &TimelineView,
     st: &mut VfxUiState,
     ti: usize,
-    li: usize,
-    lane: &VfxLaneDoc,
+    lref: LaneRef,
+    track: &VfxTrackDoc,
     label_area: Rect,
     strip: Rect,
     dur: f32,
     deferred: &mut Option<DeferredEdit>,
 ) {
-    let is_tint = lane.target == VfxLaneTargetDoc::Tint;
-    let (lo, hi) = lane_vrange(lane.target);
-    let rt = curve_from_doc(&lane.curve);
-    let to_x = |t: f32| strip.left() + (t / dur).clamp(0.0, 1.0) * strip.width();
-    let v_to_y = |v: f32| strip.bottom() - ((v - lo) / (hi - lo)) * strip.height();
+    let Some(curve) = lane_curve(track, lref) else { return };
+    let kind = curve.keys.first().map(|k| value_kind(&k.v)).unwrap_or(LaneVis::Scalar);
+    let is_stops = matches!(kind, LaneVis::Color | LaneVis::Vec3); // time-only handles
+    let dmax = if lane_is_time(lref) { dur } else { 1.0 }; // x-axis maximum
+    let is_time = lane_is_time(lref);
+    let snap = st.snap_fps;
+    let rt = curve_from_doc(curve);
 
-    // ---- left label: target name + delete-lane ----
+    // Value range: fixed for automation multipliers; auto-fit for life scalars/vec3,
+    // frozen while THIS lane's scalar point is dragged so the fit can't feed back.
+    let chans = if kind == LaneVis::Vec3 { 3 } else { 1 };
+    let (lo, hi) = match lane_fixed_range(track, lref) {
+        Some(r) => r,
+        None if st.lane_drag == Some((ti, lref)) => {
+            st.lane_vrange.unwrap_or_else(|| auto_fit_range(&rt, chans))
+        }
+        None => auto_fit_range(&rt, chans),
+    };
+    let to_x = |t: f32| strip.left() + (t / dmax).clamp(0.0, 1.0) * strip.width();
+    let v_to_y = |v: f32| strip.bottom() - ((v - lo) / (hi - lo).max(1e-4)) * strip.height();
+    let y_to_v = |yy: f32| (lo + (strip.bottom() - yy) / strip.height() * (hi - lo)).clamp(lo, hi);
+    // Pointer x → this lane's t: snapped seconds for a timeline lane, raw 0..1 for life.
+    let x_to_t = |x: f32| {
+        if is_time {
+            snap_time(view.x_to_time(x), snap).clamp(0.0, dmax)
+        } else {
+            ((x - strip.left()) / strip.width().max(1.0)).clamp(0.0, 1.0)
+        }
+    };
+
+    // ---- left label + add-key-at-playhead (🔑) + remove-lane (🗑) ----
     painter.text(
         Pos2::new(label_area.left() + 2.0, label_area.center().y),
         Align2::LEFT_CENTER,
-        lane_label(lane.target),
-        FontId::proportional(10.5),
+        lane_ref_label(track, lref),
+        FontId::proportional(10.0),
         ui.visuals().text_color(),
     );
+    let key_btn = Rect::from_min_size(
+        Pos2::new(label_area.right() - 34.0, label_area.center().y - 8.0),
+        egui::vec2(15.0, 16.0),
+    );
+    let kresp = ui.interact(key_btn, ui.id().with(("vfx-lane-key", ti, lref)), Sense::click());
+    painter.text(
+        key_btn.center(),
+        Align2::CENTER_CENTER,
+        "🔑",
+        FontId::proportional(10.0),
+        if kresp.hovered() { ACCENT } else { ui.visuals().weak_text_color() },
+    );
+    if kresp.on_hover_text("add a keyframe at the playhead").clicked() {
+        *deferred = Some(DeferredEdit::AddKeyAtPlayhead(ti, lref));
+    }
     let del = Rect::from_min_size(
         Pos2::new(label_area.right() - 16.0, label_area.center().y - 8.0),
         egui::vec2(14.0, 16.0),
     );
-    let dresp = ui.interact(del, ui.id().with(("vfx-lane-del", ti, li)), Sense::click());
+    let dresp = ui.interact(del, ui.id().with(("vfx-lane-del", ti, lref)), Sense::click());
     painter.text(
         del.center(),
         Align2::CENTER_CENTER,
@@ -897,63 +1126,82 @@ fn automation_lane_ui(
         FontId::proportional(11.0),
         if dresp.hovered() { ACCENT } else { ui.visuals().weak_text_color() },
     );
-    if dresp.clicked() {
-        *deferred = Some(DeferredEdit::DelLane(ti, li));
+    if dresp.on_hover_text("remove this lane").clicked() {
+        *deferred = Some(DeferredEdit::DelLane(ti, lref));
     }
 
     // ---- strip background + empty double-click-to-add (registered BEFORE the
     // handles so the handles, drawn after, win the pointer where they overlap) ----
     painter.rect_filled(strip, 3.0, ui.visuals().extreme_bg_color);
-    let sresp = ui.interact(strip, ui.id().with(("vfx-lane-strip", ti, li)), Sense::click());
+    let sresp = ui.interact(strip, ui.id().with(("vfx-lane-strip", ti, lref)), Sense::click());
     if sresp.double_clicked()
         && let Some(p) = sresp.interact_pointer_pos()
     {
-        let t = snap_time(view.x_to_time(p.x), st.snap_fps).clamp(0.0, dur);
-        let v = if is_tint {
-            let c = rt.eval(t);
-            VfxValueDoc::Rgba([c[0], c[1], c[2], c[3]])
-        } else {
-            let vy = (lo + (strip.bottom() - p.y) / strip.height() * (hi - lo)).clamp(lo, hi);
-            VfxValueDoc::F32(vy)
+        let t = x_to_t(p.x);
+        let sc = rt.eval(t);
+        let v = match kind {
+            LaneVis::Scalar => VfxValueDoc::F32(y_to_v(p.y)),
+            LaneVis::Vec3 => VfxValueDoc::Vec3([sc[0], sc[1], sc[2]]),
+            LaneVis::Color => VfxValueDoc::Rgba([sc[0], sc[1], sc[2], sc[3]]),
         };
-        *deferred = Some(DeferredEdit::AddAutoKey(ti, li, t, v));
+        *deferred = Some(DeferredEdit::AddKey(ti, lref, t, v));
     }
 
-    // ---- the curve / gradient ----
-    if is_tint {
-        let n = strip.width().max(2.0) as usize;
-        for i in 0..n {
-            let u = i as f32 / (n - 1).max(1) as f32;
-            let c = rt.eval(u * dur);
-            let x = strip.left() + u * strip.width();
-            painter.line_segment(
-                [Pos2::new(x, strip.top()), Pos2::new(x, strip.bottom())],
-                Stroke::new(1.5, Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)),
-            );
+    // ---- the curve / channels / gradient ----
+    match kind {
+        LaneVis::Color => {
+            let n = strip.width().max(2.0) as usize;
+            for i in 0..n {
+                let u = i as f32 / (n - 1).max(1) as f32;
+                let c = rt.eval(u * dmax);
+                let x = strip.left() + u * strip.width();
+                painter.line_segment(
+                    [Pos2::new(x, strip.top()), Pos2::new(x, strip.bottom())],
+                    Stroke::new(1.5, Color32::from_rgb((c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8)),
+                );
+            }
         }
-    } else {
-        if lo < 1.0 && hi > 1.0 {
-            let y1 = v_to_y(1.0);
-            painter.line_segment(
-                [Pos2::new(strip.left(), y1), Pos2::new(strip.right(), y1)],
-                Stroke::new(0.5, ui.visuals().weak_text_color().gamma_multiply(0.4)),
-            );
+        LaneVis::Vec3 => {
+            let cols = [
+                Color32::from_rgb(230, 120, 120),
+                Color32::from_rgb(120, 220, 120),
+                Color32::from_rgb(120, 160, 240),
+            ];
+            for (ch, col) in cols.iter().enumerate() {
+                let mut pts = Vec::new();
+                let n = 40;
+                for i in 0..=n {
+                    let u = i as f32 / n as f32;
+                    let v = rt.eval(u * dmax)[ch];
+                    pts.push(Pos2::new(strip.left() + u * strip.width(), v_to_y(v).clamp(strip.top(), strip.bottom())));
+                }
+                painter.add(egui::Shape::line(pts, Stroke::new(1.0, *col)));
+            }
         }
-        let mut pts = Vec::new();
-        let n = 48;
-        for i in 0..=n {
-            let u = i as f32 / n as f32;
-            let v = rt.eval(u * dur)[0];
-            pts.push(Pos2::new(strip.left() + u * strip.width(), v_to_y(v).clamp(strip.top(), strip.bottom())));
+        LaneVis::Scalar => {
+            if lo < 1.0 && hi > 1.0 {
+                let y1 = v_to_y(1.0);
+                painter.line_segment(
+                    [Pos2::new(strip.left(), y1), Pos2::new(strip.right(), y1)],
+                    Stroke::new(0.5, ui.visuals().weak_text_color().gamma_multiply(0.4)),
+                );
+            }
+            let mut pts = Vec::new();
+            let n = 48;
+            for i in 0..=n {
+                let u = i as f32 / n as f32;
+                let v = rt.eval(u * dmax)[0];
+                pts.push(Pos2::new(strip.left() + u * strip.width(), v_to_y(v).clamp(strip.top(), strip.bottom())));
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
         }
-        painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
     }
 
     // ---- breakpoints / stops ----
-    for (ki, k) in lane.curve.keys.iter().enumerate() {
-        let x = to_x(k.t.clamp(0.0, dur));
-        let sel = st.auto_sel == Some((ti, li, ki));
-        let hit = if is_tint {
+    for (ki, k) in curve.keys.iter().enumerate() {
+        let x = to_x(k.t.clamp(0.0, dmax));
+        let sel = st.auto_sel == Some((ti, lref, ki));
+        let hit = if is_stops {
             painter.line_segment(
                 [Pos2::new(x, strip.top()), Pos2::new(x, strip.bottom())],
                 Stroke::new(if sel { 2.0 } else { 1.0 }, if sel { ACCENT } else { Color32::from_black_alpha(150) }),
@@ -969,38 +1217,39 @@ fn automation_lane_ui(
             painter.circle(c, if sel { 5.0 } else { 4.0 }, if sel { ACCENT } else { KEY_COLOR }, Stroke::new(1.0, Color32::from_black_alpha(160)));
             Rect::from_center_size(c, egui::vec2(12.0, 12.0))
         };
-        let resp = ui.interact(hit, ui.id().with(("vfx-auto-key", ti, li, ki)), Sense::click_and_drag());
+        let resp = ui.interact(hit, ui.id().with(("vfx-lane-pt", ti, lref, ki)), Sense::click_and_drag());
         if resp.clicked() || resp.drag_started() {
-            st.auto_sel = Some((ti, li, ki));
+            st.auto_sel = Some((ti, lref, ki));
             st.sel_track = Some(ti);
+            // Freeze an auto-fit lane's value axis for the whole scalar drag.
+            if resp.drag_started() && !is_stops && lane_fixed_range(track, lref).is_none() {
+                st.lane_drag = Some((ti, lref));
+                st.lane_vrange = Some((lo, hi));
+            }
         }
         if resp.dragged()
             && let Some(p) = resp.interact_pointer_pos()
         {
-            let t = snap_time(view.x_to_time(p.x), st.snap_fps).clamp(0.0, dur);
-            let v = if is_tint {
-                k.v // colour is unchanged by a time drag
-            } else {
-                VfxValueDoc::F32((lo + (strip.bottom() - p.y) / strip.height() * (hi - lo)).clamp(lo, hi))
-            };
-            *deferred = Some(DeferredEdit::MoveAutoKey(ti, li, ki, t, v));
+            let t = x_to_t(p.x);
+            let v = if is_stops { k.v } else { VfxValueDoc::F32(y_to_v(p.y)) };
+            *deferred = Some(DeferredEdit::MoveKey(ti, lref, ki, t, v));
         }
         resp.context_menu(|ui| {
-            if !is_tint {
+            if !is_stops {
                 for (iv, lbl) in [
                     (VfxInterpDoc::Constant, "hold"),
                     (VfxInterpDoc::Linear, "linear"),
                     (VfxInterpDoc::Bezier, "smooth"),
                 ] {
                     if ui.button(lbl).clicked() {
-                        *deferred = Some(DeferredEdit::SetAutoInterp(ti, li, ki, iv));
+                        *deferred = Some(DeferredEdit::SetInterp(ti, lref, ki, iv));
                         ui.close();
                     }
                 }
                 ui.separator();
             }
-            if lane.curve.keys.len() > 1 && ui.button("🗑 delete point").clicked() {
-                *deferred = Some(DeferredEdit::DelAutoKey(ti, li, ki));
+            if curve.keys.len() > 1 && ui.button("🗑 delete point").clicked() {
+                *deferred = Some(DeferredEdit::DelKey(ti, lref, ki));
                 ui.close();
             }
         });
@@ -1017,12 +1266,14 @@ enum DeferredEdit {
     DelBurst(usize, usize),
     DupTrack(usize),
     DelTrack(usize),
-    AddLane(usize, VfxLaneTargetDoc),
-    DelLane(usize, usize),
-    AddAutoKey(usize, usize, f32, VfxValueDoc),
-    MoveAutoKey(usize, usize, usize, f32, VfxValueDoc),
-    DelAutoKey(usize, usize, usize),
-    SetAutoInterp(usize, usize, usize, VfxInterpDoc),
+    AddAutoLane(usize, VfxLaneTargetDoc),
+    AddLifeLane(usize, LifeProp),
+    DelLane(usize, LaneRef),
+    AddKey(usize, LaneRef, f32, VfxValueDoc),
+    AddKeyAtPlayhead(usize, LaneRef),
+    MoveKey(usize, LaneRef, usize, f32, VfxValueDoc),
+    DelKey(usize, LaneRef, usize),
+    SetInterp(usize, LaneRef, usize, VfxInterpDoc),
 }
 
 fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dur: f32) {
@@ -1094,55 +1345,97 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                 st.auto_sel = None;
             }
         }
-        DeferredEdit::AddLane(ti, target) => {
+        DeferredEdit::AddAutoLane(ti, target) => {
             if let Some(t) = doc.tracks.get_mut(ti) {
                 t.automation.push(starter_lane(target, dur));
                 st.expanded_tracks.insert(ti); // reveal it so the artist can shape it
             }
         }
-        DeferredEdit::DelLane(ti, li) => {
-            if let Some(t) = doc.tracks.get_mut(ti)
-                && li < t.automation.len()
-            {
-                t.automation.remove(li);
-                if matches!(st.auto_sel, Some((a, b, _)) if a == ti && b == li) {
-                    st.auto_sel = None;
+        DeferredEdit::AddLifeLane(ti, prop) => {
+            if let Some(t) = doc.tracks.get_mut(ti) {
+                promote_to_curve(life_prop_doc_mut(t, prop));
+                st.expanded_tracks.insert(ti);
+            }
+        }
+        DeferredEdit::DelLane(ti, lref) => {
+            if let Some(t) = doc.tracks.get_mut(ti) {
+                match lref {
+                    LaneRef::Auto(li) if li < t.automation.len() => {
+                        t.automation.remove(li);
+                    }
+                    LaneRef::Life(p) => {
+                        // "Removing" a life lane = stop animating it: collapse to a
+                        // constant (the value the curve held at birth).
+                        let prop = life_prop_doc_mut(t, p);
+                        if let VfxPropDoc::Curve(c) = prop {
+                            let v0 = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
+                            *prop = VfxPropDoc::Const(v0);
+                        }
+                    }
+                    LaneRef::Auto(_) => {}
                 }
+                st.auto_sel = None;
             }
         }
-        DeferredEdit::AddAutoKey(ti, li, t, v) => {
-            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li)) {
-                l.curve.keys.push(VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 });
-                l.curve.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
-                st.auto_sel = l.curve.keys.iter().position(|k| k.t == t).map(|ki| (ti, li, ki));
+        DeferredEdit::AddKey(ti, lref, t, v) => {
+            if let Some(c) = doc.tracks.get_mut(ti).and_then(|tr| lane_curve_mut(tr, lref)) {
+                c.keys.push(VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 });
+                c.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+                st.auto_sel = c.keys.iter().position(|k| k.t == t).map(|ki| (ti, lref, ki));
             }
         }
-        DeferredEdit::MoveAutoKey(ti, li, ki, t, v) => {
-            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li)) {
+        DeferredEdit::AddKeyAtPlayhead(ti, lref) => {
+            // Insert a keyframe at the playhead (mapped into the lane's domain) holding
+            // the curve's current value there — a clean insert that doesn't reshape it.
+            let dmax = if lane_is_time(lref) { dur } else { 1.0 };
+            let t = if lane_is_time(lref) {
+                match doc.playback {
+                    VfxPlaybackDoc::Looping => st.playhead.rem_euclid(dur),
+                    VfxPlaybackDoc::OneShot => st.playhead.min(dur),
+                }
+            } else {
+                (st.playhead / dur).clamp(0.0, 1.0)
+            }
+            .clamp(0.0, dmax);
+            if let Some(c) = doc.tracks.get_mut(ti).and_then(|tr| lane_curve_mut(tr, lref)) {
+                let sc = curve_from_doc(c).eval(t);
+                let v = match c.keys.first().map(|k| k.v) {
+                    Some(VfxValueDoc::Vec3(_)) => VfxValueDoc::Vec3([sc[0], sc[1], sc[2]]),
+                    Some(VfxValueDoc::Rgba(_)) => VfxValueDoc::Rgba([sc[0], sc[1], sc[2], sc[3]]),
+                    _ => VfxValueDoc::F32(sc[0]),
+                };
+                c.keys.push(VfxKeyDoc { t, v, interp: VfxInterpDoc::Linear, in_tan: 0.0, out_tan: 0.0 });
+                c.keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+                st.auto_sel = c.keys.iter().position(|k| k.t == t).map(|ki| (ti, lref, ki));
+            }
+        }
+        DeferredEdit::MoveKey(ti, lref, ki, t, v) => {
+            let dmax = if lane_is_time(lref) { dur } else { 1.0 };
+            if let Some(c) = doc.tracks.get_mut(ti).and_then(|tr| lane_curve_mut(tr, lref)) {
                 // Clamp between neighbours so keys never reorder mid-drag — the key
                 // index stays valid, so no re-sort (and no selection jump) is needed.
-                let n = l.curve.keys.len();
-                let lo = if ki > 0 { l.curve.keys[ki - 1].t + 1e-3 } else { 0.0 };
-                let hi = if ki + 1 < n { l.curve.keys[ki + 1].t - 1e-3 } else { dur };
+                let n = c.keys.len();
+                let lo = if ki > 0 { c.keys[ki - 1].t + 1e-3 } else { 0.0 };
+                let hi = if ki + 1 < n { c.keys[ki + 1].t - 1e-3 } else { dmax };
                 let (a, b) = (lo.min(hi), lo.max(hi));
-                if let Some(k) = l.curve.keys.get_mut(ki) {
+                if let Some(k) = c.keys.get_mut(ki) {
                     k.t = t.clamp(a, b);
                     k.v = v;
                 }
             }
         }
-        DeferredEdit::DelAutoKey(ti, li, ki) => {
-            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li))
-                && ki < l.curve.keys.len()
-                && l.curve.keys.len() > 1
+        DeferredEdit::DelKey(ti, lref, ki) => {
+            if let Some(c) = doc.tracks.get_mut(ti).and_then(|tr| lane_curve_mut(tr, lref))
+                && ki < c.keys.len()
+                && c.keys.len() > 1
             {
-                l.curve.keys.remove(ki);
+                c.keys.remove(ki);
                 st.auto_sel = None;
             }
         }
-        DeferredEdit::SetAutoInterp(ti, li, ki, iv) => {
-            if let Some(l) = doc.tracks.get_mut(ti).and_then(|tr| tr.automation.get_mut(li))
-                && let Some(k) = l.curve.keys.get_mut(ki)
+        DeferredEdit::SetInterp(ti, lref, ki, iv) => {
+            if let Some(c) = doc.tracks.get_mut(ti).and_then(|tr| lane_curve_mut(tr, lref))
+                && let Some(k) = c.keys.get_mut(ki)
             {
                 k.interp = iv;
             }
@@ -1155,15 +1448,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn track_block_h_grows_with_expanded_lanes() {
+    fn visible_lanes_include_life_curves_and_automation() {
         let mut t = starter_effect_doc("x").tracks.remove(0);
-        let collapsed = track_block_h(&t, false);
-        assert_eq!(collapsed, ROW_H, "a collapsed track is exactly one row");
-        let expanded_empty = track_block_h(&t, true);
-        assert!(expanded_empty > collapsed, "expanding an empty track reserves its add-hint row");
+        // The starter animates size + colour over life → two life lanes, no automation.
+        let base = visible_lanes(&t);
+        assert!(base.contains(&LaneRef::Life(LifeProp::Size)));
+        assert!(base.contains(&LaneRef::Life(LifeProp::Color)));
+        assert!(base.iter().all(|l| matches!(l, LaneRef::Life(_))), "no automation yet");
+        // A collapsed track is one row; expanding reserves a strip per visible lane.
+        assert_eq!(track_block_h(&t, false), ROW_H);
+        let h0 = track_block_h(&t, true);
         t.automation.push(starter_lane(VfxLaneTargetDoc::Rate, 2.0));
-        t.automation.push(starter_lane(VfxLaneTargetDoc::Size, 2.0));
-        assert!(track_block_h(&t, true) > expanded_empty, "each lane adds a strip's height");
+        assert_eq!(visible_lanes(&t).len(), base.len() + 1, "automation adds a lane");
+        assert!(track_block_h(&t, true) > h0, "the extra lane adds height");
+    }
+
+    #[test]
+    fn promote_to_curve_seeds_a_flat_life_curve() {
+        let mut prop = VfxPropDoc::Const(VfxValueDoc::F32(0.7));
+        promote_to_curve(&mut prop);
+        match prop {
+            VfxPropDoc::Curve(c) => {
+                assert_eq!(c.keys.len(), 2);
+                assert_eq!((c.keys[0].t, c.keys[1].t), (0.0, 1.0));
+                assert!(matches!(c.keys[0].v, VfxValueDoc::F32(v) if v == 0.7));
+            }
+            _ => panic!("promote must produce a curve"),
+        }
     }
 
     #[test]
