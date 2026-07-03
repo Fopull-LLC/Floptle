@@ -72,7 +72,7 @@ impl Skeleton {
         debug_assert!(nodes
             .iter()
             .enumerate()
-            .all(|(i, n)| n.parent.map_or(true, |p| p < i)));
+            .all(|(i, n)| n.parent.is_none_or(|p| p < i)));
         let name_to_node =
             nodes.iter().enumerate().map(|(i, n)| (n.name.clone(), i)).collect();
         Self { nodes, name_to_node }
@@ -337,11 +337,10 @@ impl Layer {
         if let Some(f) = self.states[to].fade_in {
             return f.max(0.0);
         }
-        if let Some(f) = from {
-            if let Some(&d) = self.fades.get(&(f, to)) {
+        if let Some(f) = from
+            && let Some(&d) = self.fades.get(&(f, to)) {
                 return d;
             }
-        }
         default_fade
     }
 }
@@ -432,11 +431,10 @@ impl Controller {
         if state >= l.states.len() {
             return;
         }
-        if let Some(cur) = l.cur {
-            if cur.state == state && !cur.finished && !force {
+        if let Some(cur) = l.cur
+            && cur.state == state && !cur.finished && !force {
                 return; // already playing — keep the blend advancing.
             }
-        }
         let mut fade_dur = if let Some(f) = l.states[state].fade_in {
             // The state's fade-in override beats even an explicit request —
             // fade_in = 0 gives guaranteed-instant states.
@@ -556,14 +554,13 @@ impl Controller {
 
     /// Seek the current state of `layer` to absolute time `t` (scrubbing).
     pub fn seek(&mut self, layer: usize, t: f32) {
-        if let Some(l) = self.layers.get_mut(layer) {
-            if let Some(cur) = l.cur.as_mut() {
+        if let Some(l) = self.layers.get_mut(layer)
+            && let Some(cur) = l.cur.as_mut() {
                 let dur = l.states[cur.state].clip.duration.max(1e-6);
                 cur.t = t.clamp(0.0, dur);
                 cur.finished = false;
                 l.fade = None;
             }
-        }
     }
 
     /// Quantized sample time for the retro stepped look. Real time flows
@@ -625,13 +622,11 @@ impl Controller {
             let l = &mut self.layers[li];
 
             // Start the default state if idle (base behavior on spawn).
-            if l.cur.is_none() && l.fade.is_none() {
-                if let Some(d) = l.default_state {
-                    if d < l.states.len() {
+            if l.cur.is_none() && l.fade.is_none()
+                && let Some(d) = l.default_state
+                    && d < l.states.len() {
                         l.cur = Some(Playback::enter(d));
                     }
-                }
-            }
 
             // -- advance the current playback + fire crossed events --
             if let Some(cur) = l.cur.as_mut() {
@@ -707,8 +702,8 @@ impl Controller {
             }
 
             // -- a finished one-shot returns to default (base) or fades out --
-            if let Some(cur) = l.cur {
-                if cur.finished {
+            if let Some(cur) = l.cur
+                && cur.finished {
                     if let Some(d) = l.default_state {
                         if d != cur.state {
                             let fade = l.fade_secs(Some(cur.state), d, default_fade);
@@ -738,7 +733,6 @@ impl Controller {
                         l.cur = None;
                     }
                 }
-            }
 
             // -- sample + fold this layer into the accumulator --
             let l = &self.layers[li];

@@ -90,11 +90,9 @@ impl Editor {
         let want = self.texture_settings.get(path).copied().unwrap_or_default();
         if let (Some(id), Some(prev)) =
             (self.texture_registry.get(path), self.texture_registry_setting.get(path))
-        {
-            if *prev == want {
+            && *prev == want {
                 return Some(*id);
             }
-        }
         let data = floptle_assets::load_texture(Path::new(path))?;
         let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
         let id = raster.register_texture(gpu, &data, want.to_sampling());
@@ -138,8 +136,8 @@ impl Editor {
             .world
             .query::<Matter>()
             .find_map(|(e, m)| matches!(m, Matter::PostProcess { .. }).then_some(e));
-        if let Some(e) = node {
-            if let Some(Matter::PostProcess {
+        if let Some(e) = node
+            && let Some(Matter::PostProcess {
                 bloom,
                 bloom_threshold,
                 bloom_intensity,
@@ -156,7 +154,6 @@ impl Editor {
                 *vignette_strength = p.vignette_strength;
                 *vignette_radius = p.vignette_radius;
             }
-        }
     }
 
     /// Import + register a glTF model (cached by path). Returns true on success.

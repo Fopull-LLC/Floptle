@@ -398,11 +398,10 @@ impl Character {
         }
 
         // grapple: start a shot, advance an in-flight shot, release if let go
-        if c.grapple_edge {
-            if let Grapple::Idle = self.grapple {
+        if c.grapple_edge
+            && let Grapple::Idle = self.grapple {
                 self.grapple = Grapple::Firing { tip: self.pos + self.up_smooth * (0.2 * s), dir: c.aim, len: 0.0 };
             }
-        }
         self.update_grapple(time, c);
 
         // jump (generous can_jump + coyote + buffer)
@@ -491,8 +490,8 @@ impl Character {
                 }
             } else {
                 // JETPACK (unlimited): WASD air thrust (speed-capped) + Space up-thrust
-                if c.wish.length_squared() > 1e-6 {
-                    if let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
+                if c.wish.length_squared() > 1e-6
+                    && let Some(wt) = (c.wish - up * c.wish.dot(up)).try_normalize() {
                         self.vel += wt * JETPACK_ACCEL * s * sub;
                         let vn = up * self.vel.dot(up);
                         let mut vt = self.vel - vn;
@@ -502,7 +501,6 @@ impl Character {
                         self.vel = vn + vt;
                         thrusting = true;
                     }
-                }
                 if c.jump_held {
                     self.vel += up * JETPACK_UP * s * sub;
                     thrusting = true;
@@ -611,11 +609,10 @@ impl Character {
         }
 
         // write the reeled rope length back
-        if g_attached {
-            if let Grapple::Attached { rest_len, .. } = &mut self.grapple {
+        if g_attached
+            && let Grapple::Attached { rest_len, .. } = &mut self.grapple {
                 *rest_len = g_rest;
             }
-        }
 
         // squash/stretch relaxes back to neutral
         self.squash += (1.0 - self.squash) * (1.0 - (-SQUASH_K * dt).exp());
@@ -1473,14 +1470,12 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
-            if let Some(state) = self.state.as_mut() {
-                if state.input.captured {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && let Some(state) = self.state.as_mut()
+                && state.input.captured {
                     state.input.mouse_dx += delta.0 as f32;
                     state.input.mouse_dy += delta.1 as f32;
                 }
-            }
-        }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {

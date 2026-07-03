@@ -104,11 +104,10 @@ impl Editor {
     /// Toggle the selected folder's open/closed state in the Hierarchy (Enter key).
     pub(crate) fn toggle_folder_selected(&mut self) {
         let Some(e) = self.selection.last().copied() else { return };
-        if matches!(self.world.get::<Matter>(e), Some(Matter::Empty)) {
-            if !self.collapsed.remove(&e) {
+        if matches!(self.world.get::<Matter>(e), Some(Matter::Empty))
+            && !self.collapsed.remove(&e) {
                 self.collapsed.insert(e);
             }
-        }
     }
 
     /// Frame the selected object in the viewport (the F key): keep the view angle,
@@ -190,11 +189,10 @@ impl Editor {
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => None,
             };
-            if let Some(th) = hit {
-                if best.is_none_or(|(_, bt)| th < bt) {
+            if let Some(th) = hit
+                && best.is_none_or(|(_, bt)| th < bt) {
                     best = Some((e, th));
                 }
-            }
         }
         best.map(|(e, _)| e)
     }

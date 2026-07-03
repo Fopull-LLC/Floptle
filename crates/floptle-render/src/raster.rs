@@ -612,6 +612,7 @@ impl Raster {
     /// `field`: the raymarch pass's [`field_bind`](crate::Raymarch::field_bind) so
     /// meshes receive field shadows + SDF AO — or `None` for a standalone draw
     /// (previews, probes) where every field effect is simply off.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_scene(
         &mut self,
         gpu: &Gpu,

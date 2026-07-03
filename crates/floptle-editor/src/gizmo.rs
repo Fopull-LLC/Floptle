@@ -164,6 +164,7 @@ pub(crate) fn ray_aabb(ro: Vec3, rd: Vec3, half: f32) -> Option<f32> {
 }
 
 /// Build the gizmo geometry for the selected entity and hit-test the cursor.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_gizmo(
     tool: Tool,
     selection: Option<Entity>,
@@ -190,9 +191,9 @@ pub(crate) fn build_gizmo(
 
     // Tips follow the object's LOCAL axes, so the gizmo aligns with its orientation.
     let mut tips = [None; 3];
-    for i in 0..3 {
+    for (i, tip) in tips.iter_mut().enumerate() {
         let tip_world = t.translation + (local_axis(rot, i) * axis_len).as_dvec3();
-        tips[i] = project(tip_world, cam_world, vp, w, h);
+        *tip = project(tip_world, cam_world, vp, w, h);
     }
 
     // Rotation rings live in the planes spanned by the object's local axes.
@@ -200,7 +201,7 @@ pub(crate) fn build_gizmo(
     let mut center_ring: Vec<Vec2> = Vec::new();
     if tool == Tool::Rotate {
         const N: usize = 48;
-        for i in 0..3 {
+        for (i, ring) in ring_pts.iter_mut().enumerate() {
             let u = local_axis(rot, (i + 1) % 3);
             let v = local_axis(rot, (i + 2) % 3);
             let mut pts = Vec::with_capacity(N + 1);
@@ -211,7 +212,7 @@ pub(crate) fn build_gizmo(
                     pts.push(s);
                 }
             }
-            ring_pts[i] = pts;
+            *ring = pts;
         }
         // A flat screen-space trackball ring around the center — the free-rotate handle.
         const M: usize = 40;
@@ -244,16 +245,16 @@ pub(crate) fn hit_test(
     };
     match tool {
         Tool::Move | Tool::Scale => {
-            for i in 0..3 {
-                if let Some(tip) = tips[i] {
+            for (i, tip) in tips.iter().enumerate() {
+                if let Some(tip) = *tip {
                     cands.push((handle_for_axis(i), seg_dist(cursor, center, tip)));
                 }
             }
             cands.push((Handle::Center, (cursor - center).length()));
         }
         Tool::Rotate => {
-            for i in 0..3 {
-                cands.push((handle_for_axis(i), ring_dist(&rings[i])));
+            for (i, ring) in rings.iter().enumerate() {
+                cands.push((handle_for_axis(i), ring_dist(ring)));
             }
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
@@ -305,10 +306,10 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
     let center = pt(g.center);
     match tool {
         Tool::Move => {
-            for i in 0..3 {
-                if let Some(tip) = g.tips[i] {
+            for (i, (tip, col)) in g.tips.iter().zip(axis_col).enumerate() {
+                if let Some(tip) = *tip {
                     let on = active(handle_for_axis(i));
-                    let col = brighten(axis_col[i], on);
+                    let col = brighten(col, on);
                     let tp = pt(tip);
                     painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
                     arrow_head(painter, center, tp, col);
@@ -322,10 +323,10 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
             );
         }
         Tool::Scale => {
-            for i in 0..3 {
-                if let Some(tip) = g.tips[i] {
+            for (i, (tip, col)) in g.tips.iter().zip(axis_col).enumerate() {
+                if let Some(tip) = *tip {
                     let on = active(handle_for_axis(i));
-                    let col = brighten(axis_col[i], on);
+                    let col = brighten(col, on);
                     let tp = pt(tip);
                     painter.line_segment([center, tp], Stroke::new(if on { 4.0 } else { 2.5 }, col));
                     painter.rect_filled(egui::Rect::from_center_size(tp, egui::vec2(8.0, 8.0)), 0.0, col);
@@ -345,10 +346,10 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
             if cring.len() >= 2 {
                 painter.line(cring, Stroke::new(if on_c { 3.0 } else { 1.5 }, brighten(Color32::from_gray(170), on_c)));
             }
-            for i in 0..3 {
+            for (i, (ring, col)) in g.ring_pts.iter().zip(axis_col).enumerate() {
                 let on = active(handle_for_axis(i));
-                let col = brighten(axis_col[i], on);
-                let pts: Vec<Pos2> = g.ring_pts[i].iter().map(|v| pt(*v)).collect();
+                let col = brighten(col, on);
+                let pts: Vec<Pos2> = ring.iter().map(|v| pt(*v)).collect();
                 if pts.len() >= 2 {
                     painter.line(pts, Stroke::new(if on { 3.5 } else { 2.0 }, col));
                 }

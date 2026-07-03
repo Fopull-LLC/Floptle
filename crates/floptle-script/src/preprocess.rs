@@ -170,12 +170,11 @@ pub(crate) fn preprocess(src: &str) -> String {
         }
 
         // Long string.
-        if c == b'[' {
-            if let Some(level) = long_bracket_level(b, i) {
+        if c == b'['
+            && let Some(level) = long_bracket_level(b, i) {
                 i = copy_long_bracket(b, i, level, &mut out);
                 continue;
             }
-        }
 
         // Statement terminator — close any pending rewritten RHS.
         if c == b'\n' || c == b';' {

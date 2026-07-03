@@ -250,24 +250,21 @@ impl EditorTabViewer<'_> {
             }
         });
         // Drops: a node re-parents under me; a script attaches to me.
-        if let Some(p) = resp.dnd_release_payload::<NodePayload>() {
-            if p.0 != e {
+        if let Some(p) = resp.dnd_release_payload::<NodePayload>()
+            && p.0 != e {
                 self.cmd.reparent = Some((p.0, Some(e)));
             }
-        }
-        if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
-            if is_script(&p.path) {
+        if let Some(p) = resp.dnd_release_payload::<AssetPayload>()
+            && is_script(&p.path) {
                 self.cmd.drop_script_on = Some((p.path.clone(), e));
             }
-        }
 
         // Recurse into children unless this folder is collapsed.
-        if !self.collapsed.contains(&e) {
-            if let Some(kids) = children.get(&e) {
+        if !self.collapsed.contains(&e)
+            && let Some(kids) = children.get(&e) {
                 for &c in kids {
                     self.hierarchy_node(ui, c, children, names, depth + 1);
                 }
             }
-        }
     }
 }

@@ -674,14 +674,12 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
-            if let Some(state) = self.state.as_mut() {
-                if state.input.captured {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && let Some(state) = self.state.as_mut()
+                && state.input.captured {
                     state.input.mouse_dx += delta.0 as f32;
                     state.input.mouse_dy += delta.1 as f32;
                 }
-            }
-        }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {

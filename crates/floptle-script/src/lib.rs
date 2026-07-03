@@ -36,6 +36,10 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material};
 use mlua::{Lua, RegistryKey, Table};
 
+/// Queued `node:getcomponent(name).field = value` writes: (entity index,
+/// component, field) → value, flushed to the ECS after `run`.
+type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
+
 mod api;
 mod env;
 mod host;
@@ -142,7 +146,7 @@ pub struct ScriptHost {
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
-    component_changes: Rc<RefCell<HashMap<(u32, String, String), f64>>>,
+    component_changes: ComponentWrites,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -257,7 +261,7 @@ struct Shared {
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
-    component_changes: Rc<RefCell<HashMap<(u32, String, String), f64>>>,
+    component_changes: ComponentWrites,
     /// Animator mirror (entity → layers/states), fed by the editor each frame.
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
     /// Animator commands queued by `node:animator()` handles this frame.
@@ -291,7 +295,7 @@ mod tests {
     use floptle_core::{Matter, RigidBody, Visible};
 
     use super::*;
-    use crate::env::*;
+    
     use crate::preprocess::*;
     use floptle_core::transform::Transform;
     use floptle_core::{Scripts, World};

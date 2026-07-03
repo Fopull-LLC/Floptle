@@ -413,15 +413,14 @@ impl Editor {
         self.next_terrain_id = max_id + 1;
         self.terrain_gpu_dirty = !self.terrains.is_empty();
         // Restore the texture palette so painted-texture slots map to images again.
-        if !self.terrains.is_empty() {
-            if let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
+        if !self.terrains.is_empty()
+            && let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut palette: Vec<String> = text.lines().map(|s| s.to_string()).collect();
                 palette.resize(slots, String::new());
                 self.terrain_textures = palette;
                 self.terrain_textures_dirty = true;
             }
-        }
     }
 
     /// The world translation of a terrain node (places its field in world space).
@@ -432,16 +431,14 @@ impl Editor {
     /// Which terrain a whole-terrain op (Fill) targets: the selected terrain node, or
     /// the one last sculpted, or — if there's exactly one — that terrain.
     pub(crate) fn target_terrain(&self) -> Option<Entity> {
-        if let Some(&e) = self.selection.last() {
-            if self.terrains.contains_key(&e) {
+        if let Some(&e) = self.selection.last()
+            && self.terrains.contains_key(&e) {
                 return Some(e);
             }
-        }
-        if let Some(e) = self.active_terrain {
-            if self.terrains.contains_key(&e) {
+        if let Some(e) = self.active_terrain
+            && self.terrains.contains_key(&e) {
                 return Some(e);
             }
-        }
         if self.terrains.len() == 1 {
             return self.terrains.keys().next().copied();
         }

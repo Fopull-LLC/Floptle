@@ -17,6 +17,12 @@ use crate::env::{
     params_table,
 };
 use crate::preprocess::preprocess;
+
+/// Lua argument tuples for the `gizmo.*` draw calls: positions, then the
+/// optional size/length and 0–1 RGB tail.
+type GizmoLineArgs = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
+type GizmoRayArgs = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+type GizmoBallArgs = (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 use crate::{
     error_line, gizmo_color, install_handle_api, AnimCmd, AnimInfo, BodyState, GizmoCmd,
     InputSnapshot, Instance, LogLevel, SceneMirror, ScriptHost, ScriptLog, Shared, Source,
@@ -240,7 +246,7 @@ impl ScriptHost {
             let q = gizmos.clone();
             let _ = t.set(
                 "line",
-                lua.create_function(move |_, (x1, y1, z1, x2, y2, z2, r, g, b): (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>)| {
+                lua.create_function(move |_, (x1, y1, z1, x2, y2, z2, r, g, b): GizmoLineArgs| {
                     let mut q = q.borrow_mut();
                     if q.len() < GIZMO_CAP {
                         q.push(GizmoCmd::Line {
@@ -256,7 +262,7 @@ impl ScriptHost {
             let q = gizmos.clone();
             let _ = t.set(
                 "ray",
-                lua.create_function(move |_, (ox, oy, oz, dx, dy, dz, len, r, g, b): (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                lua.create_function(move |_, (ox, oy, oz, dx, dy, dz, len, r, g, b): GizmoRayArgs| {
                     let mut q = q.borrow_mut();
                     if q.len() < GIZMO_CAP {
                         let d = glam::DVec3::new(dx, dy, dz);
@@ -281,7 +287,7 @@ impl ScriptHost {
             let q = gizmos.clone();
             let _ = t.set(
                 "sphere",
-                lua.create_function(move |_, (x, y, z, radius, r, g, b): (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                lua.create_function(move |_, (x, y, z, radius, r, g, b): GizmoBallArgs| {
                     let mut q = q.borrow_mut();
                     if q.len() < GIZMO_CAP {
                         q.push(GizmoCmd::Sphere {
@@ -297,7 +303,7 @@ impl ScriptHost {
             let q = gizmos.clone();
             let _ = t.set(
                 "point",
-                lua.create_function(move |_, (x, y, z, size, r, g, b): (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>)| {
+                lua.create_function(move |_, (x, y, z, size, r, g, b): GizmoBallArgs| {
                     let mut q = q.borrow_mut();
                     if q.len() < GIZMO_CAP {
                         q.push(GizmoCmd::Point {
@@ -635,19 +641,17 @@ impl ScriptHost {
         {
             let scene = self.scene.borrow();
             for (eid, path) in self.model_changes.borrow().iter() {
-                if let Some(&ent) = scene.ents.get(eid) {
-                    if let Some(Matter::Mesh { asset_path }) = world.get_mut::<Matter>(ent) {
+                if let Some(&ent) = scene.ents.get(eid)
+                    && let Some(Matter::Mesh { asset_path }) = world.get_mut::<Matter>(ent) {
                         *asset_path = path.clone();
                     }
-                }
             }
             let mats = self.materials.borrow();
             for (eid, refstr) in self.material_changes.borrow().iter() {
-                if let Some(&ent) = scene.ents.get(eid) {
-                    if let Some(m) = mats.get(&material_key(refstr)) {
+                if let Some(&ent) = scene.ents.get(eid)
+                    && let Some(m) = mats.get(&material_key(refstr)) {
                         world.insert(ent, m.clone());
                     }
-                }
             }
             for (eid, shown) in self.visible_changes.borrow().iter() {
                 if let Some(&ent) = scene.ents.get(eid) {
@@ -724,11 +728,10 @@ impl ScriptHost {
     fn flush_scene(&self, world: &mut World) {
         let s = self.scene.borrow();
         for &id in &s.dirty {
-            if let (Some(&ent), Some(tr)) = (s.ents.get(&id), s.transforms.get(&id)) {
-                if let Some(slot) = world.get_mut::<Transform>(ent) {
+            if let (Some(&ent), Some(tr)) = (s.ents.get(&id), s.transforms.get(&id))
+                && let Some(slot) = world.get_mut::<Transform>(ent) {
                     *slot = *tr;
                 }
-            }
         }
     }
 
@@ -858,11 +861,10 @@ impl ScriptHost {
         let pre = node_pre(tr);
         // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
         // still work for older scripts.
-        if first {
-            if let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
+        if first
+            && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
                 f.call::<()>(node.clone())?;
             }
-        }
         if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
             f.call::<()>((node.clone(), dt as f64))?;
         }

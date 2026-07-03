@@ -17,9 +17,9 @@
 //! - `lawset`      : the Lawset struct + law axes (enum-of-models + `Inherit`).
 //! - `realm`       : a Lawset bound to an SDF volume; the realm tree.
 //! - `resolve`     : `effective_at(p)` — inside-test resolution + `smin` crossfade,
-//!                   cached once per body per step.
+//!   cached once per body per step.
 //! - `interaction` : the field-interaction graph (edges: field A modulates B) —
-//!                   the *data* half of ADR-0019 (the executor is a runtime system).
+//!   the *data* half of ADR-0019 (the executor is a runtime system).
 
 /// A law axis is inherited from the parent realm or set to a named model.
 /// Each axis is a small enum (not free parameters) to avoid "property soup".

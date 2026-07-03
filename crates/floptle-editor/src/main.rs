@@ -440,8 +440,8 @@ fn main() {
     println!("{} editor v{}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut editor = Editor::default();
-    editor.show_gizmos = true; // gizmos/overlays on by default (toggle in the viewport)
+    // Gizmos/overlays on by default (toggle in the viewport).
+    let mut editor = Editor { show_gizmos: true, ..Default::default() };
     event_loop.run_app(&mut editor).expect("run editor");
 }
 
@@ -1082,13 +1082,11 @@ impl ApplicationHandler for Editor {
                 if pressed {
                     // Clicking anywhere outside a text field ends text editing —
                     // a click into the viewport (which egui never sees) included.
-                    if let Some(eg) = self.egui.as_ref() {
-                        if !eg.ctx.is_pointer_over_egui() {
-                            if let Some(f) = eg.ctx.memory(|m| m.focused()) {
+                    if let Some(eg) = self.egui.as_ref()
+                        && !eg.ctx.is_pointer_over_egui()
+                            && let Some(f) = eg.ctx.memory(|m| m.focused()) {
                                 eg.ctx.memory_mut(|m| m.surrender_focus(f));
                             }
-                        }
-                    }
                     // In the Game view a left click is a GAME input only — never an editor
                     // pick/sculpt/gizmo-grab (it plays like a build), so treat it as not
                     // over the scene for editor purposes.
@@ -1142,11 +1140,10 @@ impl ApplicationHandler for Editor {
                     self.editing = false;
                     self.sculpting = false;
                     // End of a sculpt stroke: bank one undo step if it changed anything.
-                    if let Some((id, snap)) = self.stroke_snapshot.take() {
-                        if self.stroke_dabbed {
+                    if let Some((id, snap)) = self.stroke_snapshot.take()
+                        && self.stroke_dabbed {
                             self.push_history(Snapshot::Terrain(id, snap));
                         }
-                    }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
@@ -1185,14 +1182,13 @@ impl ApplicationHandler for Editor {
                     let was_looking = self.input.looking;
                     self.input.looking = false;
                     // Don't release the grab if a script is holding the mouse locked.
-                    if !self.script_mouse_lock {
-                        if let Some(window) = self.window.as_ref() {
+                    if !self.script_mouse_lock
+                        && let Some(window) = self.window.as_ref() {
                             self.cursor_lock_soft = grab_cursor(window, false);
                         }
-                    }
                     // A click (negligible motion) over the viewport ⏵ context menu (editor only).
-                    if editor && was_looking && self.rmb_moved < 6.0 {
-                        if let Some(p) = self.rmb_press {
+                    if editor && was_looking && self.rmb_moved < 6.0
+                        && let Some(p) = self.rmb_press {
                             self.cursor = Some(p);
                             let ppp = self
                                 .egui
@@ -1210,7 +1206,6 @@ impl ApplicationHandler for Editor {
                             self.context_menu =
                                 Some((egui::Pos2::new(p.x / ppp, p.y / ppp), hit));
                         }
-                    }
                 }
             }
             _ => {}

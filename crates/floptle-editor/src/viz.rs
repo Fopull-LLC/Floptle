@@ -194,21 +194,18 @@ pub(crate) fn terrain_collider_wire(t: &floptle_field::Terrain, stride: u32) -> 
         for cy in 0..cy_n {
             for cx in 0..cx_n {
                 let Some(v) = verts[ci(cx, cy, cz)] else { continue };
-                if cx + 1 < cx_n {
-                    if let Some(v2) = verts[ci(cx + 1, cy, cz)] {
+                if cx + 1 < cx_n
+                    && let Some(v2) = verts[ci(cx + 1, cy, cz)] {
                         segs.push((v, v2));
                     }
-                }
-                if cy + 1 < cy_n {
-                    if let Some(v2) = verts[ci(cx, cy + 1, cz)] {
+                if cy + 1 < cy_n
+                    && let Some(v2) = verts[ci(cx, cy + 1, cz)] {
                         segs.push((v, v2));
                     }
-                }
-                if cz + 1 < cz_n {
-                    if let Some(v2) = verts[ci(cx, cy, cz + 1)] {
+                if cz + 1 < cz_n
+                    && let Some(v2) = verts[ci(cx, cy, cz + 1)] {
                         segs.push((v, v2));
                     }
-                }
             }
         }
     }
@@ -367,6 +364,7 @@ pub(crate) fn oriented_box_lines(
 
 /// Build a rigidbody collider outline: a 3-ring wireframe sphere, or a capsule (two
 /// end rings + side connectors + cap arcs). Y-up (the editor doesn't tilt the gizmo).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rigidbody_lines(
     pos: DVec3,
     capsule: bool,

@@ -229,10 +229,10 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                         stream.weights.extend(w);
                     }
                     _ => {
-                        stream.joints.extend(std::iter::repeat([0u16; 4]).take(positions.len()));
+                        stream.joints.extend(std::iter::repeat_n([0u16; 4], positions.len()));
                         stream
                             .weights
-                            .extend(std::iter::repeat([0.0f32; 4]).take(positions.len()));
+                            .extend(std::iter::repeat_n([0.0f32; 4], positions.len()));
                     }
                 }
                 debug_assert_eq!(stream.joints.len(), part.mesh.vertices.len());

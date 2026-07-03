@@ -107,11 +107,11 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 /// (`refresh_mesh_occluders`), so a level casts with its true silhouette. Skips
 /// hidden nodes and `CastShadow(false)` opt-outs; returns zeros when shadows are
 /// off.
-pub(crate) fn collect_shadow_proxies(
-    world: &World,
-    cam_world: DVec3,
-    enabled: bool,
-) -> ([f32; 4], [[f32; 4]; 32], [[f32; 4]; 32], [[f32; 4]; 32]) {
+/// The proxy-occluder uniform block: `[count, 0, 0, 0]` plus the `prox_a` /
+/// `prox_b` / `prox_rot` arrays the shadow march reads (see `field.wgsl`).
+pub(crate) type ShadowProxies = ([f32; 4], [[f32; 4]; 32], [[f32; 4]; 32], [[f32; 4]; 32]);
+
+pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: bool) -> ShadowProxies {
     let mut a = [[0.0f32; 4]; 32];
     let mut b = [[0.0f32; 4]; 32];
     let mut r = [[0.0f32, 0.0, 0.0, 1.0]; 32];

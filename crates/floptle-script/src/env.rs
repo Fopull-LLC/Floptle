@@ -35,7 +35,7 @@ pub(crate) fn build_env(lua: &Lua, src: &str, name: &str) -> mlua::Result<Table>
     let mt = lua.create_table()?;
     mt.set("__index", lua.globals())?;
     env.set_metatable(Some(mt));
-    lua.load(&preprocess(src)).set_name(name).set_environment(env.clone()).exec()?;
+    lua.load(preprocess(src)).set_name(name).set_environment(env.clone()).exec()?;
     Ok(env)
 }
 

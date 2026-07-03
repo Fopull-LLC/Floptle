@@ -151,7 +151,9 @@ impl ApplicationHandler for Runner {
         // per-material parts register separately so their textures bind correctly.
         let paths = all_models(Path::new("assets/models"));
         let mut env_size: Option<f32> = None;
-        let mut prop_models: Vec<(Vec<(MeshId, [f32; 3])>, f32)> = Vec::new();
+        // One prop: its per-part meshes (mesh id + base tint) and the model's size.
+        type PropModel = (Vec<(MeshId, [f32; 3])>, f32);
+        let mut prop_models: Vec<PropModel> = Vec::new();
         for path in &paths {
             match floptle_assets::gltf_import::import(path) {
                 Ok(model) => {
@@ -346,11 +348,10 @@ impl ApplicationHandler for Runner {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
-            if self.input.looking {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
             }
-        }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {

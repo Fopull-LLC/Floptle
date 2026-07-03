@@ -11,18 +11,18 @@
 //! Layered design (own the novel parts, borrow only the boring parts):
 //! - `world`     : the collision world — a set of colliders queried each step.
 //! - `sdf`       : SDF colliders (fractals + analytic primitives); point/sphere/
-//!                 capsule/ray queries via `f(p,t)`, normals from its gradient,
-//!                 surface velocity from ∂f/∂t (so riders inherit the morph).
+//!   capsule/ray queries via `f(p,t)`, normals from its gradient,
+//!   surface velocity from ∂f/∂t (so riders inherit the morph).
 //! - `field`     : baked sparse SDF/voxel grid — decouples physics cost from the
-//!                 expensive analytic fractal (analytic near, baked far).
+//!   expensive analytic fractal (analytic near, baked far).
 //! - `mesh`      : triangle-BVH colliders for static/imported (Blender) meshes.
 //! - `character` : kinematic capsule controller (the "cool movement system");
-//!                 samples `gravity` and aligns orientation to `-g`, so you can
-//!                 run on a fractal and up its swirling walls (ADR-0014).
+//!   samples `gravity` and aligns orientation to `-g`, so you can
+//!   run on a fractal and up its swirling walls (ADR-0014).
 //! - `vehicle`   : raycast-vehicle model (drive a car across the fractal).
 //! - `gravity`   : gravity as a composable vector field `g(p)` — global, analytic
-//!                 sources (planets), SDF-surface (`-∇f`), and calculated
-//!                 density-field (Poisson `∇²Φ=4πGρ`, Barnes-Hut/FFT) (ADR-0014).
+//!   sources (planets), SDF-surface (`-∇f`), and calculated
+//!   density-field (Poisson `∇²Φ=4πGρ`, Barnes-Hut/FFT) (ADR-0014).
 //! - `dynamics`  : OPTIONAL lightweight impulse solver for object-vs-object.
 
 //! ## Slice 1 (this module): collision core + integrator

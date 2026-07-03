@@ -297,11 +297,10 @@ impl EditorTabViewer<'_> {
     // =========================================================================
     pub fn anim_graph_tab_ui(&mut self, ui: &mut egui::Ui) {
         // Sync the working copy with the selected key.
-        if self.anim_ui.graph_doc.is_none() {
-            if let Some(key) = self.anim_ui.graph_key.clone() {
+        if self.anim_ui.graph_doc.is_none()
+            && let Some(key) = self.anim_ui.graph_key.clone() {
                 self.anim_ui.graph_doc = self.anim.controller(&key).cloned();
             }
-        }
         self.anim_graph_ui(ui);
     }
 
@@ -360,11 +359,10 @@ impl EditorTabViewer<'_> {
                     doc.sample_fps = if stepped { Some(12.0) } else { None };
                     st.graph_dirty = true;
                 }
-                if let Some(fps) = doc.sample_fps.as_mut() {
-                    if ui.add(egui::DragValue::new(fps).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
+                if let Some(fps) = doc.sample_fps.as_mut()
+                    && ui.add(egui::DragValue::new(fps).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
                         st.graph_dirty = true;
                     }
-                }
             }
         });
         // New-controller prompt.
@@ -630,14 +628,12 @@ impl EditorTabViewer<'_> {
                 col,
             );
             // Click-select an arrow (distance to segment).
-            if bg_resp.clicked() {
-                if let Some(cur) = ui.ctx().pointer_interact_pos() {
-                    if seg_dist2(cur, pa, pb) < 7.0 {
+            if bg_resp.clicked()
+                && let Some(cur) = ui.ctx().pointer_interact_pos()
+                    && seg_dist2(cur, pa, pb) < 7.0 {
                         st.sel_trans = Some((tr.from.clone(), tr.to.clone()));
                         st.sel_state = None;
                     }
-                }
-            }
             // (Deletion goes through the side panel's 🗑 button — a raw Delete
             // keypress here would collide with the scene's delete shortcut.)
         }
@@ -774,18 +770,17 @@ impl EditorTabViewer<'_> {
 
         // ---- live transition drag ----
         if let Some(from) = st.drag_from.clone() {
-            if let Some(cur) = ui.ctx().pointer_hover_pos() {
-                if let Some(s) = layer.states.iter().find(|s| s.name == from) {
+            if let Some(cur) = ui.ctx().pointer_hover_pos()
+                && let Some(s) = layer.states.iter().find(|s| s.name == from) {
                     let r = node_rect(s.pos);
                     painter.line_segment(
                         [Pos2::new(r.right() - 8.0, r.center().y), cur],
                         Stroke::new(2.0, ACCENT),
                     );
                 }
-            }
             if ui.input(|i| i.pointer.any_released()) {
-                if let Some(to) = hovered_node.filter(|n| *n != from) {
-                    if !layer.transitions.iter().any(|t| t.from == from && t.to == to) {
+                if let Some(to) = hovered_node.filter(|n| *n != from)
+                    && !layer.transitions.iter().any(|t| t.from == from && t.to == to) {
                         layer.transitions.push(AnimTransitionDoc {
                             from: from.clone(),
                             to: to.clone(),
@@ -795,17 +790,16 @@ impl EditorTabViewer<'_> {
                         st.sel_state = None;
                         st.graph_dirty = true;
                     }
-                }
                 st.drag_from = None;
             }
         }
 
         // ---- drop a clip asset onto the canvas → a new state ----
         let payload = egui::DragAndDrop::payload::<AssetPayload>(ui.ctx());
-        if let Some(p) = payload {
-            if is_anim_clip(&p.path) {
-                if let Some(cur) = ui.ctx().pointer_hover_pos() {
-                    if rect.contains(cur) {
+        if let Some(p) = payload
+            && is_anim_clip(&p.path)
+                && let Some(cur) = ui.ctx().pointer_hover_pos()
+                    && rect.contains(cur) {
                         painter.rect_stroke(rect.shrink(2.0), 4.0, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
                         painter.text(
                             rect.center(),
@@ -842,9 +836,6 @@ impl EditorTabViewer<'_> {
                             egui::DragAndDrop::clear_payload(ui.ctx());
                         }
                     }
-                }
-            }
-        }
 
         if layer.states.is_empty() {
             painter.text(
@@ -936,14 +927,13 @@ impl EditorTabViewer<'_> {
                     s.fps = if own_fps { Some(8.0) } else { None };
                     st.graph_dirty = true;
                 }
-                if let Some(f) = s.fps.as_mut() {
-                    if ui.add(egui::DragValue::new(f).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
+                if let Some(f) = s.fps.as_mut()
+                    && ui.add(egui::DragValue::new(f).speed(0.2).range(1.0..=60.0).suffix(" fps")).changed() {
                         st.graph_dirty = true;
                     }
-                }
             }
-            if let Some((old, new)) = rename {
-                if !layer.states.iter().any(|s| s.name == new) {
+            if let Some((old, new)) = rename
+                && !layer.states.iter().any(|s| s.name == new) {
                     if let Some(s) = layer.states.iter_mut().find(|s| s.name == old) {
                         s.name = new.clone();
                     }
@@ -961,7 +951,6 @@ impl EditorTabViewer<'_> {
                     st.sel_state = Some(new);
                     st.graph_dirty = true;
                 }
-            }
             ui.separator();
             if ui.button("▶ Set as default").clicked() {
                 layer.default_state = Some(sel.clone());
@@ -1018,18 +1007,15 @@ impl EditorTabViewer<'_> {
                 || matches!(viewer.world.get::<Matter>(e), Some(Matter::Mesh { asset_path })
                     if viewer.mesh_registry.get(asset_path).is_some_and(|m| m.rig.is_some()))
         };
-        if let Some(t) = self.anim_ui.target {
-            if !valid(t, self) {
+        if let Some(t) = self.anim_ui.target
+            && !valid(t, self) {
                 self.anim_ui.target = None;
             }
-        }
-        if self.anim_ui.target.is_none() {
-            if let Some(&sel) = self.selection.last() {
-                if valid(sel, self) {
+        if self.anim_ui.target.is_none()
+            && let Some(&sel) = self.selection.last()
+                && valid(sel, self) {
                     self.anim_ui.target = Some(sel);
                 }
-            }
-        }
         let candidates: Vec<(Entity, String)> = self
             .entity_names
             .iter()
@@ -1248,8 +1234,8 @@ impl EditorTabViewer<'_> {
                     if self.anim_ui.graph_key.as_ref() == Some(k) {
                         self.flush_graph(true);
                     }
-                    if let Some(mut cdoc) = self.anim.controller(k).cloned() {
-                        if let Some(layer) = cdoc.layers.first_mut() {
+                    if let Some(mut cdoc) = self.anim.controller(k).cloned()
+                        && let Some(layer) = cdoc.layers.first_mut() {
                             let mut sname = name.clone();
                             let mut n = 2;
                             while layer.states.iter().any(|s| s.name == sname) {
@@ -1276,7 +1262,6 @@ impl EditorTabViewer<'_> {
                             self.anim_ui.sel_anim = Some(sname);
                             self.anim_ui.clip_doc = None;
                         }
-                    }
                 }
                 self.anim_ui.new_anim_buf = None;
             } else if cancel || done {
@@ -1348,13 +1333,12 @@ impl EditorTabViewer<'_> {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
         draw_ruler(&painter, rect, dur, self.anim_ui.playhead, rect.width() / dur.max(0.01));
-        if resp.dragged() || resp.clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if (resp.dragged() || resp.clicked())
+            && let Some(p) = resp.interact_pointer_pos() {
                 let t = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * dur;
                 self.anim_ui.playhead = self.snap_time(t);
                 self.anim_ui.preview_playing = false;
             }
-        }
         if self.anim_ui.preview_playing && self.anim_ui.playhead > dur {
             self.anim_ui.playhead %= dur.max(1e-3);
         }
@@ -1486,8 +1470,8 @@ impl EditorTabViewer<'_> {
             // ---- ruler (scrub) ----
             let ruler = Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px + 100.0, ruler_h));
             let rresp = ui.interact(ruler, ui.id().with("anim-ruler"), Sense::click_and_drag());
-            if rresp.dragged() || rresp.clicked() {
-                if let Some(p) = rresp.interact_pointer_pos() {
+            if (rresp.dragged() || rresp.clicked())
+                && let Some(p) = rresp.interact_pointer_pos() {
                     st.playhead = if st.snap_fps > 0.0 {
                         (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
                     } else {
@@ -1495,7 +1479,6 @@ impl EditorTabViewer<'_> {
                     };
                     st.preview_playing = false;
                 }
-            }
             painter.rect_filled(ruler, 0.0, ui.visuals().extreme_bg_color);
 
             // ---- event lane ----
@@ -1536,11 +1519,10 @@ impl EditorTabViewer<'_> {
                 if resp.clicked() {
                     st.sel_event = Some(ei);
                 }
-                if resp.dragged() {
-                    if let Some(p) = resp.interact_pointer_pos() {
+                if resp.dragged()
+                    && let Some(p) = resp.interact_pointer_pos() {
                         ev_drag = Some((ei, x_to_time(p.x)));
                     }
-                }
                 resp.context_menu(|ui| {
                     if ui.button("🗑 Delete event").clicked() {
                         ev_drag = Some((ei, f32::NAN)); // NaN = delete
@@ -1613,27 +1595,23 @@ impl EditorTabViewer<'_> {
                     if resp.drag_started() {
                         st.key_drag = Some((ci, t, t));
                     }
-                    if resp.dragged() {
-                        if let Some(p) = resp.interact_pointer_pos() {
+                    if resp.dragged()
+                        && let Some(p) = resp.interact_pointer_pos() {
                             let nt = if st.snap_fps > 0.0 {
                                 (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
                             } else {
                                 x_to_time(p.x)
                             };
-                            if let Some(kd) = st.key_drag.as_mut() {
-                                if kd.0 == ci && (kd.1 - t).abs() < 1e-6 {
+                            if let Some(kd) = st.key_drag.as_mut()
+                                && kd.0 == ci && (kd.1 - t).abs() < 1e-6 {
                                     kd.2 = nt;
                                 }
-                            }
                         }
-                    }
-                    if resp.drag_stopped() {
-                        if let Some((dci, ot, nt)) = st.key_drag.take() {
-                            if dci == ci && (ot - t).abs() < 1e-6 && (nt - ot).abs() > 1e-6 {
+                    if resp.drag_stopped()
+                        && let Some((dci, ot, nt)) = st.key_drag.take()
+                            && dci == ci && (ot - t).abs() < 1e-6 && (nt - ot).abs() > 1e-6 {
                                 retime = Some((ci, ot, nt));
                             }
-                        }
-                    }
                     resp.context_menu(|ui| {
                         if ui.button("🗑 Delete key").clicked() {
                             delete_key = Some((ci, t));
@@ -1720,14 +1698,12 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
         }
         let Some(tr) = world.get::<floptle_core::Transform>(*e) else { continue };
         let cur = TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale };
-        if let Some(prev) = st.last_scene_local.get(e) {
-            if *prev != cur {
-                if let Some((_, doc)) = st.clip_doc.as_mut() {
+        if let Some(prev) = st.last_scene_local.get(e)
+            && *prev != cur
+                && let Some((_, doc)) = st.clip_doc.as_mut() {
                     write_key(doc, chan_name, playhead, &cur);
                     wrote = true;
                 }
-            }
-        }
         st.last_scene_local.insert(*e, cur);
     }
     if wrote {

@@ -143,11 +143,10 @@ impl Editor {
                 .terrain_textures
                 .iter()
                 .map(|p| {
-                    if !p.is_empty() {
-                        if let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
+                    if !p.is_empty()
+                        && let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
                             return t;
                         }
-                    }
                     floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
                 })
                 .collect();
@@ -439,15 +438,14 @@ impl Editor {
         // wander inside the window — pin it to the center ourselves while a
         // look/lock is active. Look input reads RAW device motion, so this
         // re-centering never pollutes the deltas.
-        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking) {
-            if let Some(window) = self.window.as_ref() {
+        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking)
+            && let Some(window) = self.window.as_ref() {
                 let sz = window.inner_size();
                 let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
                     sz.width / 2,
                     sz.height / 2,
                 ));
             }
-        }
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
             self.console.push(l.level, l.msg, l.source);
@@ -821,11 +819,10 @@ impl Editor {
                     }
                     // Record first: capture the user's pose edits as keys BEFORE
                     // the preview re-applies the clip (which then includes them).
-                    if self.anim_ui.record {
-                        if anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
+                    if self.anim_ui.record
+                        && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
                             self.anim_ui.clip_dirty = true;
                         }
-                    }
                     anim::preview_pose(
                         &mut self.anim,
                         &mut self.world,
@@ -852,8 +849,8 @@ impl Editor {
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
-        if let Some((path, pos)) = &drag_ghost {
-            if let Some(asset) = self.mesh_registry.get(path) {
+        if let Some((path, pos)) = &drag_ghost
+            && let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
                 let model = ghost.render_matrix(cam.world_position);
                 for (i, &mid) in asset.parts.iter().enumerate() {
@@ -865,7 +862,6 @@ impl Editor {
                     instances.push((mid, None, instance_of(model * local, [0.7, 0.85, 1.0])));
                 }
             }
-        }
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
             // Inspector can toggle this); they still keep transforms, physics, children.
@@ -1016,8 +1012,8 @@ impl Editor {
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
         // The Game view plays like a build — no selection outline there.
-        if let Some(e) = self.selection.last().copied().filter(|_| !game_view) {
-            if let Some(m) = self.world.get::<Matter>(e) {
+        if let Some(e) = self.selection.last().copied().filter(|_| !game_view)
+            && let Some(m) = self.world.get::<Matter>(e) {
                 let t = floptle_core::world_transform(&self.world, e);
                 match m {
                     Matter::Primitive { shape, .. } => {
@@ -1067,7 +1063,6 @@ impl Editor {
                     | Matter::PostProcess { .. } => {}
                 }
             }
-        }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
         // and/or the combined terrain volume. The globals are built either way — on
@@ -1422,11 +1417,10 @@ impl Editor {
             {
                 let pos = ui.input(|i| i.pointer.interact_pos());
                 let over_scene = matches!((pos, *scene_rect), (Some(p), Some(r)) if r.contains(p));
-                if over_scene {
-                    if let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
+                if over_scene
+                    && let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
                         cmd.drop_asset = Some(p.path.clone());
                     }
-                }
             }
 
             // ---- project settings window (project-wide rendering) ----
@@ -2067,11 +2061,10 @@ impl Editor {
         if want_save || cmd.save_scene {
             self.save_scene();
         }
-        if want_save_project {
-            if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
+        if want_save_project
+            && let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
                 eprintln!("  save project failed: {e}");
             }
-        }
 
         // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
         if let Some(action) = cmd.project_action {
@@ -2100,11 +2093,10 @@ impl Editor {
         if let Some((name, line)) = cmd.open_log_source {
             self.open_source_at(&name, line);
         }
-        if cmd.focus_scripting {
-            if let Some(dock) = self.dock_state.as_mut() {
+        if cmd.focus_scripting
+            && let Some(dock) = self.dock_state.as_mut() {
                 focus_scripting_tab(dock);
             }
-        }
         if cmd.close_menu {
             self.context_menu = None;
         }
@@ -2288,13 +2280,12 @@ impl Editor {
         if let Some(e) = cmd.paste_component {
             self.paste_onto(e);
         }
-        if let Some((e, name)) = cmd.apply_preset {
-            if let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
+        if let Some((e, name)) = cmd.apply_preset
+            && let Some((_, doc)) = self.materials.iter().find(|(n, _)| n == &name) {
                 let mat = doc.to_material();
                 self.record();
                 self.world.insert(e, mat);
             }
-        }
         if let Some(path) = cmd.extract_textures {
             self.extract_textures(&path);
         }
@@ -2351,24 +2342,22 @@ impl Editor {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
             });
         }
-        if cmd.focus_animating {
-            if let Some(dock) = self.dock_state.as_mut() {
+        if cmd.focus_animating
+            && let Some(dock) = self.dock_state.as_mut() {
                 if let Some(path) = dock.find_tab(&EditorTab::Animation) {
                     let _ = dock.set_active_tab(path);
                 } else {
                     dock.push_to_focused_leaf(EditorTab::Animation);
                 }
             }
-        }
-        if cmd.focus_anim_graph {
-            if let Some(dock) = self.dock_state.as_mut() {
+        if cmd.focus_anim_graph
+            && let Some(dock) = self.dock_state.as_mut() {
                 if let Some(path) = dock.find_tab(&EditorTab::AnimGraph) {
                     let _ = dock.set_active_tab(path);
                 } else {
                     dock.push_to_focused_leaf(EditorTab::AnimGraph);
                 }
             }
-        }
         if let Some((child, parent)) = cmd.reparent {
             self.reparent(child, parent);
         }
@@ -2414,8 +2403,8 @@ impl Editor {
         if cmd.terrain_palette_changed {
             self.terrain_textures_dirty = true;
         }
-        if let Some(fill) = cmd.fill_terrain {
-            if let Some(e) = self.target_terrain() {
+        if let Some(fill) = cmd.fill_terrain
+            && let Some(e) = self.target_terrain() {
                 // Snapshot for undo (one step), then fill the whole field.
                 let id = match self.world.get::<Matter>(e) {
                     Some(Matter::Terrain { id }) => *id,
@@ -2432,9 +2421,8 @@ impl Editor {
                     self.terrain_gpu_dirty = true;
                 }
             }
-        }
-        if cmd.fill_bounds {
-            if let Some(e) = self.target_terrain() {
+        if cmd.fill_bounds
+            && let Some(e) = self.target_terrain() {
                 let id = match self.world.get::<Matter>(e) {
                     Some(Matter::Terrain { id }) => *id,
                     _ => 0,
@@ -2453,7 +2441,6 @@ impl Editor {
                     self.terrain_gpu_dirty = true;
                 }
             }
-        }
         if cmd.focus_terrain {
             self.focus_terrain();
         }
@@ -2514,12 +2501,10 @@ impl Editor {
         // (the gather can't import — gpu/raster are borrowed there).
         if let Some(p) =
             self.egui.as_ref().and_then(|e| egui::DragAndDrop::payload::<AssetPayload>(&e.ctx))
-        {
-            if is_model(&p.path) && !self.mesh_registry.contains_key(&p.path) {
+            && is_model(&p.path) && !self.mesh_registry.contains_key(&p.path) {
                 let path = p.path.clone();
                 self.import_model(&path);
             }
-        }
         // Pre-warm material textures so the gather can resolve them next frame.
         let tex_paths: Vec<String> = self
             .world
