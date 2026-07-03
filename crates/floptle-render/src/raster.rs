@@ -481,6 +481,13 @@ impl Raster {
         samp
     }
 
+    /// The bind group of a registered material texture — shared with the particle
+    /// pass, whose group(1) layout is structurally identical, so one registry
+    /// textures both meshes and billboards.
+    pub(crate) fn material_bind(&self, id: TexId) -> Option<&wgpu::BindGroup> {
+        self.textures.get(id.0 as usize).map(|t| &t.bind)
+    }
+
     /// Register a standalone material texture (RGBA8) with the given sampling, returning
     /// its handle. Bound per-instance in `draw_scene` to re-texture a shape regardless
     /// of its mesh. Re-registering the same image with new settings returns a fresh id.

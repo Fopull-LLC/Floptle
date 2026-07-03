@@ -11,3 +11,8 @@ rust-version.workspace = true
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
+
+[dev-dependencies]
+# Offscreen probe (examples/vfx_probe.rs) renders the deterministic sim to PNGs.
+wgpu = { workspace = true }
+png = "0.18"
