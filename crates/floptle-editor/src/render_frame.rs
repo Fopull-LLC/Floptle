@@ -121,7 +121,7 @@ impl Editor {
             self.retro.as_mut(),
             self.outline.as_ref(),
             self.grid_render.as_mut(),
-            self.post.as_ref(),
+            self.post.as_mut(),
             self.egui.as_mut(),
             self.window.as_ref(),
         ) else {
@@ -1607,15 +1607,26 @@ impl Editor {
         }
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
-        // gathered above) runs at full frame res after the scene is composited (and
-        // after any retro downsample), before the outline + egui.
+        // gathered above) runs at the resolution the scene was composited at: the
+        // retro internal res in retro mode (BEFORE the nearest-neighbor upscale, so
+        // AO/bloom/vignette land on the same chunky pixel grid as the scene), else
+        // full frame res. The stack lazily re-sizes when retro toggles/resizes.
         let post_on = post_settings.any();
+        let post_size =
+            if self.project.retro { retro.resolution() } else { (gpu.config.width, gpu.config.height) };
+        post.configure(gpu, post_size.0, post_size.1, self.project.retro);
 
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
             Some(frame) => {
                 let (color, depth) = if self.project.retro {
-                    (retro.color_view(), retro.depth_view())
+                    if post_on {
+                        // Retro + post: scene renders into the (retro-sized) post
+                        // input; the chain later writes the retro color target.
+                        (post.input_view(), retro.depth_view())
+                    } else {
+                        (retro.color_view(), retro.depth_view())
+                    }
                 } else if post_on {
                     // Non-retro + post: render the scene into the post input target.
                     (post.input_view(), gpu.depth_view())
@@ -1651,26 +1662,23 @@ impl Editor {
                         [c[0], c[1], c[2], self.grid.alpha],
                     );
                 }
-                // Retro upscales the low-res scene; into the post input if post is on,
-                // else straight to the frame. Then post (if on) writes to the frame.
-                if self.project.retro {
-                    if post_on {
-                        retro.blit_to(gpu, post.input_view());
-                    } else {
-                        retro.blit(gpu, &frame);
-                    }
-                }
+                // Post runs BEFORE any retro upscale, at the scene's composited
+                // resolution. SSAO reads whichever depth the scene rendered with;
+                // in retro mode the chain outputs into the retro color target so
+                // the nearest-neighbor blit carries the finished effects up with
+                // the same chunky pixels as the scene.
                 if post_on {
-                    // SSAO reads whichever depth the scene was rendered with — the
-                    // low-res retro depth in retro mode (AO goes chunky with the
-                    // pixels, which fits the look) or the full-res shared depth.
                     let proj = cam.proj_matrix(aspect);
                     let ssao_frame = floptle_render::SsaoFrame {
                         depth: if self.project.retro { retro.depth_view() } else { gpu.depth_view() },
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
                     };
-                    post.run(gpu, &post_settings, Some(&ssao_frame), &frame.view);
+                    let out = if self.project.retro { retro.color_view() } else { &frame.view };
+                    post.run(gpu, &post_settings, Some(&ssao_frame), out);
+                }
+                if self.project.retro {
+                    retro.blit(gpu, &frame);
                 }
 
                 // Selection outline: mask the selected object's silhouette (full
