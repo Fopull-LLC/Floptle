@@ -55,6 +55,7 @@ mod shading;
 mod terrain_edit;
 mod terrain_ui;
 mod theme;
+mod timeline;
 mod vfx;
 mod viewports;
 mod viz;
