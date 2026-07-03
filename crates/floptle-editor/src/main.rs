@@ -36,6 +36,7 @@ mod anim_ui;
 mod assets;
 mod assets_ui;
 mod console;
+mod curve_edit;
 mod dock;
 mod gizmo;
 mod hierarchy;
@@ -57,6 +58,7 @@ mod terrain_ui;
 mod theme;
 mod timeline;
 mod vfx;
+mod vfx_inspector;
 mod vfx_ui;
 mod viewports;
 mod viz;
@@ -388,6 +390,10 @@ struct EditorTabViewer<'a> {
     vfx: &'a mut vfx::VfxSystem,
     /// Particles tab UI state.
     vfx_ui: &'a mut vfx_ui::VfxUiState,
+    /// The Particles tab is visible this frame — so the Inspector swaps to the
+    /// selected track's settings (VFX artists edit tracks in the Inspector, not a
+    /// cramped bottom panel).
+    particles_active: bool,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: &'a mut anim_ui::AnimUiState,
     /// Registered models — rig lookups for the animation UI.

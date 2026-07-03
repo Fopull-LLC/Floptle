@@ -8,7 +8,7 @@
 
 use crate::effect::{Blend, RenderMode};
 use crate::sim::EffectInstance;
-use floptle_core::math::{Mat4, Vec3};
+use floptle_core::math::{Mat4, Quat, Vec3};
 use floptle_render::particles::{ParticleBlend, ParticleInstance};
 
 /// One track's contribution to this frame's packed instance array. `texture` is
@@ -77,6 +77,41 @@ pub fn collect_billboards(
     }
 }
 
+/// One mesh-render track's live particles as camera-relative model matrices +
+/// tints. The caller resolves `asset_path` to GPU mesh(es) and appends these to
+/// the raster pass's instance list — so mesh particles are lit, sun-shadowed, and
+/// SDF-AO'd exactly like scene meshes (proposal §5.2).
+#[derive(Clone, Debug)]
+pub struct MeshDraw {
+    pub asset_path: String,
+    /// (camera-relative model matrix, straight-alpha rgba tint) per particle.
+    pub instances: Vec<(Mat4, [f32; 4])>,
+}
+
+/// Collect every mesh-render track of `inst` into `out`. `xf` maps emitter space
+/// to camera-relative world space (the node's `render_matrix`); each particle
+/// becomes `translate(worldpos) · spinY(rotation) · scale(size · emitter_scale)`.
+pub fn collect_mesh_particles(inst: &EffectInstance, xf: Mat4, out: &mut Vec<MeshDraw>) {
+    let s = glam_mat3_scale(&xf);
+    let scale = (s.0 + s.1 + s.2) / 3.0;
+    for (ti, ct) in inst.mesh_tracks() {
+        let RenderMode::Mesh { asset_path } = &ct.look.render else { continue };
+        let mut items = Vec::new();
+        inst.sample_track(ti, |p| {
+            let world = xf.transform_point3(p.pos);
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::splat((p.size * scale).max(1e-4)),
+                Quat::from_rotation_y(p.rotation),
+                world,
+            );
+            items.push((model, p.color));
+        });
+        if !items.is_empty() {
+            out.push(MeshDraw { asset_path: asset_path.clone(), instances: items });
+        }
+    }
+}
+
 /// The lengths of the matrix's three basis axes (its per-axis scale).
 fn glam_mat3_scale(m: &Mat4) -> (f32, f32, f32) {
     (
@@ -123,6 +158,44 @@ mod tests {
         assert_eq!(draws[0].range, 0..20);
         for w in packed.windows(2) {
             assert!(w[0].pos_rot[2] >= w[1].pos_rot[2], "not back-to-front along +Z");
+        }
+    }
+
+    #[test]
+    fn mesh_tracks_collect_one_model_matrix_per_particle() {
+        use crate::effect::{Clip, RenderMode};
+        let fx = Arc::new(
+            ParticleEffect {
+                lifetime: 1.0,
+                playback: Playback::OneShot,
+                tracks: vec![
+                    // A billboard track (ignored by mesh collection)...
+                    Track { rate: 0.0, bursts: vec![Burst { t: 0.0, count: 3 }], particle_lifetime: 5.0, ..Track::default() },
+                    // ...and a mesh track that should yield a MeshDraw.
+                    Track {
+                        rate: 0.0,
+                        bursts: vec![Burst { t: 0.0, count: 5 }],
+                        particle_lifetime: 5.0,
+                        clips: vec![Clip { start: 0.0, end: 1.0 }],
+                        look: Look { render: RenderMode::Mesh { asset_path: "models/Spark.glb".into() }, ..Look::default() },
+                        ..Track::default()
+                    },
+                ],
+                ..ParticleEffect::default()
+            }
+            .compile(),
+        );
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.1, Vec3::ZERO);
+
+        let mut out = Vec::new();
+        collect_mesh_particles(&inst, Mat4::IDENTITY, &mut out);
+        assert_eq!(out.len(), 1, "one mesh track -> one MeshDraw (billboard track skipped)");
+        assert_eq!(out[0].asset_path, "models/Spark.glb");
+        assert_eq!(out[0].instances.len(), 5, "one model matrix per live particle");
+        // Each model matrix must be finite + non-degenerate (positive scale).
+        for (m, _c) in &out[0].instances {
+            assert!(m.determinant().abs() > 1e-9, "degenerate mesh-particle matrix");
         }
     }
 }

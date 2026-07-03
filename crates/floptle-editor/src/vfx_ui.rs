@@ -13,10 +13,7 @@ use std::sync::Arc;
 
 use floptle_core::ParticleSystem;
 use floptle_core::World;
-use floptle_scene::{
-    VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxEffectDoc, VfxEndDoc, VfxPlaybackDoc, VfxPropDoc,
-    VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxTrackDoc, VfxValueDoc,
-};
+use floptle_scene::{VfxBurstDoc, VfxClipDoc, VfxEffectDoc, VfxEndDoc, VfxPlaybackDoc, VfxTrackDoc};
 use floptle_vfx::EffectInstance;
 
 use crate::timeline::{draw_ruler, snap_time, TimelineView, ACCENT, EVENT_COLOR, PLAYHEAD};
@@ -64,6 +61,10 @@ pub(crate) struct VfxUiState {
     drag: Option<VfxDrag>,
     /// Timeline position captured at right-click, for "add burst here".
     ctx_t: f32,
+    /// Which property's curve editor is expanded in the Inspector (by label), and
+    /// the selected key within it — the value-or-curve affordance's state.
+    pub expanded_prop: Option<String>,
+    pub sel_key: Option<usize>,
 }
 
 impl Default for VfxUiState {
@@ -83,6 +84,8 @@ impl Default for VfxUiState {
             sel: None,
             drag: None,
             ctx_t: 0.0,
+            expanded_prop: None,
+            sel_key: None,
         }
     }
 }
@@ -105,6 +108,13 @@ impl VfxUiState {
 
     fn bump(&mut self) {
         self.doc_rev = self.doc_rev.wrapping_add(1);
+    }
+
+    /// Mark the working doc edited: schedule a coalesced save + a preview
+    /// recompile. Used by the Inspector's track editor (a different module).
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.bump();
     }
 }
 
@@ -139,10 +149,6 @@ impl EditorTabViewer<'_> {
             return;
         }
 
-        // Texture list for the side panel's picker (borrowed before doc is).
-        let mut tex_list = Vec::new();
-        crate::assets::collect_texture_paths(self.asset_tree, &mut tex_list);
-
         let st = &mut *self.vfx_ui;
         let key = st.open_key.clone().expect("checked above");
         // Take the working copy for the frame (returned below) so the UI can
@@ -152,25 +158,12 @@ impl EditorTabViewer<'_> {
 
         transport_ui(ui, st, &mut doc, &mut dirty);
         ui.separator();
-
-        // ---- timeline canvas (left) + properties panel (right) ----
-        // (the anim-graph layout idiom: manual split, panel width fixed)
-        let panel_w = 250.0;
-        ui.horizontal_top(|ui| {
-            let canvas_w = (ui.available_width() - panel_w - 8.0).max(200.0);
-            ui.vertical(|ui| {
-                ui.set_width(canvas_w);
-                ui.set_height(ui.available_height());
-                canvas_ui(ui, st, &mut doc, &mut dirty);
-            });
-            ui.separator();
-            ui.vertical(|ui| {
-                ui.set_width(panel_w - 12.0);
-                egui::ScrollArea::vertical().id_salt("vfx_side").show(ui, |ui| {
-                    side_panel_ui(ui, st, &mut doc, &tex_list, &mut dirty);
-                });
-            });
-        });
+        ui.small(
+            "Select a track to edit it in the Inspector →   ·   double-click a lane = clip, \
+             right-click = burst.",
+        );
+        // The timeline canvas is full-width; track settings live in the Inspector.
+        canvas_ui(ui, st, &mut doc, &mut dirty);
 
         if dirty {
             st.dirty = true;
@@ -775,294 +768,3 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
     }
 }
 
-// ---------------------------------------------------------------------------
-// Side panel
-// ---------------------------------------------------------------------------
-
-fn side_panel_ui(
-    ui: &mut egui::Ui,
-    st: &mut VfxUiState,
-    doc: &mut VfxEffectDoc,
-    tex_list: &[String],
-    dirty: &mut bool,
-) {
-    // Selected clip / burst details first (the thing you just touched).
-    match st.sel {
-        Some(VfxSel::Clip(ti, ci)) => {
-            if let Some(c) = doc.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) {
-                ui.strong("▬ Clip");
-                ui.horizontal(|ui| {
-                    ui.label("start");
-                    *dirty |= ui
-                        .add(egui::DragValue::new(&mut c.start).speed(0.01).suffix("s"))
-                        .changed();
-                    ui.label("end");
-                    *dirty |=
-                        ui.add(egui::DragValue::new(&mut c.end).speed(0.01).suffix("s")).changed();
-                });
-                if c.end < c.start + CLIP_MIN_LEN {
-                    c.end = c.start + CLIP_MIN_LEN;
-                }
-                ui.separator();
-            }
-        }
-        Some(VfxSel::Burst(ti, bi)) => {
-            if let Some(b) = doc.tracks.get_mut(ti).and_then(|t| t.bursts.get_mut(bi)) {
-                ui.strong("✦ Burst");
-                ui.horizontal(|ui| {
-                    ui.label("t");
-                    *dirty |=
-                        ui.add(egui::DragValue::new(&mut b.t).speed(0.01).suffix("s")).changed();
-                    ui.label("count");
-                    *dirty |= ui
-                        .add(egui::DragValue::new(&mut b.count).speed(0.2).range(1..=10_000))
-                        .changed();
-                });
-                ui.separator();
-            }
-        }
-        None => {}
-    }
-
-    let Some(ti) = st.sel_track else {
-        ui.weak("select a track to edit its properties");
-        return;
-    };
-    if ti >= doc.tracks.len() {
-        st.sel_track = None;
-        return;
-    }
-    let n_tracks = doc.tracks.len();
-
-    // Name + reorder row — reordering must not overlap the track borrow below.
-    let mut move_dir: i32 = 0;
-    ui.horizontal(|ui| {
-        ui.strong("Track");
-        if let Some(t) = doc.tracks.get_mut(ti) {
-            *dirty |=
-                ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(120.0)).changed();
-        }
-        if ti > 0 && ui.small_button("⬆").clicked() {
-            move_dir = -1;
-        }
-        if ti + 1 < n_tracks && ui.small_button("⬇").clicked() {
-            move_dir = 1;
-        }
-    });
-    if move_dir != 0 {
-        let nj = (ti as i32 + move_dir) as usize;
-        doc.tracks.swap(ti, nj);
-        st.sel_track = Some(nj);
-        st.sel = None;
-        *dirty = true;
-        return; // indices moved — rebuild the panel next frame
-    }
-    let Some(track) = doc.tracks.get_mut(ti) else { return };
-
-    *dirty |= ui.checkbox(&mut track.enabled, "enabled").changed();
-
-    ui.add_space(4.0);
-    ui.label("Look");
-    // Billboard texture (mesh particles arrive in phase 4).
-    if let VfxRenderDoc::Billboard { texture } = &mut track.render {
-        let current = texture.clone().unwrap_or_else(|| "(plain quad)".into());
-        egui::ComboBox::from_id_salt(("vfx_tex", st.sel_track))
-            .width(180.0)
-            .selected_text(current)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(texture.is_none(), "(plain quad)").clicked() {
-                    *texture = None;
-                    *dirty = true;
-                }
-                for p in tex_list {
-                    if ui.selectable_label(texture.as_deref() == Some(p), p).clicked() {
-                        *texture = Some(p.clone());
-                        *dirty = true;
-                    }
-                }
-            });
-    }
-    egui::ComboBox::from_id_salt(("vfx_blend", st.sel_track))
-        .selected_text(match track.blend {
-            VfxBlendDoc::Alpha => "blend: alpha",
-            VfxBlendDoc::Additive => "blend: additive",
-        })
-        .show_ui(ui, |ui| {
-            for (v, l) in [(VfxBlendDoc::Alpha, "alpha"), (VfxBlendDoc::Additive, "additive")] {
-                if ui.selectable_label(track.blend == v, l).clicked() && track.blend != v {
-                    track.blend = v;
-                    *dirty = true;
-                }
-            }
-        });
-    egui::ComboBox::from_id_salt(("vfx_space", st.sel_track))
-        .selected_text(match track.space {
-            VfxSpaceDoc::Local => "space: local (follows node)",
-            VfxSpaceDoc::World => "space: world (trails)",
-        })
-        .show_ui(ui, |ui| {
-            for (v, l) in [
-                (VfxSpaceDoc::Local, "local (follows node)"),
-                (VfxSpaceDoc::World, "world (trails) — phase 4"),
-            ] {
-                if ui.selectable_label(track.space == v, l).clicked() && track.space != v {
-                    track.space = v;
-                    *dirty = true;
-                }
-            }
-        });
-
-    ui.add_space(4.0);
-    ui.label("Emission");
-    ui.horizontal(|ui| {
-        ui.label("rate");
-        *dirty |= ui
-            .add(egui::DragValue::new(&mut track.rate).speed(0.5).range(0.0..=100_000.0).suffix("/s"))
-            .changed();
-    });
-    shape_ui(ui, st, track, dirty);
-    ui.horizontal(|ui| {
-        ui.label("particle life");
-        *dirty |= ui
-            .add(
-                egui::DragValue::new(&mut track.particle_lifetime)
-                    .speed(0.01)
-                    .range(0.01..=600.0)
-                    .suffix("s"),
-            )
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("life jitter");
-        *dirty |= ui
-            .add(egui::Slider::new(&mut track.lifetime_jitter, 0.0..=1.0))
-            .changed();
-    });
-
-    ui.add_space(4.0);
-    ui.label("Particle (value or curve over its life)");
-    prop_ui(ui, "velocity", &mut track.velocity, dirty);
-    prop_ui(ui, "size", &mut track.size, dirty);
-    prop_ui(ui, "rotation", &mut track.rotation, dirty);
-    prop_ui(ui, "color", &mut track.color, dirty);
-    ui.horizontal(|ui| {
-        ui.label("gravity");
-        *dirty |= ui.add(egui::Slider::new(&mut track.gravity, 0.0..=2.0)).changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("drag");
-        *dirty |= ui
-            .add(egui::DragValue::new(&mut track.drag).speed(0.01).range(0.0..=50.0))
-            .changed();
-    });
-
-    if !track.automation.is_empty() {
-        ui.add_space(4.0);
-        ui.weak(format!(
-            "∿ {} automation lane(s) — lane editing arrives with the graph editor",
-            track.automation.len()
-        ));
-    }
-}
-
-fn shape_ui(ui: &mut egui::Ui, st: &VfxUiState, track: &mut VfxTrackDoc, dirty: &mut bool) {
-    let label = match track.shape {
-        VfxShapeDoc::Point => "shape: point",
-        VfxShapeDoc::Cone { .. } => "shape: cone",
-        VfxShapeDoc::Sphere { .. } => "shape: sphere",
-        VfxShapeDoc::Edge { .. } => "shape: edge",
-        VfxShapeDoc::Ring { .. } => "shape: ring",
-    };
-    egui::ComboBox::from_id_salt(("vfx_shape", st.sel_track))
-        .selected_text(label)
-        .show_ui(ui, |ui| {
-            let options: [(&str, VfxShapeDoc); 5] = [
-                ("point", VfxShapeDoc::Point),
-                ("cone", VfxShapeDoc::Cone { angle: 25.0, radius: 0.1 }),
-                ("sphere", VfxShapeDoc::Sphere { radius: 0.5, shell: false }),
-                ("edge", VfxShapeDoc::Edge { length: 1.0 }),
-                ("ring", VfxShapeDoc::Ring { radius: 0.5 }),
-            ];
-            for (l, v) in options {
-                let is = std::mem::discriminant(&track.shape) == std::mem::discriminant(&v);
-                if ui.selectable_label(is, l).clicked() && !is {
-                    track.shape = v;
-                    *dirty = true;
-                }
-            }
-        });
-    match &mut track.shape {
-        VfxShapeDoc::Point => {}
-        VfxShapeDoc::Cone { angle, radius } => {
-            ui.horizontal(|ui| {
-                ui.label("angle");
-                *dirty |= ui
-                    .add(egui::DragValue::new(angle).speed(0.5).range(0.0..=180.0).suffix("°"))
-                    .changed();
-                ui.label("radius");
-                *dirty |= ui.add(egui::DragValue::new(radius).speed(0.01).range(0.0..=100.0)).changed();
-            });
-        }
-        VfxShapeDoc::Sphere { radius, shell } => {
-            ui.horizontal(|ui| {
-                ui.label("radius");
-                *dirty |= ui.add(egui::DragValue::new(radius).speed(0.01).range(0.0..=100.0)).changed();
-                *dirty |= ui.checkbox(shell, "shell").changed();
-            });
-        }
-        VfxShapeDoc::Edge { length } => {
-            ui.horizontal(|ui| {
-                ui.label("length");
-                *dirty |= ui.add(egui::DragValue::new(length).speed(0.01).range(0.0..=1000.0)).changed();
-            });
-        }
-        VfxShapeDoc::Ring { radius } => {
-            ui.horizontal(|ui| {
-                ui.label("radius");
-                *dirty |= ui.add(egui::DragValue::new(radius).speed(0.01).range(0.0..=1000.0)).changed();
-            });
-        }
-    }
-}
-
-/// Minimal value-or-curve editor: constants edit inline; curves show a marker
-/// and can demote to a constant. The drawn-curve editor is phase 3.
-fn prop_ui(ui: &mut egui::Ui, label: &str, p: &mut VfxPropDoc, dirty: &mut bool) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        match p {
-            VfxPropDoc::Const(v) => match v {
-                VfxValueDoc::F32(x) => {
-                    *dirty |= ui.add(egui::DragValue::new(x).speed(0.01)).changed();
-                }
-                VfxValueDoc::Vec3(xyz) => {
-                    for (i, prefix) in ["x ", "y ", "z "].iter().enumerate() {
-                        *dirty |= ui
-                            .add(egui::DragValue::new(&mut xyz[i]).speed(0.01).prefix(*prefix))
-                            .changed();
-                    }
-                }
-                VfxValueDoc::Rgba(rgba) => {
-                    let mut c = *rgba;
-                    if ui.color_edit_button_rgba_unmultiplied(&mut c).changed() {
-                        *rgba = c;
-                        *dirty = true;
-                    }
-                }
-            },
-            VfxPropDoc::Curve(c) => {
-                ui.weak(format!("∿ curve · {} keys", c.keys.len()))
-                    .on_hover_text("drawn-curve editing arrives with the graph editor (phase 3)");
-                if ui
-                    .small_button("→ const")
-                    .on_hover_text("replace the curve with its value at t = 0")
-                    .clicked()
-                {
-                    let v = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
-                    *p = VfxPropDoc::Const(v);
-                    *dirty = true;
-                }
-            }
-        }
-    });
-}

@@ -127,6 +127,7 @@ fn soft_puff(size: u32) -> TextureData {
     TextureData { pixels, width: size, height: size }
 }
 
+
 struct Harness {
     gpu: Gpu,
     color_tex: wgpu::Texture,
@@ -139,7 +140,7 @@ struct Harness {
     pglobals: ParticleGlobals,
     cam: RenderCamera,
     fx: Arc<floptle_vfx::CompiledEffect>,
-    soft_tex: TexId,
+    registry: std::collections::HashMap<String, TexId>,
     emitter: Transform,
 }
 
@@ -160,10 +161,12 @@ impl Harness {
             packed.len(),
             draws.iter().map(|d| (d.blend, d.range.clone())).collect::<Vec<_>>()
         );
+        // Resolve textures EXACTLY as the editor does: by path, through a registry
+        // map (not a direct TexId). This exercises the real editor resolve path.
         let batches: Vec<ParticleBatch> = draws
             .iter()
             .map(|d| ParticleBatch {
-                texture: d.texture.as_deref().map(|_| self.soft_tex),
+                texture: d.texture.as_deref().and_then(|p| self.registry.get(p).copied()),
                 blend: d.blend,
                 range: d.range.clone(),
             })
@@ -204,7 +207,10 @@ fn main() {
     let particles = Particles::new(&gpu);
     let retro = Retro::new(&gpu, RETRO_H);
     let box_mesh = raster.register(&gpu, &cube(1.0), None);
-    let soft_tex = raster.register_texture(&gpu, &soft_puff(64), TexSampling::default());
+    // Registry keyed by PATH, exactly like the editor's texture_registry — the
+    // probe resolves batches through this map, exercising the real resolve path.
+    let mut registry = std::collections::HashMap::new();
+    registry.insert("soft".to_string(), raster.register_texture(&gpu, &soft_puff(64), TexSampling::default()));
 
     let cam = RenderCamera::new(
         DVec3::new(0.0, 1.7, 5.2),
@@ -256,7 +262,7 @@ fn main() {
         pglobals,
         cam,
         fx,
-        soft_tex,
+        registry,
         emitter,
     };
 

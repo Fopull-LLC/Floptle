@@ -103,6 +103,10 @@ impl Editor {
 
         self.play_step(dt, game_focused);
         self.finish_input_frame();
+        // Register every texture + import every mesh the particle system needs
+        // BEFORE the gather that resolves them (full &mut self here — no borrow
+        // race, no frame lag on the open effect).
+        self.ensure_vfx_assets();
 
         let (
             Some(gpu),
@@ -629,6 +633,10 @@ impl Editor {
             &mut vfx_instances,
             &mut vfx_batches,
         );
+        // Mesh-render particle tracks ride the raster instance list (lit + shadowed
+        // like scene meshes), so append them to `instances` built above.
+        let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, &cam, vfx_preview_on);
+        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
 
         // Skybox: a Skybox node drives the environment background — a solid color, or an
         // equirect texture × tint, rotated by the node so a script can spin the sky.
@@ -869,6 +877,7 @@ impl Editor {
             .and(self.cam_preview.as_ref().map(|p| p.tex_id));
         // Split view: the Game tab paints its own offscreen render this frame.
         let game_split = fullscreen_tab.is_none() && scene_and_game_split(dock_state);
+        let particles_active = crate::dock::tab_is_front(dock_state, EditorTab::Particles);
         let game_tex = self.game_vp.as_ref().map(|p| p.tex_id);
         let game_rect = &mut self.game_rect;
         let materials = &self.materials;
@@ -1072,6 +1081,7 @@ impl Editor {
                 anim: anim_sys,
                 vfx: vfx_sys,
                 vfx_ui: vfx_ui_state,
+                particles_active,
                 anim_ui: anim_ui_state,
                 mesh_registry,
                 pointer_down,
@@ -2701,17 +2711,50 @@ impl Editor {
         for p in tex_paths {
             self.ensure_texture(&p);
         }
-        // Same for particle track textures (registered effects reference them by path).
-        let vfx_paths: Vec<String> = self
-            .vfx
-            .texture_paths()
-            .into_iter()
-            .filter(|p| !self.texture_registry.contains_key(p))
-            .collect();
-        for p in vfx_paths {
-            self.ensure_texture(&p);
+    }
+
+    /// Register (GPU-upload) every texture and import every mesh the particle
+    /// system references this frame: the effect open in the Particles tab (its
+    /// live working doc — so a just-picked asset resolves next frame
+    /// deterministically), every saved effect, every live play instance, and the
+    /// tab preview. Idempotent. Called at the top of `render()`, before the gather
+    /// resolves batch textures / mesh handles.
+    fn ensure_vfx_assets(&mut self) {
+        let mut tex: Vec<String> = Vec::new();
+        let mut meshes: Vec<String> = Vec::new();
+        let push = |v: &mut Vec<String>, p: &str| {
+            if !p.is_empty() && !v.iter().any(|q| q == p) {
+                v.push(p.to_string());
+            }
+        };
+        // The open working doc first (it holds edits not yet in the registry).
+        if let Some(doc) = &self.vfx_ui.doc {
+            for t in &doc.tracks {
+                match &t.render {
+                    floptle_scene::VfxRenderDoc::Billboard { texture: Some(p) } => push(&mut tex, p),
+                    floptle_scene::VfxRenderDoc::Mesh { asset_path } => push(&mut meshes, asset_path),
+                    _ => {}
+                }
+            }
+        }
+        for p in self.vfx.texture_paths() {
+            push(&mut tex, &p);
+        }
+        for p in self.vfx.mesh_paths() {
+            push(&mut meshes, &p);
+        }
+        for p in tex {
+            if !self.texture_registry.contains_key(&p) {
+                self.ensure_texture(&p);
+            }
+        }
+        for p in meshes {
+            if !self.mesh_registry.contains_key(&p) {
+                self.import_model(&p);
+            }
         }
     }
+
 
 
     /// Render the whole scene from `cam` (at `aspect`) into offscreen color+depth views —
@@ -2867,6 +2910,8 @@ impl Editor {
             &mut vfx_instances,
             &mut vfx_batches,
         );
+        let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
+        resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
 
         if let (Some(gpu), Some(raster), Some(raymarch), Some(particles)) = (
             self.gpu.as_ref(),
@@ -2897,6 +2942,28 @@ impl Editor {
                     &vfx_batches,
                     raster,
                 );
+            }
+        }
+    }
+}
+
+/// Resolve mesh-particle draws to raster instances (camera-relative model matrix
+/// plus alpha-aware tinted material) and append them to `instances`. Free function
+/// so callers pass just `&mesh_registry`, a disjoint field borrow, while `gpu` and
+/// `raster` are held by the main render's destructure.
+fn resolve_mesh_particles(
+    mesh_registry: &HashMap<String, MeshAsset>,
+    draws: &[floptle_vfx::MeshDraw],
+    instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+) {
+    for md in draws {
+        let Some(asset) = mesh_registry.get(&md.asset_path) else { continue };
+        for (model, color) in &md.instances {
+            let mut mp = MaterialParams::flat([color[0], color[1], color[2]]);
+            mp.alpha = color[3];
+            let raw = instance_of_mat(*model, &mp);
+            for &mid in &asset.parts {
+                instances.push((mid, None, raw));
             }
         }
     }

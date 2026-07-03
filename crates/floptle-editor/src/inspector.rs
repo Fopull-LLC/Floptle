@@ -200,6 +200,14 @@ pub(crate) fn material_props_ui(
 }
 impl EditorTabViewer<'_> {
     pub(crate) fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        // When the Particles tab is up and a track is selected, the Inspector
+        // becomes that track's editor (VFX artists tune tracks here, not in a
+        // cramped bottom panel). Deselecting the track — or picking a scene node,
+        // which clears the track selection — reverts to the node inspector.
+        if self.vfx_track_active() {
+            self.vfx_track_inspector_ui(ui);
+            return;
+        }
         // The Inspector shows *only* the current selection (the scene name + save
         // live in the Hierarchy header). An asset selected in the browser shows here.
         if let Some(path) = self.selected_asset.clone() {

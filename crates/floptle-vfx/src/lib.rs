@@ -18,7 +18,7 @@ pub mod effect;
 pub mod sim;
 
 pub use curve::{Curve, Extrapolate, Interp, Key, Value, ValueOrCurve};
-pub use draw::{BillboardDraw, collect_billboards};
+pub use draw::{BillboardDraw, MeshDraw, collect_billboards, collect_mesh_particles};
 pub use effect::{
     Blend, Burst, Clip, CompiledEffect, CompiledTrack, EmitShape, EndBehavior, Lane, LaneTarget,
     Look, ParticleEffect, Playback, RenderMode, Space, Track,

@@ -259,6 +259,58 @@ impl VfxSystem {
         }
         out
     }
+
+    /// Every model path any mesh-render track references — so the editor can
+    /// import (GPU-load) them before drawing mesh particles.
+    pub fn mesh_paths(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut scan = |fx: &CompiledEffect| {
+            for track in &fx.tracks {
+                if let RenderMode::Mesh { asset_path } = &track.look.render
+                    && !asset_path.is_empty()
+                    && !out.contains(asset_path)
+                {
+                    out.push(asset_path.clone());
+                }
+            }
+        };
+        for (_, asset) in &self.effects {
+            scan(&asset.compiled);
+        }
+        if let Some(p) = &self.preview {
+            scan(&p.inst.effect);
+        }
+        out
+    }
+
+    /// Collect every live mesh-particle track (play instances + preview) as
+    /// camera-relative model matrices + tints; the caller resolves `asset_path`
+    /// to GPU mesh(es) and appends them to the raster pass.
+    pub fn collect_mesh_draws(
+        &self,
+        world: &World,
+        cam: &RenderCamera,
+        include_preview: bool,
+    ) -> Vec<floptle_vfx::MeshDraw> {
+        let mut out = Vec::new();
+        let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
+            let xf = match anchor {
+                Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
+                None => floptle_core::transform::Transform::IDENTITY
+                    .render_matrix(cam.world_position),
+            };
+            floptle_vfx::collect_mesh_particles(inst, xf, &mut out);
+        };
+        for (e, (_, inst)) in &self.instances {
+            pack(inst, Some(*e));
+        }
+        if include_preview
+            && let Some(p) = &self.preview
+        {
+            pack(&p.inst, p.anchor);
+        }
+        out
+    }
 }
 
 /// The particle pass's frame globals for `cam` (billboard basis from its rotation).
@@ -333,7 +385,7 @@ fn value_from_doc(v: &VfxValueDoc) -> Value {
     }
 }
 
-fn curve_from_doc(c: &VfxCurveDoc) -> Curve {
+pub(crate) fn curve_from_doc(c: &VfxCurveDoc) -> Curve {
     Curve {
         keys: c
             .keys
@@ -478,5 +530,40 @@ mod tests {
         assert!(sys.effect("Spark").is_some(), "stem fallback (moved-file grace)");
         assert!(sys.effect("vfx/Nope").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Localizes the "texture never applies" bug: proves the editor-side resolve
+    // path (preview → texture_paths → collect → batch.texture) is correct, so any
+    // remaining failure is registration/GPU, not this logic.
+    #[test]
+    fn preview_texture_resolves_through_registry() {
+        const P: &str = "assets/textures/Grass.png";
+        let mut doc = starter_effect_doc("T");
+        if let VfxRenderDoc::Billboard { texture } = &mut doc.tracks[0].render {
+            *texture = Some(P.into());
+        }
+        let fx = Arc::new(effect_from_doc(&doc).compile());
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, VFX_GRAVITY);
+        assert!(inst.alive() > 0, "must emit");
+
+        let sys = VfxSystem {
+            preview: Some(VfxPreview { key: "T".into(), inst, anchor: None }),
+            ..Default::default()
+        };
+        assert_eq!(sys.texture_paths(), vec![P.to_string()], "prewarm sees the preview texture");
+
+        let mut registry = HashMap::new();
+        registry.insert(P.to_string(), TexId(7));
+        let cam = RenderCamera::new(
+            floptle_core::math::DVec3::ZERO,
+            floptle_core::math::Quat::IDENTITY,
+            floptle_render::Projection::Perspective { fov_y: 1.0, near: 0.1, far: 100.0 },
+        );
+        let world = World::new();
+        let (mut instances, mut batches) = (Vec::new(), Vec::new());
+        sys.collect(&world, &cam, &registry, true, &mut instances, &mut batches);
+        assert!(!batches.is_empty(), "preview must produce a batch");
+        assert_eq!(batches[0].texture, Some(TexId(7)), "path must resolve to the registered id");
     }
 }
