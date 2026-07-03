@@ -37,7 +37,12 @@ pub(crate) fn script_name_of(path: &str) -> String {
 
 pub(crate) fn is_texture(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
-    p.ends_with(".png") || p.ends_with(".jpg") || p.ends_with(".jpeg")
+    // The decoder guesses format from content (see floptle_assets::load_texture), so
+    // a mislabeled file loads regardless — but these are the extensions we surface in
+    // texture pickers and the asset browser.
+    [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tga", ".tif", ".tiff", ".gif", ".qoi"]
+        .iter()
+        .any(|ext| p.ends_with(ext))
 }
 pub(crate) fn is_markdown(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
