@@ -259,7 +259,7 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_new_scene = true;
             ui.close();
         }
-        if ui.button("◉ New Animation Controller").clicked() {
+        if ui.button("◎ New Animation Controller").clicked() {
             self.cmd.new_anim_controller = Some(None);
             self.cmd.new_anim_controller_dir = Some(dir.to_string_lossy().to_string());
             ui.close();

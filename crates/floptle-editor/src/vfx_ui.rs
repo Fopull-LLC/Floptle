@@ -315,14 +315,14 @@ impl EditorTabViewer<'_> {
         ui.add_space(8.0);
         ui.label("No effect open.");
         ui.small(
-            "Open one from a Particle System component (✎ Edit effect), double-click a \
-             .vfx.ron asset, or pick below. \"Add Component → Particle System (new)\" \
+            "Open one from a Particle System component (✏ Edit effect), double-click a \
+             .vfx.ron asset, or pick below. \"Add Component › Particle System (new)\" \
              creates a starter effect on the selected node.",
         );
         ui.add_space(6.0);
         let keys: Vec<String> = self.vfx.effects.iter().map(|(k, _)| k.clone()).collect();
         for k in keys {
-            if ui.button(format!("❋  {k}")).clicked() {
+            if ui.button(format!("✨  {k}")).clicked() {
                 self.vfx_ui.open(k);
             }
         }
@@ -340,7 +340,7 @@ fn anchor_for(world: &World, key: &str) -> Option<floptle_core::Entity> {
 
 fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("❋ {}", doc.name)).strong());
+        ui.label(egui::RichText::new(format!("✨ {}", doc.name)).strong());
         ui.separator();
         if ui.button("⏮").on_hover_text("to start").clicked() {
             st.playhead = 0.0;
@@ -372,12 +372,12 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
         egui::ComboBox::from_id_salt("vfx_playback")
             .selected_text(match doc.playback {
                 VfxPlaybackDoc::Looping => "⟲ Looping",
-                VfxPlaybackDoc::OneShot => "→ One-shot",
+                VfxPlaybackDoc::OneShot => "➡ One-shot",
             })
             .show_ui(ui, |ui| {
                 for (v, l) in [
                     (VfxPlaybackDoc::Looping, "⟲ Looping"),
-                    (VfxPlaybackDoc::OneShot, "→ One-shot"),
+                    (VfxPlaybackDoc::OneShot, "➡ One-shot"),
                 ] {
                     if ui.selectable_label(doc.playback == v, l).clicked() && doc.playback != v {
                         doc.playback = v;
@@ -409,7 +409,7 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
         }
         ui.separator();
 
-        if ui.button("＋ Track").clicked() {
+        if ui.button("+ Track").clicked() {
             let mut t = starter_track(doc);
             t.name = format!("Track {}", doc.tracks.len() + 1);
             doc.tracks.push(t);
@@ -454,7 +454,7 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
     });
 }
 
-/// A fresh track for "＋ Track": one clip spanning the whole timeline, so it
+/// A fresh track for "+ Track": one clip spanning the whole timeline, so it
 /// visibly emits the moment it exists.
 fn starter_track(doc: &VfxEffectDoc) -> VfxTrackDoc {
     let mut t = starter_effect_doc("x").tracks.remove(0);
@@ -519,13 +519,13 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 );
             }
 
-            // Expand toggle (▾/▸) — reveals this track's automation lanes below it.
+            // Expand toggle (⏷/⏵) — reveals this track's automation lanes below it.
             let tri = Rect::from_min_size(Pos2::new(full.left() + 2.0, y), egui::vec2(14.0, ROW_H));
             let tresp = ui.interact(tri, ui.id().with(("vfx-expand", ti)), Sense::click());
             painter.text(
                 tri.center(),
                 Align2::CENTER_CENTER,
-                if expanded { "▾" } else { "▸" },
+                if expanded { "⏷" } else { "⏵" },
                 FontId::proportional(11.0),
                 if track.automation.is_empty() && !expanded {
                     ui.visuals().weak_text_color()
@@ -543,7 +543,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             painter.text(
                 mute.center(),
                 Align2::CENTER_CENTER,
-                if track.enabled { "▣" } else { "□" },
+                if track.enabled { "▣" } else { "☐" },
                 FontId::proportional(12.0),
                 if track.enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color() },
             );
@@ -593,7 +593,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             let ctx_t = st.ctx_t;
             let present: Vec<VfxLaneTargetDoc> = track.automation.iter().map(|l| l.target).collect();
             lane_resp.context_menu(|ui| {
-                if ui.button("✦ Add burst here").clicked() {
+                if ui.button("✳ Add burst here").clicked() {
                     deferred = Some(DeferredEdit::AddBurst(ti, ctx_t));
                     ui.close();
                 }
@@ -612,7 +612,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                     ui.weak("  (all lanes added)");
                 }
                 ui.separator();
-                if ui.button("⧉ Duplicate track").clicked() {
+                if ui.button("📋 Duplicate track").clicked() {
                     deferred = Some(DeferredEdit::DupTrack(ti));
                     ui.close();
                 }
@@ -767,7 +767,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             painter.text(
                 Pos2::new(view.left + 12.0, rows_top + ROW_H * 0.7),
                 Align2::LEFT_CENTER,
-                "no tracks yet — ＋ Track adds one (a track = one visual layer of the effect)",
+                "no tracks yet — + Track adds one (a track = one visual layer of the effect)",
                 FontId::proportional(11.5),
                 ui.visuals().weak_text_color(),
             );

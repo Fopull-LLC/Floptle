@@ -985,11 +985,11 @@ impl Editor {
                             *show_material_editor = true;
                             ui.close();
                         }
-                        if ui.button("◉ Animation Controller").on_hover_text("the state-graph editor: states, transitions, fades, layers").clicked() {
+                        if ui.button("◎ Animation Controller").on_hover_text("the state-graph editor: states, transitions, fades, layers").clicked() {
                             cmd.focus_anim_graph = true;
                             ui.close();
                         }
-                        if ui.button("✎ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
+                        if ui.button("✏ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
                             cmd.focus_animating = true;
                             ui.close();
                         }

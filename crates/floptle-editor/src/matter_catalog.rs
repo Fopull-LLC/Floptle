@@ -56,15 +56,15 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
     match m {
         Matter::Primitive { shape: Shape::Cube, .. } => "■",
         Matter::Primitive { shape: Shape::Sphere, .. } => "○",
-        Matter::Primitive { shape: Shape::Capsule, .. } => "⬭",
+        Matter::Primitive { shape: Shape::Capsule, .. } => "▪",
         Matter::Blob { .. } => "◑",
-        Matter::Mesh { .. } => "✦",
+        Matter::Mesh { .. } => "✳",
         Matter::Empty => "🗀",
         Matter::Terrain { .. } => "Δ",
         Matter::Camera { .. } => "⌖",
         Matter::PointLight { .. } => "●",
         Matter::GravityVolume { .. } => "⬇",
-        Matter::Skybox { .. } => "◐",
+        Matter::Skybox { .. } => "◎",
         Matter::PostProcess { .. } => "✨",
     }
 }
@@ -78,12 +78,12 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
     vec![
         ("■  Cube", Matter::Primitive { shape: Shape::Cube, color: [0.8, 0.5, 0.4] }),
         ("○  Sphere", Matter::Primitive { shape: Shape::Sphere, color: [0.4, 0.6, 0.9] }),
-        ("⬭  Capsule", Matter::Primitive { shape: Shape::Capsule, color: [0.5, 0.85, 0.6] }),
+        ("▪  Capsule", Matter::Primitive { shape: Shape::Capsule, color: [0.5, 0.85, 0.6] }),
         ("◑  Blob", Matter::Blob { scale: 1.0 }),
         ("🗀  Empty", Matter::Empty),
         ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),
         ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
-        ("◐  Skybox", Matter::default_skybox()),
+        ("◎  Skybox", Matter::default_skybox()),
     ]
 }

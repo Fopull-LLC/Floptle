@@ -49,7 +49,7 @@ impl EditorTabViewer<'_> {
         let mut dirty = false;
 
         ui.horizontal(|ui| {
-            ui.strong("❋ Track");
+            ui.strong("✨ Track");
             ui.weak(format!("· {effect_name}"));
         });
 
@@ -120,7 +120,7 @@ fn clip_burst_detail(
         Some(VfxSel::Clip(ti, ci)) => {
             if let Some(c) = doc.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) {
                 ui.horizontal(|ui| {
-                    ui.small("▬ clip");
+                    ui.small("▪ clip");
                     ui.label("start");
                     *dirty |= ui.add(egui::DragValue::new(&mut c.start).speed(0.01).suffix("s")).changed();
                     ui.label("end");
@@ -134,7 +134,7 @@ fn clip_burst_detail(
         Some(VfxSel::Burst(ti, bi)) => {
             if let Some(b) = doc.tracks.get_mut(ti).and_then(|t| t.bursts.get_mut(bi)) {
                 ui.horizontal(|ui| {
-                    ui.small("✦ burst");
+                    ui.small("✳ burst");
                     ui.label("t");
                     *dirty |= ui.add(egui::DragValue::new(&mut b.t).speed(0.01).suffix("s")).changed();
                     ui.label("count");
@@ -328,7 +328,7 @@ fn particle_section(
     dirty: &mut bool,
 ) {
     ui.strong("Over each particle's life");
-    ui.small("hover the value, tap ∿ to animate it into a curve");
+    ui.small("hover the value, tap 📈 to animate it into a curve");
     let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
     *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr);
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
@@ -355,7 +355,7 @@ fn automation_point_section(
 ) {
     ui.horizontal(|ui| {
         ui.strong("Automation");
-        ui.small("(shape lanes on the timeline — expand a track with ▾)");
+        ui.small("(shape lanes on the timeline — expand a track with ⏷)");
     });
     let Some((ati, ali, aki)) = st.auto_sel else {
         if track.automation.is_empty() {
@@ -385,7 +385,7 @@ fn automation_point_section(
         return;
     };
     ui.horizontal(|ui| {
-        ui.small(format!("◆ {}", lane_label(target)));
+        ui.small(format!("♦ {}", lane_label(target)));
         ui.label("t");
         *dirty |= ui
             .add(egui::DragValue::new(&mut k.t).speed(0.01).range(tmin..=tmax).suffix("s"))

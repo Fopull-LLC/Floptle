@@ -338,7 +338,7 @@ impl EditorTabViewer<'_> {
                 {
                     let (icon, label, is_terrain) = match world.get::<Matter>(e) {
                         Some(m) => (matter_icon(m), matter_kind_label(m), matches!(m, Matter::Terrain { .. })),
-                        None => ("◈", "Type", false),
+                        None => ("◎", "Type", false),
                     };
                     let (copy, paste, _) = component_header(
                         ui,
@@ -737,7 +737,7 @@ impl EditorTabViewer<'_> {
                     ui.separator();
                     let (copy, paste, remove) = component_header(
                         ui,
-                        "❋ Particle System",
+                        "✨ Particle System",
                         matches!(clip, Some(ComponentClip::Particles(_))),
                         true,
                     );
@@ -782,7 +782,7 @@ impl EditorTabViewer<'_> {
                             let edit_key =
                                 (!ps.asset.is_empty()).then(|| ps.asset.clone());
                             if let Some(k) = edit_key
-                                && ui.button("✎ Edit effect").clicked()
+                                && ui.button("✏ Edit effect").clicked()
                             {
                                 cmd.open_particle_editor = Some(k);
                             }
@@ -795,7 +795,7 @@ impl EditorTabViewer<'_> {
                     ui.separator();
                     let (copy, paste, remove) = component_header(
                         ui,
-                        "◆ Rigidbody",
+                        "♦ Rigidbody",
                         matches!(clip, Some(ComponentClip::RigidBody(_))),
                         true,
                     );
@@ -1082,7 +1082,7 @@ impl EditorTabViewer<'_> {
                     }
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
-                        items.push(("Physics", "◆  Rigidbody".into(), Add::Rb));
+                        items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
                     }
                     if !has_collidable
                         && let Some(k) = collider_kind {
@@ -1106,9 +1106,9 @@ impl EditorTabViewer<'_> {
                     // Particle System: attach an existing effect asset, or create a
                     // starter effect (a small looping fountain to shape from).
                     if world.get::<floptle_core::ParticleSystem>(e).is_none() {
-                        items.push(("Effects", "❋  Particle System (new)".into(), Add::ParticlesNew));
+                        items.push(("Effects", "✨  Particle System (new)".into(), Add::ParticlesNew));
                         for (k, _) in self.vfx.effects.iter() {
-                            items.push(("Effects", format!("❋  {k}"), Add::Particles(k.clone())));
+                            items.push(("Effects", format!("✨  {k}"), Add::Particles(k.clone())));
                         }
                     }
                     for (name, _) in self.materials {
@@ -1145,7 +1145,7 @@ impl EditorTabViewer<'_> {
                             if !is_cur {
                                 items.push((
                                     "Mesh — replaces type",
-                                    format!("✦  {name}"),
+                                    format!("✳  {name}"),
                                     Add::Type(Matter::Mesh { asset_path: p }),
                                 ));
                             }

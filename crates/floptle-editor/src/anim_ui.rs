@@ -147,7 +147,7 @@ impl EditorTabViewer<'_> {
         ui.separator();
         ui.strong(format!("▶ Animations ({})", names.len()));
         for n in &names {
-            ui.label(format!("   ▷ {n}"));
+            ui.label(format!("   ▶ {n}"));
         }
         // Which clips are already extracted?
         let stem = Path::new(path)
@@ -212,7 +212,7 @@ impl EditorTabViewer<'_> {
             let states: usize = doc.layers.iter().map(|l| l.states.len()).sum();
             ui.small(format!("{} layer(s) · {states} state(s)", doc.layers.len()));
         }
-        if ui.button("◉ Open in graph editor").clicked() {
+        if ui.button("◎ Open in graph editor").clicked() {
             self.cmd.open_anim_graph = Some(key);
         }
     }
@@ -262,11 +262,11 @@ pub fn anim_component_ui(
             );
         }
         ui.horizontal(|ui| {
-            if ui.button("◉ Edit graph").clicked() {
+            if ui.button("◎ Edit graph").clicked() {
                 cmd.open_anim_graph = Some(key.clone());
             }
             if ui
-                .button("✎ Animate")
+                .button("✏ Animate")
                 .on_hover_text("open the Animating timeline bound to this node")
                 .clicked()
             {
@@ -732,7 +732,7 @@ impl EditorTabViewer<'_> {
                     st.graph_dirty = true;
                     ui.close();
                 }
-                if ui.button("✎ Edit keys/events (Animating)").clicked() {
+                if ui.button("✏ Edit keys/events (Animating)").clicked() {
                     // Bind the Animating tab to a scene node actually using this
                     // controller, so the jump lands on the right timeline.
                     if let Some(key) = &st.graph_key {
@@ -838,7 +838,7 @@ impl EditorTabViewer<'_> {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "drag animation clips (▷ .anim.ron) from Assets here",
+                "drag animation clips (▶ .anim.ron) from Assets here",
                 FontId::proportional(13.0),
                 ui.visuals().weak_text_color(),
             );
@@ -986,7 +986,7 @@ impl EditorTabViewer<'_> {
         } else {
             ui.weak("Click a state or a transition arrow to edit it.");
             ui.add_space(6.0);
-            ui.small("• drag a ▷ clip from Assets onto the canvas to add a state");
+            ui.small("• drag a ▶ clip from Assets onto the canvas to add a state");
             ui.small("• drag the ○ port between states to add a transition");
             ui.small("• right-click a state for default / delete");
             ui.small("• fades: default on the controller, per-arrow overrides, ⇥ per-state override (0 = ⚡ instant)");
@@ -1024,7 +1024,7 @@ impl EditorTabViewer<'_> {
             ui.vertical_centered(|ui| {
                 ui.weak("Select a node with an Animation Controller (or a rigged model) to animate.");
                 if candidates.is_empty() {
-                    ui.small("add one via Inspector ➕ Add Component ▸ Animation Controller");
+                    ui.small("add one via Inspector ➕ Add Component ⏵ Animation Controller");
                 } else {
                     ui.horizontal(|ui| {
                         ui.label("or pick:");

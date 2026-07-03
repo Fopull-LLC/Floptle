@@ -77,7 +77,7 @@ impl EditorTabViewer<'_> {
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.toggle_value(self.show_gizmos, "◈ Gizmos")
+                        ui.toggle_value(self.show_gizmos, "◎ Gizmos")
                             .on_hover_text("show selection/collider/camera/light gizmos in the viewport");
                     });
                 });

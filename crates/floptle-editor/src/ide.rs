@@ -920,7 +920,7 @@ impl EditorTabViewer<'_> {
                     .hint_text("search the docs — try \"friction\", \"jump\", \"crossfade\", \"mouse\"")
                     .desired_width(320.0),
             );
-            if !self.ide.docs_search.is_empty() && ui.small_button("✕").clicked() {
+            if !self.ide.docs_search.is_empty() && ui.small_button("✖").clicked() {
                 self.ide.docs_search.clear();
             }
         });
@@ -1314,7 +1314,7 @@ impl EditorTabViewer<'_> {
         output.response.response.context_menu(|ui| {
             match &rc_word {
                 Some(w) => {
-                    if ui.button(format!("⧉ Go to definition of \"{w}\"  (Ctrl+B)")).clicked() {
+                    if ui.button(format!("📋 Go to definition of \"{w}\"  (Ctrl+B)")).clicked() {
                         self.goto_definition(w);
                         ui.close();
                     }
@@ -1364,8 +1364,8 @@ impl EditorTabViewer<'_> {
             ui.separator();
             let word = self.ide.refs_word.clone();
             ui.horizontal(|ui| {
-                ui.strong(format!("⌕ {} hit(s) for \"{word}\"", self.ide.refs.len()));
-                if ui.small_button("✕ clear").clicked() {
+                ui.strong(format!("🔍 {} hit(s) for \"{word}\"", self.ide.refs.len()));
+                if ui.small_button("✖ clear").clicked() {
                     self.ide.refs.clear();
                 }
             });
@@ -1446,14 +1446,14 @@ impl EditorTabViewer<'_> {
             }
             if !self.ide.find_query.is_empty()
                 && ui
-                    .button("⌕ all scripts")
+                    .button("🔍 all scripts")
                     .on_hover_text("list every matching line across all project scripts")
                     .clicked()
             {
                 let q = self.ide.find_query.clone();
                 self.gather_text_matches(&q);
             }
-            if ui.button("✕").on_hover_text("close (Esc)").clicked() {
+            if ui.button("✖").on_hover_text("close (Esc)").clicked() {
                 close = true;
             }
         });
@@ -2011,7 +2011,7 @@ so setting a field moves the object:
         "node — the physics body",
         "\
 These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
-◆ Rigidbody). Drive the body by its velocity instead of teleporting it:
+♦ Rigidbody). Drive the body by its velocity instead of teleporting it:
   • node.vx, node.vy, node.vz   velocity (m/s) — READ the current value, modify,
                                 and WRITE it back; the engine integrates it
   • node.grounded               true while the body rests on a surface (read-only)
@@ -2140,7 +2140,7 @@ Reference files under Assets/ in code, and swap a node's components at runtime.
     -- equip a different model on a key press
     if input.pressed(\"e\") then node.model = assets.getFile(\"models/gold.glb\") end
 
-(Right-click an asset ▸ Copy asset path to grab the string to type.)",
+(Right-click an asset ⏵ Copy asset path to grab the string to type.)",
     ),
     (
         "Animation — node:animator()",

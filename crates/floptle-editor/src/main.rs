@@ -221,9 +221,9 @@ struct EditorCmd {
     /// Open the graph window with the new-controller name prompt; the inner Entity
     /// (if any) gets the created controller attached.
     new_anim_controller: Option<Option<Entity>>,
-    /// Focus (or open) the ✎ Animating dock tab.
+    /// Focus (or open) the ✏ Animating dock tab.
     focus_animating: bool,
-    /// Focus (or open) the ◉ Controller graph dock tab.
+    /// Focus (or open) the ◎ Controller graph dock tab.
     focus_anim_graph: bool,
     /// CONFIRMED asset deletion (from the delete modal) — actually deletes.
     do_delete_asset: Option<String>,
