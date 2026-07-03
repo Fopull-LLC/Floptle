@@ -127,10 +127,7 @@ pub fn is_anim_ctl(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".actl.ron")
 }
 
-const ACCENT: Color32 = Color32::from_rgb(120, 190, 255);
-const KEY_COLOR: Color32 = Color32::from_rgb(235, 200, 90);
-const EVENT_COLOR: Color32 = Color32::from_rgb(240, 140, 150);
-const PLAYHEAD: Color32 = Color32::from_rgb(240, 90, 90);
+use crate::timeline::{draw_ruler, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
 
 impl EditorTabViewer<'_> {
     // =========================================================================
@@ -1345,59 +1342,9 @@ impl EditorTabViewer<'_> {
     }
 
     fn snap_time(&self, t: f32) -> f32 {
-        if self.anim_ui.snap_fps > 0.0 {
-            (t * self.anim_ui.snap_fps).round() / self.anim_ui.snap_fps
-        } else {
-            t
-        }
+        crate::timeline::snap_time(t, self.anim_ui.snap_fps)
     }
 
-}
-
-/// Ruler ticks + labels + playhead over `rect`.
-fn draw_ruler(painter: &egui::Painter, rect: Rect, dur: f32, playhead: f32, px_per_s: f32) {
-        let weak = Color32::from_gray(140);
-        // Second ticks + labels, denser tenth-ticks when zoomed in.
-        let mut t = 0.0;
-        while t <= dur + 1e-4 {
-            let x = rect.left() + t * px_per_s;
-            painter.line_segment(
-                [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 8.0)],
-                Stroke::new(1.0, weak),
-            );
-            painter.text(
-                Pos2::new(x + 3.0, rect.top() + 4.0),
-                Align2::LEFT_CENTER,
-                format!("{t:.0}s"),
-                FontId::proportional(9.0),
-                weak,
-            );
-            if px_per_s > 80.0 {
-                for i in 1..10 {
-                    let tt = t + i as f32 * 0.1;
-                    if tt > dur {
-                        break;
-                    }
-                    let xx = rect.left() + tt * px_per_s;
-                    painter.line_segment(
-                        [Pos2::new(xx, rect.top()), Pos2::new(xx, rect.top() + 4.0)],
-                        Stroke::new(0.5, weak.gamma_multiply(0.6)),
-                    );
-                }
-            }
-            t += 1.0;
-        }
-        // End-of-clip marker + playhead.
-        let xe = rect.left() + dur * px_per_s;
-        painter.line_segment(
-            [Pos2::new(xe, rect.top()), Pos2::new(xe, rect.bottom())],
-            Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
-        );
-        let xp = rect.left() + playhead * px_per_s;
-        painter.line_segment(
-            [Pos2::new(xp, rect.top()), Pos2::new(xp, rect.bottom())],
-            Stroke::new(1.5, PLAYHEAD),
-        );
 }
 
 impl EditorTabViewer<'_> {
@@ -1464,19 +1411,16 @@ impl EditorTabViewer<'_> {
             let (full, _) = ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::hover());
             let painter = ui.painter_at(full);
             let tl_left = full.left() + label_w;
-            let time_to_x = |t: f32| tl_left + t * px;
-            let x_to_time = |x: f32| ((x - tl_left) / px).clamp(0.0, dur);
+            let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
+            let time_to_x = |t: f32| view.time_to_x(t);
+            let x_to_time = |x: f32| view.x_to_time(x);
 
             // ---- ruler (scrub) ----
             let ruler = Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px + 100.0, ruler_h));
             let rresp = ui.interact(ruler, ui.id().with("anim-ruler"), Sense::click_and_drag());
             if (rresp.dragged() || rresp.clicked())
                 && let Some(p) = rresp.interact_pointer_pos() {
-                    st.playhead = if st.snap_fps > 0.0 {
-                        (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
-                    } else {
-                        x_to_time(p.x)
-                    };
+                    st.playhead = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
                     st.preview_playing = false;
                 }
             painter.rect_filled(ruler, 0.0, ui.visuals().extreme_bg_color);
@@ -1535,7 +1479,7 @@ impl EditorTabViewer<'_> {
                     doc.events.remove(ei);
                     st.sel_event = None;
                 } else if let Some(ev) = doc.events.get_mut(ei) {
-                    ev.t = if st.snap_fps > 0.0 { (t * st.snap_fps).round() / st.snap_fps } else { t };
+                    ev.t = crate::timeline::snap_time(t, st.snap_fps);
                     st.sel_event = Some(ei);
                 }
                 st.clip_dirty = true;
@@ -1597,11 +1541,7 @@ impl EditorTabViewer<'_> {
                     }
                     if resp.dragged()
                         && let Some(p) = resp.interact_pointer_pos() {
-                            let nt = if st.snap_fps > 0.0 {
-                                (x_to_time(p.x) * st.snap_fps).round() / st.snap_fps
-                            } else {
-                                x_to_time(p.x)
-                            };
+                            let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
                             if let Some(kd) = st.key_drag.as_mut()
                                 && kd.0 == ci && (kd.1 - t).abs() < 1e-6 {
                                     kd.2 = nt;
