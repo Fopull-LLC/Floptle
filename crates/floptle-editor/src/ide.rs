@@ -975,7 +975,7 @@ impl EditorTabViewer<'_> {
             ui.add_space(10.0);
             ui.separator();
             ui.strong("API reference");
-            ui.small("Everything here also pops up as you type in a script (Tab/Enter accepts, ↑↓ chooses).");
+            ui.small("Everything here also pops up as you type in a script (Tab accepts, ↑↓ chooses).");
             ui.add_space(4.0);
             for cat in API_CATEGORIES {
                 let entries: Vec<&ApiEntry> = LUA_API
@@ -1196,16 +1196,17 @@ impl EditorTabViewer<'_> {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        // While the completion popup is open (last frame), it owns Tab/Enter
-        // (accept), the arrow keys (choose) and Esc (dismiss) — eat them *before*
-        // the editor runs so they don't indent / newline / move the caret.
+        // While the completion popup is open (last frame), it owns Tab (accept),
+        // the arrow keys (choose) and Esc (dismiss) — eat them *before* the
+        // editor runs so they don't indent / move the caret. Enter is
+        // deliberately NOT an accept key: it stays a plain newline, so typing
+        // `else` + Enter never turns into an unwanted `elseif`.
         let ac_id = egui::Id::new(("ide_ac_open", editor_id));
         let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
         let (mut ac_accept, mut ac_nav, mut ac_dismiss) = (false, 0i32, false);
         if ac_was_open {
             ui.input_mut(|inp| {
-                ac_accept = inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
-                    || inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                ac_accept = inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
                 ac_nav = inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as i32
                     - (inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as i32);
                 ac_dismiss = inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
@@ -1688,7 +1689,8 @@ impl EditorTabViewer<'_> {
     /// An autocomplete popup at the caret: the engine API (full labels, member
     /// access on any variable, `params.` keys, component-handle fields) plus
     /// identifiers from the current file, ranked by [`ac_matches`]. ↑↓ choose,
-    /// Tab/Enter accept, Esc dismisses (until the token changes), a click
+    /// Tab accepts (Enter stays a newline), Esc dismisses (until the token
+    /// changes), a click
     /// inserts too; the selected row's doc shows inside the popup. Returns
     /// whether the popup is showing (so the caller routes keys to it next frame).
     #[allow(clippy::too_many_arguments)]
@@ -1738,7 +1740,7 @@ impl EditorTabViewer<'_> {
 
         let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
         let pos = galley_pos + caret.left_bottom().to_vec2();
-        // Tab/Enter insert the selected match; otherwise a click does.
+        // Tab inserts the selected match; otherwise a click does.
         let mut chosen: Option<(usize, String)> =
             accept.then(|| (items[sel].keep, items[sel].insert.clone()));
         egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
@@ -1761,7 +1763,7 @@ impl EditorTabViewer<'_> {
                     // The selected entry's doc, right in the popup (no hover needed).
                     ui.small(items[sel].doc.as_deref().unwrap_or("An identifier from this file."));
                     ui.small(
-                        egui::RichText::new("⇥/⏎ accept · ↑↓ choose · esc hide")
+                        egui::RichText::new("⇥ accept · ↑↓ choose · esc hide")
                             .color(ui.visuals().weak_text_color()),
                     );
                 });
@@ -1845,7 +1847,7 @@ Ctrl+D          duplicate line     Ctrl+Shift+K   delete line
 Alt+Up / Down   move line(s)       Ctrl+/         toggle -- comment
 Tab / Shift+Tab indent / outdent the selected lines
 Ctrl+B          go to definition   right-click    definition / references
-completion:     ↑↓ choose · Tab/Enter accept · Esc hide
+completion:     ↑↓ choose · Tab accept (Enter = newline) · Esc hide
 Ctrl+W          close tab          Tab            accept completion";
 
 // ---- in-engine IDE: Lua syntax highlighting + autocomplete -----------------
