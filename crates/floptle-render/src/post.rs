@@ -28,12 +28,18 @@ pub struct PostSettings {
     pub ssao_strength: f32,
     /// Occlusion reach in world units.
     pub ssao_radius: f32,
+    /// Posterize: quantize the final color to this many levels per channel (a limited
+    /// palette / banded look). 0 or 1 = off; 2.. = enabled. Applied in the terminal
+    /// pass at the composited (retro) resolution, before the upscale.
+    pub posterize_bands: u32,
+    /// Ordered-dither the posterize quantization so smooth ramps don't hard-step.
+    pub posterize_dither: bool,
 }
 
 impl PostSettings {
     /// True if any effect is enabled (else the stack is a no-op passthrough).
     pub fn any(&self) -> bool {
-        self.bloom || self.vignette || self.ssao
+        self.bloom || self.vignette || self.ssao || self.posterize_bands >= 2
     }
 }
 
@@ -101,7 +107,7 @@ pub struct PostStack {
     bright_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline, // additive blend
-    vignette_pipeline: wgpu::RenderPipeline,
+    finish_pipeline: wgpu::RenderPipeline,     // terminal vignette + posterize
     ssao_pipeline: wgpu::RenderPipeline,       // ssao.wgsl → half-res R8
     ao_blur_pipeline: wgpu::RenderPipeline,    // fs_blur onto the R8 targets
     ssao_apply_pipeline: wgpu::RenderPipeline, // scene × AO
@@ -256,7 +262,7 @@ impl PostStack {
                 alpha: wgpu::BlendComponent::REPLACE,
             }),
         );
-        let vignette_pipeline = make_pipeline("fs_vignette", None);
+        let finish_pipeline = make_pipeline("fs_finish", None);
 
         // The SSAO trio: its own shader module for the factor (a depth binding
         // can't share post.wgsl's group 0), fs_blur re-targeted at the R8 AO
@@ -348,7 +354,7 @@ impl PostStack {
             bright_pipeline,
             blur_pipeline,
             composite_pipeline,
-            vignette_pipeline,
+            finish_pipeline,
             ssao_pipeline,
             ao_blur_pipeline,
             ssao_apply_pipeline,
@@ -433,7 +439,8 @@ impl PostStack {
     /// settings ask for SSAO but no frame inputs are given, the effect is skipped.
     pub fn run(&self, gpu: &Gpu, s: &PostSettings, ssao: Option<&SsaoFrame>, out: &wgpu::TextureView) {
         let ssao_on = s.ssao && ssao.is_some();
-        if !(ssao_on || s.bloom || s.vignette) {
+        let posterize_on = s.posterize_bands >= 2;
+        if !(ssao_on || s.bloom || s.vignette || posterize_on) {
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });
             self.pass(gpu, &self.copy_pipeline, &self.scene.bind, out, wgpu::LoadOp::Clear(BLACK));
             return;
@@ -500,9 +507,18 @@ impl PostStack {
             cur = dst;
         }
 
-        if s.vignette {
-            self.write_params(gpu, PostParams { a: [0.0; 4], b: [s.vignette_strength, s.vignette_radius, 0.0, 0.0] });
-            self.pass(gpu, &self.vignette_pipeline, &cur.bind, out, wgpu::LoadOp::Clear(BLACK));
+        // Terminal pass: vignette and/or posterize (one shader, no-op at identity
+        // params). Reuses the dead blur_dir lanes b.zw for posterize (bands, dither),
+        // so no uniform-layout change. Otherwise a straight passthrough copy to `out`.
+        if s.vignette || posterize_on {
+            let b = [
+                if s.vignette { s.vignette_strength } else { 0.0 },
+                if s.vignette { s.vignette_radius } else { 1.0 },
+                if posterize_on { s.posterize_bands as f32 } else { 0.0 },
+                if posterize_on && s.posterize_dither { 1.0 } else { 0.0 },
+            ];
+            self.write_params(gpu, PostParams { a: [0.0; 4], b });
+            self.pass(gpu, &self.finish_pipeline, &cur.bind, out, wgpu::LoadOp::Clear(BLACK));
         } else {
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });
             self.pass(gpu, &self.copy_pipeline, &cur.bind, out, wgpu::LoadOp::Clear(BLACK));

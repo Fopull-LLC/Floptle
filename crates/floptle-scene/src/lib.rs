@@ -332,6 +332,10 @@ pub enum MatterDoc {
         ao_strength: f32,
         #[serde(default = "default_ao_radius")]
         ao_radius: f32,
+        #[serde(default)]
+        posterize_bands: u32,
+        #[serde(default)]
+        posterize_dither: bool,
     },
 }
 
@@ -436,6 +440,8 @@ impl From<&Matter> for MatterDoc {
                 ao,
                 ao_strength,
                 ao_radius,
+                posterize_bands,
+                posterize_dither,
             } => MatterDoc::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -447,6 +453,8 @@ impl From<&Matter> for MatterDoc {
                 ao: (*ao).into(),
                 ao_strength: *ao_strength,
                 ao_radius: *ao_radius,
+                posterize_bands: *posterize_bands,
+                posterize_dither: *posterize_dither,
             },
         }
     }
@@ -488,6 +496,8 @@ impl MatterDoc {
                 ao,
                 ao_strength,
                 ao_radius,
+                posterize_bands,
+                posterize_dither,
             } => Matter::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -499,6 +509,8 @@ impl MatterDoc {
                 ao: ao.to_mode(),
                 ao_strength: *ao_strength,
                 ao_radius: *ao_radius,
+                posterize_bands: *posterize_bands,
+                posterize_dither: *posterize_dither,
             },
         }
     }
@@ -555,6 +567,10 @@ pub struct LightDoc {
     pub fog_start: f32,
     #[serde(default = "default_fog_end")]
     pub fog_end: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_dither: bool,
+    #[serde(default = "default_fog_dither_strength")]
+    pub fog_dither_strength: f32,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -571,6 +587,9 @@ fn default_fog_start() -> f32 {
 }
 fn default_fog_end() -> f32 {
     200.0
+}
+fn default_fog_dither_strength() -> f32 {
+    0.5
 }
 
 impl Default for LightDoc {
@@ -597,6 +616,8 @@ impl From<&Light> for LightDoc {
             fog_color: l.fog_color,
             fog_start: l.fog_start,
             fog_end: l.fog_end,
+            fog_dither: l.fog_dither,
+            fog_dither_strength: l.fog_dither_strength,
         }
     }
 }
@@ -619,6 +640,8 @@ impl LightDoc {
             fog_color: self.fog_color,
             fog_start: self.fog_start,
             fog_end: self.fog_end,
+            fog_dither: self.fog_dither,
+            fog_dither_strength: self.fog_dither_strength,
         }
     }
 }
@@ -1253,6 +1276,8 @@ mod tests {
             ao: AoMode::Sdf,
             ao_strength: 0.9,
             ao_radius: 1.25,
+            posterize_bands: 6,
+            posterize_dither: true,
         };
         world.insert(e, authored.clone());
 

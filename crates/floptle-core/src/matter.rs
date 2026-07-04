@@ -194,6 +194,10 @@ pub struct Light {
     pub fog_start: f32,
     /// World distance where fog is full (fully `fog_color` past this).
     pub fog_end: f32,
+    /// Dither the fog gradient to hide 8-bit banding on long, slow ramps.
+    pub fog_dither: bool,
+    /// Dither amplitude (0..1); scaled to a sub-percent nudge of the fog factor.
+    pub fog_dither_strength: f32,
 }
 
 impl Default for Light {
@@ -214,6 +218,8 @@ impl Default for Light {
             fog_color: [0.6, 0.65, 0.72],
             fog_start: 40.0,
             fog_end: 200.0,
+            fog_dither: false,
+            fog_dither_strength: 0.5,
         }
     }
 }
@@ -283,6 +289,12 @@ pub enum Matter {
         ao_strength: f32,
         /// Occlusion reach in world units.
         ao_radius: f32,
+        /// Posterize the final image to this many color levels per channel (a limited
+        /// palette / banded retro look). 0 or 1 = off; 2.. = on. Runs last, at the
+        /// composited (retro) resolution, so bands land on the same chunky pixels.
+        posterize_bands: u32,
+        /// Ordered-dither the posterize so smooth gradients don't hard-step.
+        posterize_dither: bool,
     },
 }
 
@@ -307,6 +319,8 @@ impl Matter {
             ao: AoMode::ScreenSpace,
             ao_strength: 0.7,
             ao_radius: 0.5,
+            posterize_bands: 0,
+            posterize_dither: false,
         }
     }
 }

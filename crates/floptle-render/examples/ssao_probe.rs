@@ -85,6 +85,8 @@ fn main() {
         ssao: false,
         ssao_strength: 0.8,
         ssao_radius: 0.7,
+        posterize_bands: 0,
+        posterize_dither: false,
     };
 
     // Pass 1: SSAO off (pure passthrough copy).

@@ -99,11 +99,15 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 }
 
 /// The depth-fog uniforms for the Lighting node: `(fog_color, fog_params)` where
-/// `fog_params = [start, end, on, 0]`. Fed to the raymarch/raster field globals AND
-/// the particle globals so meshes, matter, terrain and particles fog together.
+/// `fog_params = [start, end, on, dither_mode]` and the spare `fog_color.w` carries
+/// the effective dither strength (0 = off). Fed to the raymarch/raster field globals
+/// AND the particle globals so meshes, matter, terrain and particles fog together —
+/// and band-break identically. Packing into the two already-spare `.w` lanes keeps
+/// the uniform layout (and its byte-sync with the WGSL structs) unchanged.
 pub(crate) fn fog_uniforms(l: &Light) -> ([f32; 4], [f32; 4]) {
+    let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
     (
-        [l.fog_color[0], l.fog_color[1], l.fog_color[2], 0.0],
+        [l.fog_color[0], l.fog_color[1], l.fog_color[2], dither],
         [l.fog_start, l.fog_end.max(l.fog_start + 1e-3), if l.fog { 1.0 } else { 0.0 }, 0.0],
     )
 }
@@ -260,6 +264,8 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         ssao: false,
         ssao_strength: 0.7,
         ssao_radius: 0.5,
+        posterize_bands: 0,
+        posterize_dither: false,
     };
     for (_, m) in world.query::<Matter>() {
         if let Matter::PostProcess {
@@ -273,6 +279,8 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
             ao,
             ao_strength,
             ao_radius,
+            posterize_bands,
+            posterize_dither,
         } = m
         {
             if !enabled {
@@ -288,6 +296,8 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 ssao: *ao == AoMode::ScreenSpace,
                 ssao_strength: *ao_strength,
                 ssao_radius: *ao_radius,
+                posterize_bands: *posterize_bands,
+                posterize_dither: *posterize_dither,
             };
             let ao_p =
                 if *ao == AoMode::Sdf { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };

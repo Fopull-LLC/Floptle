@@ -91,6 +91,8 @@ fn main() {
         ssao: true,
         ssao_strength: 1.0,
         ssao_radius: 0.9,
+        posterize_bands: 6,
+        posterize_dither: true,
     };
     let clear = Some([0.55, 0.7, 0.9, 1.0]);
 

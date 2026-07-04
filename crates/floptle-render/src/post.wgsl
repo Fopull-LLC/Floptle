@@ -12,6 +12,7 @@
 struct P {
     a: vec4<f32>, // xy = texel (1/size of src), z = bloom_threshold, w = bloom_intensity
     b: vec4<f32>, // x = vignette_strength, y = vignette_radius, zw = blur_dir (texels)
+                  //   OR, in the terminal fs_finish pass: z = posterize bands, w = dither
 };
 @group(0) @binding(2) var<uniform> p: P;
 
@@ -79,12 +80,39 @@ fn fs_ssao_apply(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(c * ao, 1.0);
 }
 
-// Vignette: radial darkening toward the corners (last pass).
+// Bayer 4×4 ordered-dither threshold in (0,1) (standalone copy — see field.wgsl).
+fn bayer4(pix: vec2<u32>) -> f32 {
+    var m = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    return (f32(m[(pix.y % 4u) * 4u + (pix.x % 4u)]) + 0.5) / 16.0;
+}
+
+// Terminal color pass: vignette (radial darken) then optional posterize (quantize
+// each channel to a limited palette / band count). Both are no-ops at their
+// identity params (strength 0 / bands < 2), so this one pass serves vignette-only,
+// posterize-only, or both. Runs last, at the scene's composited (retro) resolution
+// and BEFORE the upscale, so the banding lands on the same chunky pixel grid.
 @fragment
-fn fs_vignette(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, in.uv).rgb;
+fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
+    var c = textureSample(tex, samp, in.uv).rgb;
+    // Vignette (skipped when strength p.b.x == 0; radius p.b.y = 1 is the identity).
     let d = distance(in.uv, vec2<f32>(0.5)) * 1.41421356; // 0 center .. ~1 corner
-    let v = smoothstep(1.0, p.b.y, d);                    // 1 inside radius → 0 at corners
-    let f = mix(1.0 - p.b.x, 1.0, v);
-    return vec4<f32>(c * f, 1.0);
+    let vg = smoothstep(1.0, p.b.y, d);                   // 1 inside radius → 0 at corners
+    c = c * mix(1.0 - p.b.x, 1.0, vg);
+    // Posterize: quantize to `bands` levels per channel in ~gamma space (perceptually
+    // even steps), with optional ordered dither so smooth ramps don't hard-step.
+    let bands = p.b.z;
+    if (bands >= 2.0) {
+        let scale = bands - 1.0;
+        let g = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)); // linear → ~gamma
+        var q = g * scale;
+        if (p.b.w > 0.5) {
+            let t = bayer4(vec2<u32>(u32(in.pos.x), u32(in.pos.y)));
+            q = floor(q + vec3<f32>(t));
+        } else {
+            q = floor(q + vec3<f32>(0.5)); // nearest level (= round)
+        }
+        let gq = clamp(q / scale, vec3<f32>(0.0), vec3<f32>(1.0));
+        c = pow(gq, vec3<f32>(2.2)); // ~gamma → linear
+    }
+    return vec4<f32>(c, 1.0);
 }
