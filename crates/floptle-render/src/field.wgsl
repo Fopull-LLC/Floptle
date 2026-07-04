@@ -60,6 +60,10 @@ struct Globals {
     prox_a: array<vec4<f32>, 32>,        // xyz center / capsule end A (camera-relative), w = radius
     prox_b: array<vec4<f32>, 32>,        // xyz capsule end B / box half-extents, w = kind (0 sphere, 1 capsule, 2 box)
     prox_rot: array<vec4<f32>, 32>,      // box orientation quat (xyzw)
+    // Depth fog (the Lighting node). Appended at the END so this struct stays
+    // byte-identical to the Rust `RaymarchGlobals` that feeds it.
+    fog_color: vec4<f32>,                // rgb = fog color (w unused)
+    fog_params: vec4<f32>,               // x start dist, y end dist, z on (0/1), w unused
 };
 
 fn sd_sphere(p: vec3<f32>, r: f32) -> f32 {
@@ -241,6 +245,19 @@ fn field_eps(p: vec3<f32>) -> f32 {
 // mode (ao_params: y = strength, z = radius in world units). Mesh fragments call
 // this too (the raster pass binds the field), so meshes RECEIVE field AO — they
 // just don't occlude, not being in the field themselves.
+// Depth fog: blend `color` toward the fog color by camera-relative distance. `pos`
+// is the camera-relative fragment position — the camera is the origin (ADR-0015), so
+// `length(pos)` is the view distance, a small number even at world 1e7 (no depth
+// reconstruction, no precision loss). Off (returns `color`) when fog_params.z == 0.
+fn apply_fog(color: vec3<f32>, pos: vec3<f32>) -> vec3<f32> {
+    if (G.fog_params.z < 0.5) {
+        return color;
+    }
+    let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
+    let f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    return mix(color, G.fog_color.rgb, f);
+}
+
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
     let radius = max(G.ao_params.z, 1e-3);
     var occ = 0.0;

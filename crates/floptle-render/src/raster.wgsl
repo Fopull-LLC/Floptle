@@ -111,7 +111,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
-        return vec4<f32>(albedo + emissive, alpha);
+        return vec4<f32>(apply_fog(albedo + emissive, in.view_pos), alpha);
     }
 
     // Field sun-shadows + true SDF AO, received from the fused field at group(2).
@@ -145,7 +145,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
 
-    return vec4<f32>(lit * occ + emissive, alpha);
+    return vec4<f32>(apply_fog(lit * occ + emissive, in.view_pos), alpha);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

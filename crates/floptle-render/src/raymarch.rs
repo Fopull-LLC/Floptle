@@ -104,6 +104,11 @@ pub struct RaymarchGlobals {
     pub prox_b: [[f32; 4]; 32],
     /// Per proxy: the box's orientation quaternion (xyzw); unused otherwise.
     pub prox_rot: [[f32; 4]; 32],
+    /// Depth fog: rgb = color (w unused). Appended at the END to stay byte-identical
+    /// to `struct Globals` in field.wgsl (which this uniform feeds).
+    pub fog_color: [f32; 4],
+    /// Depth fog: x = start dist, y = end dist, z = enabled (0/1), w unused.
+    pub fog_params: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -148,6 +153,8 @@ impl Default for RaymarchGlobals {
             prox_a: [[0.0; 4]; 32],
             prox_b: [[0.0; 4]; 32],
             prox_rot: [[0.0, 0.0, 0.0, 1.0]; 32],
+            fog_color: [0.0; 4],
+            fog_params: [0.0; 4],
         }
     }
 }
