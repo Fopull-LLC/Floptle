@@ -530,6 +530,10 @@ impl Editor {
             self.anim_ui.tab_visible = false; // re-armed by the tab each frame it draws
         }
 
+        // Bone attachments follow their mesh's bones while authoring too (uses the
+        // preview pose if the Animating tab is scrubbing, else the rig's rest pose).
+        anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
+
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
@@ -2127,9 +2131,13 @@ impl Editor {
                 }
                 sim.advance(&mut self.world, sdt, focus);
             }
+            // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
+            // character body), while animation only bent the bones — so a weapon on a
+            // bone must read the POST-physics mesh world or it swims a frame behind.
+            anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
             // Particles tick last: emitter node transforms are final for the frame
-            // (scripts → animation → physics → particles). Apply any play/stop/restart
-            // a script queued this frame first, so it takes effect immediately.
+            // (scripts → animation → physics → attachments → particles). Apply any
+            // play/stop/restart a script queued this frame first, so it lands now.
             let vfx_cmds = self.script_host.take_vfx_commands();
             self.vfx.apply_script_commands(&self.world, vfx_cmds);
             // Fire-and-forget one-shots a script requested this frame (spawnEffect).

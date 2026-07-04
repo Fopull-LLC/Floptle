@@ -22,7 +22,7 @@ use std::path::Path;
 use floptle_anim::{Clip, Controller, Interp, Layer, NodeChannels, SkelNode, Skeleton, State, Track, TransformTRS};
 use floptle_core::math::{Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
-use floptle_core::{AnimController, Entity, Matter, Name, World};
+use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
     AnimChannelDoc, AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimTrackDoc3, AnimTrackDoc4,
     ANIM_CLIP_EXT, ANIM_CTL_EXT,
@@ -678,6 +678,46 @@ pub fn apply_instance(
                     tr.scale = p.s;
                 }
             }
+        }
+    }
+}
+
+/// Make every `BoneAttach` node ride its target mesh's bone this frame. Writes the
+/// child's LOCAL transform = `bone_local · offset` (both in the mesh's model space);
+/// the ordinary [`floptle_core::world_transform`] parent-walk then re-applies the
+/// mesh's f64 world, so the attachment follows the bone jitter-free far from the
+/// origin and every consumer (render/physics/gizmo/particles) sees it through the one
+/// choke point. Uses the current animated pose when there is one, else the rig's rest
+/// pose (so it works at rest / with the anim tab closed). Cost = # of attachments.
+///
+/// MUST run AFTER animation AND physics (physics moves the mesh ROOT — the pose only
+/// bends the bones), and before anything reads the attached node's world transform.
+pub fn resolve_attachments(
+    system: &AnimSystem,
+    world: &mut World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+) {
+    // Collect the jobs first — can't hold the query borrow while mutating transforms.
+    let jobs: Vec<(Entity, Entity, String, Transform)> = world
+        .query::<BoneAttach>()
+        .map(|(e, a)| (e, a.target, a.bone.clone(), a.offset))
+        .collect();
+    for (child, target, bone, offset) in jobs {
+        let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(target) else { continue };
+        let Some(rig) = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref()) else { continue };
+        let Some(idx) = rig.skeleton.index_of(&bone) else { continue }; // bone gone after re-import
+        let bone_local = system
+            .poses
+            .get(&target)
+            .and_then(|p| p.get(idx))
+            .or_else(|| rig.rest_world.get(idx))
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        // Model-space: bone matrix · bone-local offset. Decomposed to the child's LOCAL
+        // transform; world_transform re-applies the mesh f64 world (Parent chain intact).
+        let local = Transform::from_matrix(bone_local.as_dmat4() * offset.world_matrix());
+        if let Some(t) = world.get_mut::<Transform>(child) {
+            *t = local;
         }
     }
 }

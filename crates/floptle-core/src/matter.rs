@@ -15,6 +15,27 @@ pub struct Name(pub String);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parent(pub crate::ecs::Entity);
 
+/// Rides a **bone / sub-object** of a rigged (node-preserving) `Matter::Mesh`, so a
+/// weapon, emitter, or pickup follows a character's hand/arm — including under
+/// animation. Lives ALONGSIDE [`Parent`]`(target)` (which keeps the node in the
+/// hierarchy and serializable): `Parent` says *under which mesh*, `BoneAttach` says
+/// *which bone under it*. Each frame `resolve_attachments` sets this node's LOCAL
+/// transform to `bone_local · offset` (both in the mesh's model space), and the
+/// ordinary [`world_transform`] parent-walk re-applies the mesh's f64 world — so the
+/// attachment stays jitter-free far from the origin and every consumer (render,
+/// physics, gizmo, particles) follows the bone through the one choke point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoneAttach {
+    /// The rigged Mesh entity this rides (kept equal to `Parent(target)`).
+    pub target: crate::ecs::Entity,
+    /// The skeleton node NAME (portable across re-import; resolved to an index each
+    /// frame via `Skeleton::index_of`, like animation clips).
+    pub bone: String,
+    /// The child's transform IN THE BONE'S LOCAL SPACE — seeded on attach so the node
+    /// doesn't jump, then editable to position it on the bone.
+    pub offset: crate::transform::Transform,
+}
+
 /// A procedural primitive shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
