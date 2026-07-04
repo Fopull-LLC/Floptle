@@ -128,7 +128,7 @@ impl Editor {
         if doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })) {
             return;
         }
-        let p = self.project;
+        let p = self.project.clone();
         if !(p.bloom || p.vignette) {
             return;
         }
@@ -645,7 +645,7 @@ fn empty_scene() -> floptle_scene::SceneDoc {
 }
 
 /// A tiny built-in scene used if `assets/scenes/first.ron` is missing.
-fn default_scene() -> floptle_scene::SceneDoc {
+pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
     use floptle_scene::*;
     SceneDoc {
         name: "first".into(),

@@ -653,11 +653,16 @@ impl LightDoc {
 /// Post-processing moved to the per-scene `PostProcess` node ([`MatterDoc::PostProcess`]);
 /// the `bloom`/`vignette` fields below are **legacy** — still read so an old
 /// `project.ron`'s look can be migrated onto a scene's node, but never written back.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProjectConfigDoc {
     pub retro: bool,
     pub retro_height: u32,
     pub matter: bool,
+    /// The engine version this project targets — written by the Hub / `--new`, read by
+    /// the Hub to launch the matching install. Advisory (the editor doesn't enforce it);
+    /// `None` on projects created before the Hub existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
     // Legacy post-processing (pre-PostProcess-node projects) — deserialize only.
     #[serde(default, skip_serializing)]
     pub bloom: bool,
@@ -699,6 +704,7 @@ impl ProjectConfigDoc {
             retro: true,
             retro_height: 240,
             matter: true,
+            engine_version: None,
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
             bloom_intensity: default_bloom_intensity(),

@@ -470,12 +470,126 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
 
 fn main() {
     env_logger::init();
+    // CLI surface the Hub (docs/hub-proposal.md) drives. --version / --new / --migrate run
+    // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
+    // of the default `assets/`.
+    let args: Vec<String> = std::env::args().collect();
+    let mut project_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--version" | "-V" => {
+                println!("{} {}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
+                return;
+            }
+            "--help" | "-h" => {
+                println!(
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]      open a project (default: assets/)\n  floptle-editor --new <DIR>       scaffold a new project and exit\n  floptle-editor --migrate <DIR>   migrate a project's assets to this version and exit\n  floptle-editor --version         print the engine version and exit",
+                    floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION
+                );
+                return;
+            }
+            "--new" => {
+                let Some(p) = args.get(i + 1) else {
+                    eprintln!("--new needs a <dir>");
+                    std::process::exit(2);
+                };
+                std::process::exit(new_project(Path::new(p)));
+            }
+            "--migrate" => {
+                let Some(p) = args.get(i + 1) else {
+                    eprintln!("--migrate needs a <dir>");
+                    std::process::exit(2);
+                };
+                std::process::exit(migrate_project(Path::new(p)));
+            }
+            s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
+            other => {
+                eprintln!("unknown argument: {other} (try --help)");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+
     println!("{} editor v{}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     // Gizmos/overlays on by default (toggle in the viewport).
     let mut editor = Editor { show_gizmos: true, ..Default::default() };
+    if let Some(p) = project_path {
+        editor.project_root = p;
+    }
     event_loop.run_app(&mut editor).expect("run editor");
+}
+
+/// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
+/// scene, a `project.ron` pinned to THIS engine version) without a window/GPU. Returns the
+/// process exit code.
+fn new_project(path: &Path) -> i32 {
+    if let Err(e) = std::fs::create_dir_all(path) {
+        eprintln!("could not create {}: {e}", path.display());
+        return 1;
+    }
+    // seed_project_dirs / project_cfg_path only touch the filesystem via project_root, so a
+    // Default editor (no GPU) is a valid headless context for them.
+    let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
+    ed.seed_project_dirs();
+    let scene = path.join("scenes/first.ron");
+    if !scene.exists()
+        && let Err(e) = floptle_scene::save(&crate::project::default_scene(), &scene)
+    {
+        eprintln!("could not write starter scene: {e}");
+        return 1;
+    }
+    let cfg = floptle_scene::ProjectConfigDoc {
+        engine_version: Some(floptle_core::ENGINE_VERSION.to_string()),
+        ..floptle_scene::ProjectConfigDoc::default()
+    };
+    if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
+        eprintln!("could not write project.ron: {e}");
+        return 1;
+    }
+    println!("created project at {}", path.display());
+    0
+}
+
+/// Headless `--migrate <dir>`: re-serialize every `.vfx.ron` (so the clip-emit migration
+/// persists) and stamp `project.ron`'s engine_version to THIS version. Best-effort — a file
+/// that fails to parse is left as-is. Returns the process exit code.
+fn migrate_project(path: &Path) -> i32 {
+    if !path.is_dir() {
+        eprintln!("{} is not a directory", path.display());
+        return 1;
+    }
+    // Recursively re-serialize effects (load runs migrate_clips), skipping hidden/target.
+    let mut stack = vec![path.to_path_buf()];
+    let mut migrated = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with('.') && name != "target" {
+                    stack.push(p);
+                }
+            } else if p.to_string_lossy().ends_with(floptle_scene::VFX_EXT)
+                && let Ok(doc) = floptle_scene::load_vfx_effect(&p)
+                && floptle_scene::save_vfx_effect(&doc, &p).is_ok()
+            {
+                migrated += 1;
+            }
+        }
+    }
+    // Stamp the project's engine version.
+    let cfg_path = path.join("project.ron");
+    let mut cfg = floptle_scene::load_project(&cfg_path);
+    cfg.engine_version = Some(floptle_core::ENGINE_VERSION.to_string());
+    let _ = floptle_scene::save_project(&cfg, &cfg_path);
+    println!("migrated {migrated} effect(s) in {}", path.display());
+    0
 }
 
 /// Seconds an F-key focus glide takes to settle.
@@ -900,9 +1014,11 @@ impl ApplicationHandler for Editor {
         if self.window.is_some() {
             return;
         }
-        // The default project is the repo's `assets/` folder; File ⏵ Open/New
-        // re-points this elsewhere.
-        self.project_root = PathBuf::from("assets");
+        // A project path from the CLI (the Hub launches `floptle-editor <project>`) wins;
+        // otherwise default to the repo's `assets/` folder. File ⏵ Open/New re-points it.
+        if self.project_root.as_os_str().is_empty() {
+            self.project_root = PathBuf::from("assets");
+        }
         self.dock_state = Some(default_dock());
         self.viewport_zoom = 0.9;
         self.terrain_detail = 64;
