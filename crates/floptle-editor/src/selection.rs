@@ -339,6 +339,25 @@ impl Editor {
     /// node's *local* transform when it has a parent (so dragging a child's gizmo
     /// edits its local placement, and parents still carry it).
     pub(crate) fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
+        // A bone-attached node's Transform is regenerated from BoneAttach.offset every
+        // frame by resolve_attachments, so writing Transform here would be clobbered next
+        // frame (the node snaps back onto the bone). Edit the offset instead — in the
+        // bone's world frame: offset = (mesh_world · bone_local)⁻¹ · world_xf.
+        if let Some(a) = self.world.get::<floptle_core::BoneAttach>(e).cloned()
+            && let Some(bone_world) = crate::anim::bone_world_matrix(
+                &self.anim,
+                &self.world,
+                &self.mesh_registry,
+                a.target,
+                &a.bone,
+            )
+        {
+            let offset = Transform::from_matrix(bone_world.inverse() * world_xf.world_matrix());
+            if let Some(at) = self.world.get_mut::<floptle_core::BoneAttach>(e) {
+                at.offset = offset;
+            }
+            return;
+        }
         let local = match self.world.get::<floptle_core::Parent>(e).copied() {
             None => world_xf,
             Some(floptle_core::Parent(p)) => {
