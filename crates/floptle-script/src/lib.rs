@@ -164,6 +164,12 @@ pub struct ScriptHost {
     /// the editor and applied to the controller runtimes before they advance — so intent
     /// set this frame lands this frame.
     anim_commands: Rc<RefCell<Vec<(u32, AnimCmd)>>>,
+    /// Particle-system state per entity (playing/alive/asset), fed by the editor
+    /// before `run` so scripts can read `node:particles():isPlaying()` / `:alive()`.
+    vfx_info: Rc<RefCell<HashMap<u32, VfxInfo>>>,
+    /// Particle commands scripts queued this frame (`node:particles():play()` etc.),
+    /// drained by the editor and applied before the effects advance.
+    vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
     /// Debug-draw commands scripts queued this frame (`gizmo.line(...)` etc.) —
     /// immediate mode: drained by the editor each frame and drawn for one frame.
     gizmos: Rc<RefCell<Vec<GizmoCmd>>>,
@@ -208,6 +214,30 @@ pub enum AnimCmd {
     SetLayerWeight { layer: String, weight: f32 },
     /// Scrub the current state of `layer` (`None` = base) to `t` seconds.
     Seek { t: f32, layer: Option<String> },
+}
+
+/// The particle-system state of one node, mirrored to scripts each frame so
+/// `node:particles():isPlaying()` / `:alive()` read live values.
+#[derive(Clone, Debug, Default)]
+pub struct VfxInfo {
+    /// A live effect instance is emitting/ageing on this node right now.
+    pub playing: bool,
+    /// Live particle count across the effect's tracks.
+    pub alive: u32,
+    /// The effect asset key the node's `ParticleSystem` references.
+    pub asset: String,
+}
+
+/// One queued `node:particles()` command, drained by the editor and applied to the
+/// live VFX instances before they advance (so intent set this frame lands this frame).
+#[derive(Clone, Debug)]
+pub enum VfxCmd {
+    /// Start the node's effect if it isn't already playing (spawns an instance).
+    Play,
+    /// Stop + despawn the node's effect (its live particles vanish).
+    Stop,
+    /// Restart from t = 0 (re-spawns a fresh instance) — re-fire a one-shot burst.
+    Restart,
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from
@@ -266,6 +296,10 @@ struct Shared {
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
     /// Animator commands queued by `node:animator()` handles this frame.
     anim_commands: Rc<RefCell<Vec<(u32, AnimCmd)>>>,
+    /// Particle-system mirror (entity → playing/alive/asset), fed by the editor.
+    vfx_info: Rc<RefCell<HashMap<u32, VfxInfo>>>,
+    /// Particle commands queued by `node:particles()` handles this frame.
+    vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
 }
 
 /// A physics body's state exposed to its node's scripts.
@@ -292,7 +326,7 @@ mod tests {
     use std::path::Path;
 
     use floptle_core::math::EulerRot;
-    use floptle_core::{Matter, RigidBody, Visible};
+    use floptle_core::{Matter, ParticleSystem, RigidBody, Visible};
 
     use super::*;
     
@@ -584,6 +618,57 @@ mod tests {
         let logs = host.drain_logs();
         assert!(logs.iter().any(|l| l.level == LogLevel::Error), "expected an error log: {logs:?}");
         assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "broken")), "error lacks source: {logs:?}");
+    }
+
+    #[test]
+    fn particles_api_queues_commands_and_reads_state() {
+        let dir = std::env::temp_dir().join("floptle_script_test_vfx");
+        let _ = std::fs::create_dir_all(&dir);
+        // First frame: not playing → play(). Once the editor reports it playing, read
+        // alive() into node.y.
+        write_script(
+            &dir,
+            "smoke",
+            "function update(node, dt)\n  local p = node:particles()\n  if p:isPlaying() then node.y = p:alive() else p:play() end\nend\n",
+        );
+        let (mut world, e) = world_with_script("smoke");
+        world.insert(e, ParticleSystem { asset: "vfx/Smoke".into(), play_on_start: false });
+        let mut host = ScriptHost::new();
+
+        // Frame 1: empty info → isPlaying() false → the script queues play().
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let cmds = host.take_vfx_commands();
+        assert_eq!(cmds.len(), 1, "play() must queue exactly one command");
+        assert!(matches!(cmds[0], (idx, VfxCmd::Play) if idx == e.index()), "wrong cmd: {cmds:?}");
+
+        // Frame 2: the editor reports it playing with 12 alive → the script reads alive().
+        host.set_vfx_info(HashMap::from([(
+            e.index(),
+            VfxInfo { playing: true, alive: 12, asset: "vfx/Smoke".into() },
+        )]));
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            12.0,
+            "alive() must read the fed count"
+        );
+        assert!(host.take_vfx_commands().is_empty(), "no play() when already playing");
+    }
+
+    #[test]
+    fn getcomponent_toggles_particle_play_on_start() {
+        let dir = std::env::temp_dir().join("floptle_script_test_vfx_comp");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "arm",
+            "function update(node, dt)\n  node:getcomponent('ParticleSystem').play_on_start = 1\nend\n",
+        );
+        let (mut world, e) = world_with_script("arm");
+        world.insert(e, ParticleSystem { asset: "vfx/Smoke".into(), play_on_start: false });
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(world.get::<ParticleSystem>(e).unwrap().play_on_start, "field must flush to the ECS");
     }
 
     #[test]

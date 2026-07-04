@@ -2057,6 +2057,9 @@ impl Editor {
             // Feed each animator's state (layers/current/time) so scripts can read
             // anim:state()/:time()/:clips() this frame.
             self.script_host.set_anim_info(anim::build_info(&self.anim));
+            // Feed each particle node's state so scripts can read
+            // node:particles():isPlaying()/:alive() this frame.
+            self.script_host.set_vfx_info(self.vfx.script_info(&self.world));
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
@@ -2122,7 +2125,10 @@ impl Editor {
                 sim.advance(&mut self.world, sdt, focus);
             }
             // Particles tick last: emitter node transforms are final for the frame
-            // (scripts → animation → physics → particles).
+            // (scripts → animation → physics → particles). Apply any play/stop/restart
+            // a script queued this frame first, so it takes effect immediately.
+            let vfx_cmds = self.script_host.take_vfx_commands();
+            self.vfx.apply_script_commands(&self.world, vfx_cmds);
             self.vfx.advance(&self.world, sdt);
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();

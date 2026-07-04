@@ -200,6 +200,53 @@ impl VfxSystem {
         }
     }
 
+    /// The per-node particle state scripts read via `node:particles()`: one entry per
+    /// ParticleSystem node — `playing`/`alive` from its live instance (if any) plus the
+    /// effect asset key. Fed to the script host before each Play-mode script frame.
+    pub fn script_info(&self, world: &World) -> HashMap<u32, floptle_script::VfxInfo> {
+        let mut out = HashMap::new();
+        for (e, ps) in world.query::<ParticleSystem>() {
+            let inst = self.instances.get(&e);
+            out.insert(
+                e.index(),
+                floptle_script::VfxInfo {
+                    playing: inst.is_some(),
+                    alive: inst.map(|(_, i)| i.alive() as u32).unwrap_or(0),
+                    asset: ps.asset.clone(),
+                },
+            );
+        }
+        out
+    }
+
+    /// Apply the particle commands scripts queued this frame (`node:particles():play()`
+    /// / `:stop()` / `:restart()`) to the live instances, before they advance — so a
+    /// script that starts an effect this frame sees it emit this frame.
+    pub fn apply_script_commands(&mut self, world: &World, cmds: Vec<(u32, floptle_script::VfxCmd)>) {
+        for (eid, cmd) in cmds {
+            // Resolve the entity (with generation) + its effect asset from the index.
+            let Some((e, key)) = world
+                .query::<ParticleSystem>()
+                .find(|(e, _)| e.index() == eid)
+                .map(|(e, ps)| (e, ps.asset.clone()))
+            else {
+                continue;
+            };
+            match cmd {
+                // Play only if idle; Restart always re-spawns a fresh instance at t=0.
+                floptle_script::VfxCmd::Play => {
+                    if !self.instances.contains_key(&e) {
+                        self.spawn(e, &key);
+                    }
+                }
+                floptle_script::VfxCmd::Restart => self.spawn(e, &key),
+                floptle_script::VfxCmd::Stop => {
+                    self.instances.remove(&e);
+                }
+            }
+        }
+    }
+
     /// Pack this frame's billboards — every live play instance plus (when
     /// `include_preview`, i.e. outside Play) the Particles tab's preview —
     /// resolving track texture paths through the editor's registered-texture map.

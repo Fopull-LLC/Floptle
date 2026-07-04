@@ -25,7 +25,8 @@ type GizmoRayArgs = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Opt
 type GizmoBallArgs = (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 use crate::{
     error_line, gizmo_color, install_handle_api, AnimCmd, AnimInfo, BodyState, GizmoCmd,
-    InputSnapshot, Instance, LogLevel, SceneMirror, ScriptHost, ScriptLog, Shared, Source,
+    InputSnapshot, Instance, LogLevel, SceneMirror, ScriptHost, ScriptLog, Shared, Source, VfxCmd,
+    VfxInfo,
 };
 
 impl Default for ScriptHost {
@@ -385,6 +386,8 @@ impl ScriptHost {
             component_changes: Rc::new(RefCell::new(HashMap::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
+            vfx_info: Rc::new(RefCell::new(HashMap::new())),
+            vfx_commands: Rc::new(RefCell::new(Vec::new())),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -413,6 +416,8 @@ impl ScriptHost {
             mouse_lock,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
+            vfx_info: shared.vfx_info.clone(),
+            vfx_commands: shared.vfx_commands.clone(),
             gizmos,
         }
     }
@@ -427,6 +432,18 @@ impl ScriptHost {
     /// them to the controller runtimes before advancing them.
     pub fn take_anim_commands(&self) -> Vec<(u32, AnimCmd)> {
         std::mem::take(&mut *self.anim_commands.borrow_mut())
+    }
+
+    /// Feed each particle node's live state for this frame (before `run`), so scripts
+    /// can read `node:particles():isPlaying()` / `:alive()`.
+    pub fn set_vfx_info(&self, map: HashMap<u32, VfxInfo>) {
+        *self.vfx_info.borrow_mut() = map;
+    }
+
+    /// Drain the particle commands scripts queued this frame — the editor applies
+    /// them to the live VFX instances before advancing them.
+    pub fn take_vfx_commands(&self) -> Vec<(u32, VfxCmd)> {
+        std::mem::take(&mut *self.vfx_commands.borrow_mut())
     }
 
     /// Drain the debug-draw commands scripts queued this frame (`gizmo.*`) — the
@@ -475,6 +492,8 @@ impl ScriptHost {
     pub fn clear_anim_state(&self) {
         self.anim_info.borrow_mut().clear();
         self.anim_commands.borrow_mut().clear();
+        self.vfx_info.borrow_mut().clear();
+        self.vfx_commands.borrow_mut().clear();
     }
 
     /// Drain a pending `input.lockMouse()` / `input.unlockMouse()` request from this frame:

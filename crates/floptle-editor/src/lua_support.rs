@@ -49,6 +49,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|nil Live component handle (RigidBody / PointLight), nil if the node lacks it.
+---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.
@@ -76,6 +77,16 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+
+---A node's Particle System, controlled from a script via `node:particles()`.
+---Start/stop the effect at runtime and read whether it's playing.
+---@class ParticleSystemHandle
+---@field play fun(self: ParticleSystemHandle) Start emitting if idle (spawns a fresh instance).
+---@field stop fun(self: ParticleSystemHandle) Stop + despawn — the live particles vanish.
+---@field restart fun(self: ParticleSystemHandle) Re-spawn from t=0 (re-fire a one-shot burst).
+---@field isPlaying fun(self: ParticleSystemHandle): boolean Is an instance emitting/ageing right now?
+---@field alive fun(self: ParticleSystemHandle): number Live particle count across the effect's tracks.
+---@field asset fun(self: ParticleSystemHandle): string|nil The effect asset key this node references.
 
 ---This instance's tunables, seeded from the script's `defaults` table.
 ---@type table<string, number>
