@@ -539,15 +539,17 @@ impl EditorTabViewer<'_> {
         let cur_idx = effects.iter().position(|(k, _)| *k == cur_key);
         let cur_name = cur_idx.map(|i| effects[i].1.clone()).unwrap_or_else(|| cur_key.clone());
         let mut pick: Option<String> = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Effect");
             let n = effects.len();
             if ui.add_enabled(n > 1, egui::Button::new("◀").small()).on_hover_text("previous effect").clicked() {
                 let i = cur_idx.unwrap_or(0);
                 pick = Some(effects[(i + n - 1) % n].0.clone());
             }
+            // Shrink the picker on a narrow panel so it never overflows the header.
+            let combo_w = (ui.available_width() - 60.0).clamp(90.0, 240.0);
             egui::ComboBox::from_id_salt("vfx_switcher")
-                .width(240.0)
+                .width(combo_w)
                 .selected_text(format!("✨ {cur_name}"))
                 .show_ui(ui, |ui| {
                     for (k, name) in &effects {
@@ -604,7 +606,9 @@ fn anchor_for(world: &World, key: &str) -> Option<floptle_core::Entity> {
 // ---------------------------------------------------------------------------
 
 fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
-    ui.horizontal(|ui| {
+    // Wrapped so a narrow/vertical panel flows the controls onto extra rows instead
+    // of overlapping (no right-to-left sub-layout to collide with the left widgets).
+    ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(format!("✨ {}", doc.name)).strong());
         ui.separator();
         if ui.button("⏮").on_hover_text("to start").clicked() {
@@ -683,46 +687,44 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
             *dirty = true;
         }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            egui::ComboBox::from_id_salt("vfx_snap")
-                .width(64.0)
-                .selected_text(if st.snap_fps > 0.0 {
-                    format!("{} fps", st.snap_fps as u32)
-                } else {
-                    "free".into()
-                })
-                .show_ui(ui, |ui| {
-                    for (v, l) in [
-                        (0.0, "free"),
-                        (8.0, "8 fps"),
-                        (12.0, "12 fps"),
-                        (24.0, "24 fps"),
-                        (30.0, "30 fps"),
-                        (60.0, "60 fps"),
-                    ] {
-                        if ui.selectable_label(st.snap_fps == v, l).clicked() {
-                            st.snap_fps = v;
-                        }
+        ui.separator();
+        ui.label("🔍");
+        let mut z = st.zoom;
+        if ui
+            .add(egui::DragValue::new(&mut z).speed(2.0).range(ZOOM_MIN..=ZOOM_MAX).suffix(" px/s"))
+            .on_hover_text(
+                "horizontal zoom. Over the timeline: scroll = zoom, Alt+scroll = row \
+                 height, Shift+scroll = pan.",
+            )
+            .changed()
+        {
+            st.zoom = z;
+        }
+        if ui.button("Fit").on_hover_text("zoom to fit the whole effect (F)").clicked() {
+            st.fit_pending = true;
+        }
+        ui.label("snap").on_hover_text("quantize drags + the playhead to a frame grid");
+        egui::ComboBox::from_id_salt("vfx_snap")
+            .width(64.0)
+            .selected_text(if st.snap_fps > 0.0 {
+                format!("{} fps", st.snap_fps as u32)
+            } else {
+                "free".into()
+            })
+            .show_ui(ui, |ui| {
+                for (v, l) in [
+                    (0.0, "free"),
+                    (8.0, "8 fps"),
+                    (12.0, "12 fps"),
+                    (24.0, "24 fps"),
+                    (30.0, "30 fps"),
+                    (60.0, "60 fps"),
+                ] {
+                    if ui.selectable_label(st.snap_fps == v, l).clicked() {
+                        st.snap_fps = v;
                     }
-                });
-            ui.label("snap").on_hover_text("quantize drags + the playhead to a frame grid");
-            ui.separator();
-            if ui.button("Fit").on_hover_text("zoom to fit the whole effect (F)").clicked() {
-                st.fit_pending = true;
-            }
-            let mut z = st.zoom;
-            if ui
-                .add(egui::DragValue::new(&mut z).speed(2.0).range(ZOOM_MIN..=ZOOM_MAX).suffix(" px/s"))
-                .on_hover_text(
-                    "horizontal zoom. Over the timeline: scroll = zoom, Alt+scroll = row \
-                     height, Shift+scroll = pan.",
-                )
-                .changed()
-            {
-                st.zoom = z;
-            }
-            ui.label("🔍");
-        });
+                }
+            });
     });
 }
 

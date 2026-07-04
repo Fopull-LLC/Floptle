@@ -94,14 +94,27 @@ impl EditorTabViewer<'_> {
 
         let track = &mut doc.tracks[ti];
         egui::ScrollArea::vertical().id_salt("vfx_track_insp").show(ui, |ui| {
-            look_section(ui, track, &tex_list, &model_list, &mut dirty);
-            ui.separator();
-            emission_section(ui, ti, track, &mut dirty);
-            ui.separator();
-            particle_section(ui, track, st, &mut dirty);
-            ui.separator();
-            forces_section(ui, track, &mut dirty);
-            ui.separator();
+            // Collapsible sections so a track's controls stay scannable — collapse the
+            // ones you're not touching. Look/Emission/Life open by default.
+            let section = |ui: &mut egui::Ui, id: &str, title: &str, open: bool, body: &mut dyn FnMut(&mut egui::Ui)| {
+                egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+                    .id_salt(id)
+                    .default_open(open)
+                    .show(ui, |ui| body(ui));
+            };
+            section(ui, "vfx_look", "🎨  Look", true, &mut |ui| {
+                look_section(ui, track, &tex_list, &model_list, &mut dirty)
+            });
+            section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
+                emission_section(ui, ti, track, &mut dirty)
+            });
+            section(ui, "vfx_life", "📈  Over each particle's life", true, &mut |ui| {
+                particle_section(ui, track, st, &mut dirty)
+            });
+            section(ui, "vfx_forces", "💨  Forces", false, &mut |ui| {
+                forces_section(ui, track, &mut dirty)
+            });
+            ui.add_space(2.0);
             selected_point_section(ui, ti, track, st, dur, &mut dirty);
         });
 
@@ -156,7 +169,6 @@ fn look_section(
     model_list: &[String],
     dirty: &mut bool,
 ) {
-    ui.strong("Look");
     // Render mode: billboard (textured quad) vs instanced mesh.
     let is_mesh = matches!(track.render, VfxRenderDoc::Mesh { .. });
     egui::ComboBox::from_id_salt("vfx_rendermode")
@@ -366,7 +378,6 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
 }
 
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
-    ui.strong("Emission");
     ui.horizontal(|ui| {
         ui.label("rate");
         *dirty |= ui
@@ -453,8 +464,7 @@ fn particle_section(
     st: &mut crate::vfx_ui::VfxUiState,
     dirty: &mut bool,
 ) {
-    ui.strong("Over each particle's life");
-    ui.small("hover the value, tap 📈 to animate it into a curve");
+    ui.small("hover a value, tap 📈 to animate it over the particle's life");
     let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
     *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr);
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
@@ -485,23 +495,18 @@ fn particle_section(
 fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
     use VfxForceDoc as F;
     let mut add: Option<F> = None;
-    ui.horizontal(|ui| {
-        ui.strong("Forces");
-        ui.menu_button("＋", |ui| {
-            for (lbl, f) in [
-                ("💨 wind (directional)", F::Directional { dir: [0.0, 1.0, 0.0], strength: 2.0 }),
-                ("🎯 attractor (point)", F::Point { center: [0.0, 0.0, 0.0], strength: 3.0 }),
-                ("🌀 vortex", F::Vortex { center: [0.0; 3], axis: [0.0, 1.0, 0.0], strength: 3.0 }),
-                ("〰 turbulence", F::Turbulence { frequency: 0.5, strength: 2.0 }),
-            ] {
-                if ui.button(lbl).clicked() {
-                    add = Some(f);
-                    ui.close();
-                }
+    ui.menu_button("＋ add force", |ui| {
+        for (lbl, f) in [
+            ("💨 wind (directional)", F::Directional { dir: [0.0, 1.0, 0.0], strength: 2.0 }),
+            ("🎯 attractor (point)", F::Point { center: [0.0, 0.0, 0.0], strength: 3.0 }),
+            ("🌀 vortex", F::Vortex { center: [0.0; 3], axis: [0.0, 1.0, 0.0], strength: 3.0 }),
+            ("〰 turbulence", F::Turbulence { frequency: 0.5, strength: 2.0 }),
+        ] {
+            if ui.button(lbl).clicked() {
+                add = Some(f);
+                ui.close();
             }
-        })
-        .response
-        .on_hover_text("add a force field");
+        }
     });
     if let Some(f) = add {
         track.forces.push(f);
