@@ -1943,7 +1943,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(\"RigidBody\" | \"PointLight\") — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. RigidBody (every Inspector tunable): friction, restitution, gravity (true/false, reads 1/0), shape (0 sphere / 1 capsule / 2 box), radius, height, half_x/y/z (box half-extents), lock_x/y/z + lock_rot_x/y/z (axis freezes). PointLight: intensity, range, r, g, b. e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
+    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(\"RigidBody\" | \"PointLight\") — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. RigidBody (every Inspector tunable): friction, restitution, gravity (true/false, reads 1/0), shape (0 sphere / 1 capsule / 2 box), radius, height, half_x/y/z (box half-extents), lock_x/y/z + lock_rot_x/y/z (axis freezes). PointLight: intensity, range, r, g, b. ParticleSystem: play_on_start (1/0). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice. (To play/stop effects at runtime use node:particles().)" },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
     ApiEntry { label: "anim:restart", insert: ":restart(", doc: "anim:restart(\"Attack\" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot)." },
@@ -1957,6 +1957,13 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:finished", insert: ":finished(", doc: "anim:finished([layer]) — true when a non-looped state reached its end this frame (or stays true while holding the last frame)." },
     ApiEntry { label: "anim:isPlaying", insert: ":isPlaying(", doc: "anim:isPlaying([state]) — is that state playing on any layer (or anything at all, with no argument)?" },
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
+    ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
+    ApiEntry { label: "particles:play", insert: ":play()", doc: "particles:play() — start emitting if the effect is idle (spawns a fresh instance). No-op if already playing." },
+    ApiEntry { label: "particles:stop", insert: ":stop()", doc: "particles:stop() — stop + despawn the effect; its live particles vanish." },
+    ApiEntry { label: "particles:restart", insert: ":restart()", doc: "particles:restart() — re-spawn from t=0 (re-fire a one-shot burst, e.g. a muzzle flash on each shot)." },
+    ApiEntry { label: "particles:isPlaying", insert: ":isPlaying()", doc: "particles:isPlaying() — true while an instance is emitting/ageing on this node." },
+    ApiEntry { label: "particles:alive", insert: ":alive()", doc: "particles:alive() — live particle count across the effect's tracks (0 when stopped)." },
+    ApiEntry { label: "particles:asset", insert: ":asset()", doc: "particles:asset() — the effect asset key this node's Particle System references, or nil." },
     ApiEntry { label: "math.sin", insert: "math.sin(", doc: "math.sin(x) — sine of x (radians)." },
     ApiEntry { label: "math.cos", insert: "math.cos(", doc: "math.cos(x) — cosine of x (radians)." },
     ApiEntry { label: "math.rad", insert: "math.rad(", doc: "math.rad(deg) — degrees to radians." },
@@ -2164,6 +2171,26 @@ a rigged model's embedded clips). Drive states from gameplay:
     local speed = math.sqrt(node.vx ^ 2 + node.vz ^ 2)
     anim:play(speed > 4 and \"Run\" or (speed > 0.1 and \"Walk\" or \"Idle\"))
     if input.clicked(0) then anim:restart(\"Attack\") end",
+    ),
+    (
+        "Particles — node:particles()",
+        "\
+node:particles() controls the node's Particle System component from a script —
+start and stop effects on cue, and read their live state:
+
+  local p = node:particles()
+  • p:play()        start emitting if idle (spawns a fresh instance)
+  • p:stop()        stop + despawn — the live particles vanish
+  • p:restart()     re-spawn from t=0 (re-fire a one-shot burst)
+  Getters: p:isPlaying()   p:alive()   p:asset()
+
+    -- muzzle flash on each shot; thruster smoke only while accelerating
+    if input.clicked(0) then node:particles():restart() end
+    local jet = find(\"Thruster\"):particles()
+    if input.key('w') then jet:play() else jet:stop() end
+
+You can also arm a node to auto-play (or not) at spawn:
+    node:getcomponent(\"ParticleSystem\").play_on_start = 1",
     ),
     (
         "Globals — params, time, dt, log",

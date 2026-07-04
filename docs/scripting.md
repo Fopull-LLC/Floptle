@@ -18,10 +18,11 @@ it up immediately.
 7. [Assets & swapping models / materials](#7-assets--swapping-models--materials)
 8. [Referencing other nodes & scripts](#8-referencing-other-nodes--scripts)
 9. [Animation: `node:animator()`](#9-animation-nodeanimator)
-10. [Recipe: a walkable first-person character](#10-recipe-a-walkable-first-person-character)
-11. [Bundled example scripts](#11-bundled-example-scripts)
-12. [The in-engine IDE](#12-the-in-engine-ide)
-13. [Tips & gotchas](#13-tips--gotchas)
+10. [Particles: `node:particles()`](#10-particles-nodeparticles)
+11. [Recipe: a walkable first-person character](#11-recipe-a-walkable-first-person-character)
+12. [Bundled example scripts](#12-bundled-example-scripts)
+13. [The in-engine IDE](#13-the-in-engine-ide)
+14. [Tips & gotchas](#14-tips--gotchas)
 
 ---
 
@@ -419,7 +420,42 @@ name a function; when the playhead crosses it during Play, that function is
 called (with the node) on every script attached to the controller's node that
 defines it.
 
-## 10. Recipe: a walkable first-person character
+## 10. Particles: `node:particles()`
+
+Any node with a **Particle System** component exposes a particle handle, so
+scripts can fire and stop effects on cue — muzzle flashes, footstep dust,
+thruster plumes, pickups. See `docs/particle-system-proposal.md` for authoring
+effects on the ❋ Particles timeline.
+
+```lua
+function update(node, dt)
+  local p = node:particles()
+
+  -- one-shot burst on each shot (re-fires even mid-play):
+  if input.clicked(0) then p:restart() end
+
+  -- a continuous effect that follows a condition:
+  local jet = find("Thruster"):particles()
+  if input.key("w") then jet:play() else jet:stop() end
+
+  if p:isPlaying() then log("smoke: " .. p:alive() .. " alive") end
+end
+```
+
+| Call | What it does |
+|---|---|
+| `p:play()` | start emitting if idle (spawns a fresh instance); no-op if already playing |
+| `p:stop()` | stop + despawn — the live particles vanish |
+| `p:restart()` | re-spawn from `t=0` (re-fire a one-shot burst) |
+| `p:isPlaying()` | is an instance emitting/ageing right now |
+| `p:alive()` | live particle count across the effect's tracks |
+| `p:asset()` | the effect asset key this node references, or `nil` |
+
+> Handles work cross-node: `find("Campfire"):particles():stop()`. A node's
+> **Play on start** flag is also scriptable —
+> `node:getcomponent("ParticleSystem").play_on_start = 1`.
+
+## 11. Recipe: a walkable first-person character
 
 No glue code required:
 
@@ -454,7 +490,7 @@ function update(node, dt)
 end
 ```
 
-## 11. Bundled example scripts
+## 12. Bundled example scripts
 
 Every project ships these under `scripts/` — open one for a working start:
 
@@ -468,7 +504,7 @@ Every project ships these under `scripts/` — open one for a working start:
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |
 
-## 12. The in-engine IDE
+## 13. The in-engine IDE
 
 Double-click a `.lua` in Assets (or use the Inspector's Scripting section) to
 open it in the **Scripting** tab — a small but real code editor:
@@ -500,7 +536,7 @@ open it in the **Scripting** tab — a small but real code editor:
 
 The full shortcut list lives on the tab's **§ Docs** page.
 
-## 13. Tips & gotchas
+## 14. Tips & gotchas
 
 - **Run, then Play:** scripts only execute while the game is playing (F1). Stop
   restores the scene to its pre-Play state.

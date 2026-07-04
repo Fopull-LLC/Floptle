@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use floptle_core::math::{EulerRot, Quat, Vec3};
-use floptle_core::{Entity, Matter, RigidBody, World};
+use floptle_core::{Entity, Matter, ParticleSystem, RigidBody, World};
 use mlua::{Lua, Table, Value};
 
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
-use crate::{AnimCmd, AnimInfo, Shared};
+use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
 
 /// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
 /// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
@@ -28,6 +28,12 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
                 ("g".to_string(), color[1] as f64),
                 ("b".to_string(), color[2] as f64),
             ]),
+        );
+    }
+    if let Some(ps) = world.get::<ParticleSystem>(e) {
+        out.insert(
+            "ParticleSystem".to_string(),
+            HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
     if let Some(rb) = world.get::<RigidBody>(e) {
@@ -65,6 +71,13 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
 /// [`mirror_components`]). Unknown component/field names are ignored.
 pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
     match comp {
+        "ParticleSystem" => {
+            if let Some(ps) = world.get_mut::<ParticleSystem>(ent)
+                && field == "play_on_start"
+            {
+                ps.play_on_start = val != 0.0;
+            }
+        }
         "PointLight" => {
             if let Some(Matter::PointLight { color, intensity, range }) = world.get_mut::<Matter>(ent) {
                 match field {
@@ -756,6 +769,76 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 let t = lua.create_table()?;
                 t.raw_set("__id", e)?;
                 if let Ok(mt) = lua.named_registry_value::<Table>("floptle_anim_mt") {
+                    t.set_metatable(Some(mt));
+                }
+                Ok(t)
+            })?,
+        )?;
+    }
+    // node:particles() → the particle-system handle: play / stop / restart the node's
+    // ParticleSystem effect, and read its live state. Setters queue into `vfx_commands`
+    // (applied before the effects advance, same frame); getters read the `vfx_info`
+    // mirror the editor feeds each frame.
+    {
+        let vfx_methods = lua.create_table()?;
+        for (name, cmd) in
+            [("play", VfxCmd::Play), ("stop", VfxCmd::Stop), ("restart", VfxCmd::Restart)]
+        {
+            let cmds = shared.vfx_commands.clone();
+            let cmd = cmd.clone();
+            vfx_methods.set(
+                name,
+                lua.create_function(move |_, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    cmds.borrow_mut().push((e, cmd.clone()));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.vfx_info.clone();
+            vfx_methods.set(
+                "isPlaying",
+                lua.create_function(move |_, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    Ok(Value::Boolean(inf.borrow().get(&e).map(|i| i.playing).unwrap_or(false)))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.vfx_info.clone();
+            vfx_methods.set(
+                "alive",
+                lua.create_function(move |_, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    Ok(Value::Number(inf.borrow().get(&e).map(|i| i.alive as f64).unwrap_or(0.0)))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.vfx_info.clone();
+            vfx_methods.set(
+                "asset",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    match inf.borrow().get(&e) {
+                        Some(i) => Ok(Value::String(lua.create_string(&i.asset)?)),
+                        None => Ok(Value::Nil),
+                    }
+                })?,
+            )?;
+        }
+        let vfx_mt = lua.create_table()?;
+        vfx_mt.set("__index", vfx_methods)?;
+        lua.set_named_registry_value("floptle_vfx_mt", vfx_mt)?;
+
+        methods.set(
+            "particles",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let t = lua.create_table()?;
+                t.raw_set("__id", e)?;
+                if let Ok(mt) = lua.named_registry_value::<Table>("floptle_vfx_mt") {
                     t.set_metatable(Some(mt));
                 }
                 Ok(t)
