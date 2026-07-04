@@ -4,6 +4,15 @@
 > boundary stub today; this doc records the target so the engine keeps the right
 > seams. See [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §10, the deterministic sim
 > in [`./physics.md`](./physics.md), and [`../ROADMAP.md`](../ROADMAP.md) "Later".
+>
+> **⚠ Scope update (2026-07-04):** the **technical foundation below stands** (roles,
+> replication, the `Transport` trait, authoritative dedicated servers), but the
+> "*your server, your infra — not a platform*" stance in §7 has been **superseded by
+> [ADR-0022 — Networking & Floptle Cloud](../decisions/0022-networking-and-cloud.md)**
+> and the [networking proposal](../networking-proposal.md). Self-hosting stays
+> first-class *and* Fopull now offers an optional managed service (relay,
+> matchmaking, dedicated hosting) as an open-source-friendly way to fund the engine.
+> Read §7's "out of scope: matchmaking / hosted backend" as **no longer current.**
 
 This is **explicitly deferred** — sequenced *after* the single-player engine is
 solid. We design for it now only enough to avoid painting ourselves into a corner.
