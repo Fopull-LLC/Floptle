@@ -53,6 +53,23 @@ enum Tab {
     About,
 }
 
+/// Force `project.ron`'s `engine_version` to `version`. The HUB is the authority on which
+/// engine it installed/selected, so it corrects whatever the editor subprocess stamped —
+/// this keeps create/upgrade correct even against an OLDER editor binary that ignores
+/// `--engine-version` and writes its own compiled-in version (the exact reason a bundle
+/// installed as "0.1.0" could otherwise pin projects to "0.0.0"). Best-effort and
+/// idempotent: uses the same `save_project` the editor does, so the file stays byte-for-byte
+/// what the editor would have written; a missing/unparseable config is left untouched.
+fn pin_engine_version(project_dir: &std::path::Path, version: &str) {
+    let cfg_path = project_dir.join("project.ron");
+    if let Ok(Some(mut cfg)) = floptle_scene::try_load_project(&cfg_path)
+        && cfg.engine_version.as_deref() != Some(version)
+    {
+        cfg.engine_version = Some(version.to_string());
+        let _ = floptle_scene::save_project(&cfg, &cfg_path);
+    }
+}
+
 enum ManifestState {
     Idle,
     Loading(Receiver<Result<Manifest, String>>),
@@ -341,6 +358,9 @@ impl HubApp {
                 .status()
             {
                 Ok(s) if s.success() => {
+                    // Authoritatively pin the picked version, correcting an older binary
+                    // that stamped its own compiled-in version.
+                    pin_engine_version(&path, &pin);
                     let mut p = Project { name, path, engine_version: None, last_opened: None };
                     p.refresh();
                     ProcOutcome::Created(p)
@@ -408,7 +428,12 @@ impl HubApp {
                 .arg(&pin)
                 .status()
             {
-                Ok(s) if s.success() => ProcOutcome::Upgraded(idx),
+                Ok(s) if s.success() => {
+                    // The Hub is the authority: re-point the pin even if the target binary
+                    // is old and re-stamped its own version.
+                    pin_engine_version(&path, &pin);
+                    ProcOutcome::Upgraded(idx)
+                }
                 Ok(_) => ProcOutcome::Failed("migration exited with an error".into()),
                 Err(e) => ProcOutcome::Failed(format!("upgrade failed: {e}")),
             };
@@ -944,5 +969,37 @@ impl HubApp {
             ui.add_space(4.0);
             ui.small(format!("© 2026 {COMPANY}. All rights reserved."));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pin_engine_version;
+
+    #[test]
+    fn pin_corrects_a_stale_engine_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("project.ron");
+        // Simulate what an OLD editor binary wrote: pinned to the workspace 0.0.0.
+        let stale = floptle_scene::ProjectConfigDoc {
+            engine_version: Some("0.0.0".into()),
+            ..floptle_scene::ProjectConfigDoc::default()
+        };
+        floptle_scene::save_project(&stale, &cfg_path).unwrap();
+
+        // The Hub corrects it to the version it actually installed.
+        pin_engine_version(tmp.path(), "0.1.0");
+        assert_eq!(
+            floptle_scene::load_project(&cfg_path).engine_version.as_deref(),
+            Some("0.1.0")
+        );
+    }
+
+    #[test]
+    fn pin_is_a_noop_without_a_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No project.ron — nothing to correct, and nothing is fabricated.
+        pin_engine_version(tmp.path(), "0.1.0");
+        assert!(!tmp.path().join("project.ron").exists());
     }
 }
