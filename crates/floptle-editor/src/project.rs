@@ -174,9 +174,23 @@ impl Editor {
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
                 let rig = anim::rig_from_model(&model);
+                let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
+                let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(
                     path.to_string(),
                     MeshAsset { parts, size: model.size, rig: Some(rig) },
+                );
+                // Surface the import stats to the Console so an incomplete import (e.g. a
+                // Blender Mirror modifier that wasn't applied at export, which drops half
+                // the geometry) is visible — the missing half lives in the .glb, not here.
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "imported {path} — rigged: {} part(s) ({skinned} skinned), {verts} verts, {} clip(s)",
+                        model.parts.len(),
+                        model.clips.len()
+                    ),
+                    None,
                 );
                 println!("  imported {path} (rigged, {} clip(s))", model.clips.len());
                 return true;

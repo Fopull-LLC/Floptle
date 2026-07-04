@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use floptle_anim::{Clip, Controller, Interp, Layer, NodeChannels, SkelNode, Skeleton, State, Track, TransformTRS};
-use floptle_core::math::{Mat4, Quat, Vec3};
+use floptle_core::math::{Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
@@ -44,6 +44,72 @@ pub struct RigAsset {
     /// Placement offset (recenters the authored rig on the node origin —
     /// kept OUT of the skeleton/clips so extracted clips stay portable).
     pub offset: Mat4,
+    /// Per registered part (parallel to `part_nodes`): `Some` for a TRUE vertex-skinned
+    /// part (its bind vertices + per-vertex joints/weights + bone palette inputs), which
+    /// the draw path CPU-deforms each frame; `None` for a rigid-parented part (drawn at
+    /// its node matrix, R6-style). This is what makes a skinned character actually move.
+    pub skins: Vec<Option<SkinnedPart>>,
+}
+
+/// CPU vertex-skinning data for one part: the bind-pose vertices plus everything needed
+/// to deform them by the animated skeleton each frame (see [`cpu_skin_part`]).
+pub struct SkinnedPart {
+    /// Bind-pose vertices (skin space), CPU-skinned into a scratch buffer per frame.
+    pub base: Vec<floptle_render::Vertex>,
+    /// Per-vertex joint indices (into `joint_nodes`) + weights (parallel to `base`).
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+    /// Skeleton node index for each palette slot.
+    pub joint_nodes: Vec<usize>,
+    /// glTF inverse-bind matrix per palette slot.
+    pub inverse_bind: Vec<Mat4>,
+}
+
+/// CPU vertex-skin one part: deform its bind vertices by the bone palette
+/// (`node_world[joint_node] · inverse_bind`) into `out`. `node_world` is the skeleton's
+/// per-node world matrices for this frame (`AnimSystem::poses[e]`, or the rig rest).
+/// Zero-weight vertices fall back to the mesh node's own matrix, matching the importer's
+/// zero-weight pad. Positions and normals are transformed; UVs pass through.
+pub fn cpu_skin_part(
+    part: &SkinnedPart,
+    part_node: usize,
+    node_world: &[Mat4],
+    out: &mut Vec<floptle_render::Vertex>,
+) {
+    let palette: Vec<Mat4> = part
+        .joint_nodes
+        .iter()
+        .zip(&part.inverse_bind)
+        .map(|(&jn, ib)| node_world.get(jn).copied().unwrap_or(Mat4::IDENTITY) * *ib)
+        .collect();
+    let fallback = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
+    out.clear();
+    out.reserve(part.base.len());
+    for (vi, v) in part.base.iter().enumerate() {
+        let j = part.joints[vi];
+        let w = part.weights[vi];
+        let wsum = w[0] + w[1] + w[2] + w[3];
+        let m = if wsum > 1e-4 {
+            let mut acc = Mat4::ZERO;
+            for k in 0..4 {
+                if w[k] > 0.0
+                    && let Some(p) = palette.get(j[k] as usize)
+                {
+                    acc += *p * (w[k] / wsum);
+                }
+            }
+            acc
+        } else {
+            fallback
+        };
+        let pos = m.transform_point3(Vec3::from(v.pos));
+        let normal = (Mat3::from_mat4(m) * Vec3::from(v.normal)).normalize_or_zero();
+        out.push(floptle_render::Vertex {
+            pos: pos.to_array(),
+            normal: normal.to_array(),
+            uv: v.uv,
+        });
+    }
 }
 
 /// How a bound controller instance applies its pose.
@@ -887,6 +953,19 @@ pub fn rig_from_model(model: &floptle_assets::RiggedModel) -> RigAsset {
         part_nodes: model.parts.iter().map(|p| p.node).collect(),
         rest_world,
         offset,
+        skins: model
+            .parts
+            .iter()
+            .map(|p| {
+                p.skin.as_ref().map(|s| SkinnedPart {
+                    base: p.mesh.vertices.clone(),
+                    joints: s.joints.clone(),
+                    weights: s.weights.clone(),
+                    joint_nodes: s.joint_nodes.clone(),
+                    inverse_bind: s.inverse_bind.clone(),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -924,6 +1003,48 @@ pub fn new_clip_key(project_root: &Path, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
+    /// a bone translates the vertices weighted to it while others stay put — a two-joint
+    /// blend interpolates. This is the math that makes a vertex-skinned mesh (Ty) animate.
+    #[test]
+    fn cpu_skin_bind_is_identity_and_bones_deform() {
+        let v = |p: [f32; 3]| floptle_render::Vertex { pos: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] };
+        // Two joints: joint0 at origin, joint1 translated +Y by 1. inverse_bind = inverse
+        // of each joint's bind-world matrix (the glTF invariant jointBind·invBind = I).
+        let bind0 = Mat4::IDENTITY;
+        let bind1 = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
+        let part = SkinnedPart {
+            base: vec![v([0.0, 0.0, 0.0]), v([0.0, 1.0, 0.0]), v([0.0, 0.5, 0.0])],
+            joints: vec![[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0]],
+            weights: vec![[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0]],
+            joint_nodes: vec![0, 1],
+            inverse_bind: vec![bind0.inverse(), bind1.inverse()],
+        };
+        let mut out = Vec::new();
+        // Bind pose (node_world == bind world): vertices unchanged.
+        cpu_skin_part(&part, 0, &[bind0, bind1], &mut out);
+        assert!((Vec3::from(out[0].pos) - Vec3::new(0.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((Vec3::from(out[1].pos) - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-5);
+        assert!((Vec3::from(out[2].pos) - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-5);
+        // Animate joint1 by +X 2: its weighted vertex[1] moves +X 2; vertex[0] (joint0)
+        // stays; vertex[2] (50/50) moves +X 1.
+        let anim1 = Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0));
+        cpu_skin_part(&part, 0, &[bind0, anim1], &mut out);
+        assert!((Vec3::from(out[0].pos) - Vec3::new(0.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((Vec3::from(out[1].pos) - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-5);
+        assert!((Vec3::from(out[2].pos) - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-5);
+        // A zero-weight vertex falls back to the part-node matrix (importer's pad).
+        let part2 = SkinnedPart {
+            base: vec![v([1.0, 0.0, 0.0])],
+            joints: vec![[0, 0, 0, 0]],
+            weights: vec![[0.0, 0.0, 0.0, 0.0]],
+            joint_nodes: vec![0],
+            inverse_bind: vec![Mat4::IDENTITY],
+        };
+        cpu_skin_part(&part2, 0, &[Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0))], &mut out);
+        assert!((Vec3::from(out[0].pos) - Vec3::new(1.0, 5.0, 0.0)).length() < 1e-5);
+    }
 
     /// End-to-end on the real test model: extraction (bake to name-keyed docs)
     /// then rebinding against the same skeleton must reproduce the pose.

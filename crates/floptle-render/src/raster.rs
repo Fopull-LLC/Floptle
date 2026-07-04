@@ -533,6 +533,16 @@ impl Raster {
         id
     }
 
+    /// Re-upload a registered mesh's vertex data in place (its buffer is `COPY_DST`).
+    /// Used by CPU vertex skinning to push each frame's deformed vertices. `verts` must
+    /// have the same length the mesh was registered with (the index buffer is unchanged);
+    /// a mismatch or unknown id is ignored.
+    pub fn update_mesh_vertices(&self, gpu: &Gpu, id: MeshId, verts: &[Vertex]) {
+        if let Some(m) = self.meshes.get(id.0 as usize) {
+            gpu.queue.write_buffer(&m.gpu_mesh.vbuf, 0, bytemuck::cast_slice(verts));
+        }
+    }
+
     fn ensure_instances(&mut self, gpu: &Gpu, count: u32) {
         if count <= self.instance_cap {
             return;

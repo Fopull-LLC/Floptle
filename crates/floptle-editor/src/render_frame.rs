@@ -603,6 +603,8 @@ impl Editor {
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
+        // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part).
+        let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
         if let Some((path, pos)) = &drag_ghost
             && let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
@@ -649,17 +651,22 @@ impl Editor {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         if let Some(rig) = asset.rig.as_ref() {
-                            // Rigged: each part rides its (possibly animated) node.
-                            let node_world =
-                                self.anim.poses.get(e).unwrap_or(&rig.rest_world);
+                            // Rigged: each part either rides its (possibly animated) node
+                            // rigidly (R6-style), or — for a TRUE vertex-skinned part
+                            // (Ty) — is CPU-deformed by the bone palette this frame and
+                            // drawn at the mesh matrix. Skinned deform makes the mesh bend;
+                            // rigid placement never would (why Ty looked frozen).
+                            let node_world = self.anim.poses.get(e).unwrap_or(&rig.rest_world);
                             for (i, &mid) in asset.parts.iter().enumerate() {
-                                let local = rig
-                                    .part_nodes
-                                    .get(i)
-                                    .and_then(|&n| node_world.get(n))
-                                    .copied()
-                                    .unwrap_or(Mat4::IDENTITY);
-                                instances.push((mid, tex, instance_of_mat(model * local, &mp)));
+                                let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
+                                if let Some(Some(skin)) = rig.skins.get(i) {
+                                    anim::cpu_skin_part(skin, part_node, node_world, &mut skin_scratch);
+                                    raster.update_mesh_vertices(gpu, mid, &skin_scratch);
+                                    instances.push((mid, tex, instance_of_mat(model, &mp)));
+                                } else {
+                                    let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
+                                    instances.push((mid, tex, instance_of_mat(model * local, &mp)));
+                                }
                             }
                         } else {
                             for &mid in &asset.parts {
