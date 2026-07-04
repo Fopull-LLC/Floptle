@@ -352,9 +352,14 @@ impl Editor {
                 &a.bone,
             )
         {
-            let offset = Transform::from_matrix(bone_world.inverse() * world_xf.world_matrix());
-            if let Some(at) = self.world.get_mut::<floptle_core::BoneAttach>(e) {
-                at.offset = offset;
+            // Guard against a degenerate bone frame (e.g. a zero-scale mesh) whose inverse
+            // is non-finite — writing a NaN offset would corrupt the attachment.
+            let offset_m = bone_world.inverse() * world_xf.world_matrix();
+            if offset_m.is_finite() {
+                let offset = Transform::from_matrix(offset_m);
+                if let Some(at) = self.world.get_mut::<floptle_core::BoneAttach>(e) {
+                    at.offset = offset;
+                }
             }
             return;
         }

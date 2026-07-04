@@ -458,24 +458,37 @@ fn fold_lanes_tint(lanes: &[Lane], lifetime: f32) -> Prop4 {
     Prop4::Lut(s)
 }
 
-impl Track {
-    /// Upper bound on simultaneously live particles, summed over clips: a stream can hold
-    /// `rate × lifetime`; a burst-train can hold `count × pulses` (all pulses' particles
-    /// alive at once in the worst case). Jitter widens both.
-    fn derive_capacity(&self) -> u32 {
-        let mut total = 0.0f32;
-        for c in &self.clips {
-            let life = c.lifetime() * (1.0 + c.lifetime_jitter.clamp(0.0, 1.0));
-            total += match c.emit {
-                Emit::Rate { rate } => rate.max(0.0) * life,
-                Emit::Burst { count, count_jitter, pulses, .. } => {
-                    count as f32 * (1.0 + count_jitter.clamp(0.0, 1.0)) * pulses.max(1) as f32
-                }
-            };
-        }
-        (total.ceil() as u32).clamp(1, 65_536)
-    }
+/// Peak value of a folded scalar lane over the whole timeline (the max the emission
+/// multiplier can reach), floored at 1 so a lane that only attenuates never shrinks the
+/// pool budget below the un-automated size.
+fn prop1_peak(p: &Prop1) -> f32 {
+    let m = match p {
+        Prop1::Const(v) => *v,
+        Prop1::Range(a, b) => a.max(*b),
+        Prop1::Lut(s) => s.iter().copied().fold(0.0f32, f32::max),
+    };
+    m.max(1.0)
+}
 
+/// Upper bound on simultaneously live particles, summed over clips: a stream can hold
+/// `rate × lifetime`; a burst-train can hold `count × pulses` (all pulses' particles
+/// alive at once in the worst case). Jitter widens both, and the peak Rate/Count
+/// automation multipliers scale them so a lane swell above 1× isn't silently clipped.
+fn derive_capacity(clips: &[Clip], rate_peak: f32, count_peak: f32) -> u32 {
+    let mut total = 0.0f32;
+    for c in clips {
+        let life = c.lifetime() * (1.0 + c.lifetime_jitter.clamp(0.0, 1.0));
+        total += match c.emit {
+            Emit::Rate { rate } => rate.max(0.0) * rate_peak * life,
+            Emit::Burst { count, count_jitter, pulses, .. } => {
+                count as f32 * (1.0 + count_jitter.clamp(0.0, 1.0)) * count_peak * pulses.max(1) as f32
+            }
+        };
+    }
+    (total.ceil() as u32).clamp(1, 65_536)
+}
+
+impl Track {
     fn compile(&self, lifetime: f32) -> CompiledTrack {
         let mut clips = self.clips.clone();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -496,6 +509,15 @@ impl Track {
                 }
             }
         }
+        // Fold the emission-scaling lanes first so the derived pool is sized for their
+        // PEAK multiplier (a Rate/Count swell above 1× would otherwise overflow and drop
+        // spawns silently).
+        let lane_rate = fold_lanes1(&self.automation, LaneTarget::Rate, lifetime);
+        let lane_count = fold_lanes1(&self.automation, LaneTarget::Count, lifetime);
+        let capacity = self
+            .max_alive
+            .unwrap_or_else(|| derive_capacity(&clips, prop1_peak(&lane_rate), prop1_peak(&lane_count)))
+            .max(1);
         CompiledTrack {
             name: self.name.clone(),
             enabled: self.enabled,
@@ -503,7 +525,7 @@ impl Track {
             space: self.space,
             clips,
             shape: self.shape,
-            capacity: self.max_alive.unwrap_or_else(|| self.derive_capacity()).max(1),
+            capacity,
             velocity: bake4(&self.velocity, 1.0),
             velocity_is_curve: matches!(self.velocity, ValueOrCurve::Curve(_)),
             size: bake1(&self.size, 1.0),
@@ -513,8 +535,8 @@ impl Track {
             gravity: self.gravity,
             drag: self.drag.max(0.0),
             forces: self.forces.clone(),
-            lane_rate: fold_lanes1(&self.automation, LaneTarget::Rate, lifetime),
-            lane_count: fold_lanes1(&self.automation, LaneTarget::Count, lifetime),
+            lane_rate,
+            lane_count,
             lane_speed: fold_lanes1(&self.automation, LaneTarget::Speed, lifetime),
             lane_size: fold_lanes1(&self.automation, LaneTarget::Size, lifetime),
             lane_tint: fold_lanes_tint(&self.automation, lifetime),
@@ -559,7 +581,37 @@ mod tests {
             ],
             ..Track::default()
         };
-        assert_eq!(t.derive_capacity(), 22);
+        assert_eq!(t.compile(2.0).capacity, 22);
+    }
+
+    #[test]
+    fn capacity_accounts_for_rate_and_count_lane_swells() {
+        // A 3× Count lane must triple the burst pool budget so the swell isn't clipped.
+        let lane = |target| Lane {
+            target,
+            curve: Curve {
+                keys: vec![Key::new(0.0, Value::F32(3.0)), Key::new(1.0, Value::F32(3.0))],
+                extrapolate: Default::default(),
+            },
+        };
+        let burst = Track {
+            clips: vec![Clip {
+                start: 0.0,
+                end: 1.0,
+                lifetime_jitter: 0.0,
+                emit: Emit::Burst { count: 100, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+            }],
+            automation: vec![lane(LaneTarget::Count)],
+            ..Track::default()
+        };
+        assert_eq!(burst.compile(1.0).capacity, 300, "3x Count lane sizes the pool for 300");
+        // A rate stream with a 3× Rate lane: 10/s × 3 × 2 s life = 60.
+        let stream = Track {
+            clips: vec![Clip { start: 0.0, end: 2.0, lifetime_jitter: 0.0, emit: Emit::Rate { rate: 10.0 } }],
+            automation: vec![lane(LaneTarget::Rate)],
+            ..Track::default()
+        };
+        assert_eq!(stream.compile(1.0).capacity, 60);
     }
 
     #[test]
