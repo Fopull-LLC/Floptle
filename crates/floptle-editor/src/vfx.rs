@@ -448,6 +448,42 @@ pub fn particle_globals(
     }
 }
 
+/// Reserved keys + display labels for the built-in primitive meshes offered in the VFX
+/// mesh-render picker, so a mesh track isn't limited to user `.glb` assets. Registered
+/// into `mesh_registry` at startup (main.rs `resumed`); they then resolve by key exactly
+/// like an imported model, and `ensure_vfx_assets`' disk-import for a `builtin://…` key is
+/// a no-op because the key is already present. This slice is the single source of truth
+/// for which built-ins exist — both the registration and the picker read it.
+pub(crate) const BUILTIN_PARTICLE_MESHES: &[(&str, &str)] = &[
+    ("builtin://sphere", "● Sphere"),
+    ("builtin://cube", "■ Cube"),
+    ("builtin://capsule", "▮ Capsule"),
+    ("builtin://pyramid", "▲ Pyramid"),
+    ("builtin://cone", "◣ Cone"),
+    ("builtin://cylinder", "▯ Cylinder"),
+];
+
+/// Geometry for a built-in particle-mesh key (see [`BUILTIN_PARTICLE_MESHES`]). Sized to
+/// roughly a unit extent so a particle `size` of 1.0 ≈ one world unit; `None` for any key
+/// not in the table.
+pub(crate) fn builtin_particle_mesh_data(key: &str) -> Option<floptle_render::MeshData> {
+    use floptle_render::{capsule, cone, cube, cylinder, pyramid, uv_sphere};
+    Some(match key {
+        "builtin://sphere" => uv_sphere(0.5, 24, 36),
+        "builtin://cube" => cube(0.5),
+        "builtin://capsule" => capsule(0.35, 0.4, 16, 24),
+        "builtin://pyramid" => pyramid(0.5, 1.0),
+        "builtin://cone" => cone(0.5, 1.0, 32),
+        "builtin://cylinder" => cylinder(0.5, 0.5, 32),
+        _ => return None,
+    })
+}
+
+/// The picker label for a built-in mesh key, or `None` for a user asset path.
+pub(crate) fn builtin_particle_mesh_label(key: &str) -> Option<&'static str> {
+    BUILTIN_PARTICLE_MESHES.iter().find(|(k, _)| *k == key).map(|(_, l)| *l)
+}
+
 /// A starter effect for "Add Component › Particle System (new)": a small looping
 /// fountain so the node visibly emits the moment Play starts.
 pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {

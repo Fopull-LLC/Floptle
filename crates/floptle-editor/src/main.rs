@@ -928,6 +928,17 @@ impl ApplicationHandler for Editor {
         self.mesh_ids = vec![cube_id, sphere_id, capsule_id];
         self.raymarch = Some(Raymarch::new(&gpu));
 
+        // Built-in primitive meshes for particle mesh-render tracks (see vfx.rs). Reserved
+        // `builtin://…` keys in mesh_registry so the VFX picker offers stock shapes and
+        // resolve_mesh_particles finds them by key like any imported model.
+        for (key, _) in crate::vfx::BUILTIN_PARTICLE_MESHES {
+            if let Some(data) = crate::vfx::builtin_particle_mesh_data(key) {
+                let id = raster.register(&gpu, &data, None);
+                self.mesh_registry
+                    .insert((*key).to_string(), MeshAsset { parts: vec![id], size: 1.0, rig: None });
+            }
+        }
+
         // Seed the project folder structure + default assets, then load the scene,
         // project settings, materials and asset tree from `project_root`.
         self.seed_project_dirs();
