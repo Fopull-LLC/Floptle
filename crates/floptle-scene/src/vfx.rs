@@ -92,6 +92,23 @@ pub enum VfxBlendDoc {
     Additive,
 }
 
+/// How a billboard quad is oriented in the world (billboard tracks only).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VfxOrientDoc {
+    /// Always faces the camera (classic billboard) — the default, so old files keep
+    /// their look.
+    #[default]
+    FaceCamera,
+    /// Stretched along the particle's velocity (sprays, sparks, rain).
+    Velocity,
+    /// Upright, locked to the world up-axis, yawing to the camera (flames, grass).
+    Vertical,
+    /// Flat on the ground, normal pointing up (decals, shockwaves, ripples).
+    Horizontal,
+    /// Fixed to the particle's birth (emit-direction) orientation (debris, cards).
+    WorldFixed,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VfxSpaceDoc {
     #[default]
@@ -163,6 +180,15 @@ pub struct VfxTrackDoc {
     pub render: VfxRenderDoc,
     #[serde(default)]
     pub blend: VfxBlendDoc,
+    /// How a billboard quad is aligned in the world (billboard tracks only).
+    #[serde(default, skip_serializing_if = "is_face_camera")]
+    pub orient: VfxOrientDoc,
+    /// Billboard width-to-height ratio (1 = square).
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub aspect: f32,
+    /// Velocity-orientation length multiplier (1 = neutral).
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub stretch: f32,
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
@@ -246,6 +272,12 @@ fn is_true(b: &bool) -> bool {
 fn one_f32() -> f32 {
     1.0
 }
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
+}
+fn is_face_camera(o: &VfxOrientDoc) -> bool {
+    matches!(o, VfxOrientDoc::FaceCamera)
+}
 fn ten_f32() -> f32 {
     10.0
 }
@@ -327,6 +359,9 @@ mod tests {
                 enabled: true,
                 render: VfxRenderDoc::Billboard { texture: Some("vfx/crescent.png".into()) },
                 blend: VfxBlendDoc::Additive,
+                orient: VfxOrientDoc::Velocity,
+                aspect: 0.5,
+                stretch: 2.0,
                 lit: false,
                 cast_shadows: false,
                 space: VfxSpaceDoc::Local,
@@ -408,5 +443,46 @@ mod tests {
         assert_eq!(doc.playback, VfxPlaybackDoc::Looping);
         assert!(doc.tracks.is_empty());
         assert_eq!(doc.seed, 1);
+    }
+
+    #[test]
+    fn pre_orientation_track_defaults_to_face_camera_square() {
+        // A track authored before orientation existed (no orient/aspect/stretch)
+        // must load as a plain camera-facing square billboard — no visual change.
+        let doc: VfxEffectDoc = ron::from_str(
+            r#"(name: "Old", tracks: [(name: "T", render: Billboard(texture: Some("x.png")))])"#,
+        )
+        .unwrap();
+        let t = &doc.tracks[0];
+        assert_eq!(t.orient, VfxOrientDoc::FaceCamera);
+        assert_eq!(t.aspect, 1.0);
+        assert_eq!(t.stretch, 1.0);
+    }
+
+    #[test]
+    fn default_orientation_fields_are_omitted_from_ron() {
+        // The common case (face-camera, square) must not bloat the file.
+        let doc = VfxEffectDoc {
+            name: "Clean".into(),
+            lifetime: 1.0,
+            playback: VfxPlaybackDoc::OneShot,
+            end: VfxEndDoc::Destroy,
+            seed: 1,
+            tracks: vec![VfxTrackDoc {
+                orient: VfxOrientDoc::FaceCamera,
+                aspect: 1.0,
+                stretch: 1.0,
+                ..minimal_track()
+            }],
+        };
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        assert!(!text.contains("orient"), "default orient must be skipped");
+        assert!(!text.contains("aspect"), "default aspect must be skipped");
+        assert!(!text.contains("stretch"), "default stretch must be skipped");
+    }
+
+    /// A minimal track for tests that only care about a couple of fields.
+    fn minimal_track() -> VfxTrackDoc {
+        ron::from_str(r#"(name: "T")"#).unwrap()
     }
 }

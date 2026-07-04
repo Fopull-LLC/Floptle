@@ -477,6 +477,12 @@ fn sample_shape(shape: EmitShape, scale: f32, seed: u32) -> (Vec3, Vec3) {
 pub struct ParticleSample {
     /// Emitter-space position (`Space::Local`; the caller applies the node matrix).
     pub pos: Vec3,
+    /// Emitter-space instantaneous velocity — the motion axis for velocity-aligned
+    /// billboards. The caller rotates it into world/camera-relative space.
+    pub velocity: Vec3,
+    /// Birth orientation (the emit-direction frame): the plane of a `WorldFixed`
+    /// billboard, so debris keeps the pose it was fired with.
+    pub frame: Quat,
     pub size: f32,
     /// Euler rotation in radians `(x=pitch, y=yaw, z=roll)` — base rotation plus the
     /// angular velocity integrated over the particle's age.
@@ -504,8 +510,21 @@ impl EffectInstance {
             // Rotation = base Euler over life + angular velocity integrated over age.
             let rotation = ct.rotation.sample_vec3_rand(u, rand01(seed, SALT_ROTATION))
                 + ct.angular_velocity.sample_vec3_rand(u, rand01(seed, SALT_ANGULAR)) * age;
+            // Instantaneous velocity for velocity-aligned billboards: the integrated
+            // component plus, for kinematic tracks, the re-sampled base (mirrors
+            // `integrate` so the drawn motion axis matches the actual motion).
+            let frame = {
+                let q = p.frame[i];
+                Quat::from_xyzw(q.x, q.y, q.z, q.w)
+            };
+            let mut velocity = p.vel_life[i].truncate();
+            if ct.velocity_is_curve {
+                velocity += frame * ct.velocity.sample_vec3(u) * p.misc[i].y;
+            }
             f(ParticleSample {
                 pos: p.pos_age[i].truncate(),
+                velocity,
+                frame,
                 size: ct.size.sample_rand(u, rand01(seed, SALT_SIZE)) * p.misc[i].x,
                 rotation,
                 color,

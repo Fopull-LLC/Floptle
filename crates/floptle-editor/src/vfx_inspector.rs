@@ -6,7 +6,7 @@
 //! [`crate::curve_edit`]); automation lanes shape birth values over effect time.
 
 use floptle_scene::{
-    VfxBlendDoc, VfxInterpDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
+    VfxBlendDoc, VfxInterpDoc, VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
@@ -159,7 +159,7 @@ fn look_section(
     egui::ComboBox::from_id_salt("vfx_rendermode")
         .selected_text(if is_mesh { "3D mesh" } else { "billboard" })
         .show_ui(ui, |ui| {
-            if ui.selectable_label(!is_mesh, "billboard (camera-facing quad)").clicked() && is_mesh {
+            if ui.selectable_label(!is_mesh, "billboard (flat quad)").clicked() && is_mesh {
                 track.render = VfxRenderDoc::Billboard { texture: None };
                 *dirty = true;
             }
@@ -222,10 +222,18 @@ fn look_section(
             ui.small("mesh particles are lit + sun-shadowed like scene meshes");
         }
     }
-    // Lighting / shadow opt-ins (off by default — proposal §5).
-    ui.horizontal(|ui| {
-        *dirty |= ui.checkbox(&mut track.lit, "lit").on_hover_text("full scene lighting per particle").changed();
-        *dirty |= ui.checkbox(&mut track.cast_shadows, "casts shadow").on_hover_text("the track's cloud darkens the ground (aggregate proxy)").changed();
+    // Billboard alignment: how the quad is oriented in the world (billboards only).
+    if !is_mesh {
+        orient_editor(ui, track, dirty);
+    }
+    // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
+    // MESH particles — the billboard pass draws unlit textured quads — so grey them
+    // out for billboards rather than offering a dead knob.
+    ui.add_enabled_ui(is_mesh, |ui| {
+        ui.horizontal(|ui| {
+            *dirty |= ui.checkbox(&mut track.lit, "lit").on_hover_text("full scene lighting per particle (mesh particles only)").changed();
+            *dirty |= ui.checkbox(&mut track.cast_shadows, "casts shadow").on_hover_text("the track's cloud darkens the ground — aggregate proxy (mesh particles only)").changed();
+        });
     });
     egui::ComboBox::from_id_salt("vfx_space")
         .selected_text(match track.space {
@@ -242,6 +250,60 @@ fn look_section(
         });
 }
 
+/// A human label + one-line hint for each billboard alignment mode.
+fn orient_label(o: VfxOrientDoc) -> (&'static str, &'static str) {
+    match o {
+        VfxOrientDoc::FaceCamera => ("face camera", "classic billboard — always turns its flat side to you"),
+        VfxOrientDoc::Velocity => ("velocity (stretched)", "stretched along the particle's motion — sparks, rain, speed lines"),
+        VfxOrientDoc::Vertical => ("upright (axis-locked)", "stands up on the world Y axis, yawing to you — flames, grass"),
+        VfxOrientDoc::Horizontal => ("flat on ground", "lies flat in the ground plane — decals, shockwaves, ripples"),
+        VfxOrientDoc::WorldFixed => ("world-fixed (birth)", "keeps the pose it was fired with — debris, cards"),
+    }
+}
+
+/// Billboard alignment picker + aspect + (for velocity) stretch. This is what makes
+/// a quad NOT face the camera.
+fn orient_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
+    const ALL: [VfxOrientDoc; 5] = [
+        VfxOrientDoc::FaceCamera,
+        VfxOrientDoc::Velocity,
+        VfxOrientDoc::Vertical,
+        VfxOrientDoc::Horizontal,
+        VfxOrientDoc::WorldFixed,
+    ];
+    ui.horizontal(|ui| {
+        ui.label("align").on_hover_text("how the flat quad is oriented in the world");
+        egui::ComboBox::from_id_salt("vfx_orient")
+            .width(168.0)
+            .selected_text(orient_label(track.orient).0)
+            .show_ui(ui, |ui| {
+                for o in ALL {
+                    let (lbl, hint) = orient_label(o);
+                    if ui.selectable_label(track.orient == o, lbl).on_hover_text(hint).clicked()
+                        && track.orient != o
+                    {
+                        track.orient = o;
+                        *dirty = true;
+                    }
+                }
+            });
+    });
+    ui.horizontal(|ui| {
+        ui.label("aspect");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.aspect).speed(0.02).range(0.05..=20.0))
+            .on_hover_text("width ÷ height. 1 = square, >1 = wide, <1 = tall")
+            .changed();
+        if track.orient == VfxOrientDoc::Velocity {
+            ui.label("stretch");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut track.stretch).speed(0.05).range(0.1..=40.0))
+                .on_hover_text("how far the quad stretches along its motion")
+                .changed();
+        }
+    });
+}
+
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
     ui.strong("Emission");
     ui.horizontal(|ui| {
@@ -256,8 +318,11 @@ fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::Vfx
             .changed();
     });
     ui.horizontal(|ui| {
-        ui.label("life jitter");
-        *dirty |= ui.add(egui::Slider::new(&mut track.lifetime_jitter, 0.0..=1.0)).changed();
+        ui.label("life randomness");
+        *dirty |= ui
+            .add(egui::Slider::new(&mut track.lifetime_jitter, 0.0..=1.0))
+            .on_hover_text("± fraction of random variation on each particle's lifetime")
+            .changed();
     });
     shape_editor(ui, ti, track, dirty);
 }
@@ -334,13 +399,22 @@ fn particle_section(
     *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
     *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr);
     *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr);
-    ui.small("rotation/angular are Euler radians (x=pitch, y=yaw, z=roll); billboards spin on z only.");
+    ui.small("rotation/angular are Euler radians (x=pitch, y=yaw, z=roll). Meshes use all three; billboards use roll (z) only — and 'velocity'/'upright' alignment ignore roll.");
     *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr);
     ui.horizontal(|ui| {
-        ui.label("gravity");
-        *dirty |= ui.add(egui::Slider::new(&mut track.gravity, 0.0..=2.0)).changed();
+        ui.label("gravity ×");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.gravity).speed(0.02).range(-4.0..=8.0))
+            .on_hover_text(
+                "scales the scene's gravity for this track. 0 = weightless, 1 = full, \
+                 negative = floats up (buoyancy)",
+            )
+            .changed();
         ui.label("drag");
-        *dirty |= ui.add(egui::DragValue::new(&mut track.drag).speed(0.01).range(0.0..=50.0)).changed();
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.drag).speed(0.01).range(0.0..=50.0).suffix("/s"))
+            .on_hover_text("velocity damping per second (air resistance)")
+            .changed();
     });
 }
 
