@@ -52,6 +52,15 @@ impl Transform {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, rel)
     }
 
+    /// Decompose a full model matrix back into a TRS transform (the inverse of
+    /// [`Self::world_matrix`]). Any shear (from non-uniform scale composed with
+    /// rotation up a chain) is lost — TRS can't represent it; fine for the
+    /// uniform-scale bones an attachment rides (see `BoneAttach`).
+    pub fn from_matrix(m: glam::DMat4) -> Transform {
+        let (scale, rotation, translation) = m.to_scale_rotation_translation();
+        Transform { translation, rotation: rotation.as_quat(), scale: scale.as_vec3() }
+    }
+
     /// Compose `self` onto a parent transform (child-in-parent -> child-in-world).
     pub fn mul_transform(&self, child: &Transform) -> Transform {
         Transform {
