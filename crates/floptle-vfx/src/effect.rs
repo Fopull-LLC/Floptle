@@ -166,6 +166,9 @@ pub enum LaneTarget {
     Tint,
     /// Scales the emit shape (a cone widening over the effect).
     ShapeScale,
+    /// Multiplies the billboard [`Look::aspect`] (width:height) over effect time —
+    /// e.g. round sparks that stretch into streaks partway through the effect.
+    Aspect,
 }
 
 /// A DAW-style automation lane: one curve over effect time targeting a birth
@@ -381,6 +384,7 @@ pub struct CompiledTrack {
     pub lane_size: Prop1,
     pub lane_tint: Prop4,
     pub lane_shape: Prop1,
+    pub lane_aspect: Prop1,
 }
 
 /// A compiled effect: share via `Arc` across every live instance.
@@ -473,6 +477,7 @@ impl Track {
             lane_size: fold_lanes1(&self.automation, LaneTarget::Size, lifetime),
             lane_tint: fold_lanes_tint(&self.automation, lifetime),
             lane_shape: fold_lanes1(&self.automation, LaneTarget::ShapeScale, lifetime),
+            lane_aspect: fold_lanes1(&self.automation, LaneTarget::Aspect, lifetime),
         }
     }
 }

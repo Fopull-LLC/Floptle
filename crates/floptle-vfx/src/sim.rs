@@ -614,6 +614,14 @@ impl EffectInstance {
         }
     }
 
+    /// The billboard aspect (width:height) for `track` at the current effect time —
+    /// the base [`Look::aspect`] times the folded `Aspect` automation lane. Sampled at
+    /// draw like `lane_tint`; a flat (no-lane) track just returns the base aspect.
+    pub fn track_aspect(&self, track: usize) -> f32 {
+        let ct = &self.effect.tracks[track];
+        (ct.look.aspect * ct.lane_aspect.sample(self.t / self.effect.lifetime)).max(1e-3)
+    }
+
     /// Iterate the tracks that draw as billboards, with their look data.
     pub fn billboard_tracks(&self) -> impl Iterator<Item = (usize, &CompiledTrack)> {
         self.effect
