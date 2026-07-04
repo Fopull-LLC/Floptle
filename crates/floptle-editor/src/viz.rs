@@ -240,6 +240,68 @@ pub(crate) fn point_light_lines(pos: DVec3, range: f32, cam_world: DVec3, vp: Ma
     lines
 }
 
+/// Directional ("sun") light gizmo: a small sun disc with radiating spokes, plus a
+/// bundle of parallel rays flowing along −`dir` (the way the light travels) to `anchor`,
+/// each capped with an arrowhead. `dir` points TOWARD the sun (matches `Light.direction`).
+/// The directional light has no world position, so callers anchor it in front of the
+/// camera. All-`DVec3` so it stays precise under floating origin (ADR-0015). Empty if the
+/// direction is degenerate or nothing projects in front of the camera.
+pub(crate) fn light_dir_lines(
+    anchor: DVec3,
+    dir: Vec3,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let d = dir.normalize_or_zero().as_dvec3();
+    if d.length_squared() < 1e-9 {
+        return Vec::new();
+    }
+    let mut lines: Vec<(Vec2, Vec2)> = Vec::new();
+    let push = |a: DVec3, b: DVec3, lines: &mut Vec<(Vec2, Vec2)>| {
+        if let (Some(p0), Some(p1)) =
+            (project(a, cam_world, vp, w, h), project(b, cam_world, vp, w, h))
+        {
+            lines.push((p0, p1));
+        }
+    };
+    // Orthonormal basis around the light direction.
+    let refv = if d.y.abs() > 0.9 { DVec3::X } else { DVec3::Y };
+    let side = d.cross(refv).normalize();
+    let up = side.cross(d);
+    // Sun disc sits a few units toward the sun from the anchor.
+    let sun = anchor + d * 3.0;
+    let r = 0.5;
+    let segs = 24;
+    let disc = |a: f64| -> DVec3 { sun + side * (a.cos() * r) + up * (a.sin() * r) };
+    let mut prev = disc(0.0);
+    for i in 1..=segs {
+        let p = disc(i as f64 / segs as f64 * std::f64::consts::TAU);
+        push(prev, p, &mut lines);
+        prev = p;
+    }
+    // Short spokes radiating from the disc (the "sun" read).
+    for i in 0..8 {
+        let a = i as f64 / 8.0 * std::f64::consts::TAU;
+        let dirp = side * a.cos() + up * a.sin();
+        push(sun + dirp * (r * 1.2), sun + dirp * (r * 1.7), &mut lines);
+    }
+    // Parallel rays flowing sun → anchor (along −d), each with a 4-line arrowhead.
+    let flow = -d;
+    let barb = 0.22;
+    for (ox, oy) in [(0.0, 0.0), (0.7, 0.0), (-0.7, 0.0), (0.0, 0.7), (0.0, -0.7)] {
+        let off = side * ox + up * oy;
+        let base = sun + off;
+        let tip = anchor + off;
+        push(base, tip, &mut lines);
+        for hd in [side, -side, up, -up] {
+            push(tip, tip - flow * barb + hd * (barb * 0.6), &mut lines);
+        }
+    }
+    lines
+}
+
 /// Build a gravity-volume gizmo: a radial well is a 3-ring sphere wireframe at its
 /// `radius`; a Down volume is a downward arrow. Empty if it doesn't project.
 pub(crate) fn gravity_volume_lines(
