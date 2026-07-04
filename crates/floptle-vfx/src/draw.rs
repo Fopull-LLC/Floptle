@@ -6,7 +6,7 @@
 //! raster [`TexId`](floptle_render::TexId) through its own registry, and issues one
 //! `Particles::draw`.
 
-use crate::effect::{BillboardOrient, Blend, RenderMode, Space};
+use crate::effect::{BillboardOrient, Blend, FlipMode, Flipbook, RenderMode, Space};
 use crate::sim::{EffectInstance, ParticleSample};
 use floptle_core::math::{Mat4, Quat, Vec3};
 use floptle_render::particles::{ParticleBlend, ParticleInstance};
@@ -52,6 +52,7 @@ pub fn collect_billboards(
         let orient = ct.look.orient;
         let aspect = ct.look.aspect.max(1e-3);
         let stretch = ct.look.stretch.max(1e-3);
+        let flip = ct.look.flipbook;
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
@@ -61,20 +62,23 @@ pub fn collect_billboards(
             let (w, h) = (base * aspect, base);
             let (right, up, spin) =
                 billboard_basis(orient, &xf, world, &s, cam_right, cam_up, stretch);
+            // Flipbook UV sub-rect [min_u, min_v, du, dv] packed into the spare
+            // channels (full quad [0,0,1,1] when there's no flipbook).
+            let uv = flipbook_uv(flip, &s);
             instances.push(ParticleInstance {
                 pos_rot: [world.x, world.y, world.z, spin],
-                size: [w, h, 0.0, 0.0],
+                size: [w, h, uv[0], uv[1]],
                 color: s.color,
-                basis_right: [right.x, right.y, right.z, 0.0],
-                basis_up: [up.x, up.y, up.z, 0.0],
+                basis_right: [right.x, right.y, right.z, uv[2]],
+                basis_up: [up.x, up.y, up.z, uv[3]],
             });
         });
         if instances.len() == start {
             continue;
         }
-        if ct.look.blend == Blend::Alpha {
-            // Back-to-front along the view direction so alpha composites correctly
-            // within the track (positions are already camera-relative).
+        if ct.look.blend.needs_sort() {
+            // Back-to-front along the view direction so order-dependent modes
+            // composite correctly within the track (positions are camera-relative).
             instances[start..].sort_by(|a, b| {
                 let da = a.pos_rot[0] * cam_forward.x
                     + a.pos_rot[1] * cam_forward.y
@@ -90,10 +94,33 @@ pub fn collect_billboards(
             blend: match ct.look.blend {
                 Blend::Alpha => ParticleBlend::Alpha,
                 Blend::Additive => ParticleBlend::Additive,
+                Blend::Premultiplied => ParticleBlend::Premultiplied,
+                Blend::Screen => ParticleBlend::Screen,
+                Blend::Multiply => ParticleBlend::Multiply,
             },
             range: start as u32..instances.len() as u32,
         });
     }
+}
+
+/// The UV sub-rect `[min_u, min_v, du, dv]` a particle samples from a flipbook atlas
+/// this frame — the full quad `[0, 0, 1, 1]` when the track has no flipbook. The
+/// frame index comes from the particle's age (over its life, or a fixed-fps loop).
+fn flipbook_uv(flip: Option<Flipbook>, s: &ParticleSample) -> [f32; 4] {
+    let Some(fb) = flip else { return [0.0, 0.0, 1.0, 1.0] };
+    let (cols, rows) = (fb.cols.max(1), fb.rows.max(1));
+    let n = cols * rows;
+    if n <= 1 {
+        return [0.0, 0.0, 1.0, 1.0];
+    }
+    let raw = match fb.mode {
+        FlipMode::OverLife => (s.age01.clamp(0.0, 1.0) * n as f32) as u32,
+        FlipMode::LoopFps => (s.age.max(0.0) * fb.fps.max(0.0)) as u32,
+    };
+    let f = (raw % n).min(n - 1);
+    let (cx, cy) = (f % cols, f / cols);
+    let (du, dv) = (1.0 / cols as f32, 1.0 / rows as f32);
+    [cx as f32 * du, cy as f32 * dv, du, dv]
 }
 
 /// The world-space in-plane basis (+X width axis, +Y height axis) a particle's quad
@@ -360,6 +387,32 @@ mod tests {
         let up_b = Vec3::new(b.basis_up[0], b.basis_up[1], b.basis_up[2]).length();
         assert!((up_b / up_a - 3.0).abs() < 0.05, "stretch should triple up length");
         assert_eq!(a.pos_rot[3], 0.0, "velocity mode drops roll spin");
+    }
+
+    #[test]
+    fn flipbook_uv_walks_the_atlas_by_age() {
+        use crate::effect::{FlipMode, Flipbook};
+        let s = |age01: f32| ParticleSample {
+            pos: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            frame: Quat::IDENTITY,
+            size: 1.0,
+            rotation: Vec3::ZERO,
+            color: [1.0; 4],
+            age: 0.0,
+            age01,
+        };
+        // No flipbook → the full quad.
+        assert_eq!(flipbook_uv(None, &s(0.5)), [0.0, 0.0, 1.0, 1.0]);
+        let fb = Some(Flipbook { cols: 4, rows: 4, mode: FlipMode::OverLife, fps: 12.0 });
+        // Frame 0 at birth: top-left cell, 1/4 wide/tall.
+        assert_eq!(flipbook_uv(fb, &s(0.0)), [0.0, 0.0, 0.25, 0.25]);
+        // Just before death: last cell (frame 15) → col 3, row 3.
+        let last = flipbook_uv(fb, &s(0.999));
+        assert!((last[0] - 0.75).abs() < 1e-6 && (last[1] - 0.75).abs() < 1e-6, "{last:?}");
+        // Mid-life (frame 8) → col 0, row 2.
+        let mid = flipbook_uv(fb, &s(0.5));
+        assert!((mid[0] - 0.0).abs() < 1e-6 && (mid[1] - 0.5).abs() < 1e-6, "{mid:?}");
     }
 
     #[test]

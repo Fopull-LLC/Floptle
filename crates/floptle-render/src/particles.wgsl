@@ -66,8 +66,12 @@ fn vs(in: VsIn) -> VsOut {
 
     var out: VsOut;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
-    // Un-spun corner maps the texture, so the image rotates with the particle.
-    out.uv = vec2<f32>(in.corner.x + 0.5, 0.5 - in.corner.y);
+    // Un-spun corner maps the texture, so the image rotates with the particle. The
+    // flipbook UV sub-rect [min_u, min_v, du, dv] rides the spare instance channels
+    // (size.zw + the two basis .w's); a plain texture packs the full quad [0,0,1,1].
+    let base_uv = vec2<f32>(in.corner.x + 0.5, 0.5 - in.corner.y);
+    let rect = vec4<f32>(in.size.z, in.size.w, in.basis_right.w, in.basis_up.w);
+    out.uv = base_uv * rect.zw + rect.xy;
     out.color = in.color;
     return out;
 }

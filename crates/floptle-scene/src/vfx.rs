@@ -90,6 +90,30 @@ pub enum VfxBlendDoc {
     #[default]
     Alpha,
     Additive,
+    Premultiplied,
+    Screen,
+    Multiply,
+}
+
+/// How a flipbook advances through its frames.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VfxFlipModeDoc {
+    #[default]
+    OverLife,
+    LoopFps,
+}
+
+/// A sprite-sheet flipbook: the billboard texture is a `cols × rows` grid of frames.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct VfxFlipbookDoc {
+    #[serde(default = "one_u32")]
+    pub cols: u32,
+    #[serde(default = "one_u32")]
+    pub rows: u32,
+    #[serde(default)]
+    pub mode: VfxFlipModeDoc,
+    #[serde(default = "twelve_f32")]
+    pub fps: f32,
 }
 
 /// How a billboard quad is oriented in the world (billboard tracks only).
@@ -199,6 +223,9 @@ pub struct VfxTrackDoc {
     /// Velocity-orientation length multiplier (1 = neutral).
     #[serde(default = "one_f32", skip_serializing_if = "is_one")]
     pub stretch: f32,
+    /// Sprite-sheet flipbook (None = a plain single-frame texture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flipbook: Option<VfxFlipbookDoc>,
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
@@ -294,6 +321,9 @@ fn is_face_camera(o: &VfxOrientDoc) -> bool {
 fn ten_f32() -> f32 {
     10.0
 }
+fn twelve_f32() -> f32 {
+    12.0
+}
 fn one_u32() -> u32 {
     1
 }
@@ -375,6 +405,12 @@ mod tests {
                 orient: VfxOrientDoc::Velocity,
                 aspect: 0.5,
                 stretch: 2.0,
+                flipbook: Some(VfxFlipbookDoc {
+                    cols: 4,
+                    rows: 4,
+                    mode: VfxFlipModeDoc::LoopFps,
+                    fps: 24.0,
+                }),
                 lit: false,
                 cast_shadows: false,
                 space: VfxSpaceDoc::Local,

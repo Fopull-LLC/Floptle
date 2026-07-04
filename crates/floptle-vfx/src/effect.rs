@@ -28,7 +28,7 @@ pub enum Playback {
     OneShot,
 }
 
-/// Alpha compositing mode for a track's particles.
+/// Compositing mode for a track's particles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Blend {
     /// Classic transparency — depth-sorted back-to-front at draw time.
@@ -36,6 +36,20 @@ pub enum Blend {
     Alpha,
     /// Light-accumulating (fire, sparks, glow) — order-independent, drawn unsorted.
     Additive,
+    /// Premultiplied-alpha over: glow that also occludes cleanly (order-dependent).
+    Premultiplied,
+    /// Screen — lightens toward white, order-independent (soft glows, light shafts).
+    Screen,
+    /// Multiply — darkens what's behind (smoke that occludes, stains; order-dependent).
+    Multiply,
+}
+
+impl Blend {
+    /// Order-dependent modes must be depth-sorted back-to-front; light-accumulating
+    /// ones (additive / screen) composite the same in any order.
+    pub fn needs_sort(self) -> bool {
+        matches!(self, Blend::Alpha | Blend::Premultiplied | Blend::Multiply)
+    }
 }
 
 /// How a particle is drawn.
@@ -162,6 +176,33 @@ pub struct Lane {
     pub curve: crate::curve::Curve,
 }
 
+/// How a flipbook advances through its frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlipMode {
+    /// Play the whole sheet once across the particle's life (birth → death).
+    #[default]
+    OverLife,
+    /// Loop at a fixed `fps`, wrapping — animated fire/smoke sprites.
+    LoopFps,
+}
+
+/// A sprite-sheet animation for a billboard: the texture is a `cols × rows` grid of
+/// frames; each particle samples the frame for its age. `1 × 1` = no flipbook.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flipbook {
+    pub cols: u32,
+    pub rows: u32,
+    pub mode: FlipMode,
+    /// Frames per second for [`FlipMode::LoopFps`] (ignored for `OverLife`).
+    pub fps: f32,
+}
+
+impl Default for Flipbook {
+    fn default() -> Self {
+        Self { cols: 1, rows: 1, mode: FlipMode::default(), fps: 12.0 }
+    }
+}
+
 /// The rendered look of a track. Lighting and shadow casting are per-track opt-ins,
 /// both OFF by default (classic crisp VFX costs nothing until asked).
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +218,8 @@ pub struct Look {
     /// [`BillboardOrient::Velocity`] length multiplier: the quad's height is scaled
     /// by `stretch` along the motion axis. 1 = neutral; higher = longer speed lines.
     pub stretch: f32,
+    /// Sprite-sheet flipbook (`None` = a plain single-frame texture).
+    pub flipbook: Option<Flipbook>,
     /// Full scene lighting per particle: sun + point lights + field shadow + AO.
     pub lit: bool,
     /// The track's live cloud casts into the field shadow march (aggregate proxy).
@@ -191,6 +234,7 @@ impl Default for Look {
             orient: BillboardOrient::default(),
             aspect: 1.0,
             stretch: 1.0,
+            flipbook: None,
             lit: false,
             cast_shadows: false,
         }

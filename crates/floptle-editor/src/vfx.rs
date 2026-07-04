@@ -16,12 +16,13 @@ use floptle_render::particles::{ParticleBatch, ParticleGlobals};
 use floptle_render::{ParticleInstance, RenderCamera, TexId};
 use floptle_scene::{
     VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxForceDoc, VfxInterpDoc, VfxLaneTargetDoc,
-    VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
+    VfxFlipModeDoc, VfxFlipbookDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc,
+    VfxShapeDoc, VfxValueDoc, VFX_EXT,
 };
 use floptle_vfx::{
     BillboardOrient, Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape,
-    EndBehavior, Extrapolate, Force, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback,
-    RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
+    EndBehavior, Extrapolate, FlipMode, Flipbook, Force, Interp, Key, Lane, LaneTarget, Look,
+    ParticleEffect, Playback, RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
 };
 
 use crate::anim::asset_key;
@@ -429,6 +430,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         orient: VfxOrientDoc::FaceCamera,
         aspect: 1.0,
         stretch: 1.0,
+        flipbook: None,
         lit: false,
         cast_shadows: false,
         space: floptle_scene::VfxSpaceDoc::Local,
@@ -549,6 +551,9 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     blend: match t.blend {
                         VfxBlendDoc::Alpha => Blend::Alpha,
                         VfxBlendDoc::Additive => Blend::Additive,
+                        VfxBlendDoc::Premultiplied => Blend::Premultiplied,
+                        VfxBlendDoc::Screen => Blend::Screen,
+                        VfxBlendDoc::Multiply => Blend::Multiply,
                     },
                     orient: match t.orient {
                         VfxOrientDoc::FaceCamera => BillboardOrient::FaceCamera,
@@ -559,6 +564,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     },
                     aspect: t.aspect,
                     stretch: t.stretch,
+                    flipbook: t.flipbook.as_ref().map(flipbook_from_doc),
                     lit: t.lit,
                     cast_shadows: t.cast_shadows,
                 },
@@ -604,6 +610,18 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 forces: t.forces.iter().map(force_from_doc).collect(),
             })
             .collect(),
+    }
+}
+
+fn flipbook_from_doc(f: &VfxFlipbookDoc) -> Flipbook {
+    Flipbook {
+        cols: f.cols,
+        rows: f.rows,
+        mode: match f.mode {
+            VfxFlipModeDoc::OverLife => FlipMode::OverLife,
+            VfxFlipModeDoc::LoopFps => FlipMode::LoopFps,
+        },
+        fps: f.fps,
     }
 }
 

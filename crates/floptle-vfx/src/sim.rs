@@ -564,6 +564,10 @@ pub struct ParticleSample {
     /// angular velocity integrated over the particle's age.
     pub rotation: Vec3,
     pub color: [f32; 4],
+    /// Age in seconds (for fixed-fps flipbooks).
+    pub age: f32,
+    /// Normalized life `age/lifetime` in `[0,1]` (for over-life flipbooks + effects).
+    pub age01: f32,
 }
 
 impl EffectInstance {
@@ -604,6 +608,8 @@ impl EffectInstance {
                 size: ct.size.sample_rand(u, rand01(seed, SALT_SIZE)) * p.misc[i].x,
                 rotation,
                 color,
+                age,
+                age01: u,
             });
         }
     }

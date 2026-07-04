@@ -26,9 +26,9 @@ pub use anim::{
 pub mod vfx;
 pub use vfx::{
     load_vfx_effect, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
-    VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxForceDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc,
-    VfxLaneTargetDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc,
-    VfxSpaceDoc, VfxTrackDoc, VfxValueDoc, VFX_EXT,
+    VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxFlipModeDoc, VfxFlipbookDoc, VfxForceDoc,
+    VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxOrientDoc, VfxPlaybackDoc,
+    VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxTrackDoc, VfxValueDoc, VFX_EXT,
 };
 
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
