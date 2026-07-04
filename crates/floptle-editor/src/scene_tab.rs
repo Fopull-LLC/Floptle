@@ -227,6 +227,25 @@ impl EditorTabViewer<'_> {
             }
         }
 
+        // Selected particle track's emitter/force gizmo — birth shape (warm), emit
+        // direction (cyan-green), and force arrows (magenta), each carrying its color.
+        if !game && !self.particle_gizmo.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("particle_gizmo")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            for (a, b, c) in self.particle_gizmo {
+                let col = egui::Color32::from_rgb(
+                    (c[0].clamp(0.0, 1.0) * 255.0) as u8,
+                    (c[1].clamp(0.0, 1.0) * 255.0) as u8,
+                    (c[2].clamp(0.0, 1.0) * 255.0) as u8,
+                );
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.5, col));
+            }
+        }
+
         // Mesh collider wireframes (imported maps flagged walkable) — a cyan triangle net.
         if !game && !self.mesh_wire.is_empty() {
             let painter = ui

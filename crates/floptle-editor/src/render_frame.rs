@@ -36,7 +36,7 @@ use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_
 use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
-use crate::viz::{CameraGizmo, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, mesh_collider_wire_local, oriented_box_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
+use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
 use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
 impl Editor {
@@ -185,6 +185,7 @@ impl Editor {
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
         self.mesh_wire_gizmo.clear();
+        self.particle_gizmo.clear();
         // Script debug gizmos (`gizmo.*` from Lua). Unlike the editor overlays these
         // draw in the GAME view too — they're the developer's own telegraphs — but
         // the viewport gizmos toggle still hides them. (Projected for the SURFACE
@@ -431,6 +432,71 @@ impl Editor {
                     }
                 };
                 self.mesh_wire_gizmo.extend(lines);
+            }
+
+            // Selected particle track: draw its emitter birth shape + emit direction +
+            // force arrows, so authoring a VFX has spatial feedback. The node is the
+            // Particles-tab preview anchor, or a selected ParticleSystem node; the edited
+            // effect is `vfx_ui.doc`. sel_track only (less clutter) else every track.
+            let particle_node = self
+                .vfx
+                .preview
+                .as_ref()
+                .and_then(|p| p.anchor)
+                .or_else(|| {
+                    self.selection
+                        .last()
+                        .copied()
+                        .filter(|&e| self.world.get::<floptle_core::ParticleSystem>(e).is_some())
+                });
+            if let (Some(node), Some(doc)) = (particle_node, self.vfx_ui.doc.as_ref()) {
+                use floptle_scene::{VfxForceDoc, VfxShapeDoc, VfxSpaceDoc};
+                let wt = floptle_core::world_transform(&self.world, node);
+                let m_shape = Mat4::from_scale_rotation_translation(
+                    wt.scale,
+                    wt.rotation,
+                    wt.translation.as_vec3(),
+                );
+                let m_anchor = Mat4::from_translation(wt.translation.as_vec3());
+                let tracks: Vec<usize> = match self.vfx_ui.sel_track {
+                    Some(i) if i < doc.tracks.len() => vec![i],
+                    _ => (0..doc.tracks.len()).collect(),
+                };
+                for ti in tracks {
+                    let t = &doc.tracks[ti];
+                    let shape = match t.shape {
+                        VfxShapeDoc::Point => EmitterViz::Point,
+                        VfxShapeDoc::Cone { angle, radius } => EmitterViz::Cone { angle, radius },
+                        VfxShapeDoc::Sphere { radius, .. } => EmitterViz::Sphere { radius },
+                        VfxShapeDoc::Edge { length } => EmitterViz::Edge { length },
+                        VfxShapeDoc::Ring { radius } => EmitterViz::Ring { radius },
+                    };
+                    let forces: Vec<ForceViz> = t
+                        .forces
+                        .iter()
+                        .filter_map(|f| match *f {
+                            VfxForceDoc::Directional { dir, .. } => {
+                                Some(ForceViz::Directional { dir: Vec3::from(dir) })
+                            }
+                            VfxForceDoc::Point { center, strength } => Some(ForceViz::Point {
+                                center: Vec3::from(center),
+                                attract: strength >= 0.0,
+                            }),
+                            VfxForceDoc::Vortex { center, axis, .. } => Some(ForceViz::Vortex {
+                                center: Vec3::from(center),
+                                axis: Vec3::from(axis),
+                            }),
+                            VfxForceDoc::Turbulence { .. } => None,
+                        })
+                        .collect();
+                    // World-space forces act in world/anchor space (translation only);
+                    // Local-space forces (and every birth shape) ride the emitter frame.
+                    let m_force =
+                        if t.space == VfxSpaceDoc::World { m_anchor } else { m_shape };
+                    self.particle_gizmo.extend(particle_gizmo_lines(
+                        &shape, &forces, m_shape, m_force, cam.world_position, view_proj, gw, gh,
+                    ));
+                }
             }
         }
 
@@ -926,6 +992,7 @@ impl Editor {
         let script_gizmo_lines = self.script_gizmo_lines.as_slice();
         let terrain_wire = self.terrain_wire_gizmo.as_slice();
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
+        let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
         let grabbed = self.grabbed;
         let tool = self.tool;
@@ -1091,6 +1158,7 @@ impl Editor {
                 script_gizmo_lines,
                 terrain_wire,
                 mesh_wire,
+                particle_gizmo,
                 show_gizmos,
                 grabbed,
                 tool,
