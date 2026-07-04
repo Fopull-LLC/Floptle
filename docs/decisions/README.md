@@ -27,5 +27,6 @@ reasoning history stays intact.
 | [0018](0018-lawset-realm.md) | **The Lawset / Realm meta-spine** (a world's laws) | Accepted |
 | [0019](0019-field-interaction-graph.md) | **Field-interaction graph** (composition by design) | Accepted |
 | [0020](0020-fractal-shape-primitive.md) | **Fractal as a first-class shape primitive** (walkable/delvable, out of the box) | Accepted |
+| [0021](0021-hub-and-distribution.md) | **Hub & distribution** (eframe launcher + GitHub-Releases pipeline) | Proposed |
 
 > Date format: ISO `YYYY-MM-DD`. Decider: Ty Johnston (Fopull LLC).
