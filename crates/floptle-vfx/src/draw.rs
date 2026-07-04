@@ -243,8 +243,18 @@ fn glam_mat3_scale(m: &Mat4) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect::{Burst, Look, ParticleEffect, Playback, Track};
+    use crate::effect::{Clip, Emit, Look, ParticleEffect, Playback, Track};
     use std::sync::Arc;
+
+    /// A single-burst clip firing `count` at t=0 whose particles live `life`.
+    fn burst_clip(count: u32, life: f32) -> Clip {
+        Clip {
+            start: 0.0,
+            end: life,
+            lifetime_jitter: 0.0,
+            emit: Emit::Burst { count, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+        }
+    }
 
     #[test]
     fn collect_packs_and_sorts_alpha_back_to_front() {
@@ -253,9 +263,7 @@ mod tests {
                 lifetime: 1.0,
                 playback: Playback::OneShot,
                 tracks: vec![Track {
-                    rate: 0.0,
-                    bursts: vec![Burst { t: 0.0, count: 20 }],
-                    particle_lifetime: 5.0,
+                    clips: vec![burst_clip(20, 5.0)],
                     shape: crate::effect::EmitShape::Sphere { radius: 2.0, shell: false },
                     look: Look { blend: Blend::Alpha, ..Look::default() },
                     ..Track::default()
@@ -306,9 +314,7 @@ mod tests {
                     lifetime: 1.0,
                     playback: Playback::OneShot,
                     tracks: vec![Track {
-                        rate: 0.0,
-                        bursts: vec![Burst { t: 0.0, count: 16 }],
-                        particle_lifetime: 5.0,
+                        clips: vec![burst_clip(16, 5.0)],
                         // Sphere spread gives velocities in every direction, incl.
                         // straight at/away from the camera and along the up axis.
                         shape: crate::effect::EmitShape::Sphere { radius: 1.0, shell: true },
@@ -358,9 +364,7 @@ mod tests {
                     lifetime: 1.0,
                     playback: Playback::OneShot,
                     tracks: vec![Track {
-                        rate: 0.0,
-                        bursts: vec![Burst { t: 0.0, count: 1 }],
-                        particle_lifetime: 5.0,
+                        clips: vec![burst_clip(1, 5.0)],
                         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 4.0, 0.0))),
                         rotation: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 0.0, 1.0))),
                         look: Look { orient: BillboardOrient::Velocity, stretch, ..Look::default() },
@@ -417,20 +421,17 @@ mod tests {
 
     #[test]
     fn mesh_tracks_collect_one_model_matrix_per_particle() {
-        use crate::effect::{Clip, RenderMode};
+        use crate::effect::RenderMode;
         let fx = Arc::new(
             ParticleEffect {
                 lifetime: 1.0,
                 playback: Playback::OneShot,
                 tracks: vec![
                     // A billboard track (ignored by mesh collection)...
-                    Track { rate: 0.0, bursts: vec![Burst { t: 0.0, count: 3 }], particle_lifetime: 5.0, ..Track::default() },
+                    Track { clips: vec![burst_clip(3, 5.0)], ..Track::default() },
                     // ...and a mesh track that should yield a MeshDraw.
                     Track {
-                        rate: 0.0,
-                        bursts: vec![Burst { t: 0.0, count: 5 }],
-                        particle_lifetime: 5.0,
-                        clips: vec![Clip { start: 0.0, end: 1.0 }],
+                        clips: vec![burst_clip(5, 5.0)],
                         look: Look { render: RenderMode::Mesh { asset_path: "models/Spark.glb".into() }, ..Look::default() },
                         ..Track::default()
                     },

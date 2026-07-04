@@ -11,7 +11,7 @@
 //! aliases this layout instead of inventing its own. Births stay CPU-side forever
 //! (timeline logic — tiny and exact); aging is the part that will move on-device.
 
-use crate::effect::{CompiledEffect, CompiledTrack, EmitShape, Playback, RenderMode, Space};
+use crate::effect::{CompiledEffect, CompiledTrack, Emit, EmitShape, Playback, RenderMode, Space};
 use floptle_core::math::{DVec3, Quat, Vec3, Vec4};
 use floptle_core::transform::Transform;
 use std::sync::Arc;
@@ -61,6 +61,12 @@ const SALT_SIZE: u32 = 0x5EED_0002;
 const SALT_ROTATION: u32 = 0x5EED_0003;
 const SALT_COLOR: u32 = 0x5EED_0004;
 const SALT_ANGULAR: u32 = 0x5EED_0005;
+const SALT_LIFE: u32 = 0x5EED_0006;
+/// Per-(clip, pulse) salts for burst count / interval jitter. These derive from a stable
+/// (clip index, pulse index) hash — NOT the monotonic emit counter — so scrubbing the
+/// playhead re-rolls the identical pulse times and counts and re-simulation stays exact.
+const SALT_COUNT: u32 = 0x5EED_0007;
+const SALT_INTERVAL: u32 = 0x5EED_0008;
 
 // ---------------------------------------------------------------------------
 // Force fields — deterministic, WGSL-portable acceleration added each step.
@@ -354,7 +360,10 @@ impl EffectInstance {
         }
     }
 
-    /// Fire every clip overlap and burst crossing in `(prev, now]`.
+    /// Fire every clip's emission crossing `(prev, now]`. Each clip is either a
+    /// continuous stream (particles born across its whole span) or a burst-train (pulses
+    /// at `start + k·interval`); either way, the particles it spawns live `clip.lifetime()`
+    /// (= the clip's length) — there is no track-level rate or lifetime.
     fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3, emitter: &Transform) {
         let effect = Arc::clone(&self.effect);
         let inst_seed = hash(self.instance_seed ^ hash(effect.seed));
@@ -365,40 +374,57 @@ impl EffectInstance {
             }
             let ts = &mut self.tracks[ti];
 
-            for b in &ct.bursts {
-                if prev < b.t && b.t <= now {
-                    let mul = ct.lane_count.sample(b.t / lifetime);
-                    let n = (b.count as f32 * mul).round().max(0.0) as u32;
-                    for _ in 0..n {
-                        spawn(ts, ct, ti as u32, inst_seed, b.t, now, lifetime, gravity, emitter);
+            for (ci, clip) in ct.clips.iter().enumerate() {
+                let clip_life = clip.lifetime();
+                let jitter = clip.lifetime_jitter;
+                match clip.emit {
+                    Emit::Rate { rate } => {
+                        // Entering a clip resets the fractional accumulator: each span
+                        // starts its emission phase fresh (deterministic across scrubs).
+                        if prev < clip.start && clip.start <= now {
+                            ts.acc = 0.0;
+                        }
+                        let (s, e) = (prev.max(clip.start), now.min(clip.end));
+                        if e <= s || rate <= 0.0 {
+                            continue;
+                        }
+                        let mid = 0.5 * (s + e);
+                        let rate_eff = rate * ct.lane_rate.sample(mid / lifetime);
+                        if rate_eff <= 0.0 {
+                            continue;
+                        }
+                        let acc0 = ts.acc;
+                        ts.acc += rate_eff * (e - s);
+                        let n = ts.acc.floor() as u32;
+                        ts.acc -= n as f32;
+                        for k in 1..=n {
+                            // Reconstruct the exact accumulator-crossing time so birth
+                            // spacing is even regardless of frame boundaries.
+                            let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
+                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter);
+                        }
                     }
-                }
-            }
-
-            for clip in &ct.clips {
-                // Entering a clip resets the fractional accumulator: each span
-                // starts its emission phase fresh (deterministic across scrubs).
-                if prev < clip.start && clip.start <= now {
-                    ts.acc = 0.0;
-                }
-                let (s, e) = (prev.max(clip.start), now.min(clip.end));
-                if e <= s || ct.rate <= 0.0 {
-                    continue;
-                }
-                let mid = 0.5 * (s + e);
-                let rate_eff = ct.rate * ct.lane_rate.sample(mid / lifetime);
-                if rate_eff <= 0.0 {
-                    continue;
-                }
-                let acc0 = ts.acc;
-                ts.acc += rate_eff * (e - s);
-                let n = ts.acc.floor() as u32;
-                ts.acc -= n as f32;
-                for k in 1..=n {
-                    // Reconstruct the exact accumulator-crossing time so birth
-                    // spacing is even regardless of frame boundaries.
-                    let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                    spawn(ts, ct, ti as u32, inst_seed, tau, now, lifetime, gravity, emitter);
+                    Emit::Burst { count, count_jitter, pulses, interval, interval_jitter } => {
+                        // Walk the pulse train from the clip start, jittering each gap by a
+                        // stable per-(clip, pulse) hash so scrubbing reproduces it exactly.
+                        let mut tp = clip.start;
+                        for p in 0..pulses.max(1) {
+                            if p > 0 {
+                                let js = hash3(inst_seed, ci as u32, p ^ 0x51C0);
+                                let jmul = 1.0 + interval_jitter * (rand01(js, SALT_INTERVAL) * 2.0 - 1.0);
+                                tp += (interval * jmul).max(0.0);
+                            }
+                            if prev < tp && tp <= now {
+                                let cs = hash3(inst_seed, ci as u32, p ^ 0x9E37);
+                                let cmul = (1.0 + count_jitter * (rand01(cs, SALT_COUNT) * 2.0 - 1.0)).max(0.0);
+                                let lane = ct.lane_count.sample(tp / lifetime);
+                                let n = (count as f32 * cmul * lane).round().max(0.0) as u32;
+                                for _ in 0..n {
+                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -451,7 +477,9 @@ impl EffectInstance {
     }
 }
 
-/// Birth one particle at effect-time `tau`, aged forward to `now`.
+/// Birth one particle at effect-time `tau`, aged forward to `now`. `clip_life` /
+/// `clip_jitter` come from the emitting clip — the particle lives that long (± jitter),
+/// which is the clip's own length on the timeline.
 #[allow(clippy::too_many_arguments)]
 fn spawn(
     ts: &mut TrackState,
@@ -459,6 +487,8 @@ fn spawn(
     track_idx: u32,
     inst_seed: u32,
     tau: f32,
+    clip_life: f32,
+    clip_jitter: f32,
     now: f32,
     lifetime: f32,
     gravity: Vec3,
@@ -484,7 +514,7 @@ fn spawn(
     }
     let frame = Quat::from_rotation_arc(Vec3::Y, dir);
 
-    let life = ct.particle_lifetime * jitter_mul(seed, 0xA11FE, ct.lifetime_jitter);
+    let life = clip_life * jitter_mul(seed, SALT_LIFE, clip_jitter);
     let age0 = (now - tau).max(0.0);
     if age0 >= life {
         return; // born and expired within one (enormous) step
@@ -647,9 +677,25 @@ impl EffectInstance {
 mod tests {
     use super::*;
     use crate::curve::{Curve, Key, Value, ValueOrCurve};
-    use crate::effect::{Burst, Clip, Force, ParticleEffect, Playback, Track};
+    use crate::effect::{Clip, Emit, Force, ParticleEffect, Playback, Track};
 
     const NO_G: Vec3 = Vec3::ZERO;
+
+    /// A single-burst clip firing `count` at `t`, whose particles live `life` (the clip's
+    /// length under the clip-length-is-lifetime model).
+    fn burst_clip(t: f32, count: u32, life: f32) -> Clip {
+        Clip {
+            start: t,
+            end: t + life,
+            lifetime_jitter: 0.0,
+            emit: Emit::Burst { count, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+        }
+    }
+
+    /// A continuous-stream clip over `[start, end]`; its particles live `end - start`.
+    fn rate_clip(start: f32, end: f32, rate: f32) -> Clip {
+        Clip { start, end, lifetime_jitter: 0.0, emit: Emit::Rate { rate } }
+    }
 
     fn one_track_effect(track: Track, lifetime: f32, playback: Playback) -> Arc<CompiledEffect> {
         Arc::new(
@@ -666,12 +712,7 @@ mod tests {
     #[test]
     fn burst_at_zero_fires_exactly_once() {
         let fx = one_track_effect(
-            Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.0, count: 7 }],
-                particle_lifetime: 10.0,
-                ..Track::default()
-            },
+            Track { clips: vec![burst_clip(0.0, 7, 10.0)], ..Track::default() },
             1.0,
             Playback::OneShot,
         );
@@ -686,19 +727,16 @@ mod tests {
     fn clip_gated_rate_emits_exact_count() {
         // 10/s inside a [0.0, 0.55] clip = exactly 5 particles, none outside it
         // (crossings at 0.1..0.5; the clip edge is deliberately NOT a crossing so
-        // float accumulation can't fencepost the count).
+        // float accumulation can't fencepost the count). The clip length (0.55) is now
+        // the lifetime, so check at t=0.6 — after emission ends but before the first
+        // particle (born ~0.1) expires at 0.65.
         let fx = one_track_effect(
-            Track {
-                rate: 10.0,
-                clips: vec![Clip { start: 0.0, end: 0.55 }],
-                particle_lifetime: 10.0,
-                ..Track::default()
-            },
+            Track { clips: vec![rate_clip(0.0, 0.55, 10.0)], ..Track::default() },
             1.0,
             Playback::OneShot,
         );
         let mut inst = EffectInstance::new(fx, 1);
-        for _ in 0..100 {
+        for _ in 0..60 {
             inst.advance(0.01, NO_G);
         }
         assert_eq!(inst.alive(), 5);
@@ -707,12 +745,8 @@ mod tests {
     #[test]
     fn looping_rearms_clips_and_keeps_live_particles_across_wrap() {
         let fx = one_track_effect(
-            Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.5, count: 3 }],
-                particle_lifetime: 0.9, // outlives the 1 s wrap when born at 0.5
-                ..Track::default()
-            },
+            // Lifetime 0.9 (clip length) outlives the 1 s wrap when born at 0.5.
+            Track { clips: vec![burst_clip(0.5, 3, 0.9)], ..Track::default() },
             1.0,
             Playback::Looping,
         );
@@ -731,12 +765,7 @@ mod tests {
     #[test]
     fn oneshot_finishes_and_reports_done() {
         let fx = one_track_effect(
-            Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.1, count: 2 }],
-                particle_lifetime: 0.2,
-                ..Track::default()
-            },
+            Track { clips: vec![burst_clip(0.1, 2, 0.2)], ..Track::default() },
             0.5,
             Playback::OneShot,
         );
@@ -749,13 +778,19 @@ mod tests {
 
     #[test]
     fn scrub_is_bit_deterministic() {
+        // A jittered rate stream AND a jittered burst clip on one track — exercises both
+        // emission paths plus lifetime jitter, and must re-simulate bit-for-bit.
         let fx = one_track_effect(
             Track {
-                rate: 40.0,
-                clips: vec![Clip { start: 0.0, end: 1.0 }],
-                bursts: vec![Burst { t: 0.33, count: 5 }],
-                particle_lifetime: 0.6,
-                lifetime_jitter: 0.5,
+                clips: vec![
+                    Clip { start: 0.0, end: 0.6, lifetime_jitter: 0.5, emit: Emit::Rate { rate: 40.0 } },
+                    Clip {
+                        start: 0.33,
+                        end: 0.93,
+                        lifetime_jitter: 0.5,
+                        emit: Emit::Burst { count: 5, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+                    },
+                ],
                 ..Track::default()
             },
             1.0,
@@ -778,9 +813,7 @@ mod tests {
     fn different_instance_seeds_diverge() {
         let fx = one_track_effect(
             Track {
-                rate: 30.0,
-                clips: vec![Clip { start: 0.0, end: 1.0 }],
-                particle_lifetime: 1.0,
+                clips: vec![rate_clip(0.0, 1.0, 30.0)],
                 shape: crate::effect::EmitShape::Sphere { radius: 1.0, shell: false },
                 ..Track::default()
             },
@@ -800,9 +833,7 @@ mod tests {
     fn capacity_caps_live_particles_without_realloc() {
         let fx = one_track_effect(
             Track {
-                rate: 10_000.0,
-                clips: vec![Clip { start: 0.0, end: 1.0 }],
-                particle_lifetime: 5.0,
+                clips: vec![rate_clip(0.0, 1.0, 10_000.0)],
                 max_alive: Some(64),
                 ..Track::default()
             },
@@ -828,9 +859,7 @@ mod tests {
         });
         let fx = one_track_effect(
             Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.0, count: 1 }],
-                particle_lifetime: 1.0,
+                clips: vec![burst_clip(0.0, 1, 1.0)],
                 velocity: vel,
                 ..Track::default()
             },
@@ -855,9 +884,7 @@ mod tests {
         let mk = || {
             one_track_effect(
                 Track {
-                    rate: 0.0,
-                    bursts: vec![Burst { t: 0.0, count: 32 }],
-                    particle_lifetime: 10.0,
+                    clips: vec![burst_clip(0.0, 32, 10.0)],
                     size: ValueOrCurve::Range(Value::F32(0.1), Value::F32(1.0)),
                     ..Track::default()
                 },
@@ -885,9 +912,7 @@ mod tests {
     fn angular_velocity_spins_particles_over_age() {
         // A single particle with angular velocity (0, 2, 0) rad/s: at age t its yaw = 2t.
         let track = Track {
-            rate: 0.0,
-            bursts: vec![Burst { t: 0.0, count: 1 }],
-            particle_lifetime: 10.0,
+            clips: vec![burst_clip(0.0, 1, 10.0)],
             angular_velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
             ..Track::default()
         };
@@ -907,9 +932,7 @@ mod tests {
         // must NOT drag the particles along — their stored offset re-anchors by the
         // emitter delta so the absolute world position stays fixed.
         let mut track = Track {
-            rate: 0.0,
-            bursts: vec![Burst { t: 0.0, count: 4 }],
-            particle_lifetime: 100.0,
+            clips: vec![burst_clip(0.0, 4, 100.0)],
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             ..Track::default()
         };
@@ -928,9 +951,7 @@ mod tests {
         // The Local counterpart: the sim never re-anchors them (the node matrix moves
         // them at render), so their stored positions are identical whatever the emitter.
         let track = Track {
-            rate: 0.0,
-            bursts: vec![Burst { t: 0.0, count: 4 }],
-            particle_lifetime: 100.0,
+            clips: vec![burst_clip(0.0, 4, 100.0)],
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             ..Track::default() // Space::Local by default
         };
@@ -948,9 +969,7 @@ mod tests {
         // Zero velocity + zero gravity; a +X wind (strength 4) must push the particle
         // along +X only.
         let track = Track {
-            rate: 0.0,
-            bursts: vec![Burst { t: 0.0, count: 1 }],
-            particle_lifetime: 10.0,
+            clips: vec![burst_clip(0.0, 1, 10.0)],
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             forces: vec![Force::Directional { dir: Vec3::X, strength: 4.0 }],
             ..Track::default()
@@ -967,9 +986,7 @@ mod tests {
     fn point_force_attracts_toward_center() {
         // A particle offset at +X, pulled toward the origin, must move −X (toward it).
         let track = Track {
-            rate: 0.0,
-            bursts: vec![Burst { t: 0.0, count: 1 }],
-            particle_lifetime: 10.0,
+            clips: vec![burst_clip(0.0, 1, 10.0)],
             shape: crate::effect::EmitShape::Edge { length: 4.0 }, // spread along X
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
             forces: vec![Force::Point { center: Vec3::ZERO, strength: 5.0 }],
@@ -995,9 +1012,7 @@ mod tests {
         // re-anchors it every step). The noise field is fixed in the world.
         let mk = || {
             let mut t = Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.0, count: 1 }],
-                particle_lifetime: 100.0,
+                clips: vec![burst_clip(0.0, 1, 100.0)],
                 velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
                 forces: vec![Force::Turbulence { frequency: 0.5, strength: 3.0 }],
                 ..Track::default()
@@ -1025,9 +1040,7 @@ mod tests {
     fn gravity_pulls_particles_down() {
         let fx = one_track_effect(
             Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.0, count: 1 }],
-                particle_lifetime: 2.0,
+                clips: vec![burst_clip(0.0, 1, 2.0)],
                 velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
                 gravity: 1.0,
                 ..Track::default()
@@ -1049,13 +1062,7 @@ mod tests {
             extrapolate: Default::default(),
         });
         let fx = one_track_effect(
-            Track {
-                rate: 0.0,
-                bursts: vec![Burst { t: 0.0, count: 1 }],
-                particle_lifetime: 1.0,
-                size,
-                ..Track::default()
-            },
+            Track { clips: vec![burst_clip(0.0, 1, 1.0)], size, ..Track::default() },
             1.0,
             Playback::OneShot,
         );

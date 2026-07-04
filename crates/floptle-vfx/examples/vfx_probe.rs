@@ -20,10 +20,25 @@ use floptle_render::{
     RenderCamera, Retro, TexId, TexSampling, TextureData, cube, instance_of_mat,
 };
 use floptle_vfx::{
-    BillboardOrient, Blend, Burst, Clip, Curve, EffectInstance, EmitShape, Key, Lane, LaneTarget,
+    BillboardOrient, Blend, Clip, Curve, EffectInstance, Emit, EmitShape, Key, Lane, LaneTarget,
     Look, ParticleEffect, Playback, RenderMode, Track, Value, ValueOrCurve, collect_billboards,
 };
 use std::sync::Arc;
+
+/// A continuous-stream clip over `[start, end]` (its particles live `end - start`).
+fn rate_clip(start: f32, end: f32, rate: f32, lifetime_jitter: f32) -> Clip {
+    Clip { start, end, lifetime_jitter, emit: Emit::Rate { rate } }
+}
+
+/// A single-burst clip firing `count` at `t`, whose particles live `life`.
+fn burst_clip(t: f32, count: u32, life: f32, lifetime_jitter: f32) -> Clip {
+    Clip {
+        start: t,
+        end: t + life,
+        lifetime_jitter,
+        emit: Emit::Burst { count, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+    }
+}
 
 const W: u32 = 960;
 const H: u32 = 540;
@@ -53,11 +68,8 @@ fn fountain_effect() -> ParticleEffect {
             blend: Blend::Alpha,
             ..Look::default()
         },
-        clips: vec![Clip { start: 0.0, end: 1.6 }],
-        rate: 26.0,
+        clips: vec![rate_clip(0.0, 1.4, 26.0, 0.3)],
         shape: EmitShape::Cone { angle: 24.0, radius: 0.25 },
-        particle_lifetime: 1.4,
-        lifetime_jitter: 0.3,
         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
         size: scalar_curve(&[(0.0, 0.35), (1.0, 1.3)]),
         // Roll (z) — the screen-facing spin for billboards, now that rotation is Euler.
@@ -83,8 +95,8 @@ fn fountain_effect() -> ParticleEffect {
             blend: Blend::Additive,
             ..Look::default()
         },
-        clips: vec![Clip { start: 0.0, end: 1.5 }],
-        bursts: vec![Burst { t: 0.1, count: 40 }],
+        // A continuous stream plus an opening burst — two clips on one track.
+        clips: vec![rate_clip(0.0, 0.8, 90.0, 0.5), burst_clip(0.1, 40, 0.8, 0.5)],
         // The fountain wanes across the effect — one automation lane on Rate.
         automation: vec![Lane {
             target: LaneTarget::Rate,
@@ -93,10 +105,7 @@ fn fountain_effect() -> ParticleEffect {
                 extrapolate: Default::default(),
             },
         }],
-        rate: 90.0,
         shape: EmitShape::Cone { angle: 32.0, radius: 0.05 },
-        particle_lifetime: 0.8,
-        lifetime_jitter: 0.5,
         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 5.0, 0.0))),
         size: scalar_curve(&[(0.0, 0.14), (1.0, 0.0)]),
         color: rgba_curve(&[
@@ -133,33 +142,29 @@ fn orient_showcase() -> ParticleEffect {
             stretch,
             ..Look::default()
         },
-        clips: vec![Clip { start: 0.0, end: 4.0 }],
-        rate: 0.0,
-        particle_lifetime: 20.0,
+        // Emission (clips) is set per-track below — the card only carries the look.
         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
         size: ValueOrCurve::Const(Value::F32(0.5)),
         color: ValueOrCurve::Const(Value::Rgba(color)),
         ..Track::default()
     };
     // A ring of flat decals lying on the floor (big + bright so the flat ellipses
-    // read against the floor even at a shallow viewing angle).
+    // read against the floor even at a shallow viewing angle). Long-lived burst clip.
     let ground = Track {
-        bursts: vec![Burst { t: 0.0, count: 10 }],
+        clips: vec![burst_clip(0.0, 10, 20.0, 0.0)],
         shape: EmitShape::Ring { radius: 2.2 },
         ..card("Ground", BillboardOrient::Horizontal, Blend::Additive, 1.0, 1.0, [0.2, 0.9, 1.0, 1.0])
     };
     // A row of tall upright cards along X.
     let upright = Track {
-        bursts: vec![Burst { t: 0.0, count: 5 }],
+        clips: vec![burst_clip(0.0, 5, 20.0, 0.0)],
         shape: EmitShape::Edge { length: 3.6 },
         ..card("Upright", BillboardOrient::Vertical, Blend::Additive, 0.45, 1.0, [0.4, 1.0, 0.4, 1.0])
     };
     // A spray of velocity-stretched sparks shooting up.
     let sparks = Track {
-        rate: 60.0,
+        clips: vec![rate_clip(0.0, 0.9, 60.0, 0.3)],
         shape: EmitShape::Cone { angle: 14.0, radius: 0.04 },
-        particle_lifetime: 0.9,
-        lifetime_jitter: 0.3,
         velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 6.0, 0.0))),
         size: ValueOrCurve::Const(Value::F32(0.12)),
         color: ValueOrCurve::Const(Value::Rgba([1.0, 0.95, 0.6, 1.0])),

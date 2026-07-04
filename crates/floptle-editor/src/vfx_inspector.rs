@@ -6,8 +6,8 @@
 //! [`crate::curve_edit`]); automation lanes shape birth values over effect time.
 
 use floptle_scene::{
-    VfxBlendDoc, VfxFlipModeDoc, VfxFlipbookDoc, VfxForceDoc, VfxInterpDoc, VfxOrientDoc,
-    VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
+    VfxBlendDoc, VfxEmitDoc, VfxFlipModeDoc, VfxFlipbookDoc, VfxForceDoc, VfxInterpDoc,
+    VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
@@ -125,6 +125,9 @@ impl EditorTabViewer<'_> {
     }
 }
 
+/// The selected clip's editor: placement (start + length, where length IS the particle
+/// lifetime), lifetime jitter, and its emission mode — a continuous stream (rate) or a
+/// burst-train (count ± jitter, repeated `pulses` times every `interval` ± jitter).
 fn clip_burst_detail(
     ui: &mut egui::Ui,
     st: &crate::vfx_ui::VfxUiState,
@@ -132,31 +135,98 @@ fn clip_burst_detail(
     dirty: &mut bool,
 ) {
     use crate::vfx_ui::VfxSel;
-    match st.sel {
-        Some(VfxSel::Clip(ti, ci)) => {
-            if let Some(c) = doc.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) {
-                ui.horizontal(|ui| {
-                    ui.small("▪ clip");
-                    ui.label("start");
-                    *dirty |= ui.add(egui::DragValue::new(&mut c.start).speed(0.01).suffix("s")).changed();
-                    ui.label("end");
-                    *dirty |= ui.add(egui::DragValue::new(&mut c.end).speed(0.01).suffix("s")).changed();
-                });
-                if c.end < c.start + 0.02 {
-                    c.end = c.start + 0.02;
+    let Some(VfxSel::Clip(ti, ci)) = st.sel else { return };
+    let Some(c) = doc.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) else { return };
+    // A legacy clip may have no emit yet (normally filled on load) — default to a stream.
+    if c.emit.is_none() {
+        c.emit = Some(VfxEmitDoc::Rate { rate: 10.0 });
+    }
+    let is_burst = matches!(c.emit, Some(VfxEmitDoc::Burst { .. }));
+
+    ui.horizontal(|ui| {
+        ui.small(if is_burst { "✳ burst clip" } else { "▪ stream clip" });
+        egui::ComboBox::from_id_salt("vfx_emit_mode")
+            .selected_text(if is_burst { "burst" } else { "stream" })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(!is_burst, "stream (rate)").clicked() && is_burst {
+                    c.emit = Some(VfxEmitDoc::Rate { rate: 10.0 });
+                    *dirty = true;
                 }
-            }
+                if ui.selectable_label(is_burst, "burst (pulses)").clicked() && !is_burst {
+                    c.emit = Some(VfxEmitDoc::Burst {
+                        count: 12,
+                        count_jitter: 0.0,
+                        pulses: 1,
+                        interval: 0.1,
+                        interval_jitter: 0.0,
+                    });
+                    *dirty = true;
+                }
+            });
+    });
+
+    // Placement: start + length. Length is authoritative for lifetime.
+    ui.horizontal(|ui| {
+        ui.label("start");
+        *dirty |= ui.add(egui::DragValue::new(&mut c.start).speed(0.01).range(0.0..=100_000.0).suffix("s")).changed();
+        ui.label("life");
+        let mut life = (c.end - c.start).max(1e-3);
+        if ui
+            .add(egui::DragValue::new(&mut life).speed(0.01).range(0.001..=100_000.0).suffix("s"))
+            .on_hover_text("the clip's LENGTH on the timeline — how long its particles live")
+            .changed()
+        {
+            c.end = c.start + life.max(1e-3);
+            *dirty = true;
         }
-        Some(VfxSel::Burst(ti, bi)) => {
-            if let Some(b) = doc.tracks.get_mut(ti).and_then(|t| t.bursts.get_mut(bi)) {
-                ui.horizontal(|ui| {
-                    ui.small("✳ burst");
-                    ui.label("t");
-                    *dirty |= ui.add(egui::DragValue::new(&mut b.t).speed(0.01).suffix("s")).changed();
-                    ui.label("count");
-                    *dirty |= ui.add(egui::DragValue::new(&mut b.count).speed(0.2).range(1..=100_000)).changed();
-                });
-            }
+        ui.label("± life");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut c.lifetime_jitter).speed(0.01).range(0.0..=1.0))
+            .on_hover_text("± fraction of random variance on each particle's lifetime")
+            .changed();
+    });
+    if c.end < c.start + 1e-3 {
+        c.end = c.start + 1e-3;
+    }
+
+    // Emission-mode parameters.
+    match c.emit.as_mut() {
+        Some(VfxEmitDoc::Rate { rate }) => {
+            ui.horizontal(|ui| {
+                ui.label("rate");
+                *dirty |= ui
+                    .add(egui::DragValue::new(rate).speed(0.5).range(0.0..=100_000.0).suffix("/s"))
+                    .on_hover_text("particles per second across the whole clip")
+                    .changed();
+            });
+        }
+        Some(VfxEmitDoc::Burst { count, count_jitter, pulses, interval, interval_jitter }) => {
+            ui.horizontal(|ui| {
+                ui.label("count");
+                *dirty |= ui.add(egui::DragValue::new(count).speed(0.2).range(0..=1_000_000)).changed();
+                ui.label("± count");
+                *dirty |= ui
+                    .add(egui::DragValue::new(count_jitter).speed(0.01).range(0.0..=1.0))
+                    .on_hover_text("± fraction of random variance on each pulse's count")
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("pulses");
+                *dirty |= ui
+                    .add(egui::DragValue::new(pulses).speed(0.1).range(1..=100_000))
+                    .on_hover_text("how many bursts fire, from the clip start")
+                    .changed();
+                ui.label("every");
+                *dirty |= ui
+                    .add(egui::DragValue::new(interval).speed(0.01).range(0.0..=1000.0).suffix("s"))
+                    .on_hover_text("delay between pulses")
+                    .changed();
+                ui.label("± delay");
+                *dirty |= ui
+                    .add(egui::DragValue::new(interval_jitter).speed(0.01).range(0.0..=1.0))
+                    .on_hover_text("± fraction of random variance on each gap")
+                    .changed();
+            });
         }
         None => {}
     }
@@ -397,24 +467,10 @@ fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, di
 }
 
 fn emission_section(ui: &mut egui::Ui, ti: usize, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
-    ui.horizontal(|ui| {
-        ui.label("rate");
-        *dirty |= ui
-            .add(egui::DragValue::new(&mut track.rate).speed(0.5).range(0.0..=100_000.0).suffix("/s"))
-            .on_hover_text("particles per second while the playhead is inside a clip")
-            .changed();
-        ui.label("life");
-        *dirty |= ui
-            .add(egui::DragValue::new(&mut track.particle_lifetime).speed(0.01).range(0.01..=600.0).suffix("s"))
-            .changed();
-    });
-    ui.horizontal(|ui| {
-        ui.label("life randomness");
-        *dirty |= ui
-            .add(egui::Slider::new(&mut track.lifetime_jitter, 0.0..=1.0))
-            .on_hover_text("± fraction of random variation on each particle's lifetime")
-            .changed();
-    });
+    // Rate / lifetime / burst counts are per CLIP now (a clip is one emission, its length
+    // is the particle lifetime). Select a clip on the timeline to edit them; the emit
+    // SHAPE below is shared by every clip on the track.
+    ui.small("⏱ Emission is per clip — click a clip on the timeline to set its rate/burst, length (= lifetime) & jitter.");
     shape_editor(ui, ti, track, dirty);
 }
 

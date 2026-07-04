@@ -15,20 +15,20 @@ use std::sync::Arc;
 use floptle_core::ParticleSystem;
 use floptle_core::World;
 use floptle_scene::{
-    VfxBurstDoc, VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc,
+    VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc,
     VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxPlaybackDoc, VfxPropDoc, VfxTrackDoc, VfxValueDoc,
 };
 use floptle_vfx::EffectInstance;
 
-use crate::timeline::{draw_ruler, snap_time, TimelineView, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
+use crate::timeline::{draw_ruler, snap_time, TimelineView, ACCENT, KEY_COLOR, PLAYHEAD};
 use crate::vfx::{curve_from_doc, effect_from_doc, starter_effect_doc, VfxPreview, VFX_GRAVITY};
 use crate::EditorTabViewer;
 
-/// What's selected on the timeline (drives the side panel's detail section).
+/// What's selected on the timeline (drives the side panel's detail section). A burst is
+/// now just a `Clip` with `Emit::Burst`, so there's a single clip selection.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VfxSel {
     Clip(usize, usize),
-    Burst(usize, usize),
 }
 
 /// A drag in progress on the timeline canvas.
@@ -38,7 +38,6 @@ enum VfxDrag {
     ClipMove { track: usize, idx: usize, grab: f32 },
     /// Trimming a clip edge (`right` = the end handle).
     ClipTrim { track: usize, idx: usize, right: bool },
-    Burst { track: usize, idx: usize },
 }
 
 /// UI state of the Particles tab. One field on `Editor`.
@@ -167,6 +166,8 @@ const RULER_H: f32 = 22.0;
 /// Clip edge-trim hit zone (px).
 const EDGE_W: f32 = 6.0;
 const CLIP_FILL: Color32 = Color32::from_rgb(80, 130, 190);
+/// Burst-emit clips read warmer than continuous streams.
+const BURST_FILL: Color32 = Color32::from_rgb(200, 120, 70);
 const CLIP_MIN_LEN: f32 = 0.02;
 
 /// One automation-lane strip's height (drawn under an expanded track).
@@ -545,10 +546,13 @@ impl EditorTabViewer<'_> {
         let period = match doc.playback {
             VfxPlaybackDoc::Looping => f32::INFINITY,
             VfxPlaybackDoc::OneShot => {
+                // Longest a particle can outlive the timeline = the longest clip length
+                // (= its particles' lifetime), widened by that clip's jitter.
                 let tail = doc
                     .tracks
                     .iter()
-                    .map(|t| t.particle_lifetime * (1.0 + t.lifetime_jitter))
+                    .flat_map(|t| t.clips.iter())
+                    .map(|c| (c.end - c.start).max(1e-3) * (1.0 + c.lifetime_jitter))
                     .fold(0.0f32, f32::max);
                 lifetime + tail.max(0.2)
             }
@@ -799,11 +803,11 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
     });
 }
 
-/// A fresh track for "+ Track": one clip spanning the whole timeline, so it
+/// A fresh track for "+ Track": one stream clip spanning the whole timeline, so it
 /// visibly emits the moment it exists.
 fn starter_track(doc: &VfxEffectDoc) -> VfxTrackDoc {
     let mut t = starter_effect_doc("x").tracks.remove(0);
-    t.clips = vec![VfxClipDoc { start: 0.0, end: doc.lifetime }];
+    t.clips = vec![new_clip(0.0, doc.lifetime.max(CLIP_MIN_LEN), VfxEmitDoc::Rate { rate: 40.0 })];
     t
 }
 
@@ -1041,13 +1045,16 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 }
             });
 
-            // ---- clips ----
+            // ---- clips (streams AND burst-trains — a burst is a clip whose Emit is
+            // Burst; it draws with pulse ticks + a ×count label instead of a plain body) ----
             for (ci, clip) in track.clips.iter().enumerate() {
                 let x0 = view.time_to_x(clip.start.clamp(0.0, dur));
                 let x1 = view.time_to_x(clip.end.clamp(0.0, dur));
                 let body = Rect::from_min_max(Pos2::new(x0, y + 4.0), Pos2::new(x1, y + row_h - 4.0));
                 let sel = st.sel == Some(VfxSel::Clip(ti, ci));
-                let fill = if sel { ACCENT.gamma_multiply(0.85) } else { CLIP_FILL };
+                let is_burst = matches!(clip.emit, Some(floptle_scene::VfxEmitDoc::Burst { .. }));
+                let base = if is_burst { BURST_FILL } else { CLIP_FILL };
+                let fill = if sel { ACCENT.gamma_multiply(0.85) } else { base };
                 painter.rect_filled(body, 4.0, fill.gamma_multiply(if track.enabled { 1.0 } else { 0.4 }));
                 painter.rect_stroke(
                     body,
@@ -1055,6 +1062,28 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                     Stroke::new(1.0, Color32::from_black_alpha(140)),
                     egui::StrokeKind::Inside,
                 );
+                // Burst clips: a tick at each pulse time (start + k·interval) and a ×count
+                // label, so a pulse train reads at a glance.
+                if let Some(floptle_scene::VfxEmitDoc::Burst { count, pulses, interval, .. }) = clip.emit {
+                    for p in 0..pulses.max(1) {
+                        let tp = clip.start + interval * p as f32;
+                        if tp > dur {
+                            break;
+                        }
+                        let tx = view.time_to_x(tp.clamp(0.0, dur));
+                        painter.line_segment(
+                            [Pos2::new(tx, body.top() + 1.0), Pos2::new(tx, body.bottom() - 1.0)],
+                            Stroke::new(1.5, Color32::from_white_alpha(200)),
+                        );
+                    }
+                    painter.text(
+                        Pos2::new(body.left() + 4.0, body.center().y),
+                        Align2::LEFT_CENTER,
+                        if pulses > 1 { format!("×{count} ·{pulses}") } else { format!("×{count}") },
+                        FontId::proportional(9.0),
+                        Color32::from_white_alpha(230),
+                    );
+                }
 
                 let wide = body.width() > EDGE_W * 2.0 + 4.0;
                 let left_h = Rect::from_min_max(body.min, Pos2::new(body.left() + EDGE_W, body.bottom()));
@@ -1103,50 +1132,6 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                 resp.context_menu(|ui| {
                     if ui.button("🗑 Delete clip").clicked() {
                         deferred = Some(DeferredEdit::DelClip(ti, ci));
-                        ui.close();
-                    }
-                });
-            }
-
-            // ---- bursts (over clips) ----
-            for (bi, b) in track.bursts.iter().enumerate() {
-                let x = view.time_to_x(b.t.clamp(0.0, dur));
-                let c = Pos2::new(x, row.center().y);
-                let sel = st.sel == Some(VfxSel::Burst(ti, bi));
-                let col = if sel { ACCENT } else { EVENT_COLOR };
-                let s = 5.5;
-                painter.add(egui::Shape::convex_polygon(
-                    vec![
-                        Pos2::new(c.x, c.y - s),
-                        Pos2::new(c.x + s, c.y),
-                        Pos2::new(c.x, c.y + s),
-                        Pos2::new(c.x - s, c.y),
-                    ],
-                    col,
-                    Stroke::new(1.0, Color32::from_black_alpha(160)),
-                ));
-                painter.text(
-                    Pos2::new(c.x + 6.0, c.y - 6.0),
-                    Align2::LEFT_CENTER,
-                    format!("×{}", b.count),
-                    FontId::proportional(9.0),
-                    col.gamma_multiply(0.9),
-                );
-                let hit = Rect::from_center_size(c, egui::vec2(13.0, 13.0));
-                let id = ui.id().with(("vfx-burst", ti, bi));
-                let resp = ui.interact(hit, id, Sense::click_and_drag());
-                if resp.clicked() {
-                    st.sel = Some(VfxSel::Burst(ti, bi));
-                    st.sel_track = Some(ti);
-                }
-                if resp.drag_started() {
-                    st.drag = Some(VfxDrag::Burst { track: ti, idx: bi });
-                    st.sel = Some(VfxSel::Burst(ti, bi));
-                    st.sel_track = Some(ti);
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("🗑 Delete burst").clicked() {
-                        deferred = Some(DeferredEdit::DelBurst(ti, bi));
                         ui.close();
                     }
                 });
@@ -1227,21 +1212,12 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                         }
                     }
                 }
-                VfxDrag::Burst { track, idx } => {
-                    if let Some(b) = doc.tracks.get_mut(track).and_then(|tr| tr.bursts.get_mut(idx))
-                        && (b.t - t).abs() > 1e-6
-                    {
-                        b.t = t.clamp(0.0, dur);
-                        *dirty = true;
-                    }
-                }
             }
         }
         if released && st.drag.take().is_some() {
             // Keep authored order canonical for the sim (clips sorted by start).
             for tr in &mut doc.tracks {
                 tr.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-                tr.bursts.sort_by(|a, b| a.t.total_cmp(&b.t));
             }
             st.sel = None; // indices may have shifted under the sort
             *dirty = true;
@@ -1288,14 +1264,13 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             if fit {
                 st.fit_pending = true;
             }
-            // Delete removes whatever is selected: a keyframe first, else a clip/burst.
+            // Delete removes whatever is selected: a keyframe first, else a clip.
             if del && deferred.is_none() {
                 if let Some((ti, lref, ki)) = st.auto_sel {
                     deferred = Some(DeferredEdit::DelKey(ti, lref, ki));
                 } else {
                     match st.sel {
                         Some(VfxSel::Clip(ti, ci)) => deferred = Some(DeferredEdit::DelClip(ti, ci)),
-                        Some(VfxSel::Burst(ti, bi)) => deferred = Some(DeferredEdit::DelBurst(ti, bi)),
                         None => {}
                     }
                 }
@@ -1570,7 +1545,6 @@ enum DeferredEdit {
     AddClip(usize, f32),
     AddBurst(usize, f32),
     DelClip(usize, usize),
-    DelBurst(usize, usize),
     DupTrack(usize),
     DelTrack(usize),
     AddAutoLane(usize, VfxLaneTargetDoc),
@@ -1581,6 +1555,21 @@ enum DeferredEdit {
     MoveKey(usize, LaneRef, usize, f32, VfxValueDoc),
     DelKey(usize, LaneRef, usize),
     SetInterp(usize, LaneRef, usize, VfxInterpDoc),
+}
+
+/// A new clip with the given emission mode and no lifetime jitter.
+fn new_clip(start: f32, end: f32, emit: VfxEmitDoc) -> VfxClipDoc {
+    VfxClipDoc { start, end, lifetime_jitter: 0.0, emit: Some(emit) }
+}
+
+/// Append a clip, keep the track's clips sorted by start, and select the new one.
+fn push_clip(t: &mut VfxTrackDoc, st: &mut VfxUiState, ti: usize, clip: VfxClipDoc) {
+    let start = clip.start;
+    t.clips.push(clip);
+    t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let ci = t.clips.iter().position(|c| c.start == start).unwrap_or(0);
+    st.sel = Some(VfxSel::Clip(ti, ci));
+    st.sel_track = Some(ti);
 }
 
 fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dur: f32) {
@@ -1599,20 +1588,23 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
             if let Some(t) = doc.tracks.get_mut(ti) {
                 let start = t0.clamp(0.0, (dur - CLIP_MIN_LEN).max(0.0));
                 let end = (t0 + 0.5).min(dur).max(start + CLIP_MIN_LEN);
-                t.clips.push(VfxClipDoc { start, end });
-                t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-                let ci = t.clips.iter().position(|c| c.start == start).unwrap_or(0);
-                st.sel = Some(VfxSel::Clip(ti, ci));
-                st.sel_track = Some(ti);
+                push_clip(t, st, ti, new_clip(start, end, VfxEmitDoc::Rate { rate: 10.0 }));
             }
         }
         DeferredEdit::AddBurst(ti, t0) => {
+            // A burst is a clip whose Emit is Burst — a sizable body you drag out, its
+            // length the burst particles' lifetime.
             if let Some(t) = doc.tracks.get_mut(ti) {
-                t.bursts.push(VfxBurstDoc { t: t0.clamp(0.0, dur), count: 10 });
-                t.bursts.sort_by(|a, b| a.t.total_cmp(&b.t));
-                let bi = t.bursts.iter().position(|b| b.t == t0.clamp(0.0, dur)).unwrap_or(0);
-                st.sel = Some(VfxSel::Burst(ti, bi));
-                st.sel_track = Some(ti);
+                let start = t0.clamp(0.0, (dur - CLIP_MIN_LEN).max(0.0));
+                let end = (start + 0.6).min(dur).max(start + CLIP_MIN_LEN);
+                let emit = VfxEmitDoc::Burst {
+                    count: 12,
+                    count_jitter: 0.0,
+                    pulses: 1,
+                    interval: 0.1,
+                    interval_jitter: 0.0,
+                };
+                push_clip(t, st, ti, new_clip(start, end, emit));
             }
         }
         DeferredEdit::DelClip(ti, ci) => {
@@ -1620,14 +1612,6 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                 && ci < t.clips.len()
             {
                 t.clips.remove(ci);
-                st.sel = None;
-            }
-        }
-        DeferredEdit::DelBurst(ti, bi) => {
-            if let Some(t) = doc.tracks.get_mut(ti)
-                && bi < t.bursts.len()
-            {
-                t.bursts.remove(bi);
                 st.sel = None;
             }
         }

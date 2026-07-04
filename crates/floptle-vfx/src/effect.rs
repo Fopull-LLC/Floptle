@@ -135,19 +135,54 @@ pub enum Space {
     World,
 }
 
-/// A ranged emission span on the timeline — the draggable clip. While the playhead
-/// is inside, the track emits at its rate. Multiple clips = start, stop, start again.
+/// How a [`Clip`] releases its particles across its span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Emit {
+    /// A continuous stream: `rate` particles/second across the whole clip.
+    Rate { rate: f32 },
+    /// A pulse train: `pulses` bursts, the first at the clip's start and each subsequent
+    /// one `interval` seconds after the last (± `interval_jitter`), every burst spawning
+    /// `count` particles (± `count_jitter`). `pulses = 1` is a single burst.
+    Burst {
+        count: u32,
+        /// `0..1` fraction of random variance on each pulse's count.
+        count_jitter: f32,
+        /// Number of repeats (≥ 1).
+        pulses: u32,
+        /// Seconds between pulses.
+        interval: f32,
+        /// `0..1` fraction of random variance on each gap between pulses.
+        interval_jitter: f32,
+    },
+}
+
+impl Default for Emit {
+    fn default() -> Self {
+        Emit::Rate { rate: 10.0 }
+    }
+}
+
+/// A ranged emission on the timeline — the draggable clip, and the unit of "one
+/// emission". Its LENGTH is the lifetime of the particles it releases: each particle
+/// lives `end - start` seconds (± `lifetime_jitter`). A clip either streams
+/// ([`Emit::Rate`], particles born across the whole span) or fires burst pulses
+/// ([`Emit::Burst`]); multiple clips on a track = emit, stop, emit again. This is why
+/// there is no separate track-level rate or lifetime.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Clip {
     pub start: f32,
     pub end: f32,
+    /// `0..1` symmetric variance on each particle's lifetime (= the clip length).
+    pub lifetime_jitter: f32,
+    pub emit: Emit,
 }
 
-/// A hand-placed instant emit — the draggable diamond.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Burst {
-    pub t: f32,
-    pub count: u32,
+impl Clip {
+    /// The lifetime of particles this clip releases — its length on the timeline,
+    /// floored to a tiny positive value so a zero-width clip still spawns visibly.
+    pub fn lifetime(&self) -> f32 {
+        (self.end - self.start).max(1e-3)
+    }
 }
 
 /// What an automation lane modulates. Lanes curve over EFFECT time and shape what a
@@ -252,18 +287,15 @@ pub struct Track {
     pub look: Look,
     pub space: Space,
 
-    // Timeline content (effect-time domain).
+    // Timeline content (effect-time domain). Each clip carries its own emission mode
+    // (stream or burst-train) and lifetime (its length) — there is no track-level rate
+    // or lifetime any more.
     pub clips: Vec<Clip>,
-    pub bursts: Vec<Burst>,
     pub automation: Vec<Lane>,
 
     // Emission.
-    pub rate: f32,
     pub shape: EmitShape,
-    pub particle_lifetime: f32,
-    /// `0..1` symmetric variance on each particle's lifetime.
-    pub lifetime_jitter: f32,
-    /// Pool capacity override; derived from rate/bursts/lifetime when `None`.
+    /// Pool capacity override; derived from the clips when `None`.
     pub max_alive: Option<u32>,
 
     // Per-particle properties: birth value × curve over the particle's life [0..1].
@@ -294,12 +326,8 @@ impl Default for Track {
             look: Look::default(),
             space: Space::default(),
             clips: Vec::new(),
-            bursts: Vec::new(),
             automation: Vec::new(),
-            rate: 10.0,
             shape: EmitShape::default(),
-            particle_lifetime: 1.0,
-            lifetime_jitter: 0.0,
             max_alive: None,
             velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 1.0, 0.0))),
             size: ValueOrCurve::constant(0.25),
@@ -353,12 +381,8 @@ pub struct CompiledTrack {
     pub space: Space,
 
     pub clips: Vec<Clip>,
-    pub bursts: Vec<Burst>,
 
-    pub rate: f32,
     pub shape: EmitShape,
-    pub particle_lifetime: f32,
-    pub lifetime_jitter: f32,
     /// Hard cap on live particles (derived or authored).
     pub capacity: u32,
 
@@ -435,32 +459,50 @@ fn fold_lanes_tint(lanes: &[Lane], lifetime: f32) -> Prop4 {
 }
 
 impl Track {
-    /// Upper bound on simultaneously live particles: continuous emission fills
-    /// `rate × lifetime`, plus every burst could still be alive at once.
+    /// Upper bound on simultaneously live particles, summed over clips: a stream can hold
+    /// `rate × lifetime`; a burst-train can hold `count × pulses` (all pulses' particles
+    /// alive at once in the worst case). Jitter widens both.
     fn derive_capacity(&self) -> u32 {
-        let life = self.particle_lifetime * (1.0 + self.lifetime_jitter);
-        let clip_secs: f32 = self.clips.iter().map(|c| (c.end - c.start).max(0.0)).sum();
-        let from_rate = (self.rate * life.min(clip_secs.max(life))).ceil() as u32;
-        let from_bursts: u32 = self.bursts.iter().map(|b| b.count).sum();
-        (from_rate + from_bursts).clamp(1, 65_536)
+        let mut total = 0.0f32;
+        for c in &self.clips {
+            let life = c.lifetime() * (1.0 + c.lifetime_jitter.clamp(0.0, 1.0));
+            total += match c.emit {
+                Emit::Rate { rate } => rate.max(0.0) * life,
+                Emit::Burst { count, count_jitter, pulses, .. } => {
+                    count as f32 * (1.0 + count_jitter.clamp(0.0, 1.0)) * pulses.max(1) as f32
+                }
+            };
+        }
+        (total.ceil() as u32).clamp(1, 65_536)
     }
 
     fn compile(&self, lifetime: f32) -> CompiledTrack {
         let mut clips = self.clips.clone();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-        let mut bursts = self.bursts.clone();
-        bursts.sort_by(|a, b| a.t.total_cmp(&b.t));
+        // Sanitize each clip: a positive length (so lifetime > 0), clamped jitters, ≥ 1
+        // pulse, non-negative rate/interval.
+        for c in &mut clips {
+            if c.end < c.start + 1e-3 {
+                c.end = c.start + 1e-3;
+            }
+            c.lifetime_jitter = c.lifetime_jitter.clamp(0.0, 1.0);
+            match &mut c.emit {
+                Emit::Rate { rate } => *rate = rate.max(0.0),
+                Emit::Burst { count_jitter, pulses, interval, interval_jitter, .. } => {
+                    *count_jitter = count_jitter.clamp(0.0, 1.0);
+                    *pulses = (*pulses).max(1);
+                    *interval = interval.max(0.0);
+                    *interval_jitter = interval_jitter.clamp(0.0, 1.0);
+                }
+            }
+        }
         CompiledTrack {
             name: self.name.clone(),
             enabled: self.enabled,
             look: self.look.clone(),
             space: self.space,
             clips,
-            bursts,
-            rate: self.rate.max(0.0),
             shape: self.shape,
-            particle_lifetime: self.particle_lifetime.max(1e-3),
-            lifetime_jitter: self.lifetime_jitter.clamp(0.0, 1.0),
             capacity: self.max_alive.unwrap_or_else(|| self.derive_capacity()).max(1),
             velocity: bake4(&self.velocity, 1.0),
             velocity_is_curve: matches!(self.velocity, ValueOrCurve::Curve(_)),
@@ -505,13 +547,18 @@ mod tests {
     #[test]
     fn capacity_covers_rate_and_bursts() {
         let t = Track {
-            rate: 20.0,
-            particle_lifetime: 0.5,
-            clips: vec![Clip { start: 0.0, end: 2.0 }],
-            bursts: vec![Burst { t: 0.1, count: 12 }],
+            clips: vec![
+                // A 0.5 s-long stream at 20/s = 10 alive; a 12-count burst clip = 12.
+                Clip { start: 0.0, end: 0.5, lifetime_jitter: 0.0, emit: Emit::Rate { rate: 20.0 } },
+                Clip {
+                    start: 0.1,
+                    end: 0.6,
+                    lifetime_jitter: 0.0,
+                    emit: Emit::Burst { count: 12, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+                },
+            ],
             ..Track::default()
         };
-        // 20/s × 0.5 s alive = 10 continuous + 12 burst.
         assert_eq!(t.derive_capacity(), 22);
     }
 

@@ -172,14 +172,47 @@ pub enum VfxForceDoc {
     Turbulence { frequency: f32, strength: f32 },
 }
 
-/// A ranged emission span on the timeline — the draggable clip.
+/// How a clip releases its particles across its span.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum VfxEmitDoc {
+    /// Continuous stream at `rate` particles/second across the clip.
+    Rate { rate: f32 },
+    /// A pulse train: `pulses` bursts from the clip start, `interval` apart
+    /// (± `interval_jitter`), each of `count` (± `count_jitter`) particles.
+    Burst {
+        count: u32,
+        #[serde(default)]
+        count_jitter: f32,
+        #[serde(default = "one_u32")]
+        pulses: u32,
+        #[serde(default)]
+        interval: f32,
+        #[serde(default)]
+        interval_jitter: f32,
+    },
+}
+
+impl Default for VfxEmitDoc {
+    fn default() -> Self {
+        VfxEmitDoc::Rate { rate: 10.0 }
+    }
+}
+
+/// A ranged emission on the timeline — the draggable clip. Its LENGTH is the lifetime of
+/// the particles it releases. `emit` is `None` only in legacy files (pre-clip-emit); load
+/// migration fills it from the old track-level rate/bursts (see `migrate_clips`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct VfxClipDoc {
     pub start: f32,
     pub end: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lifetime_jitter: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit: Option<VfxEmitDoc>,
 }
 
-/// A hand-placed instant emit — the draggable diamond.
+/// DEPRECATED (pre-clip-emit): a hand-placed instant emit. Kept so old `.vfx.ron` still
+/// parses; `migrate_clips` folds these into burst clips on load.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct VfxBurstDoc {
     pub t: f32,
@@ -239,20 +272,25 @@ pub struct VfxTrackDoc {
     #[serde(default)]
     pub clips: Vec<VfxClipDoc>,
     #[serde(default)]
-    pub bursts: Vec<VfxBurstDoc>,
-    #[serde(default)]
     pub automation: Vec<VfxLaneDoc>,
 
-    #[serde(default = "ten_f32")]
-    pub rate: f32,
     #[serde(default)]
     pub shape: VfxShapeDoc,
-    #[serde(default = "one_f32")]
-    pub particle_lifetime: f32,
-    #[serde(default)]
-    pub lifetime_jitter: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_alive: Option<u32>,
+
+    // DEPRECATED (pre-clip-emit): the track used to carry one rate + lifetime for all its
+    // clips plus a separate `bursts` list. Retained with defaults so old `.vfx.ron` still
+    // deserializes; `migrate_clips` folds them into per-clip `emit` on load and clears
+    // them, so new saves omit them entirely (skip_serializing_if).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bursts: Vec<VfxBurstDoc>,
+    #[serde(default = "ten_f32", skip_serializing_if = "is_ten")]
+    pub rate: f32,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub particle_lifetime: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lifetime_jitter: f32,
 
     #[serde(default = "default_velocity")]
     pub velocity: VfxPropDoc,
@@ -322,6 +360,12 @@ fn is_face_camera(o: &VfxOrientDoc) -> bool {
 fn ten_f32() -> f32 {
     10.0
 }
+fn is_ten(v: &f32) -> bool {
+    *v == 10.0
+}
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
 fn twelve_f32() -> f32 {
     12.0
 }
@@ -362,6 +406,45 @@ fn default_color() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::Rgba([1.0, 1.0, 1.0, 1.0]))
 }
 
+/// Legacy migration (pre-clip-emit): fold the old track-level `rate` / `particle_lifetime`
+/// / `lifetime_jitter` / `bursts` into per-clip `emit` + clip length, then clear the
+/// deprecated fields so new saves omit them. A clip without an explicit `emit` was a
+/// legacy stream clip; under the clip-length-is-lifetime model its length becomes the old
+/// `particle_lifetime`. Each old burst becomes a single-pulse burst clip of that lifetime.
+/// A no-op for already-migrated (new-format) tracks.
+fn migrate_clips(t: &mut VfxTrackDoc) {
+    if t.clips.iter().all(|c| c.emit.is_some()) && t.bursts.is_empty() {
+        return;
+    }
+    let plife = t.particle_lifetime.max(1e-3);
+    let ljit = t.lifetime_jitter;
+    for c in &mut t.clips {
+        if c.emit.is_none() {
+            c.emit = Some(VfxEmitDoc::Rate { rate: t.rate });
+            c.lifetime_jitter = ljit;
+            c.end = c.start + plife;
+        }
+    }
+    for b in std::mem::take(&mut t.bursts) {
+        t.clips.push(VfxClipDoc {
+            start: b.t,
+            end: b.t + plife,
+            lifetime_jitter: ljit,
+            emit: Some(VfxEmitDoc::Burst {
+                count: b.count,
+                count_jitter: 0.0,
+                pulses: 1,
+                interval: 0.0,
+                interval_jitter: 0.0,
+            }),
+        });
+    }
+    // Reset the consumed fields to their defaults so they no longer serialize.
+    t.rate = 10.0;
+    t.particle_lifetime = 1.0;
+    t.lifetime_jitter = 0.0;
+}
+
 /// File extension (as a suffix on the full file name).
 pub const VFX_EXT: &str = ".vfx.ron";
 
@@ -373,6 +456,7 @@ pub fn load_vfx_effect(path: &Path) -> Result<VfxEffectDoc, SceneError> {
     let mut doc: VfxEffectDoc = ron::from_str(&text).map_err(SceneError::Ron)?;
     for t in &mut doc.tracks {
         upgrade_rotation(&mut t.rotation); // legacy scalar spin → Vec3 Euler
+        migrate_clips(t); // legacy track rate/bursts/lifetime → per-clip emit
     }
     Ok(doc)
 }
@@ -415,8 +499,28 @@ mod tests {
                 lit: false,
                 cast_shadows: false,
                 space: VfxSpaceDoc::Local,
-                clips: vec![VfxClipDoc { start: 0.0, end: 0.4 }],
-                bursts: vec![VfxBurstDoc { t: 0.12, count: 12 }],
+                clips: vec![
+                    VfxClipDoc {
+                        start: 0.0,
+                        end: 0.4,
+                        lifetime_jitter: 0.2,
+                        emit: Some(VfxEmitDoc::Rate { rate: 60.0 }),
+                    },
+                    VfxClipDoc {
+                        start: 0.12,
+                        end: 0.47,
+                        lifetime_jitter: 0.1,
+                        emit: Some(VfxEmitDoc::Burst {
+                            count: 12,
+                            count_jitter: 0.25,
+                            pulses: 3,
+                            interval: 0.1,
+                            interval_jitter: 0.2,
+                        }),
+                    },
+                ],
+                // Deprecated fields at defaults so they don't serialize (new format).
+                bursts: vec![],
                 automation: vec![VfxLaneDoc {
                     target: VfxLaneTargetDoc::Rate,
                     curve: VfxCurveDoc {
@@ -439,11 +543,11 @@ mod tests {
                         extrapolate: VfxExtrapolateDoc::Clamp,
                     },
                 }],
-                rate: 60.0,
                 shape: VfxShapeDoc::Edge { length: 1.4 },
-                particle_lifetime: 0.35,
-                lifetime_jitter: 0.2,
                 max_alive: Some(128),
+                rate: 10.0,
+                particle_lifetime: 1.0,
+                lifetime_jitter: 0.0,
                 velocity: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 9.0, 0.0])),
                 size: VfxPropDoc::Curve(VfxCurveDoc {
                     keys: vec![
@@ -549,6 +653,45 @@ mod tests {
         assert!(!text.contains("orient"), "default orient must be skipped");
         assert!(!text.contains("aspect"), "default aspect must be skipped");
         assert!(!text.contains("stretch"), "default stretch must be skipped");
+    }
+
+    #[test]
+    fn legacy_track_migrates_to_per_clip_emit() {
+        // Old format: a track-level rate + particle_lifetime, a bare stream clip (no
+        // `emit`), and a separate `bursts` list. Loading must fold these into per-clip
+        // emit with clip length = the old lifetime, and clear the deprecated fields.
+        let src = r#"(
+            name: "Legacy",
+            lifetime: 2.0,
+            tracks: [(
+                name: "T",
+                clips: [(start: 0.0, end: 1.5)],
+                bursts: [(t: 0.2, count: 8)],
+                rate: 30.0,
+                particle_lifetime: 0.9,
+                lifetime_jitter: 0.4,
+            )],
+        )"#;
+        let mut doc: VfxEffectDoc = ron::from_str(src).unwrap();
+        for t in &mut doc.tracks {
+            migrate_clips(t);
+        }
+        let t = &doc.tracks[0];
+        assert_eq!(t.clips.len(), 2, "one stream clip + one migrated burst clip");
+        // Stream clip: Rate(30), length reset to the old lifetime, jitter carried.
+        assert_eq!(t.clips[0].emit, Some(VfxEmitDoc::Rate { rate: 30.0 }));
+        assert!((t.clips[0].end - 0.9).abs() < 1e-6, "clip length = old lifetime");
+        assert!((t.clips[0].lifetime_jitter - 0.4).abs() < 1e-6);
+        // Burst clip: single pulse of 8 at t=0.2, same lifetime length.
+        assert_eq!(t.clips[1].start, 0.2);
+        assert!((t.clips[1].end - 1.1).abs() < 1e-6);
+        assert!(matches!(t.clips[1].emit, Some(VfxEmitDoc::Burst { count: 8, pulses: 1, .. })));
+        // Deprecated fields consumed → omitted from a re-save, and re-migration is a no-op.
+        assert!(t.bursts.is_empty());
+        assert!(!ron::ser::to_string_pretty(&doc, Default::default()).unwrap().contains("bursts"));
+        let mut again = doc.clone();
+        again.tracks.iter_mut().for_each(migrate_clips);
+        assert_eq!(again, doc, "migration is idempotent");
     }
 
     /// A minimal track for tests that only care about a couple of fields.
