@@ -249,10 +249,10 @@ pub(crate) fn curve_editor(
                 .selected_text(match k.interp {
                     VfxInterpDoc::Constant => "hold",
                     VfxInterpDoc::Linear => "linear",
-                    VfxInterpDoc::Bezier => "bezier",
+                    VfxInterpDoc::Bezier => "smooth",
                 })
                 .show_ui(ui, |ui| {
-                    for (v, l) in [(VfxInterpDoc::Constant, "hold"), (VfxInterpDoc::Linear, "linear"), (VfxInterpDoc::Bezier, "bezier")] {
+                    for (v, l) in [(VfxInterpDoc::Constant, "hold"), (VfxInterpDoc::Linear, "linear"), (VfxInterpDoc::Bezier, "smooth")] {
                         if ui.selectable_label(k.interp == v, l).clicked() && k.interp != v {
                             k.interp = v;
                             changed = true;

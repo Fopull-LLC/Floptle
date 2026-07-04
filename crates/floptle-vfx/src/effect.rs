@@ -100,7 +100,7 @@ pub enum Space {
     /// Particles ride the emitter node (attached fire follows the torch).
     #[default]
     Local,
-    /// Particles anchor where they were born (trails stay behind) — phase 4.
+    /// Particles anchor where they were born (trails stay behind), floating-origin-safe.
     World,
 }
 
