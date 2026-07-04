@@ -36,7 +36,7 @@ use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_
 use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
-use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
+use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
 use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
 impl Editor {
@@ -60,12 +60,6 @@ impl Editor {
         // shared 3D atlas (where shadow-only mesh occluders also live).
         self.sync_terrain_gpu();
         self.sync_sky_texture();
-        // Inspector camera POV preview: if a Camera node is selected, render the scene
-        // from its viewpoint into the 16:9 offscreen target (before the destructure).
-        let cam_elapsed = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
-        self.update_camera_preview(cam_elapsed);
-        // When Scene + Game are split, render the Game view into its own offscreen target.
-        self.update_game_viewport(cam_elapsed);
         // Keep the Inspector's script param list in sync with each script's `defaults`
         // (cheap: cached by file mtime, selected node only) so editing a script surfaces
         // new tunables and drops removed ones live.
@@ -107,6 +101,16 @@ impl Editor {
         // BEFORE the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
         self.ensure_vfx_assets();
+
+        // Offscreen previews render LAST (after play_step advanced this frame's poses
+        // and particles, and after ensure_vfx_assets registered their textures/meshes):
+        // otherwise a docked/split Game view or the Inspector camera POV showed frozen
+        // animation and missing effects — it was drawing a frame before the sim, with
+        // VFX assets not yet resolved. Reuses `elapsed` so it costs no extra clock read.
+        // Both take &mut self and must live outside the main GPU destructure below, so
+        // this is the last safe point before it.
+        self.update_camera_preview(elapsed);
+        self.update_game_viewport(elapsed);
 
         let (
             Some(gpu),
@@ -279,6 +283,23 @@ impl Editor {
                             self.light_gizmos.push(lines);
                         }
                     }
+                }
+            }
+            // The directional "sun" Light has no world position, so its direction gizmo
+            // only shows when the Lighting node is selected — anchored in front of the
+            // editor camera so it's always framed, pointing along the light direction.
+            if self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some()) {
+                let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+                let anchor = cam.world_position + fwd * 6.0;
+                let dir = self
+                    .world
+                    .query::<Light>()
+                    .next()
+                    .map(|(_, l)| Vec3::from(l.direction))
+                    .unwrap_or(Vec3::Y);
+                let lines = light_dir_lines(anchor, dir, cam.world_position, view_proj, gw, gh);
+                if !lines.is_empty() {
+                    self.light_gizmos.push(lines);
                 }
             }
             // Rigidbody collider outlines, so physics bodies are visible/placeable.
@@ -650,29 +671,8 @@ impl Editor {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
-                        if let Some(rig) = asset.rig.as_ref() {
-                            // Rigged: each part either rides its (possibly animated) node
-                            // rigidly (R6-style), or — for a TRUE vertex-skinned part
-                            // (Ty) — is CPU-deformed by the bone palette this frame and
-                            // drawn at the mesh matrix. Skinned deform makes the mesh bend;
-                            // rigid placement never would (why Ty looked frozen).
-                            let node_world = self.anim.poses.get(e).unwrap_or(&rig.rest_world);
-                            for (i, &mid) in asset.parts.iter().enumerate() {
-                                let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
-                                if let Some(Some(skin)) = rig.skins.get(i) {
-                                    anim::cpu_skin_part(skin, part_node, node_world, &mut skin_scratch);
-                                    raster.update_mesh_vertices(gpu, mid, &skin_scratch);
-                                    instances.push((mid, tex, instance_of_mat(model, &mp)));
-                                } else {
-                                    let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
-                                    instances.push((mid, tex, instance_of_mat(model * local, &mp)));
-                                }
-                            }
-                        } else {
-                            for &mid in &asset.parts {
-                                instances.push((mid, tex, instance_of_mat(model, &mp)));
-                            }
-                        }
+                        let pose = self.anim.poses.get(e).map(|v| v.as_slice());
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch, &mut instances);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render elsewhere.
@@ -2930,6 +2930,9 @@ impl Editor {
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
+        // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part),
+        // exactly like the main gather — so offscreen views animate skinned meshes too.
+        let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
         for (ent, matter) in &ents {
             if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
                 continue;
@@ -2954,15 +2957,26 @@ impl Editor {
                     blobs.push((t.translation, scale * t.scale.x, mp));
                 }
                 Matter::Mesh { asset_path } => {
-                    if let Some(asset) = self.mesh_registry.get(asset_path) {
+                    // Same animated/skinned gather as the main surface path (shared
+                    // helper) — a docked/split Game view or camera preview must show the
+                    // character moving, not frozen in bind pose. gpu/raster are freshly
+                    // borrowed here (disjoint fields; the loop's earlier world/texture
+                    // borrows already produced owned values).
+                    if let (Some(gpu), Some(raster), Some(asset)) = (
+                        self.gpu.as_ref(),
+                        self.raster.as_mut(),
+                        self.mesh_registry.get(asset_path),
+                    ) {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat
                             .as_ref()
                             .map(material_params)
                             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
-                        for &mid in &asset.parts {
-                            instances.push((mid, tex, instance_of_mat(model, &mp)));
-                        }
+                        let pose = self.anim.poses.get(ent).map(|v| v.as_slice());
+                        push_mesh_instances(
+                            gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch,
+                            &mut instances,
+                        );
                     }
                 }
                 _ => {}
@@ -3084,6 +3098,49 @@ impl Editor {
                     raster,
                 );
             }
+        }
+    }
+}
+
+/// Gather one `Matter::Mesh`'s draw instances. Rigged meshes animate: each part
+/// either rides its (possibly animated) node rigidly (R6-style), or — for a TRUE
+/// vertex-skinned part (Ty) — is CPU-deformed by this frame's bone palette, its
+/// vertices re-uploaded, and drawn at the mesh matrix. `pose` is the node's animated
+/// world matrices (falls back to the rig rest pose). Static (unrigged) meshes just
+/// draw every part at `model`.
+///
+/// Shared by the main surface gather AND the offscreen `render_world_into` so the
+/// fullscreen, docked, split, and camera-preview views all animate identically —
+/// previously the offscreen path drew every mesh rigidly at its root, so a character
+/// looked frozen whenever the Game view wasn't the fullscreen/focused one.
+#[allow(clippy::too_many_arguments)]
+fn push_mesh_instances(
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    asset: &MeshAsset,
+    pose: Option<&[Mat4]>,
+    model: Mat4,
+    tex: Option<TexId>,
+    mp: &MaterialParams,
+    skin_scratch: &mut Vec<floptle_render::Vertex>,
+    instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+) {
+    let Some(rig) = asset.rig.as_ref() else {
+        for &mid in &asset.parts {
+            instances.push((mid, tex, instance_of_mat(model, mp)));
+        }
+        return;
+    };
+    let node_world = pose.unwrap_or(rig.rest_world.as_slice());
+    for (i, &mid) in asset.parts.iter().enumerate() {
+        let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
+        if let Some(Some(skin)) = rig.skins.get(i) {
+            anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
+            raster.update_mesh_vertices(gpu, mid, skin_scratch);
+            instances.push((mid, tex, instance_of_mat(model, mp)));
+        } else {
+            let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
+            instances.push((mid, tex, instance_of_mat(model * local, mp)));
         }
     }
 }
