@@ -9,11 +9,48 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
+/// Fopull LLC identity + the open-source links surfaced in the About tab.
+const COMPANY: &str = "Fopull LLC";
+const WEBSITE_URL: &str = "https://fopull.com/";
+const REPO_URL: &str = "https://github.com/Fopull-LLC/Floptle";
+const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
+
+/// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
+/// emoji-icon-font), so none render as a missing-glyph box. Anything added here must be
+/// checked against that font union first: some obvious choices are NOT in the set and show
+/// as tofu — fullwidth plus (U+FF0B), the light check (U+2713), the multiplication-x
+/// (U+2715), and any emoji carrying a U+FE0F variation selector. Prefer U+2795 / U+2714 /
+/// U+2716 instead.
+mod ico {
+    pub const NEW: &str = "➕";
+    pub const OPEN: &str = "▶";
+    pub const UPGRADE: &str = "⬆";
+    pub const REMOVE: &str = "🗑";
+    pub const REVEAL: &str = "🗁";
+    pub const REFRESH: &str = "↻";
+    pub const INSTALL: &str = "⬇";
+    pub const OK: &str = "✔";
+    pub const WARN: &str = "⚠";
+    pub const CLOSE: &str = "✖";
+    pub const DEFAULT_ON: &str = "●";
+    pub const DEFAULT_OFF: &str = "○";
+    pub const STAR: &str = "⭐";
+    pub const PROJECTS: &str = "📁";
+    pub const INSTALLS: &str = "📦";
+    pub const SETTINGS: &str = "⚙";
+    pub const ABOUT: &str = "ℹ";
+    pub const GLOBE: &str = "🌐";
+    pub const BUG: &str = "🐛";
+    pub const BOOK: &str = "📖";
+    pub const ROCKET: &str = "🚀";
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Projects,
     Installs,
     Settings,
+    About,
 }
 
 enum ManifestState {
@@ -73,7 +110,11 @@ pub struct HubApp {
 impl HubApp {
     pub fn new(paths: Paths) -> Self {
         let _ = paths.ensure();
-        let config = HubConfig::load(&paths);
+        let mut config = HubConfig::load(&paths);
+        // Seed the "new project" location once so the form isn't blank on first use.
+        if config.settings.projects_dir.is_none() {
+            config.settings.projects_dir = Some(crate::config::default_projects_dir());
+        }
         let installs = registry::scan_installs(&paths.versions_dir());
         let token = std::env::var("FLOPTLE_HUB_TOKEN").unwrap_or_default();
         let mut app = Self {
@@ -92,6 +133,9 @@ impl HubApp {
             toast_at: 0.0,
         };
         app.refresh_projects();
+        // Fetch the available-versions list up front so the Installs tab is populated without
+        // a manual click (best-effort — an offline start just shows an error there).
+        app.start_manifest_fetch();
         app
     }
 
@@ -275,11 +319,27 @@ impl HubApp {
             self.toast = Some((format!("{} already exists", path.display()), true));
             return false;
         }
+        // Remember this parent folder so the next "New project" starts there.
+        let loc = form.location.trim().to_string();
+        if self.config.settings.projects_dir.as_deref() != Some(loc.as_str()) {
+            self.config.settings.projects_dir = Some(loc);
+            self.save();
+        }
         let bin = install.editor_bin();
+        // Pin the project to the version the user PICKED, not the binary's compiled-in one
+        // (a bundle reports its own version.json label; passing it explicitly is the
+        // authority so the new project's engine matches an installed one and can be opened).
+        let pin = install.version.clone();
         let label = format!("creating {name}…");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let out = match std::process::Command::new(&bin).arg("--new").arg(&path).status() {
+            let out = match std::process::Command::new(&bin)
+                .arg("--new")
+                .arg(&path)
+                .arg("--engine-version")
+                .arg(&pin)
+                .status()
+            {
                 Ok(s) if s.success() => {
                     let mut p = Project { name, path, engine_version: None, last_opened: None };
                     p.refresh();
@@ -335,10 +395,19 @@ impl HubApp {
         let Some(project) = self.config.projects.get(idx).cloned() else { return };
         let bin = target.editor_bin();
         let path = project.path.clone();
+        // Stamp the exact target version (the install dir the Hub chose), so the project's
+        // pinned engine reliably re-points even if the binary's own version.json differs.
+        let pin = target.version.clone();
         let label = format!("upgrading {} to {}…", project.name, target.version);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let out = match std::process::Command::new(&bin).arg("--migrate").arg(&path).status() {
+            let out = match std::process::Command::new(&bin)
+                .arg("--migrate")
+                .arg(&path)
+                .arg("--engine-version")
+                .arg(&pin)
+                .status()
+            {
                 Ok(s) if s.success() => ProcOutcome::Upgraded(idx),
                 Ok(_) => ProcOutcome::Failed("migration exited with an error".into()),
                 Err(e) => ProcOutcome::Failed(format!("upgrade failed: {e}")),
@@ -403,11 +472,12 @@ impl eframe::App for HubApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Floptle Hub");
+                ui.heading(format!("{} Floptle Hub", ico::ROCKET));
                 ui.separator();
-                ui.selectable_value(&mut self.tab, Tab::Projects, "Projects");
-                ui.selectable_value(&mut self.tab, Tab::Installs, "Installs");
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.tab, Tab::Projects, format!("{} Projects", ico::PROJECTS));
+                ui.selectable_value(&mut self.tab, Tab::Installs, format!("{} Installs", ico::INSTALLS));
+                ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
+                ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
             });
         });
 
@@ -415,11 +485,15 @@ impl eframe::App for HubApp {
             let mut dismiss = false;
             egui::Panel::bottom("toast").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.small_button("✕").clicked() {
+                    if ui.small_button(ico::CLOSE).clicked() {
                         dismiss = true;
                     }
-                    let color = if is_err { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN };
-                    ui.colored_label(color, msg);
+                    let (color, mark) = if is_err {
+                        (egui::Color32::LIGHT_RED, ico::WARN)
+                    } else {
+                        (egui::Color32::LIGHT_GREEN, ico::OK)
+                    };
+                    ui.colored_label(color, format!("{mark} {msg}"));
                 });
             });
             if dismiss {
@@ -432,6 +506,7 @@ impl eframe::App for HubApp {
             Tab::Projects => self.projects_tab(ui),
             Tab::Installs => self.installs_tab(ui),
             Tab::Settings => self.settings_tab(ui),
+            Tab::About => self.about_tab(ui),
         });
     }
 }
@@ -449,7 +524,7 @@ impl HubApp {
         let busy = self.proc.is_some();
         // New / add controls.
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new("＋ New project")).clicked() {
+            if ui.add_enabled(!busy, egui::Button::new(format!("{} New project", ico::NEW))).clicked() {
                 let version = self
                     .config
                     .settings
@@ -457,11 +532,14 @@ impl HubApp {
                     .clone()
                     .or_else(|| self.installs.last().map(|i| i.version.clone()))
                     .unwrap_or_default();
-                self.new_project = Some(NewProjectForm { version, ..Default::default() });
+                // Prefill the location with the remembered/default projects folder.
+                let location = self.config.settings.projects_dir.clone().unwrap_or_default();
+                self.new_project = Some(NewProjectForm { version, location, ..Default::default() });
             }
+            ui.separator();
             ui.label("or add existing:");
             ui.text_edit_singleline(&mut self.add_path);
-            if ui.button("Add").clicked() {
+            if ui.button(format!("{} Add", ico::NEW)).clicked() {
                 match self.add_existing(&self.add_path.clone()) {
                     Ok(p) => {
                         self.config.upsert_project(p);
@@ -475,18 +553,24 @@ impl HubApp {
 
         if let Some(mut form) = self.new_project.take() {
             let mut keep = true;
+            let mut reveal_loc = false;
             egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label("New project");
-                ui.horizontal(|ui| {
-                    ui.label("name");
+                ui.strong(format!("{} New project", ico::NEW));
+                egui::Grid::new("new-proj-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                    ui.label("Name");
                     ui.text_edit_singleline(&mut form.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("location (parent folder)");
-                    ui.text_edit_singleline(&mut form.location);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("engine");
+                    ui.end_row();
+
+                    ui.label("Location");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut form.location);
+                        if ui.button(ico::REVEAL).on_hover_text("open this folder in your file manager").clicked() {
+                            reveal_loc = true;
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Engine");
                     egui::ComboBox::from_id_salt("new-proj-version")
                         .selected_text(if form.version.is_empty() { "(none installed)".into() } else { form.version.clone() })
                         .show_ui(ui, |ui| {
@@ -494,16 +578,54 @@ impl HubApp {
                                 ui.selectable_value(&mut form.version, i.version.clone(), &i.version);
                             }
                         });
+                    ui.end_row();
                 });
+                // Show exactly where it lands, so there are no surprises.
+                if !form.name.trim().is_empty() && !form.location.trim().is_empty() {
+                    let dest = PathBuf::from(form.location.trim()).join(form.name.trim());
+                    ui.small(format!("will create {}", dest.display()));
+                }
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!busy, egui::Button::new("Create")).clicked() && self.start_create(&form) {
+                    if ui.add_enabled(!busy, egui::Button::new(format!("{} Create", ico::OK))).clicked()
+                        && self.start_create(&form)
+                    {
                         keep = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(format!("{} Cancel", ico::CLOSE)).clicked() {
                         keep = false;
                     }
                 });
             });
+            if reveal_loc {
+                // A "show in file manager" affordance must never write to disk. Open the
+                // folder if it exists, else its parent (so the user can see where it'll
+                // land); the folder itself is created only on Create. Don't climb past the
+                // parent — silently opening a far-off ancestor (or `/`) for a typo'd path is
+                // more confusing than a toast.
+                let trimmed = form.location.trim();
+                let loc = PathBuf::from(trimmed);
+                let target = if trimmed.is_empty() {
+                    None
+                } else if loc.is_dir() {
+                    Some(loc.clone())
+                } else {
+                    loc.parent().filter(|p| p.is_dir()).map(|p| p.to_path_buf())
+                };
+                match target {
+                    Some(dir) => {
+                        if let Err(e) = launch::reveal(&dir) {
+                            self.toast = Some((e, true));
+                        }
+                    }
+                    None => {
+                        self.toast = Some((
+                            format!("{} doesn't exist yet — it'll be created when you click Create", loc.display()),
+                            true,
+                        ));
+                    }
+                }
+            }
             if keep {
                 self.new_project = Some(form);
             }
@@ -511,7 +633,12 @@ impl HubApp {
 
         ui.separator();
         if self.config.projects.is_empty() {
-            ui.label("No projects yet — create one, or add an existing project folder.");
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new(ico::PROJECTS).size(28.0).weak());
+                ui.label("No projects yet.");
+                ui.small("Create one above, or add an existing project folder.");
+            });
             return;
         }
 
@@ -520,6 +647,7 @@ impl HubApp {
             self.config.projects.iter().map(|p| self.upgrade_target(p)).collect();
         let mut launch_idx = None;
         let mut remove = None;
+        let mut reveal_idx = None;
         let mut upgrade: Option<(usize, Install)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (idx, p) in self.config.projects.iter().enumerate() {
@@ -534,26 +662,35 @@ impl HubApp {
                                 .as_deref()
                                 .map(|v| self.installs.iter().any(|i| i.version == v))
                                 .unwrap_or(!self.installs.is_empty());
-                            let mark = if !p.exists() {
-                                "⚠ folder missing"
+                            let (mark, color) = if !p.exists() {
+                                (format!("{} folder missing", ico::WARN), egui::Color32::LIGHT_RED)
                             } else if installed {
-                                "engine ✓"
+                                (format!("engine {}", ico::OK), egui::Color32::LIGHT_GREEN)
                             } else {
-                                "engine not installed"
+                                (format!("{} engine not installed", ico::WARN), egui::Color32::from_rgb(230, 180, 90))
                             };
-                            ui.small(format!("engine: {ver}  ·  {mark}"));
+                            ui.horizontal(|ui| {
+                                ui.small(format!("engine: {ver}  ·"));
+                                ui.small(egui::RichText::new(mark).color(color));
+                            });
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("🗑").on_hover_text("remove from Hub (doesn't delete files)").clicked() {
+                            if ui.button(ico::REMOVE).on_hover_text("remove from Hub (doesn't delete files)").clicked() {
                                 remove = Some(idx);
                             }
-                            if ui.add_enabled(p.exists(), egui::Button::new("Open ▶")).clicked() {
+                            if ui.add_enabled(p.exists(), egui::Button::new(ico::REVEAL))
+                                .on_hover_text("show the project folder in your file manager")
+                                .clicked()
+                            {
+                                reveal_idx = Some(idx);
+                            }
+                            if ui.add_enabled(p.exists(), egui::Button::new(format!("{} Open", ico::OPEN))).clicked() {
                                 launch_idx = Some(idx);
                             }
                             if let Some(target) = &upgrades[idx]
                                 && p.exists()
                                 && ui
-                                    .add_enabled(!busy, egui::Button::new(format!("⬆ {}", target.version)))
+                                    .add_enabled(!busy, egui::Button::new(format!("{} {}", ico::UPGRADE, target.version)))
                                     .on_hover_text("migrate this project to the newer installed engine")
                                     .clicked()
                             {
@@ -567,6 +704,12 @@ impl HubApp {
         if let Some(idx) = launch_idx {
             self.launch_project(idx);
         }
+        if let Some(idx) = reveal_idx
+            && let Some(p) = self.config.projects.get(idx)
+            && let Err(e) = launch::reveal(&p.path)
+        {
+            self.toast = Some((e, true));
+        }
         if let Some((idx, target)) = upgrade {
             self.start_upgrade(idx, &target);
         }
@@ -579,24 +722,29 @@ impl HubApp {
 
     fn installs_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.strong("Installed");
+        ui.strong(format!("{} Installed engines", ico::INSTALLS));
         if self.installs.is_empty() {
-            ui.label("None installed yet.");
+            ui.small("None installed yet — pick one from Available below.");
         } else {
             let mut set_default = None;
             let mut uninstall = None;
+            let mut reveal = None;
             for i in &self.installs {
                 ui.horizontal(|ui| {
                     let is_default = self.config.settings.default_version.as_deref() == Some(i.version.as_str());
-                    ui.label(if is_default { format!("● {} (default)", i.version) } else { format!("○ {}", i.version) });
+                    let (dot, tail) = if is_default { (ico::DEFAULT_ON, "  (default)") } else { (ico::DEFAULT_OFF, "") };
+                    ui.label(format!("{dot} {}{tail}", i.version));
                     if !i.is_valid() {
-                        ui.colored_label(egui::Color32::LIGHT_RED, "invalid");
+                        ui.colored_label(egui::Color32::LIGHT_RED, format!("{} invalid", ico::WARN));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Uninstall").clicked() {
+                        if ui.button(ico::REMOVE).on_hover_text("uninstall this engine").clicked() {
                             uninstall = Some(i.clone());
                         }
-                        if !is_default && ui.button("Set default").clicked() {
+                        if ui.button(ico::REVEAL).on_hover_text("show this install in your file manager").clicked() {
+                            reveal = Some(i.path.clone());
+                        }
+                        if !is_default && ui.button(format!("{} Set default", ico::STAR)).clicked() {
                             set_default = Some(i.version.clone());
                         }
                     });
@@ -606,6 +754,11 @@ impl HubApp {
                 self.config.settings.default_version = Some(v);
                 self.save();
             }
+            if let Some(p) = reveal
+                && let Err(e) = launch::reveal(&p)
+            {
+                self.toast = Some((e, true));
+            }
             if let Some(i) = uninstall {
                 let _ = std::fs::remove_dir_all(&i.path);
                 if self.config.settings.default_version.as_deref() == Some(i.version.as_str()) {
@@ -613,6 +766,7 @@ impl HubApp {
                 }
                 self.rescan_installs();
                 self.save();
+                self.toast = Some((format!("uninstalled {}", i.version), false));
             }
         }
 
@@ -620,7 +774,7 @@ impl HubApp {
         ui.horizontal(|ui| {
             ui.strong("Available");
             let loading = matches!(self.manifest, ManifestState::Loading(_));
-            if ui.add_enabled(!loading, egui::Button::new("↻ Check for versions")).clicked() {
+            if ui.add_enabled(!loading, egui::Button::new(format!("{} Check for versions", ico::REFRESH))).clicked() {
                 self.start_manifest_fetch();
             }
             ui.label(format!("channel: {}", self.config.settings.channel));
@@ -667,8 +821,10 @@ impl HubApp {
                             }
                             Some(art) => {
                                 if installed {
-                                    ui.small("installed ✓");
-                                } else if self.job.is_none() && ui.button("Install").clicked() {
+                                    ui.colored_label(egui::Color32::LIGHT_GREEN, format!("installed {}", ico::OK));
+                                } else if self.job.is_none()
+                                    && ui.button(format!("{} Install", ico::INSTALL)).clicked()
+                                {
                                     to_install = Some((r.version.clone(), art.clone()));
                                 }
                             }
@@ -684,7 +840,9 @@ impl HubApp {
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        ui.strong(format!("{} Settings", ico::SETTINGS));
         let mut changed = false;
+        let mut reveal_data = false;
         egui::Grid::new("settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
             ui.label("Channel");
             egui::ComboBox::from_id_salt("channel")
@@ -719,18 +877,72 @@ impl HubApp {
                 });
             ui.end_row();
 
+            ui.label("New-project folder");
+            let mut dir = self.config.settings.projects_dir.clone().unwrap_or_default();
+            if ui.text_edit_singleline(&mut dir).changed() {
+                self.config.settings.projects_dir = Some(dir);
+                changed = true;
+            }
+            ui.end_row();
+
             ui.label("Auth token (session)");
             ui.add(egui::TextEdit::singleline(&mut self.token).password(true).hint_text("for a private repo — not saved"));
             ui.end_row();
 
             ui.label("Data folder");
-            ui.small(self.paths.data.display().to_string());
+            ui.horizontal(|ui| {
+                ui.small(self.paths.data.display().to_string());
+                if ui.small_button(ico::REVEAL).on_hover_text("open the Hub data folder").clicked() {
+                    reveal_data = true;
+                }
+            });
             ui.end_row();
         });
         if changed {
             self.save();
         }
+        if reveal_data && let Err(e) = launch::reveal(&self.paths.data) {
+            self.toast = Some((e, true));
+        }
         ui.separator();
         ui.small("Token is used only this session (a keyring store is a later hardening step). Point the manifest URL at a local releases.json to test against a locally-packaged bundle.");
+    }
+
+    fn about_tab(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new(ico::ROCKET).size(40.0));
+            ui.heading("Floptle Hub");
+            let v = env!("CARGO_PKG_VERSION");
+            ui.label(if v == "0.0.0" { "dev build".to_string() } else { format!("version {v}") });
+            ui.small(format!("platform: {}", crate::releases::platform_target()));
+        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+
+        egui::Grid::new("about-links").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+            ui.label(format!("{} Website", ico::GLOBE));
+            ui.hyperlink_to(WEBSITE_URL, WEBSITE_URL);
+            ui.end_row();
+
+            ui.label(format!("{} Source code", ico::BOOK));
+            ui.hyperlink_to(REPO_URL, REPO_URL);
+            ui.end_row();
+
+            ui.label(format!("{} Report an issue", ico::BUG));
+            ui.hyperlink_to(ISSUES_URL, ISSUES_URL);
+            ui.end_row();
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
+            ui.small("Floptle is open source. Contributions, bug reports, and ideas are welcome.");
+            ui.small("Built with Rust, wgpu, and egui.");
+            ui.add_space(4.0);
+            ui.small(format!("© 2026 {COMPANY}. All rights reserved."));
+        });
     }
 }

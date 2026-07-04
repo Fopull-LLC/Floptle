@@ -65,6 +65,10 @@ pub struct Settings {
     /// Where to fetch the release manifest.
     #[serde(default = "default_manifest_url")]
     pub manifest_url: String,
+    /// The parent folder new projects are created under. Remembered from the last create so
+    /// the user isn't retyping a path each time; seeded with [`default_projects_dir`].
+    #[serde(default)]
+    pub projects_dir: Option<String>,
 }
 
 fn default_channel() -> String {
@@ -74,9 +78,25 @@ fn default_manifest_url() -> String {
     DEFAULT_MANIFEST_URL.to_string()
 }
 
+/// A sensible default parent for new projects: `~/Floptle Projects` (under the user's home),
+/// falling back to the current dir if no home is known. Not created here — the create step
+/// makes the project dir itself.
+pub fn default_projects_dir() -> String {
+    directories::UserDirs::new()
+        .map(|u| u.home_dir().join("Floptle Projects"))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl Default for Settings {
     fn default() -> Self {
-        Self { channel: default_channel(), default_version: None, manifest_url: default_manifest_url() }
+        Self {
+            channel: default_channel(),
+            default_version: None,
+            manifest_url: default_manifest_url(),
+            projects_dir: None,
+        }
     }
 }
 
