@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use floptle_anim::{Clip, Controller, Interp, Layer, NodeChannels, SkelNode, Skeleton, State, Track, TransformTRS};
-use floptle_core::math::{Mat3, Mat4, Quat, Vec3};
+use floptle_core::math::{DMat4, Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
@@ -786,6 +786,32 @@ pub fn resolve_attachments(
             *t = local;
         }
     }
+}
+
+/// World matrix of `bone` on rigged mesh `mesh` — i.e. `mesh_world · bone_model_local`,
+/// the exact frame `resolve_attachments` places a `BoneAttach` into (uses the current
+/// animated pose, else the rig rest pose, matching that function's bone lookup). Invert
+/// it to turn a desired child WORLD transform into a `BoneAttach.offset` (bone-local) so
+/// the move gizmo edits the attachment instead of a `Transform` the resolve would clobber.
+/// `None` if `mesh` isn't a rigged mesh or the bone name is gone (e.g. after a re-import).
+pub fn bone_world_matrix(
+    system: &AnimSystem,
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    mesh: Entity,
+    bone: &str,
+) -> Option<DMat4> {
+    let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(mesh) else { return None };
+    let rig = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())?;
+    let idx = rig.skeleton.index_of(bone)?;
+    let bone_local = system
+        .poses
+        .get(&mesh)
+        .and_then(|p| p.get(idx))
+        .or_else(|| rig.rest_world.get(idx))
+        .copied()
+        .unwrap_or(Mat4::IDENTITY);
+    Some(floptle_core::world_transform(world, mesh).world_matrix() * bone_local.as_dmat4())
 }
 
 /// Preview (edit-mode) apply for ONE entity at an explicit time: bind if
