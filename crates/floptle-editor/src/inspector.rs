@@ -347,6 +347,18 @@ impl EditorTabViewer<'_> {
                                 .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
                                 .changed();
                         });
+                        // Dither: hide 8-bit banding on long, slow fog ramps.
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut l.fog_dither, "dither")
+                                .on_hover_text("break up color banding across the fog gradient (matches the retro pixel grid)")
+                                .changed();
+                            ui.add_enabled_ui(l.fog_dither, |ui| {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(&mut l.fog_dither_strength, 0.0..=1.0).text("amount"))
+                                    .changed();
+                            });
+                        });
                     });
                 }
             }
@@ -581,6 +593,8 @@ impl EditorTabViewer<'_> {
                                 ao,
                                 ao_strength,
                                 ao_radius,
+                                posterize_bands,
+                                posterize_dither,
                             } => {
                                 use floptle_core::AoMode;
                                 ui.label("post processing");
@@ -643,6 +657,33 @@ impl EditorTabViewer<'_> {
                                             .add(egui::Slider::new(vignette_radius, 0.3..=1.0).text("radius"))
                                             .changed();
                                     }
+                                    // Posterize — crush the final image to a limited palette.
+                                    ui.separator();
+                                    ui.horizontal(|ui| {
+                                        ui.label("Posterize")
+                                            .on_hover_text("reduce the final color to a fixed number of levels per channel — a limited-palette / banded retro look");
+                                        let plabel = match *posterize_bands {
+                                            0 | 1 => "off".to_string(),
+                                            n => format!("{n} levels"),
+                                        };
+                                        egui::ComboBox::from_id_salt("posterize_bands")
+                                            .selected_text(plabel)
+                                            .show_ui(ui, |ui| {
+                                                cmd.inspector_changed |=
+                                                    ui.selectable_value(posterize_bands, 0, "off").clicked();
+                                                for nb in [2u32, 3, 4, 5, 6, 8, 12, 16] {
+                                                    cmd.inspector_changed |= ui
+                                                        .selectable_value(posterize_bands, nb, format!("{nb} levels"))
+                                                        .clicked();
+                                                }
+                                            });
+                                    });
+                                    ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
+                                        cmd.inspector_changed |= ui
+                                            .checkbox(posterize_dither, "dither the bands")
+                                            .on_hover_text("ordered dither so smooth gradients don't hard-step between levels")
+                                            .changed();
+                                    });
                                 });
                             }
                         }

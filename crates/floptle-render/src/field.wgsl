@@ -249,12 +249,20 @@ fn field_eps(p: vec3<f32>) -> f32 {
 // is the camera-relative fragment position — the camera is the origin (ADR-0015), so
 // `length(pos)` is the view distance, a small number even at world 1e7 (no depth
 // reconstruction, no precision loss). Off (returns `color`) when fog_params.z == 0.
-fn apply_fog(color: vec3<f32>, pos: vec3<f32>) -> vec3<f32> {
+fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.fog_params.z < 0.5) {
         return color;
     }
     let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
-    let f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    var f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    // Optional dither of the fog factor to break up 8-bit banding on slow gradients.
+    // Strength rides in the spare fog_color.w lane (0 = off); mode in fog_params.w
+    // (0 = Bayer 4×4, 1 = interleaved-gradient noise). A sub-percent nudge is enough.
+    let amp = G.fog_color.w;
+    if (amp > 0.0) {
+        let d = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
+        f = clamp(f + (d - 0.5) * amp * 0.06, 0.0, 1.0);
+    }
     return mix(color, G.fog_color.rgb, f);
 }
 
@@ -388,6 +396,13 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
 fn bayer4(pix: vec2<u32>) -> f32 {
     var m = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     return (f32(m[(pix.y % 4u) * 4u + (pix.x % 4u)]) + 0.5) / 16.0;
+}
+
+// Interleaved-gradient noise threshold in (0,1) — a finer, less grid-like dither
+// than 4×4 Bayer, well suited to the very slow gradients of distance fog.
+fn ign(pix: vec2<u32>) -> f32 {
+    let p = vec2<f32>(f32(pix.x), f32(pix.y));
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
 }
 
 // The sun-shadow multiplier for the DIRECTIONAL light at `p` (screen pixel `pix`

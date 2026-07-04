@@ -109,9 +109,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha.
     let alpha = in.color.a * texel.a;
 
+    // Screen pixel index — drives the optional fog/shadow dither. Needed by the
+    // unlit early-return's fog too, so it's computed before that branch.
+    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
-        return vec4<f32>(apply_fog(albedo + emissive, in.view_pos), alpha);
+        return vec4<f32>(apply_fog(albedo + emissive, in.view_pos, pix), alpha);
     }
 
     // Field sun-shadows + true SDF AO, received from the fused field at group(2).
@@ -119,8 +123,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // (ADR-0015) — so the mesh fragment marches it directly. Both gate to zero
     // work when their Lighting/PostProcess switches are off; only the DIRECTIONAL
     // terms are shadowed (ambient + point lights stay as fill), matching the
-    // raymarch pass exactly.
-    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+    // raymarch pass exactly. (`pix` was computed above the unlit branch.)
     var sh = vec3<f32>(1.0);
     if (ndl > 0.0) {
         sh = sun_shadow(in.view_pos, n, pix);
@@ -145,7 +148,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
 
-    return vec4<f32>(apply_fog(lit * occ + emissive, in.view_pos), alpha);
+    return vec4<f32>(apply_fog(lit * occ + emissive, in.view_pos, pix), alpha);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

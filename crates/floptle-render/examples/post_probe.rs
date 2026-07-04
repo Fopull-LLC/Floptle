@@ -76,6 +76,8 @@ fn main() {
         ssao: false,
         ssao_strength: 0.0,
         ssao_radius: 0.5,
+        posterize_bands: 0,
+        posterize_dither: false,
     };
     post.run(&gpu, &settings, None, &color_view);
 

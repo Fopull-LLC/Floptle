@@ -86,6 +86,17 @@ fn vs(in: VsIn) -> VsOut {
     return out;
 }
 
+// Dither thresholds (this module is standalone — it isn't concatenated with
+// field.wgsl, so it carries its own copies). See field.wgsl for the rationale.
+fn bayer4(pix: vec2<u32>) -> f32 {
+    var m = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    return (f32(m[(pix.y % 4u) * 4u + (pix.x % 4u)]) + 0.5) / 16.0;
+}
+fn ign(pix: vec2<u32>) -> f32 {
+    let p = vec2<f32>(f32(pix.x), f32(pix.y));
+    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(tex, samp, in.uv);
@@ -103,7 +114,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // so length = view distance.
     if (g.fog_params.z > 0.5) {
         let denom = max(g.fog_params.y - g.fog_params.x, 1e-4);
-        let f = clamp((length(in.view_pos) - g.fog_params.x) / denom, 0.0, 1.0);
+        var f = clamp((length(in.view_pos) - g.fog_params.x) / denom, 0.0, 1.0);
+        // Match the scene fog's optional dither (strength in fog_color.w, mode in
+        // fog_params.w) so particles band-break identically to the meshes behind them.
+        let amp = g.fog_color.w;
+        if (amp > 0.0) {
+            let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+            let d = select(bayer4(pix), ign(pix), g.fog_params.w > 0.5);
+            f = clamp(f + (d - 0.5) * amp * 0.06, 0.0, 1.0);
+        }
         col = vec4<f32>(mix(col.rgb, vec3<f32>(fog_identity), f), col.a * (1.0 - f));
     }
     return col;
