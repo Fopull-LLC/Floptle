@@ -1957,6 +1957,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:finished", insert: ":finished(", doc: "anim:finished([layer]) — true when a non-looped state reached its end this frame (or stays true while holding the last frame)." },
     ApiEntry { label: "anim:isPlaying", insert: ":isPlaying(", doc: "anim:isPlaying([state]) — is that state playing on any layer (or anything at all, with no argument)?" },
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
+    ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end." },
     ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
     ApiEntry { label: "particles:play", insert: ":play()", doc: "particles:play() — start emitting if the effect is idle (spawns a fresh instance). No-op if already playing." },
     ApiEntry { label: "particles:stop", insert: ":stop()", doc: "particles:stop() — stop + despawn the effect; its live particles vanish." },
@@ -2190,7 +2191,12 @@ start and stop effects on cue, and read their live state:
     if input.key('w') then jet:play() else jet:stop() end
 
 You can also arm a node to auto-play (or not) at spawn:
-    node:getcomponent(\"ParticleSystem\").play_on_start = 1",
+    node:getcomponent(\"ParticleSystem\").play_on_start = 1
+
+FIRE-AND-FORGET — spawn a one-shot at a world point with no node at all:
+    spawnEffect(\"vfx/Explosion\", x, y, z)   -- plays once, despawns itself
+    local h = raycast(px,py,pz, dx,dy,dz, 100)
+    if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end",
     ),
     (
         "Globals — params, time, dt, log",

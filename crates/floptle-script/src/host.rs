@@ -371,6 +371,21 @@ impl ScriptHost {
             let _ = lua.globals().set("assets", t);
         }
 
+        // `spawnEffect(key, x, y, z)` — fire a one-shot particle effect at a world
+        // point, no node required. The editor spawns a detached instance that plays
+        // once and auto-despawns (the fire-and-forget path for hits, pickups, poofs).
+        let spawn_effects: Rc<RefCell<Vec<crate::SpawnedEffect>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let q = spawn_effects.clone();
+            if let Ok(f) = lua.create_function(move |_, (key, x, y, z): (String, f64, f64, f64)| {
+                q.borrow_mut().push((key, [x, y, z]));
+                Ok(())
+            }) {
+                let _ = lua.globals().set("spawnEffect", f);
+            }
+        }
+
         // The cross-node / cross-script reference layer: a scene-graph mirror plus Lua
         // `node`/`script` handles and the `find`/`findScript` globals (see
         // `install_handle_api`). Shared (interior-mutable) with the handle closures.
@@ -419,6 +434,7 @@ impl ScriptHost {
             vfx_info: shared.vfx_info.clone(),
             vfx_commands: shared.vfx_commands.clone(),
             gizmos,
+            spawn_effects,
         }
     }
 
@@ -450,6 +466,12 @@ impl ScriptHost {
     /// editor projects and paints them over the viewport for one frame.
     pub fn take_gizmos(&self) -> Vec<GizmoCmd> {
         std::mem::take(&mut *self.gizmos.borrow_mut())
+    }
+
+    /// Drain the one-shot effects scripts requested this frame (`spawnEffect(...)`):
+    /// (asset key, world position). The editor spawns a detached instance for each.
+    pub fn take_spawn_effects(&self) -> Vec<crate::SpawnedEffect> {
+        std::mem::take(&mut *self.spawn_effects.borrow_mut())
     }
 
     /// Call `func(node)` on every script instance attached to entity `eid` whose
@@ -494,6 +516,7 @@ impl ScriptHost {
         self.anim_commands.borrow_mut().clear();
         self.vfx_info.borrow_mut().clear();
         self.vfx_commands.borrow_mut().clear();
+        self.spawn_effects.borrow_mut().clear();
     }
 
     /// Drain a pending `input.lockMouse()` / `input.unlockMouse()` request from this frame:

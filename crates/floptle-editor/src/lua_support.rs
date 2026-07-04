@@ -108,6 +108,15 @@ defaults = {}
 ---@param msg string
 function log(msg) end
 
+---Spawn a one-shot particle effect at a world point — no node required. It plays
+---once and despawns itself. Great for hits, pickups, footstep poofs.
+---e.g. `spawnEffect(\"vfx/Explosion\", hit.x, hit.y, hit.z)`
+---@param key string Effect asset key (project-relative, no `.vfx.ron`).
+---@param x number
+---@param y number
+---@param z number
+function spawnEffect(key, x, y, z) end
+
 ---Runs once when play begins (optional).
 ---@param node Node
 function start(node) end
@@ -214,7 +223,7 @@ function gizmo.point(x, y, z, size, r, g, b) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\"]\n}\n";
 
 /// Write the Lua language-server support files into a project (annotations always
 /// refreshed; `.luarc.json` only if absent, so a user's own config is preserved).
