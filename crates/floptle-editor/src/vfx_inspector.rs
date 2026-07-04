@@ -6,8 +6,8 @@
 //! [`crate::curve_edit`]); automation lanes shape birth values over effect time.
 
 use floptle_scene::{
-    VfxBlendDoc, VfxForceDoc, VfxInterpDoc, VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc,
-    VfxValueDoc,
+    VfxBlendDoc, VfxFlipModeDoc, VfxFlipbookDoc, VfxForceDoc, VfxInterpDoc, VfxOrientDoc,
+    VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
@@ -197,9 +197,18 @@ fn look_section(
                 .selected_text(match track.blend {
                     VfxBlendDoc::Alpha => "blend: alpha",
                     VfxBlendDoc::Additive => "blend: additive (glow)",
+                    VfxBlendDoc::Premultiplied => "blend: premultiplied",
+                    VfxBlendDoc::Screen => "blend: screen (lighten)",
+                    VfxBlendDoc::Multiply => "blend: multiply (darken)",
                 })
                 .show_ui(ui, |ui| {
-                    for (v, l) in [(VfxBlendDoc::Alpha, "alpha"), (VfxBlendDoc::Additive, "additive (glow)")] {
+                    for (v, l) in [
+                        (VfxBlendDoc::Alpha, "alpha"),
+                        (VfxBlendDoc::Additive, "additive (glow)"),
+                        (VfxBlendDoc::Premultiplied, "premultiplied"),
+                        (VfxBlendDoc::Screen, "screen (lighten)"),
+                        (VfxBlendDoc::Multiply, "multiply (darken)"),
+                    ] {
                         if ui.selectable_label(track.blend == v, l).clicked() && track.blend != v {
                             track.blend = v;
                             *dirty = true;
@@ -225,9 +234,10 @@ fn look_section(
             ui.small("mesh particles are lit + sun-shadowed like scene meshes");
         }
     }
-    // Billboard alignment: how the quad is oriented in the world (billboards only).
+    // Billboard alignment + flipbook: both apply only to billboard tracks.
     if !is_mesh {
         orient_editor(ui, track, dirty);
+        flipbook_editor(ui, track, dirty);
     }
     // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
     // MESH particles — the billboard pass draws unlit textured quads — so grey them
@@ -302,6 +312,54 @@ fn orient_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirt
             *dirty |= ui
                 .add(egui::DragValue::new(&mut track.stretch).speed(0.05).range(0.1..=40.0))
                 .on_hover_text("how far the quad stretches along its motion")
+                .changed();
+        }
+    });
+}
+
+/// Sprite-sheet flipbook controls (billboard tracks): a cols×rows grid animated over
+/// the particle's life or at a fixed fps.
+fn flipbook_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
+    let mut on = track.flipbook.is_some();
+    if ui
+        .checkbox(&mut on, "flipbook")
+        .on_hover_text("animate a sprite-sheet texture (cols × rows of frames)")
+        .changed()
+    {
+        track.flipbook = on.then_some(VfxFlipbookDoc {
+            cols: 4,
+            rows: 4,
+            mode: VfxFlipModeDoc::OverLife,
+            fps: 12.0,
+        });
+        *dirty = true;
+    }
+    let Some(f) = &mut track.flipbook else { return };
+    ui.horizontal(|ui| {
+        ui.label("grid");
+        *dirty |= ui.add(egui::DragValue::new(&mut f.cols).range(1..=64).prefix("cols ")).changed();
+        *dirty |= ui.add(egui::DragValue::new(&mut f.rows).range(1..=64).prefix("rows ")).changed();
+    });
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("vfx_flipmode")
+            .selected_text(match f.mode {
+                VfxFlipModeDoc::OverLife => "over life",
+                VfxFlipModeDoc::LoopFps => "loop @ fps",
+            })
+            .show_ui(ui, |ui| {
+                for (v, l) in
+                    [(VfxFlipModeDoc::OverLife, "over life"), (VfxFlipModeDoc::LoopFps, "loop @ fps")]
+                {
+                    if ui.selectable_label(f.mode == v, l).clicked() && f.mode != v {
+                        f.mode = v;
+                        *dirty = true;
+                    }
+                }
+            });
+        if f.mode == VfxFlipModeDoc::LoopFps {
+            ui.label("fps");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut f.fps).speed(0.5).range(0.1..=120.0))
                 .changed();
         }
     });

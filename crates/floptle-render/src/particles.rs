@@ -18,13 +18,58 @@
 use crate::device::Gpu;
 use crate::raster::{Raster, TexId};
 
-/// How a batch composites over the scene.
+/// How a batch composites over the scene. Discriminants are the index into the
+/// pipeline array — keep them contiguous and in sync with [`ParticleBlend::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticleBlend {
     /// Classic transparency — instances must arrive depth-sorted back-to-front.
-    Alpha,
+    Alpha = 0,
     /// Light-accumulating — order-independent.
-    Additive,
+    Additive = 1,
+    /// Premultiplied-alpha over — order-dependent.
+    Premultiplied = 2,
+    /// Screen (lighten) — order-independent.
+    Screen = 3,
+    /// Multiply (darken) — order-dependent.
+    Multiply = 4,
+}
+
+impl ParticleBlend {
+    /// Every mode, in discriminant order — one pipeline is built per entry.
+    pub const ALL: [ParticleBlend; 5] = [
+        ParticleBlend::Alpha,
+        ParticleBlend::Additive,
+        ParticleBlend::Premultiplied,
+        ParticleBlend::Screen,
+        ParticleBlend::Multiply,
+    ];
+
+    /// The wgpu blend state this mode composites with.
+    fn state(self) -> wgpu::BlendState {
+        use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as Op};
+        let add = |src, dst| C { src_factor: src, dst_factor: dst, operation: Op::Add };
+        match self {
+            ParticleBlend::Alpha => wgpu::BlendState::ALPHA_BLENDING,
+            // Light accumulation: SrcAlpha·color summed into the target.
+            ParticleBlend::Additive => wgpu::BlendState {
+                color: add(F::SrcAlpha, F::One),
+                alpha: add(F::One, F::One),
+            },
+            // Premultiplied over: color already carries its alpha.
+            ParticleBlend::Premultiplied => wgpu::BlendState {
+                color: add(F::One, F::OneMinusSrcAlpha),
+                alpha: add(F::One, F::OneMinusSrcAlpha),
+            },
+            // Screen: 1−(1−src)(1−dst) — lightens, order-independent.
+            ParticleBlend::Screen => {
+                wgpu::BlendState { color: add(F::One, F::OneMinusSrc), alpha: add(F::One, F::OneMinusSrc) }
+            }
+            // Multiply: src·dst — darkens; keeps the destination alpha.
+            ParticleBlend::Multiply => {
+                wgpu::BlendState { color: add(F::Dst, F::Zero), alpha: add(F::Zero, F::One) }
+            }
+        }
+    }
 }
 
 /// Per-particle GPU data: camera-relative position + spin, size, tint, and the
@@ -75,8 +120,8 @@ pub struct ParticleGlobals {
 }
 
 pub struct Particles {
-    alpha_pipeline: wgpu::RenderPipeline,
-    additive_pipeline: wgpu::RenderPipeline,
+    /// One pipeline per [`ParticleBlend`], indexed by its discriminant.
+    pipelines: Vec<wgpu::RenderPipeline>,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
     /// White 1×1 for untextured tracks (the tint shows through unchanged).
@@ -200,22 +245,11 @@ impl Particles {
                 cache: None,
             })
         };
-        let alpha_pipeline = make_pipeline("particles-alpha", wgpu::BlendState::ALPHA_BLENDING);
-        let additive_pipeline = make_pipeline(
-            "particles-additive",
-            wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::SrcAlpha,
-                    dst_factor: wgpu::BlendFactor::One,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::One,
-                    dst_factor: wgpu::BlendFactor::One,
-                    operation: wgpu::BlendOperation::Add,
-                },
-            },
-        );
+        // One pipeline per blend mode, in discriminant order (indexed by `blend as usize`).
+        let pipelines: Vec<wgpu::RenderPipeline> = ParticleBlend::ALL
+            .iter()
+            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state()))
+            .collect();
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particles-globals"),
@@ -291,8 +325,7 @@ impl Particles {
         let instance_buf = Self::make_instance_buf(gpu, instance_cap);
 
         Self {
-            alpha_pipeline,
-            additive_pipeline,
+            pipelines,
             globals_buf,
             globals_bind,
             default_bind,
@@ -373,10 +406,7 @@ impl Particles {
                 if batch.range.is_empty() {
                     continue;
                 }
-                rp.set_pipeline(match batch.blend {
-                    ParticleBlend::Alpha => &self.alpha_pipeline,
-                    ParticleBlend::Additive => &self.additive_pipeline,
-                });
+                rp.set_pipeline(&self.pipelines[batch.blend as usize]);
                 let bind = batch
                     .texture
                     .and_then(|t| raster.material_bind(t))
