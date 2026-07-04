@@ -37,7 +37,10 @@ pub use camera::{FlyCamera, Input};
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
-pub use mesh::{capsule, cube, uv_sphere, GpuMesh, MeshData, MeshId, TextureData, Vertex};
+pub use mesh::{
+    capsule, cone, cube, cylinder, pyramid, uv_sphere, GpuMesh, MeshData, MeshId, TextureData,
+    Vertex,
+};
 pub use outline::Outline;
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{PostSettings, PostStack, SsaoFrame};

@@ -203,6 +203,129 @@ pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshD
     MeshData { vertices, indices }
 }
 
+// Small f32 vec helpers for the flat-shaded primitives below.
+fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn vcross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+fn vnorm(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
+/// A square-based pyramid: base of half-extent `half` in the XZ plane, apex `height`
+/// above it, centered on the origin (base at y=−height/2, apex at y=+height/2). Flat
+/// per-face normals like [`cube`]. Culling is off, so face winding is cosmetic.
+pub fn pyramid(half: f32, height: f32) -> MeshData {
+    let hy = height * 0.5;
+    let apex = [0.0f32, hy, 0.0];
+    let b = [
+        [-half, -hy, -half],
+        [half, -hy, -half],
+        [half, -hy, half],
+        [-half, -hy, half],
+    ];
+    let mut vertices = Vec::with_capacity(16);
+    let mut indices = Vec::with_capacity(18);
+    // Four triangular sides, each with its own flat normal (no shared corners).
+    for i in 0..4 {
+        let p0 = b[i];
+        let p1 = b[(i + 1) % 4];
+        let n = vnorm(vcross(vsub(p1, p0), vsub(apex, p0)));
+        let base = vertices.len() as u32;
+        vertices.push(Vertex { pos: p0, normal: n, uv: [0.0, 0.0] });
+        vertices.push(Vertex { pos: p1, normal: n, uv: [1.0, 0.0] });
+        vertices.push(Vertex { pos: apex, normal: n, uv: [0.5, 1.0] });
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    // Base quad (normal down).
+    let n = [0.0, -1.0, 0.0];
+    let base = vertices.len() as u32;
+    for &p in &b {
+        vertices.push(Vertex { pos: p, normal: n, uv: [p[0] / (2.0 * half) + 0.5, p[2] / (2.0 * half) + 0.5] });
+    }
+    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    MeshData { vertices, indices }
+}
+
+/// A cone of base `radius` and `height` along Y, apex up, centered (base at y=−height/2,
+/// apex at y=+height/2). Smooth side normals tilted up by the slant; a flat base cap.
+pub fn cone(radius: f32, height: f32, sectors: u32) -> MeshData {
+    use std::f32::consts::TAU;
+    let sectors = sectors.max(3);
+    let hy = height * 0.5;
+    let apex = [0.0f32, hy, 0.0];
+    let slope = radius / height.max(1e-6); // side normal tilts up by dr/dy
+    let ring = |t: f32| [t.cos() * radius, -hy, t.sin() * radius];
+    let sidenorm = |t: f32| vnorm([t.cos(), slope, t.sin()]);
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for j in 0..sectors {
+        let t0 = TAU * j as f32 / sectors as f32;
+        let t1 = TAU * (j + 1) as f32 / sectors as f32;
+        let tm = (t0 + t1) * 0.5;
+        let base = vertices.len() as u32;
+        vertices.push(Vertex { pos: ring(t0), normal: sidenorm(t0), uv: [j as f32 / sectors as f32, 0.0] });
+        vertices.push(Vertex { pos: ring(t1), normal: sidenorm(t1), uv: [(j + 1) as f32 / sectors as f32, 0.0] });
+        vertices.push(Vertex { pos: apex, normal: sidenorm(tm), uv: [(j as f32 + 0.5) / sectors as f32, 1.0] });
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    // Base cap: fan from the center (normal down).
+    let n = [0.0, -1.0, 0.0];
+    let center = vertices.len() as u32;
+    vertices.push(Vertex { pos: [0.0, -hy, 0.0], normal: n, uv: [0.5, 0.5] });
+    let rim = vertices.len() as u32;
+    for j in 0..=sectors {
+        let t = TAU * j as f32 / sectors as f32;
+        vertices.push(Vertex { pos: ring(t), normal: n, uv: [t.cos() * 0.5 + 0.5, t.sin() * 0.5 + 0.5] });
+    }
+    for j in 0..sectors {
+        indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
+    }
+    MeshData { vertices, indices }
+}
+
+/// A cylinder of `radius` and half-height `half_height` along Y, centered on the origin.
+/// Smooth side normals (radial); flat top and bottom caps.
+pub fn cylinder(radius: f32, half_height: f32, sectors: u32) -> MeshData {
+    use std::f32::consts::TAU;
+    let sectors = sectors.max(3);
+    let hy = half_height.max(0.0);
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    // Wall: a quad strip with radial normals.
+    let stride = sectors + 1;
+    for j in 0..=sectors {
+        let t = TAU * j as f32 / sectors as f32;
+        let n = [t.cos(), 0.0, t.sin()];
+        let u = j as f32 / sectors as f32;
+        vertices.push(Vertex { pos: [n[0] * radius, hy, n[2] * radius], normal: n, uv: [u, 1.0] });
+        vertices.push(Vertex { pos: [n[0] * radius, -hy, n[2] * radius], normal: n, uv: [u, 0.0] });
+    }
+    for j in 0..sectors {
+        let a = j * 2;
+        indices.extend_from_slice(&[a, a + 1, a + 2, a + 2, a + 1, a + 3]);
+    }
+    let _ = stride;
+    // Top + bottom caps (fans).
+    for (sy, ny) in [(hy, 1.0f32), (-hy, -1.0f32)] {
+        let n = [0.0, ny, 0.0];
+        let center = vertices.len() as u32;
+        vertices.push(Vertex { pos: [0.0, sy, 0.0], normal: n, uv: [0.5, 0.5] });
+        let rim = vertices.len() as u32;
+        for j in 0..=sectors {
+            let t = TAU * j as f32 / sectors as f32;
+            vertices.push(Vertex { pos: [t.cos() * radius, sy, t.sin() * radius], normal: n, uv: [t.cos() * 0.5 + 0.5, t.sin() * 0.5 + 0.5] });
+        }
+        for j in 0..sectors {
+            indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
+        }
+    }
+    MeshData { vertices, indices }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +369,24 @@ mod tests {
             // position is the normal scaled by radius
             for k in 0..3 {
                 assert!((v.pos[k] - v.normal[k] * 2.0).abs() < 1e-4);
+            }
+        }
+    }
+
+    /// The built-in particle primitives must be drawable: triangle-count multiple of 3,
+    /// every index in range, unit normals, and centered within their nominal extent.
+    #[test]
+    fn extra_primitives_are_well_formed() {
+        let meshes = [pyramid(0.5, 1.0), cone(0.5, 1.0, 16), cylinder(0.5, 0.5, 16)];
+        for m in &meshes {
+            assert!(!m.vertices.is_empty());
+            assert!(m.indices.len().is_multiple_of(3), "index count not tri-aligned");
+            assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()), "index out of range");
+            for v in &m.vertices {
+                let l = (v.normal[0].powi(2) + v.normal[1].powi(2) + v.normal[2].powi(2)).sqrt();
+                assert!((l - 1.0).abs() < 1e-4, "normal not unit: {l}");
+                // centered: |y| ≤ half-height (+ε), radial extent ≤ ~0.71 for r=0.5.
+                assert!(v.pos[1].abs() <= 0.5 + 1e-4, "y out of extent: {}", v.pos[1]);
             }
         }
     }

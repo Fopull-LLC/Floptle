@@ -179,7 +179,9 @@ fn look_section(
                 *dirty = true;
             }
             if ui.selectable_label(is_mesh, "3D mesh (instanced, lit)").clicked() && !is_mesh {
-                track.render = VfxRenderDoc::Mesh { asset_path: String::new() };
+                // Default to a built-in sphere so a fresh mesh track renders immediately
+                // instead of showing nothing until you pick an asset.
+                track.render = VfxRenderDoc::Mesh { asset_path: "builtin://sphere".to_string() };
                 *dirty = true;
             }
         });
@@ -231,10 +233,27 @@ fn look_section(
         VfxRenderDoc::Mesh { asset_path } => {
             ui.horizontal(|ui| {
                 ui.label("model");
+                let selected = if asset_path.is_empty() {
+                    "(pick a model)".to_string()
+                } else if let Some(l) = crate::vfx::builtin_particle_mesh_label(asset_path) {
+                    l.to_string()
+                } else {
+                    short(asset_path)
+                };
                 egui::ComboBox::from_id_salt("vfx_mesh")
                     .width(160.0)
-                    .selected_text(if asset_path.is_empty() { "(pick a model)".into() } else { short(asset_path) })
+                    .selected_text(selected)
                     .show_ui(ui, |ui| {
+                        // Built-in primitives first, then a separator, then user assets.
+                        for (key, label) in crate::vfx::BUILTIN_PARTICLE_MESHES {
+                            if ui.selectable_label(asset_path == key, *label).clicked() {
+                                *asset_path = (*key).to_string();
+                                *dirty = true;
+                            }
+                        }
+                        if !model_list.is_empty() {
+                            ui.separator();
+                        }
                         for p in model_list {
                             if ui.selectable_label(asset_path == p, short(p)).clicked() {
                                 *asset_path = p.clone();
