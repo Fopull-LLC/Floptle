@@ -35,9 +35,10 @@ impl Editor {
     pub(crate) fn select_single(&mut self, e: Entity) {
         self.selection.clear();
         self.selection.push(e);
-        // Picking a scene node drops any particle-track selection, so the Inspector
-        // reverts from the track editor to this node.
+        // Picking a scene node drops any particle-track and bone selection, so the
+        // Inspector reverts from the track/bone editor to this node.
         self.vfx_ui.sel_track = None;
+        self.bone_selection = None;
     }
 
     pub(crate) fn select_toggle(&mut self, e: Entity) {

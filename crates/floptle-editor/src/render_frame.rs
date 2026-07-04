@@ -907,6 +907,7 @@ impl Editor {
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
         let selection = &mut self.selection;
+        let bone_selection = &mut self.bone_selection;
         let collapsed = &mut self.collapsed;
         let console = &mut self.console;
         let preview_zoom = &mut self.preview_zoom;
@@ -1118,6 +1119,7 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                bone_selection,
                 fullscreen_tab,
                 collapsed,
                 bone_names: &bone_names,

@@ -310,6 +310,9 @@ enum ProjectAction {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
+    /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
+    /// exclusive with `selection`; drives the Hierarchy highlight + Inspector bone editor.
+    bone_selection: &'a mut Option<(Entity, usize)>,
     /// Double-clicking a tab toggles it into this slot (maximized full-window).
     fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
@@ -659,6 +662,10 @@ struct Editor {
     scene_name: String,
     /// Selected entities (multi-select); the gizmo/inspector act on the last one.
     selection: Vec<Entity>,
+    /// A selected armature bone `(rigged-mesh entity, skeleton node index)` — clicked in
+    /// the Hierarchy's bone tree. Bones aren't ECS entities, so this rides alongside
+    /// `selection` (they're mutually cleared) and drives the Inspector's bone editor.
+    bone_selection: Option<(Entity, usize)>,
     /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
     /// with the triangle or Enter on a selected folder.
     collapsed: std::collections::HashSet<Entity>,

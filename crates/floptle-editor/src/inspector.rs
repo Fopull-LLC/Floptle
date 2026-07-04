@@ -199,6 +199,102 @@ pub(crate) fn material_props_ui(
     r
 }
 impl EditorTabViewer<'_> {
+    /// The Inspector for a selected armature bone: shows which mesh it belongs to and
+    /// edits its LOCAL transform. Editing auto-keys the bone into the open animator clip
+    /// at the playhead — so posing a bone and animating it are one act — and the
+    /// Animating-tab preview shows it live. Numeric for now (a bone isn't an ECS entity,
+    /// so the move gizmo doesn't target it yet), mirroring the BoneAttach offset editor.
+    fn bone_inspector_ui(&mut self, ui: &mut egui::Ui) {
+        let Some((mesh, idx)) = *self.bone_selection else { return };
+        // Resolve the bone's name + rest pose, dropping the world/registry borrows before
+        // we touch the animator.
+        let resolved = match self.world.get::<Matter>(mesh) {
+            Some(Matter::Mesh { asset_path }) => self
+                .mesh_registry
+                .get(asset_path)
+                .and_then(|m| m.rig.as_ref())
+                .and_then(|rig| rig.skeleton.nodes.get(idx))
+                .map(|n| (n.name.clone(), n.rest)),
+            _ => None,
+        };
+        let Some((bone_name, rest)) = resolved else {
+            *self.bone_selection = None;
+            return;
+        };
+        // Current local pose: the live preview pose if the mesh is animating, else rest.
+        let cur = self
+            .anim
+            .instances
+            .get(&mesh)
+            .and_then(|inst| inst.ctl.pose().get(idx).copied())
+            .unwrap_or(rest);
+        let mesh_name = self.world.get::<Name>(mesh).map(|n| n.0.clone()).unwrap_or_default();
+
+        ui.horizontal(|ui| {
+            ui.strong(format!("🦴 {bone_name}"));
+            if ui.small_button("⮪ back").on_hover_text("back to the node inspector").clicked() {
+                *self.bone_selection = None;
+            }
+        });
+        ui.small(format!("armature bone of {mesh_name}"));
+        ui.separator();
+
+        let mut trs = cur;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("position");
+            changed |= ui.add(egui::DragValue::new(&mut trs.t.x).speed(0.01).prefix("x ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut trs.t.y).speed(0.01).prefix("y ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut trs.t.z).speed(0.01).prefix("z ")).changed();
+        });
+        let (ey, ex, ez) = trs.r.to_euler(EulerRot::YXZ);
+        let mut deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
+        ui.horizontal(|ui| {
+            ui.label("rotation°");
+            let mut rc = false;
+            rc |= ui.add(egui::DragValue::new(&mut deg[0]).speed(0.5).prefix("x ")).changed();
+            rc |= ui.add(egui::DragValue::new(&mut deg[1]).speed(0.5).prefix("y ")).changed();
+            rc |= ui.add(egui::DragValue::new(&mut deg[2]).speed(0.5).prefix("z ")).changed();
+            if rc {
+                trs.r = Quat::from_euler(
+                    EulerRot::YXZ,
+                    deg[1].to_radians(),
+                    deg[0].to_radians(),
+                    deg[2].to_radians(),
+                );
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("scale");
+            changed |= ui.add(egui::DragValue::new(&mut trs.s.x).speed(0.01).range(0.001..=100.0).prefix("x ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut trs.s.y).speed(0.01).range(0.001..=100.0).prefix("y ")).changed();
+            changed |= ui.add(egui::DragValue::new(&mut trs.s.z).speed(0.01).range(0.001..=100.0).prefix("z ")).changed();
+        });
+
+        // Auto-key into the open clip at the playhead — but only when the Animating tab is
+        // targeting THIS mesh with a clip open (bone channels are name-bound to this
+        // skeleton, so writing into another mesh's clip would be wrong).
+        ui.separator();
+        let can_key = self.anim_ui.target == Some(mesh) && self.anim_ui.clip_doc.is_some();
+        if can_key {
+            let ph = self.anim_ui.playhead;
+            let dur = self.anim_ui.clip_doc.as_ref().map(|(_, d)| d.duration).unwrap_or(0.0);
+            ui.small(format!("⏺ keys at playhead {ph:.2}s / {dur:.2}s"));
+            if changed {
+                if let Some((_, doc)) = self.anim_ui.clip_doc.as_mut() {
+                    crate::anim_ui::write_key(doc, &bone_name, ph, &trs);
+                }
+                self.anim_ui.clip_dirty = true;
+            }
+        } else {
+            ui.colored_label(
+                egui::Color32::from_rgb(235, 200, 90),
+                "⚠ pick this mesh + a clip in the Animating tab to keyframe this bone",
+            );
+        }
+    }
+
     pub(crate) fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         // When the Particles tab is up and a track is selected, the Inspector
         // becomes that track's editor (VFX artists tune tracks here, not in a
@@ -206,6 +302,13 @@ impl EditorTabViewer<'_> {
         // which clears the track selection — reverts to the node inspector.
         if self.vfx_track_active() {
             self.vfx_track_inspector_ui(ui);
+            return;
+        }
+        // A selected armature bone (clicked in the Hierarchy) takes over the Inspector:
+        // edit its local transform, auto-keyed into the open animator clip. It yields the
+        // moment a node or asset is also selected, so no stale-selection clearing needed.
+        if self.bone_selection.is_some() && self.selection.is_empty() && self.selected_asset.is_none() {
+            self.bone_inspector_ui(ui);
             return;
         }
         // The Inspector shows *only* the current selection (the scene name + save
