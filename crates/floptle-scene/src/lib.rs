@@ -41,6 +41,16 @@ pub struct SceneDoc {
     pub nodes: Vec<NodeDoc>,
 }
 
+/// A bone/sub-object attachment of a node to its parent Mesh (see
+/// [`floptle_core::BoneAttach`]). The target is the node's serialized `parent`; only
+/// the bone name + bone-local offset are stored here.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AttachmentDoc {
+    pub bone: String,
+    #[serde(default)]
+    pub offset: TransformDoc,
+}
+
 /// One node = one entity's authored data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NodeDoc {
@@ -82,6 +92,11 @@ pub struct NodeDoc {
     /// local to it. `None` = a root node. The transform is local either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
+    /// Bone/sub-object of the parent Mesh this node rides (`None` = a plain child).
+    /// The node's `transform` is serialized stable (identity) when attached, since
+    /// its live transform is a derived pose value re-computed on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AttachmentDoc>,
 }
 
 /// Serializable particle-system component, mirroring [`floptle_core::ParticleSystem`].
@@ -930,6 +945,23 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
                 world.insert(ents[i], floptle_core::Parent(ents[p]));
             }
     }
+    // Third pass: bone attachments (target = the parent linked above; resolved by the
+    // editor's resolve_attachments each frame, which fixes the identity transform).
+    for (i, node) in doc.nodes.iter().enumerate() {
+        if let (Some(att), Some(p)) = (&node.attachment, node.parent)
+            && p < ents.len()
+            && p != i
+        {
+            world.insert(
+                ents[i],
+                floptle_core::BoneAttach {
+                    target: ents[p],
+                    bone: att.bone.clone(),
+                    offset: att.offset.to_transform(),
+                },
+            );
+        }
+    }
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
     world.insert(light, doc.lighting.to_light());
@@ -976,8 +1008,17 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
     let mut nodes = Vec::with_capacity(entities.len());
     for &e in &entities {
         let Some(matter) = world.get::<Matter>(e) else { continue };
-        let transform =
-            world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default();
+        let attachment = world.get::<floptle_core::BoneAttach>(e).map(|a| AttachmentDoc {
+            bone: a.bone.clone(),
+            offset: TransformDoc::from(&a.offset),
+        });
+        // An attached node's live Transform is a derived (pose-baked) value — serialize
+        // a STABLE identity instead; `resolve_attachments` re-derives it on load.
+        let transform = if attachment.is_some() {
+            TransformDoc::from(&Transform::IDENTITY)
+        } else {
+            world.get::<Transform>(e).map(TransformDoc::from).unwrap_or_default()
+        };
         let name = world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
         let scripts = world
             .get::<Scripts>(e)
@@ -1009,6 +1050,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             anim_controller,
             particles,
             parent,
+            attachment,
         });
     }
     let lighting =
@@ -1071,6 +1113,7 @@ mod tests {
                         play_on_start: false, // exercise the non-default round-trip
                     }),
                     parent: None,
+                    attachment: None,
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -1086,6 +1129,10 @@ mod tests {
                     anim_controller: None,
                     particles: None,
                     parent: Some(0), // child of the cube — exercises parent round-trip
+                    attachment: Some(AttachmentDoc {
+                        bone: "Root".into(),
+                        offset: TransformDoc::default(),
+                    }), // exercise the bone-attachment round-trip
                 },
                 NodeDoc {
                     name: "lamp".into(),
@@ -1101,6 +1148,7 @@ mod tests {
                     anim_controller: None,
                     particles: None,
                     parent: None,
+                    attachment: None,
                 },
                 NodeDoc {
                     name: "eye".into(),
@@ -1116,6 +1164,7 @@ mod tests {
                     anim_controller: None,
                     particles: None,
                     parent: None,
+                    attachment: None,
                 },
             ],
         }
