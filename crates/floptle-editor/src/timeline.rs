@@ -38,7 +38,29 @@ impl TimelineView {
     }
 }
 
-/// Ruler ticks + labels + end marker + playhead over `rect`.
+/// A "nice" tick step (1-2-5 × 10ⁿ) at least `raw` seconds, so labels land on round
+/// numbers whatever the zoom.
+pub(crate) fn nice_step(raw: f32) -> f32 {
+    if raw <= 0.0 || !raw.is_finite() {
+        return 1.0;
+    }
+    let pow = 10f32.powf(raw.log10().floor());
+    let m = raw / pow;
+    let nice = if m <= 1.0 {
+        1.0
+    } else if m <= 2.0 {
+        2.0
+    } else if m <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    (nice * pow).max(1e-3)
+}
+
+/// Ruler ticks + labels + end marker + playhead over `rect`. The tick step adapts to
+/// the zoom (targeting ~70 px between labels) so the ruler reads at any scale — from
+/// a 600 s effect zoomed out to sub-frame keying zoomed in.
 pub(crate) fn draw_ruler(
     painter: &egui::Painter,
     rect: Rect,
@@ -47,9 +69,21 @@ pub(crate) fn draw_ruler(
     px_per_s: f32,
 ) {
     let weak = Color32::from_gray(140);
-    // Second ticks + labels, denser tenth-ticks when zoomed in.
-    let mut t = 0.0;
-    while t <= dur + 1e-4 {
+    let step = nice_step(70.0 / px_per_s.max(1e-3));
+    // How many decimals the labels need at this step (0 for ≥1 s, more when finer).
+    let decimals = if step >= 1.0 {
+        0
+    } else if step >= 0.1 {
+        1
+    } else if step >= 0.01 {
+        2
+    } else {
+        3
+    };
+    // Draw a whole number of steps across [0, dur].
+    let n = (dur / step).floor() as i64;
+    for k in 0..=n {
+        let t = k as f32 * step;
         let x = rect.left() + t * px_per_s;
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.top() + 8.0)],
@@ -58,13 +92,14 @@ pub(crate) fn draw_ruler(
         painter.text(
             Pos2::new(x + 3.0, rect.top() + 4.0),
             Align2::LEFT_CENTER,
-            format!("{t:.0}s"),
+            format!("{t:.decimals$}s"),
             FontId::proportional(9.0),
             weak,
         );
-        if px_per_s > 80.0 {
-            for i in 1..10 {
-                let tt = t + i as f32 * 0.1;
+        // Four minor ticks between labels, when there's room for them.
+        if step * px_per_s > 55.0 {
+            for i in 1..5 {
+                let tt = t + i as f32 * step / 5.0;
                 if tt > dur {
                     break;
                 }
@@ -75,7 +110,6 @@ pub(crate) fn draw_ruler(
                 );
             }
         }
-        t += 1.0;
     }
     // End-of-clip marker + playhead.
     let xe = rect.left() + dur * px_per_s;
@@ -109,5 +143,20 @@ mod tests {
     fn snap_quantizes_only_when_fps_positive() {
         assert_eq!(snap_time(0.126, 24.0), 3.0 / 24.0);
         assert_eq!(snap_time(0.126, 0.0), 0.126);
+    }
+
+    #[test]
+    fn nice_step_rounds_to_1_2_5_decades() {
+        let close = |a: f32, b: f32| (a - b).abs() < b.abs() * 1e-4 + 1e-6;
+        assert!(close(nice_step(0.9), 1.0));
+        assert!(close(nice_step(1.1), 2.0));
+        assert!(close(nice_step(2.1), 5.0));
+        assert!(close(nice_step(6.0), 10.0));
+        assert!(close(nice_step(0.03), 0.05));
+        assert!(close(nice_step(30.0), 50.0));
+        // Degenerate inputs never divide-by-zero or NaN.
+        assert_eq!(nice_step(0.0), 1.0);
+        assert_eq!(nice_step(-5.0), 1.0);
+        assert_eq!(nice_step(f32::NAN), 1.0);
     }
 }

@@ -57,8 +57,17 @@ pub(crate) struct VfxUiState {
     pub playing: bool,
     /// The effect time the preview instance is currently simulated to.
     sim_t: f32,
-    /// Timeline zoom, px per second.
+    /// Timeline zoom, px per second (horizontal). Driven by the wheel.
     pub zoom: f32,
+    /// Vertical zoom: a multiplier on row + lane heights (Alt+wheel).
+    pub row_scale: f32,
+    /// The ScrollArea's offset last frame — the anchor for cursor-centred zoom.
+    scroll_off: egui::Vec2,
+    /// A scroll offset to force next frame (cursor-anchored zoom / Fit), applied
+    /// the SAME frame the zoom changes so the point under the cursor stays put.
+    scroll_target: Option<egui::Vec2>,
+    /// Set by the Fit button; the canvas applies it once it knows the body width.
+    fit_pending: bool,
     pub snap_fps: f32,
     pub sel_track: Option<usize>,
     pub sel: Option<VfxSel>,
@@ -95,6 +104,10 @@ impl Default for VfxUiState {
             playing: true, // auto-play on open: see it live immediately
             sim_t: 0.0,
             zoom: 220.0,
+            row_scale: 1.0,
+            scroll_off: egui::Vec2::ZERO,
+            scroll_target: None,
+            fit_pending: false,
             snap_fps: 0.0,
             sel_track: None,
             sel: None,
@@ -146,7 +159,8 @@ impl VfxUiState {
     }
 }
 
-/// Track-lane geometry.
+/// Track-lane geometry. `ROW_H`/`LANE_H` are the base heights; the vertical zoom
+/// (`VfxUiState::row_scale`) multiplies them.
 const LABEL_W: f32 = 150.0;
 const ROW_H: f32 = 30.0;
 const RULER_H: f32 = 22.0;
@@ -158,6 +172,14 @@ const CLIP_MIN_LEN: f32 = 0.02;
 /// One automation-lane strip's height (drawn under an expanded track).
 const LANE_H: f32 = 36.0;
 const LANE_PAD: f32 = 3.0;
+
+/// Horizontal-zoom bounds (px per second): low enough to fit a 600 s effect, high
+/// enough to place keys at sub-frame precision.
+const ZOOM_MIN: f32 = 3.0;
+const ZOOM_MAX: f32 = 4000.0;
+/// Vertical-zoom (row-height) bounds.
+const ROW_SCALE_MIN: f32 = 0.5;
+const ROW_SCALE_MAX: f32 = 4.0;
 
 /// Every automation target, for the track's "Add automation" menu.
 const ALL_TARGETS: [VfxLaneTargetDoc; 6] = [
@@ -383,12 +405,13 @@ fn promote_to_curve(prop: &mut VfxPropDoc) {
     });
 }
 
-/// The pixel height a track occupies, including its expanded lanes.
-fn track_block_h(track: &VfxTrackDoc, expanded: bool) -> f32 {
-    ROW_H
+/// The pixel height a track occupies, including its expanded lanes, at `row_scale`
+/// vertical zoom.
+fn track_block_h(track: &VfxTrackDoc, expanded: bool, row_scale: f32) -> f32 {
+    ROW_H * row_scale
         + if expanded {
             // At least one row so an empty expanded track shows its "add" hint.
-            visible_lanes(track).len().max(1) as f32 * (LANE_H + LANE_PAD) + LANE_PAD
+            visible_lanes(track).len().max(1) as f32 * (LANE_H * row_scale + LANE_PAD) + LANE_PAD
         } else {
             0.0
         }
@@ -426,8 +449,9 @@ impl EditorTabViewer<'_> {
         transport_ui(ui, st, &mut doc, &mut dirty);
         ui.separator();
         ui.small(
-            "Select a track to edit it in the Inspector →   ·   double-click a lane = clip, \
-             right-click = burst.",
+            "Select a track → edit it in the Inspector.  Double-click a row = clip · right-click \
+             = track menu (burst / lanes) · expand ⏷ for curves.  Scroll = zoom · Alt+scroll = \
+             row height · Shift+scroll = pan · Space play · ←/→ step · F fit · Del remove.",
         );
         // The timeline canvas is full-width; track settings live in the Inspector.
         canvas_ui(ui, st, &mut doc, &mut dirty);
@@ -605,15 +629,6 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut z = st.zoom.ln();
-            if ui
-                .add(egui::Slider::new(&mut z, 30f32.ln()..=800f32.ln()).show_value(false))
-                .on_hover_text("zoom")
-                .changed()
-            {
-                st.zoom = z.exp();
-            }
-            ui.label("🔍");
             egui::ComboBox::from_id_salt("vfx_snap")
                 .width(64.0)
                 .selected_text(if st.snap_fps > 0.0 {
@@ -635,7 +650,23 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
                         }
                     }
                 });
-            ui.label("snap");
+            ui.label("snap").on_hover_text("quantize drags + the playhead to a frame grid");
+            ui.separator();
+            if ui.button("Fit").on_hover_text("zoom to fit the whole effect (F)").clicked() {
+                st.fit_pending = true;
+            }
+            let mut z = st.zoom;
+            if ui
+                .add(egui::DragValue::new(&mut z).speed(2.0).range(ZOOM_MIN..=ZOOM_MAX).suffix(" px/s"))
+                .on_hover_text(
+                    "horizontal zoom. Over the timeline: scroll = zoom, Alt+scroll = row \
+                     height, Shift+scroll = pan.",
+                )
+                .changed()
+            {
+                st.zoom = z;
+            }
+            ui.label("🔍");
         });
     });
 }
@@ -652,20 +683,80 @@ fn starter_track(doc: &VfxEffectDoc) -> VfxTrackDoc {
 // Timeline canvas
 // ---------------------------------------------------------------------------
 
+/// Mouse-wheel navigation over the timeline, video-editor style. Handled BEFORE the
+/// ScrollArea so cursor-anchored zoom drives the offset the same frame the zoom
+/// changes (no lag): plain wheel zooms X about the cursor, Alt+wheel zooms Y (row
+/// height), and Ctrl/Shift+wheel fall through to the ScrollArea to pan. Also applies
+/// a pending Fit. `st.scroll_off` is last frame's offset — the zoom anchor.
+fn handle_timeline_wheel(ui: &egui::Ui, st: &mut VfxUiState, dur: f32) {
+    let region = ui.available_rect_before_wrap();
+    let body_w = (region.width() - LABEL_W - 16.0).max(50.0);
+
+    // Fit the whole effect into view (the transport's Fit button).
+    if st.fit_pending {
+        st.zoom = (body_w / dur).clamp(ZOOM_MIN, ZOOM_MAX);
+        st.scroll_target = Some(egui::Vec2::ZERO);
+        st.fit_pending = false;
+    }
+
+    let Some(p) = ui.ctx().pointer_hover_pos() else { return };
+    if !region.contains(p) {
+        return;
+    }
+    // `smooth_scroll_delta` is egui's read+consume scroll channel: the ScrollArea
+    // reads it (and zeroes it if it pans), so zeroing it here stops the pan. Shift
+    // routes the wheel into the x component (egui's horizontal-scroll convention).
+    let (scroll, mods) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
+    let wheel = if scroll.y.abs() >= scroll.x.abs() { scroll.y } else { scroll.x };
+    if wheel.abs() < 0.5 {
+        return;
+    }
+    // Shift+wheel: let the ScrollArea pan horizontally (don't consume).
+    if mods.shift {
+        return;
+    }
+    let z = (wheel * 0.0015).exp();
+    if mods.alt {
+        // Vertical zoom: taller/shorter rows + lanes.
+        st.row_scale = (st.row_scale * z).clamp(ROW_SCALE_MIN, ROW_SCALE_MAX);
+    } else {
+        // Horizontal zoom about the cursor: keep the time under the pointer fixed.
+        let px = st.zoom;
+        let off = st.scroll_off;
+        let vrel = p.x - region.left();
+        let time = ((vrel + off.x - LABEL_W) / px).max(0.0);
+        let new_px = (px * z).clamp(ZOOM_MIN, ZOOM_MAX);
+        let new_off_x = (LABEL_W + time * new_px - vrel).max(0.0);
+        st.zoom = new_px;
+        st.scroll_target = Some(egui::vec2(new_off_x, off.y));
+    }
+    // Consume the wheel so the ScrollArea doesn't also pan on a zoom gesture.
+    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+}
+
 fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
     let dur = doc.lifetime.max(0.01);
+    // Wheel navigation (zoom-X about cursor, Alt = zoom-Y, Ctrl/Shift+wheel = pan).
+    handle_timeline_wheel(ui, st, dur);
     let px = st.zoom;
+    let row_scale = st.row_scale;
     let body_h = RULER_H
         + doc
             .tracks
             .iter()
             .enumerate()
-            .map(|(ti, t)| track_block_h(t, st.expanded_tracks.contains(&ti)))
+            .map(|(ti, t)| track_block_h(t, st.expanded_tracks.contains(&ti), row_scale))
             .sum::<f32>()
-            .max(ROW_H)
+            .max(ROW_H * row_scale)
         + 8.0;
 
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+    let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+    if let Some(t) = st.scroll_target.take() {
+        area = area.scroll_offset(t);
+    }
+    let out = area.show(ui, |ui| {
+        let row_h = ROW_H * row_scale;
+        let lane_h = LANE_H * row_scale;
         let want_w = (LABEL_W + dur * px + 140.0).max(ui.available_width());
         let want_h = body_h.max(ui.available_height());
         let (full, _) = ui.allocate_exact_size(egui::vec2(want_w, want_h), Sense::hover());
@@ -693,20 +784,20 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
         let mut deferred: Option<DeferredEdit> = None;
         for (ti, track) in doc.tracks.iter().enumerate() {
             let expanded = st.expanded_tracks.contains(&ti);
-            let row = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(full.width(), ROW_H));
+            let row = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(full.width(), row_h));
             let selected = st.sel_track == Some(ti);
             if selected {
                 painter.rect_filled(row, 0.0, ACCENT.gamma_multiply(0.08));
             } else if ti % 2 == 0 {
                 painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(view.left, y), egui::vec2(dur * px, ROW_H)),
+                    Rect::from_min_size(Pos2::new(view.left, y), egui::vec2(dur * px, row_h)),
                     0.0,
                     ui.visuals().faint_bg_color.gamma_multiply(0.6),
                 );
             }
 
             // Expand toggle (⏷/⏵) — reveals this track's automation lanes below it.
-            let tri = Rect::from_min_size(Pos2::new(full.left() + 2.0, y), egui::vec2(14.0, ROW_H));
+            let tri = Rect::from_min_size(Pos2::new(full.left() + 2.0, y), egui::vec2(14.0, row_h));
             let tresp = ui.interact(tri, ui.id().with(("vfx-expand", ti)), Sense::click());
             painter.text(
                 tri.center(),
@@ -724,7 +815,10 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             }
 
             // Label area: mute toggle + name (click selects the track).
-            let mute = Rect::from_min_size(Pos2::new(full.left() + 18.0, y + 7.0), egui::vec2(16.0, 16.0));
+            let mute = Rect::from_min_size(
+                Pos2::new(full.left() + 18.0, y + (row_h - 16.0) * 0.5),
+                egui::vec2(16.0, 16.0),
+            );
             let mresp = ui.interact(mute, ui.id().with(("vfx-mute", ti)), Sense::click());
             painter.text(
                 mute.center(),
@@ -738,7 +832,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             }
             let label = Rect::from_min_size(
                 Pos2::new(mute.right() + 4.0, y),
-                egui::vec2(LABEL_W - 42.0, ROW_H),
+                egui::vec2(LABEL_W - 42.0, row_h),
             );
             let lresp = ui.interact(label, ui.id().with(("vfx-label", ti)), Sense::click());
             let name_col = if selected {
@@ -761,7 +855,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             }
 
             // The lane itself: double-click = new clip, right-click = add burst.
-            let lane = Rect::from_min_size(Pos2::new(view.left, y), egui::vec2(dur * px, ROW_H));
+            let lane = Rect::from_min_size(Pos2::new(view.left, y), egui::vec2(dur * px, row_h));
             let lane_resp = ui.interact(lane, ui.id().with(("vfx-lane", ti)), Sense::click());
             if lane_resp.double_clicked()
                 && let Some(p) = lane_resp.interact_pointer_pos()
@@ -823,7 +917,7 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             for (ci, clip) in track.clips.iter().enumerate() {
                 let x0 = view.time_to_x(clip.start.clamp(0.0, dur));
                 let x1 = view.time_to_x(clip.end.clamp(0.0, dur));
-                let body = Rect::from_min_max(Pos2::new(x0, y + 4.0), Pos2::new(x1, y + ROW_H - 4.0));
+                let body = Rect::from_min_max(Pos2::new(x0, y + 4.0), Pos2::new(x1, y + row_h - 4.0));
                 let sel = st.sel == Some(VfxSel::Clip(ti, ci));
                 let fill = if sel { ACCENT.gamma_multiply(0.85) } else { CLIP_FILL };
                 painter.rect_filled(body, 4.0, fill.gamma_multiply(if track.enabled { 1.0 } else { 0.4 }));
@@ -933,10 +1027,10 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             // ---- expanded lanes: every animated curve of this track ----
             if expanded {
                 let lanes = visible_lanes(track);
-                let mut ly = y + ROW_H + LANE_PAD;
+                let mut ly = y + row_h + LANE_PAD;
                 if lanes.is_empty() {
                     painter.text(
-                        Pos2::new(view.left + 8.0, ly + LANE_H * 0.5),
+                        Pos2::new(view.left + 8.0, ly + lane_h * 0.5),
                         Align2::LEFT_CENTER,
                         "no curves — animate a property in the Inspector (📈), or right-click the track to add a lane",
                         FontId::proportional(10.5),
@@ -946,24 +1040,24 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
                     for lref in lanes {
                         let label_area = Rect::from_min_size(
                             Pos2::new(full.left() + 18.0, ly),
-                            egui::vec2(LABEL_W - 20.0, LANE_H),
+                            egui::vec2(LABEL_W - 20.0, lane_h),
                         );
                         let strip = Rect::from_min_size(
                             Pos2::new(view.left, ly + 2.0),
-                            egui::vec2(dur * px, LANE_H - 4.0),
+                            egui::vec2(dur * px, lane_h - 4.0),
                         );
                         curve_lane_ui(ui, &painter, &view, st, ti, lref, track, label_area, strip, dur, &mut deferred);
-                        ly += LANE_H + LANE_PAD;
+                        ly += lane_h + LANE_PAD;
                     }
                 }
             }
 
-            y += track_block_h(track, expanded);
+            y += track_block_h(track, expanded, row_scale);
         }
 
         if doc.tracks.is_empty() {
             painter.text(
-                Pos2::new(view.left + 12.0, rows_top + ROW_H * 0.7),
+                Pos2::new(view.left + 12.0, rows_top + row_h * 0.7),
                 Align2::LEFT_CENTER,
                 "no tracks yet — + Track adds one (a track = one visual layer of the effect)",
                 FontId::proportional(11.5),
@@ -1030,6 +1124,56 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             st.lane_vrange = None;
         }
 
+        // ---- keyboard transport + edit (only when no text field is focused) ----
+        if ui.memory(|m| m.focused().is_none()) {
+            let (sp, home, end, left, right, del, fit) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                    i.key_pressed(egui::Key::F),
+                )
+            });
+            let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+            if sp {
+                st.playing = !st.playing;
+            }
+            if home {
+                st.playhead = 0.0;
+                st.playing = false;
+            }
+            if end {
+                st.playhead = dur;
+                st.playing = false;
+            }
+            if left {
+                st.playhead = (st.playhead - step).max(0.0);
+                st.playing = false;
+            }
+            if right {
+                st.playhead += step;
+                st.playing = false;
+            }
+            if fit {
+                st.fit_pending = true;
+            }
+            // Delete removes whatever is selected: a keyframe first, else a clip/burst.
+            if del && deferred.is_none() {
+                if let Some((ti, lref, ki)) = st.auto_sel {
+                    deferred = Some(DeferredEdit::DelKey(ti, lref, ki));
+                } else {
+                    match st.sel {
+                        Some(VfxSel::Clip(ti, ci)) => deferred = Some(DeferredEdit::DelClip(ti, ci)),
+                        Some(VfxSel::Burst(ti, bi)) => deferred = Some(DeferredEdit::DelBurst(ti, bi)),
+                        None => {}
+                    }
+                }
+            }
+        }
+
         if let Some(edit) = deferred {
             apply_deferred(edit, st, doc, dur);
             *dirty = true;
@@ -1053,6 +1197,8 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             px,
         );
     });
+    // Remember the offset so next frame's cursor-anchored zoom has an anchor.
+    st.scroll_off = out.state.offset;
 }
 
 /// Draw + edit ONE lane over the timeline (DAW-style) — a property shaped over the
@@ -1343,20 +1489,37 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                 let mut c = t.clone();
                 c.name = format!("{} copy", c.name);
                 doc.tracks.insert(ti + 1, c);
+                // Remap the expansion set + key selection past the insert point so
+                // other tracks keep their expanded lanes (no blanket collapse).
+                st.expanded_tracks =
+                    st.expanded_tracks.iter().map(|&i| if i > ti { i + 1 } else { i }).collect();
+                if let Some((t, l, k)) = st.auto_sel
+                    && t > ti
+                {
+                    st.auto_sel = Some((t + 1, l, k));
+                }
                 st.sel_track = Some(ti + 1);
                 st.sel = None;
-                // Track indices shifted — collapse lanes so no stale index draws.
-                st.expanded_tracks.clear();
-                st.auto_sel = None;
             }
         }
         DeferredEdit::DelTrack(ti) => {
             if ti < doc.tracks.len() {
                 doc.tracks.remove(ti);
+                // Drop the removed track from the expansion set + selection, and shift
+                // the tracks after it down one so their lanes stay expanded.
+                st.expanded_tracks = st
+                    .expanded_tracks
+                    .iter()
+                    .filter(|&&i| i != ti)
+                    .map(|&i| if i > ti { i - 1 } else { i })
+                    .collect();
+                st.auto_sel = match st.auto_sel {
+                    Some((t, _, _)) if t == ti => None,
+                    Some((t, l, k)) if t > ti => Some((t - 1, l, k)),
+                    other => other,
+                };
                 st.sel_track = None;
                 st.sel = None;
-                st.expanded_tracks.clear();
-                st.auto_sel = None;
             }
         }
         DeferredEdit::AddAutoLane(ti, target) => {
@@ -1470,11 +1633,13 @@ mod tests {
         assert!(base.contains(&LaneRef::Life(LifeProp::Color)));
         assert!(base.iter().all(|l| matches!(l, LaneRef::Life(_))), "no automation yet");
         // A collapsed track is one row; expanding reserves a strip per visible lane.
-        assert_eq!(track_block_h(&t, false), ROW_H);
-        let h0 = track_block_h(&t, true);
+        assert_eq!(track_block_h(&t, false, 1.0), ROW_H);
+        let h0 = track_block_h(&t, true, 1.0);
         t.automation.push(starter_lane(VfxLaneTargetDoc::Rate, 2.0));
         assert_eq!(visible_lanes(&t).len(), base.len() + 1, "automation adds a lane");
-        assert!(track_block_h(&t, true) > h0, "the extra lane adds height");
+        assert!(track_block_h(&t, true, 1.0) > h0, "the extra lane adds height");
+        // Vertical zoom scales the row height.
+        assert!((track_block_h(&t, false, 2.0) - ROW_H * 2.0).abs() < 1e-3);
     }
 
     #[test]
