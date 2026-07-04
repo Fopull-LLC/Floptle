@@ -138,6 +138,16 @@ pub enum VfxShapeDoc {
     },
 }
 
+/// A steady force field added to a track's particles (wind / attractor / vortex /
+/// turbulence). Directions + centres are in the track's simulation space.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum VfxForceDoc {
+    Directional { dir: [f32; 3], strength: f32 },
+    Point { center: [f32; 3], strength: f32 },
+    Vortex { center: [f32; 3], axis: [f32; 3], strength: f32 },
+    Turbulence { frequency: f32, strength: f32 },
+}
+
 /// A ranged emission span on the timeline — the draggable clip.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct VfxClipDoc {
@@ -230,6 +240,9 @@ pub struct VfxTrackDoc {
     pub gravity: f32,
     #[serde(default)]
     pub drag: f32,
+    /// Force fields added to velocity each step (default: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forces: Vec<VfxForceDoc>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -419,11 +432,31 @@ mod tests {
                 color: default_color(),
                 gravity: 0.5,
                 drag: 0.1,
+                forces: vec![
+                    VfxForceDoc::Directional { dir: [1.0, 0.0, 0.0], strength: 2.0 },
+                    VfxForceDoc::Turbulence { frequency: 0.5, strength: 1.5 },
+                ],
             }],
         };
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
         let back: VfxEffectDoc = ron::from_str(&text).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn forces_default_empty_and_round_trip() {
+        // Old files (no forces field) load with an empty force list…
+        let doc: VfxEffectDoc =
+            ron::from_str(r#"(name: "Old", tracks: [(name: "T")])"#).unwrap();
+        assert!(doc.tracks[0].forces.is_empty());
+        // …and every force variant round-trips.
+        let f = vec![
+            VfxForceDoc::Point { center: [0.0, 1.0, 0.0], strength: -3.0 },
+            VfxForceDoc::Vortex { center: [0.0; 3], axis: [0.0, 1.0, 0.0], strength: 4.0 },
+        ];
+        let text = ron::ser::to_string_pretty(&f, Default::default()).unwrap();
+        let back: Vec<VfxForceDoc> = ron::from_str(&text).unwrap();
+        assert_eq!(f, back);
     }
 
     #[test]
