@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 # eframe on the wgpu backend (reuses the workspace's wgpu 29 / winit 0.30, no extra GL
 # stack). eframe tracks egui's version (workspace pins egui 0.35).
+# eframe hard-enables egui-winit's "links" feature (its browser opener) regardless of our
+# feature set, so `ui.hyperlink_to` (Fopull site / GitHub repo) opens the default browser.
 eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 serde = { workspace = true }
 serde_json = "1"

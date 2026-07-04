@@ -468,40 +468,83 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     }
 }
 
+/// The version THIS distributed build reports — the authority for what a Hub-installed
+/// bundle stamps into projects. A packaged bundle carries a `version.json` next to the
+/// executable (written by scripts/package.sh / the release CI) whose `version` is the label
+/// the Hub installed it under; a bare `cargo run` has no such file and falls back to the
+/// compiled-in [`floptle_core::ENGINE_VERSION`] (`0.0.0` in-workspace). Without this, every
+/// bundle would report `0.0.0` regardless of its real version — so a "0.1.0" install would
+/// pin new projects to an un-installable `0.0.0`.
+fn distribution_version() -> String {
+    let from_bundle = std::env::current_exe().ok().and_then(|exe| {
+        let json = std::fs::read_to_string(exe.with_file_name("version.json")).ok()?;
+        json_string_field(&json, "version")
+    });
+    from_bundle.unwrap_or_else(|| floptle_core::ENGINE_VERSION.to_string())
+}
+
+/// Pull `"<key>": "<value>"` out of a flat JSON object without pulling in a JSON parser
+/// (the editor has no serde_json dep, and version.json is a tiny machine-written file).
+/// Returns `None` if the key or its string value is absent/malformed.
+fn json_string_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let after = &json[json.find(&needle)? + needle.len()..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let rest = after.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
 fn main() {
     env_logger::init();
     // CLI surface the Hub (docs/hub-proposal.md) drives. --version / --new / --migrate run
     // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
     // of the default `assets/`.
     let args: Vec<String> = std::env::args().collect();
+    // The version to stamp into a scaffolded/migrated project. Defaults to this build's
+    // distribution version, but the Hub passes `--engine-version <v>` to pin the EXACT
+    // install it chose (the authority is the Hub's `versions/<v>/` dir name, not the
+    // binary's compiled-in version) — position-independent, so scan for it first.
+    let version_override = args
+        .iter()
+        .position(|a| a == "--engine-version")
+        .and_then(|p| args.get(p + 1))
+        .filter(|v| !v.starts_with('-'))
+        .cloned();
+    let stamp = version_override.unwrap_or_else(distribution_version);
     let mut project_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
-                println!("{} {}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
+                println!("{} {}", floptle_core::ENGINE_NAME, distribution_version());
                 return;
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]      open a project (default: assets/)\n  floptle-editor --new <DIR>       scaffold a new project and exit\n  floptle-editor --migrate <DIR>   migrate a project's assets to this version and exit\n  floptle-editor --version         print the engine version and exit",
-                    floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit",
+                    floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
+            }
+            // Consumed by the pre-scan above; skip the flag and its value.
+            "--engine-version" => {
+                i += 2;
+                continue;
             }
             "--new" => {
                 let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
                     eprintln!("--new needs a <dir>");
                     std::process::exit(2);
                 };
-                std::process::exit(new_project(Path::new(p)));
+                std::process::exit(new_project(Path::new(p), &stamp));
             }
             "--migrate" => {
                 let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
                     eprintln!("--migrate needs a <dir>");
                     std::process::exit(2);
                 };
-                std::process::exit(migrate_project(Path::new(p)));
+                std::process::exit(migrate_project(Path::new(p), &stamp));
             }
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
@@ -512,7 +555,7 @@ fn main() {
         i += 1;
     }
 
-    println!("{} editor v{}", floptle_core::ENGINE_NAME, floptle_core::ENGINE_VERSION);
+    println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     // Gizmos/overlays on by default (toggle in the viewport).
@@ -524,9 +567,10 @@ fn main() {
 }
 
 /// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
-/// scene, a `project.ron` pinned to THIS engine version) without a window/GPU. Returns the
-/// process exit code.
-fn new_project(path: &Path) -> i32 {
+/// scene, a `project.ron` pinned to `stamp`) without a window/GPU. `stamp` is the engine
+/// version to record — the Hub's chosen install label, or this build's distribution version.
+/// Returns the process exit code.
+fn new_project(path: &Path, stamp: &str) -> i32 {
     // Refuse to scaffold over an existing project — that would clobber its project.ron.
     if path.join("project.ron").exists() {
         eprintln!("{} already contains a project (project.ron); refusing to overwrite", path.display());
@@ -548,7 +592,7 @@ fn new_project(path: &Path) -> i32 {
         return 1;
     }
     let cfg = floptle_scene::ProjectConfigDoc {
-        engine_version: Some(floptle_core::ENGINE_VERSION.to_string()),
+        engine_version: Some(stamp.to_string()),
         ..floptle_scene::ProjectConfigDoc::default()
     };
     if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
@@ -560,9 +604,10 @@ fn new_project(path: &Path) -> i32 {
 }
 
 /// Headless `--migrate <dir>`: re-serialize every `.vfx.ron` (so the clip-emit migration
-/// persists) and stamp `project.ron`'s engine_version to THIS version. Best-effort — a file
-/// that fails to parse is left as-is. Returns the process exit code.
-fn migrate_project(path: &Path) -> i32 {
+/// persists) and stamp `project.ron`'s engine_version to `stamp` (the Hub's target install
+/// label, or this build's distribution version). Best-effort — a file that fails to parse is
+/// left as-is. Returns the process exit code.
+fn migrate_project(path: &Path, stamp: &str) -> i32 {
     if !path.is_dir() {
         eprintln!("{} is not a directory", path.display());
         return 1;
@@ -593,7 +638,7 @@ fn migrate_project(path: &Path) -> i32 {
     let cfg_path = path.join("project.ron");
     match floptle_scene::try_load_project(&cfg_path) {
         Ok(Some(mut cfg)) => {
-            cfg.engine_version = Some(floptle_core::ENGINE_VERSION.to_string());
+            cfg.engine_version = Some(stamp.to_string());
             let _ = floptle_scene::save_project(&cfg, &cfg_path);
         }
         Ok(None) => {} // no project.ron — leave it that way.
@@ -1478,6 +1523,30 @@ impl ApplicationHandler for Editor {
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::json_string_field;
+
+    #[test]
+    fn reads_version_from_bundle_json() {
+        let json = r#"{ "version": "0.1.0", "target": "linux-x86_64", "commit": "abc1234" }"#;
+        assert_eq!(json_string_field(json, "version").as_deref(), Some("0.1.0"));
+        assert_eq!(json_string_field(json, "target").as_deref(), Some("linux-x86_64"));
+        // Whitespace-tolerant and prerelease-safe.
+        assert_eq!(
+            json_string_field("{\n  \"version\"  :   \"1.2.0-rc.3\"\n}", "version").as_deref(),
+            Some("1.2.0-rc.3")
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_fields_are_none() {
+        assert_eq!(json_string_field(r#"{ "target": "x" }"#, "version"), None);
+        assert_eq!(json_string_field("{ \"version\": 3 }", "version"), None); // not a string
+        assert_eq!(json_string_field("", "version"), None);
     }
 }
 

@@ -22,6 +22,36 @@ pub fn launch_command(install: &Install, project_path: &Path) -> Command {
     c
 }
 
+/// The OS command that opens `path` in the system file manager (Explorer / Finder / the
+/// user's `xdg-open` handler). Pure construction so it stays unit-testable.
+pub fn reveal_command(path: &Path) -> Command {
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut c = Command::new(program);
+    c.arg(path);
+    c
+}
+
+/// Open `path` in the system file manager, detached. Best-effort — returns an error string
+/// if the opener can't be spawned (e.g. no `xdg-open` installed).
+pub fn reveal(path: &Path) -> Result<(), String> {
+    let child = reveal_command(path)
+        .spawn()
+        .map_err(|e| format!("could not open {}: {e}", path.display()))?;
+    // Reap the (usually short-lived) opener on a detached thread so a long Hub session
+    // doesn't accumulate zombies on unix — same as launch().
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Launch the editor for `project` using `install`, detached — the Hub keeps running.
 /// Errors (without spawning) if the install is missing its binary or the project is gone.
 pub fn launch(install: &Install, project: &Project) -> Result<(), String> {
@@ -64,6 +94,14 @@ mod tests {
             "program was {:?}",
             cmd.get_program()
         );
+    }
+
+    #[test]
+    fn reveal_command_targets_the_path() {
+        let p = PathBuf::from("/home/ty/games/mygame");
+        let cmd = reveal_command(&p);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["/home/ty/games/mygame"]);
     }
 
     #[test]
