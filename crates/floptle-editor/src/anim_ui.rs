@@ -1889,7 +1889,7 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
 }
 
 /// Write (or overwrite) a full TRS key for `chan_name` at time `t`.
-fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &TransformTRS) {
+pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &TransformTRS) {
     let ch = match doc.channels.iter_mut().find(|c| c.node == chan_name) {
         Some(c) => c,
         None => {

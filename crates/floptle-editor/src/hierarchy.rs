@@ -217,6 +217,7 @@ impl EditorTabViewer<'_> {
 
         if resp.clicked() {
             *self.selected_asset = None;
+            *self.bone_selection = None;
             if ui.input(|i| i.modifiers.shift) {
                 if let Some(pos) = self.selection.iter().position(|x| *x == e) {
                     self.selection.remove(pos);
@@ -281,14 +282,28 @@ impl EditorTabViewer<'_> {
                 bdepth[i] = parent.map_or(0, |p| bdepth.get(p).copied().unwrap_or(0) + 1);
             }
             for (i, (bname, _)) in bones.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.add_space((depth + 1 + bdepth[i]) as f32 * 14.0 + 12.0);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(format!("🦴 {bname}")).weak())
-                            .selectable(false),
-                    )
-                    .on_hover_text("a bone/sub-object — attach a node to it in the Inspector");
-                });
+                let sel = *self.bone_selection == Some((e, i));
+                let resp = ui
+                    .horizontal(|ui| {
+                        ui.add_space((depth + 1 + bdepth[i]) as f32 * 14.0 + 12.0);
+                        let text = if sel {
+                            egui::RichText::new(format!("🦴 {bname}"))
+                                .strong()
+                                .color(ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::RichText::new(format!("🦴 {bname}")).weak()
+                        };
+                        ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click()))
+                            .on_hover_text("armature bone — click to select + edit/keyframe its transform in the Inspector")
+                    })
+                    .inner;
+                if resp.clicked() {
+                    // Selecting a bone clears the node/asset selection so the Inspector
+                    // switches to the bone editor (they're mutually exclusive).
+                    *self.bone_selection = Some((e, i));
+                    self.selection.clear();
+                    *self.selected_asset = None;
+                }
             }
         }
     }
