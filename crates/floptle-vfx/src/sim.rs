@@ -63,6 +63,67 @@ const SALT_COLOR: u32 = 0x5EED_0004;
 const SALT_ANGULAR: u32 = 0x5EED_0005;
 
 // ---------------------------------------------------------------------------
+// Force fields — deterministic, WGSL-portable acceleration added each step.
+// ---------------------------------------------------------------------------
+
+use crate::effect::Force;
+
+/// A `[0,1)` float from a hashed `u32` (the noise-lattice value source).
+#[inline]
+fn hash_unit(x: u32) -> f32 {
+    (hash(x) >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// One channel of trilinearly-interpolated 3D value noise in `[-1, 1]`, a pure
+/// integer hash of the lattice corners (bit-identical in Rust and WGSL). `salt`
+/// decorrelates the three channels of [`noise3`].
+fn value_noise(p: Vec3, salt: u32) -> f32 {
+    let pf = p.floor();
+    let (ix, iy, iz) = (pf.x as i32, pf.y as i32, pf.z as i32);
+    let f = p - pf;
+    let u = f * f * (Vec3::splat(3.0) - 2.0 * f); // smoothstep fade
+    let corner = |dx: i32, dy: i32, dz: i32| -> f32 {
+        let h = hash3((ix + dx) as u32, (iy + dy) as u32, (iz + dz) as u32) ^ salt;
+        hash_unit(h) * 2.0 - 1.0
+    };
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let x00 = lerp(corner(0, 0, 0), corner(1, 0, 0), u.x);
+    let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), u.x);
+    let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), u.x);
+    let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), u.x);
+    let y0 = lerp(x00, x10, u.y);
+    let y1 = lerp(x01, x11, u.y);
+    lerp(y0, y1, u.z)
+}
+
+/// A smooth 3D value-noise vector in `[-1, 1]³`.
+#[inline]
+fn noise3(p: Vec3) -> Vec3 {
+    Vec3::new(value_noise(p, 0x9E37_79B1), value_noise(p, 0x85EB_CA6B), value_noise(p, 0xC2B2_AE35))
+}
+
+/// The acceleration one [`Force`] applies to a particle at `pos` (simulation-space).
+/// `world` is the particle's ABSOLUTE world position (anchor + pos for World tracks,
+/// = pos for Local) — used only for turbulence so its noise field is fixed in the
+/// world and rebase-invariant. Spatial forces use `pos` directly: for World tracks
+/// both the authored centre and `pos` are anchor-relative, so `centre − pos` is
+/// anchor-invariant.
+fn force_accel(f: &Force, pos: Vec3, world: Vec3) -> Vec3 {
+    match *f {
+        Force::Directional { dir, strength } => dir.normalize_or_zero() * strength,
+        Force::Point { center, strength } => {
+            let d = center - pos;
+            let l = d.length();
+            if l < 1e-4 { Vec3::ZERO } else { d / l * strength }
+        }
+        Force::Vortex { center, axis, strength } => {
+            axis.normalize_or_zero().cross(pos - center).normalize_or_zero() * strength
+        }
+        Force::Turbulence { frequency, strength } => noise3(world * frequency) * strength,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SoA particle storage
 // ---------------------------------------------------------------------------
 
@@ -343,12 +404,16 @@ impl EffectInstance {
         }
     }
 
-    /// Age, gravity, drag, retire. Kinematic-velocity tracks sample their LUT.
+    /// Age, gravity, drag, forces, retire. Kinematic-velocity tracks sample their LUT.
     fn integrate(&mut self, dt: f32, gravity: Vec3) {
+        // World-track turbulence samples noise at the absolute world position; the
+        // anchor (as f32) shifts it back into world space from the anchor-relative store.
+        let anchor = self.anchor.as_vec3();
         for (ti, ct) in self.effect.tracks.iter().enumerate() {
             let p = &mut self.tracks[ti].particles;
             let damp = (-ct.drag * dt).exp();
             let g = gravity * ct.gravity * dt;
+            let is_world = ct.space == Space::World;
             let mut i = 0;
             while i < p.count {
                 let age = p.pos_age[i].w + dt;
@@ -359,6 +424,17 @@ impl EffectInstance {
                 }
                 let mut vel = p.vel_life[i].truncate();
                 vel = vel * damp + g;
+                // Force fields accelerate the CARRIED velocity (kinematic tracks below
+                // only replace the base term, so forces survive the re-sample).
+                if !ct.forces.is_empty() {
+                    let pos = p.pos_age[i].truncate();
+                    let world = if is_world { anchor + pos } else { pos };
+                    let mut acc = Vec3::ZERO;
+                    for force in &ct.forces {
+                        acc += force_accel(force, pos, world);
+                    }
+                    vel += acc * dt;
+                }
                 let base = if ct.velocity_is_curve {
                     let q = p.frame[i];
                     let frame = Quat::from_xyzw(q.x, q.y, q.z, q.w);
@@ -557,7 +633,7 @@ impl EffectInstance {
 mod tests {
     use super::*;
     use crate::curve::{Curve, Key, Value, ValueOrCurve};
-    use crate::effect::{Burst, Clip, ParticleEffect, Playback, Track};
+    use crate::effect::{Burst, Clip, Force, ParticleEffect, Playback, Track};
 
     const NO_G: Vec3 = Vec3::ZERO;
 
@@ -851,6 +927,84 @@ mod tests {
         inst.advance_at(0.05, NO_G, Transform::from_translation(DVec3::new(10.0, 0.0, 0.0)));
         let p1 = inst.track_particles(0).pos_age[0].truncate();
         assert_eq!(p0, p1, "local particles' stored positions don't move with the emitter");
+    }
+
+    #[test]
+    fn directional_force_accelerates_particles() {
+        // Zero velocity + zero gravity; a +X wind (strength 4) must push the particle
+        // along +X only.
+        let track = Track {
+            rate: 0.0,
+            bursts: vec![Burst { t: 0.0, count: 1 }],
+            particle_lifetime: 10.0,
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            forces: vec![Force::Directional { dir: Vec3::X, strength: 4.0 }],
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::OneShot);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, NO_G);
+        let p = inst.track_particles(0).pos_age[0].truncate();
+        assert!(p.x > 0.3, "wind should push +X, got {p}");
+        assert!(p.y.abs() < 1e-3 && p.z.abs() < 1e-3, "only +X, got {p}");
+    }
+
+    #[test]
+    fn point_force_attracts_toward_center() {
+        // A particle offset at +X, pulled toward the origin, must move −X (toward it).
+        let track = Track {
+            rate: 0.0,
+            bursts: vec![Burst { t: 0.0, count: 1 }],
+            particle_lifetime: 10.0,
+            shape: crate::effect::EmitShape::Edge { length: 4.0 }, // spread along X
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+            forces: vec![Force::Point { center: Vec3::ZERO, strength: 5.0 }],
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::OneShot);
+        let mut inst = EffectInstance::new(fx, 3);
+        let x0 = {
+            inst.simulate_to(0.01, NO_G);
+            inst.track_particles(0).pos_age[0].x
+        };
+        inst.simulate_to(0.4, NO_G);
+        let x1 = inst.track_particles(0).pos_age[0].x;
+        // Whichever side it was born, attraction moves |x| toward 0.
+        assert!(x1.abs() < x0.abs(), "attractor should pull toward center: {x0} -> {x1}");
+    }
+
+    #[test]
+    fn turbulence_is_world_fixed_and_rebase_safe() {
+        use crate::effect::Space;
+        // A World-space particle pushed only by turbulence: its ABSOLUTE world
+        // trajectory must be identical whether or not the emitter drifts (which
+        // re-anchors it every step). The noise field is fixed in the world.
+        let mk = || {
+            let mut t = Track {
+                rate: 0.0,
+                bursts: vec![Burst { t: 0.0, count: 1 }],
+                particle_lifetime: 100.0,
+                velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+                forces: vec![Force::Turbulence { frequency: 0.5, strength: 3.0 }],
+                ..Track::default()
+            };
+            t.space = Space::World;
+            one_track_effect(t, 1.0, Playback::Looping)
+        };
+        let mut a = EffectInstance::new(mk(), 1);
+        let mut b = EffectInstance::new(mk(), 1);
+        a.advance_at(0.02, NO_G, Transform::IDENTITY); // birth both at the origin
+        b.advance_at(0.02, NO_G, Transform::IDENTITY);
+        let mut bx = 0.0;
+        for _ in 0..20 {
+            a.advance_at(0.02, NO_G, Transform::IDENTITY);
+            bx += 1.0; // B's emitter drifts → re-anchors every step
+            b.advance_at(0.02, NO_G, Transform::from_translation(DVec3::new(bx, 0.0, 0.0)));
+        }
+        let pa = a.anchor().as_vec3() + a.track_particles(0).pos_age[0].truncate();
+        let pb = b.anchor().as_vec3() + b.track_particles(0).pos_age[0].truncate();
+        assert!((pa - pb).length() < 0.05, "turbulence must be rebase-invariant: {pa} vs {pb}");
+        assert!(pa.length() > 1e-3, "turbulence should actually displace the particle");
     }
 
     #[test]

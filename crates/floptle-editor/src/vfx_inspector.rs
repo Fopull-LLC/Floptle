@@ -6,7 +6,8 @@
 //! [`crate::curve_edit`]); automation lanes shape birth values over effect time.
 
 use floptle_scene::{
-    VfxBlendDoc, VfxInterpDoc, VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
+    VfxBlendDoc, VfxForceDoc, VfxInterpDoc, VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc,
+    VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
@@ -98,6 +99,8 @@ impl EditorTabViewer<'_> {
             emission_section(ui, ti, track, &mut dirty);
             ui.separator();
             particle_section(ui, track, st, &mut dirty);
+            ui.separator();
+            forces_section(ui, track, &mut dirty);
             ui.separator();
             selected_point_section(ui, ti, track, st, dur, &mut dirty);
         });
@@ -416,6 +419,89 @@ fn particle_section(
             .on_hover_text("velocity damping per second (air resistance)")
             .changed();
     });
+}
+
+/// Force fields on a track — the "make it feel alive" layer. Add wind / attractor /
+/// vortex / turbulence and tune each; centres + directions are in the track's sim
+/// space (they follow the emitter, and stay floating-origin-safe).
+fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
+    use VfxForceDoc as F;
+    let mut add: Option<F> = None;
+    ui.horizontal(|ui| {
+        ui.strong("Forces");
+        ui.menu_button("＋", |ui| {
+            for (lbl, f) in [
+                ("💨 wind (directional)", F::Directional { dir: [0.0, 1.0, 0.0], strength: 2.0 }),
+                ("🎯 attractor (point)", F::Point { center: [0.0, 0.0, 0.0], strength: 3.0 }),
+                ("🌀 vortex", F::Vortex { center: [0.0; 3], axis: [0.0, 1.0, 0.0], strength: 3.0 }),
+                ("〰 turbulence", F::Turbulence { frequency: 0.5, strength: 2.0 }),
+            ] {
+                if ui.button(lbl).clicked() {
+                    add = Some(f);
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("add a force field");
+    });
+    if let Some(f) = add {
+        track.forces.push(f);
+        *dirty = true;
+    }
+    if track.forces.is_empty() {
+        ui.small("none — add wind, an attractor, a vortex, or turbulence");
+        return;
+    }
+    // Small inline drag helpers (a scalar and an xyz vector).
+    let dv = |ui: &mut egui::Ui, v: &mut f32, dirty: &mut bool| {
+        *dirty |= ui.add(egui::DragValue::new(v).speed(0.05)).changed();
+    };
+    let vec3 = |ui: &mut egui::Ui, a: &mut [f32; 3], dirty: &mut bool| {
+        for (i, p) in ["x", "y", "z"].iter().enumerate() {
+            *dirty |= ui.add(egui::DragValue::new(&mut a[i]).speed(0.05).prefix(*p)).changed();
+        }
+    };
+    let mut remove = None;
+    for (i, f) in track.forces.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            match f {
+                F::Directional { dir, strength } => {
+                    ui.small("💨 dir");
+                    vec3(ui, dir, dirty);
+                    ui.small("×");
+                    dv(ui, strength, dirty);
+                }
+                F::Point { center, strength } => {
+                    ui.small("🎯 at");
+                    vec3(ui, center, dirty);
+                    ui.small("pull");
+                    dv(ui, strength, dirty);
+                }
+                F::Vortex { center, axis, strength } => {
+                    ui.small("🌀 at");
+                    vec3(ui, center, dirty);
+                    ui.small("axis");
+                    vec3(ui, axis, dirty);
+                    ui.small("×");
+                    dv(ui, strength, dirty);
+                }
+                F::Turbulence { frequency, strength } => {
+                    ui.small("〰 freq");
+                    dv(ui, frequency, dirty);
+                    ui.small("×");
+                    dv(ui, strength, dirty);
+                }
+            }
+            if ui.small_button("🗑").on_hover_text("remove force").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        track.forces.remove(i);
+        *dirty = true;
+    }
 }
 
 /// The Inspector's lane area. Lanes are *shaped* on the timeline (DAW-style); here

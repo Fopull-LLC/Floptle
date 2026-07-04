@@ -94,6 +94,23 @@ pub enum EmitShape {
     Ring { radius: f32 },
 }
 
+/// A steady force added to a track's particles' velocity each step. Directions and
+/// centres are in the track's SIMULATION space — emitter-local for `Space::Local`,
+/// anchor-relative for `Space::World` — so a `Point`/`Vortex` centre stays put
+/// relative to the emitter and the whole thing is floating-origin-safe.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Force {
+    /// A constant push in a fixed direction (wind, updraft). `dir` need not be unit.
+    Directional { dir: Vec3, strength: f32 },
+    /// Pull toward (`strength > 0`) or push away from (`< 0`) a point (gravity well).
+    Point { center: Vec3, strength: f32 },
+    /// Swirl around an `axis` through `center` (tornado, whirlpool).
+    Vortex { center: Vec3, axis: Vec3, strength: f32 },
+    /// Smooth value-noise turbulence — a chaotic push that makes smoke/embers wander.
+    /// `frequency` is the spatial scale (higher = finer), `strength` the magnitude.
+    Turbulence { frequency: f32, strength: f32 },
+}
+
 /// The simulation space of a track's particles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Space {
@@ -217,6 +234,9 @@ pub struct Track {
     /// 0 = weightless, 1 = full gravity.
     pub gravity: f32,
     pub drag: f32,
+    /// Force fields (wind / attractor / vortex / turbulence) added to velocity each
+    /// step — the "make it feel alive" layer. Empty = none (zero cost).
+    pub forces: Vec<Force>,
 }
 
 impl Default for Track {
@@ -241,6 +261,7 @@ impl Default for Track {
             color: ValueOrCurve::Const(Value::Rgba([1.0; 4])),
             gravity: 0.0,
             drag: 0.0,
+            forces: Vec::new(),
         }
     }
 }
@@ -306,6 +327,8 @@ pub struct CompiledTrack {
     pub color: Prop4,
     pub gravity: f32,
     pub drag: f32,
+    /// Force fields (copied straight from the authoring track — no baking needed).
+    pub forces: Vec<Force>,
 
     // Automation lanes folded per target, domain = effect time normalized [0..1].
     pub lane_rate: Prop1,
@@ -399,6 +422,7 @@ impl Track {
             color: bake4(&self.color, 1.0),
             gravity: self.gravity,
             drag: self.drag.max(0.0),
+            forces: self.forces.clone(),
             lane_rate: fold_lanes1(&self.automation, LaneTarget::Rate, lifetime),
             lane_count: fold_lanes1(&self.automation, LaneTarget::Count, lifetime),
             lane_speed: fold_lanes1(&self.automation, LaneTarget::Speed, lifetime),

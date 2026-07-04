@@ -15,12 +15,12 @@ use floptle_core::{Entity, ParticleSystem, World};
 use floptle_render::particles::{ParticleBatch, ParticleGlobals};
 use floptle_render::{ParticleInstance, RenderCamera, TexId};
 use floptle_scene::{
-    VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxInterpDoc, VfxLaneTargetDoc, VfxOrientDoc,
-    VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
+    VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxForceDoc, VfxInterpDoc, VfxLaneTargetDoc,
+    VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
 };
 use floptle_vfx::{
     BillboardOrient, Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape,
-    EndBehavior, Extrapolate, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback,
+    EndBehavior, Extrapolate, Force, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback,
     RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
 };
 
@@ -459,6 +459,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         }),
         gravity: 0.6,
         drag: 0.0,
+        forces: Vec::new(),
     }];
     VfxEffectDoc {
         name: name.into(),
@@ -600,8 +601,26 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 color: prop_from_doc(&t.color),
                 gravity: t.gravity,
                 drag: t.drag,
+                forces: t.forces.iter().map(force_from_doc).collect(),
             })
             .collect(),
+    }
+}
+
+fn force_from_doc(f: &VfxForceDoc) -> Force {
+    match *f {
+        VfxForceDoc::Directional { dir, strength } => {
+            Force::Directional { dir: Vec3::from_array(dir), strength }
+        }
+        VfxForceDoc::Point { center, strength } => {
+            Force::Point { center: Vec3::from_array(center), strength }
+        }
+        VfxForceDoc::Vortex { center, axis, strength } => Force::Vortex {
+            center: Vec3::from_array(center),
+            axis: Vec3::from_array(axis),
+            strength,
+        },
+        VfxForceDoc::Turbulence { frequency, strength } => Force::Turbulence { frequency, strength },
     }
 }
 
