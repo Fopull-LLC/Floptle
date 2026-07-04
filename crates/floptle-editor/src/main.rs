@@ -377,9 +377,11 @@ struct EditorTabViewer<'a> {
     /// The Game tab's rect (captured each frame it draws), so the editor can size the
     /// Game viewport target to it on the next frame.
     game_rect: &'a mut Option<egui::Rect>,
-    /// When true the Scene + Game tabs are split, so the Game tab paints its own offscreen
-    /// render (`game_tex`) instead of being transparent over the surface.
-    game_split: bool,
+    /// When true the Game tab paints its own offscreen render (`game_tex`), sized+blit to
+    /// the tab rect, instead of showing the full-window surface through a transparent tab.
+    /// Fires whenever a docked (non-fullscreen) Game tab is front — single-view or split —
+    /// so the game view is always framed to its panel and never spills behind other tabs.
+    game_offscreen: bool,
     game_tex: Option<egui::TextureId>,
     aspect: &'a mut AspectMode,
     zoom: &'a mut f32,
@@ -673,6 +675,16 @@ struct Editor {
     /// The active cursor grab is only a CONFINE (X11 has no OS-level lock): the
     /// cursor can still wander inside the window, so we re-center it every frame.
     cursor_lock_soft: bool,
+    /// The Game viewport has trapped the cursor (clicked into it while playing):
+    /// the OS cursor is grabbed+hidden and confined to the Game rect, all input goes
+    /// to the game, and only Escape (or Stop) releases it. Prevents the mouse from
+    /// wandering onto editor panels while you play.
+    game_trap: bool,
+    /// A middle-mouse pan drag is in progress over the Scene viewport (cursor grabbed
+    /// so the raw delta never hits a window edge); `pan_press` restores the pointer
+    /// to where the drag began on release.
+    panning: bool,
+    pan_press: Option<Vec2>,
     /// Offscreen target for the Inspector's spinning model / material preview.
     preview: Option<PreviewTarget>,
     /// Offscreen 16:9 target for the Inspector's selected-camera POV preview.
@@ -1028,10 +1040,16 @@ impl ApplicationHandler for Editor {
                     // a RELEASE (pressed == false) always clears it, so a key can
                     // never stick on if the release lands while a field is focused
                     // (e.g. hold W, click into the IDE, release W). C moves DOWN.
-                    // Fly-camera keys only arm while the pointer is over the Scene
-                    // viewport — WASD in the Animating tab (or any other panel)
-                    // must not drive the editor camera.
-                    let mv = pressed && !typing && !game_view && self.cursor_over_scene();
+                    // Fly-camera keys arm while the pointer is over the Scene
+                    // viewport OR while RMB mouse-look is active — WASD in the
+                    // Animating tab (or any other panel) must not drive the editor
+                    // camera. The `looking` clause is load-bearing: entering look
+                    // grabs+hides the cursor and nulls `self.cursor`, so
+                    // `cursor_over_scene()` can no longer see it. Without it the
+                    // classic hold-RMB + WASD fly combo is impossible and the two
+                    // inputs silently cancel each other (the "camera freezes" bug).
+                    let mv =
+                        pressed && !typing && !game_view && (self.input.looking || self.cursor_over_scene());
                     match code {
                         KeyCode::KeyW => self.input.forward = mv && !self.ctrl,
                         KeyCode::KeyS => self.input.back = mv && !self.ctrl,
@@ -1057,10 +1075,15 @@ impl ApplicationHandler for Editor {
                         // Engine controls work in any view (Play/Pause/Quit).
                         match code {
                             KeyCode::Escape => {
-                                // Escape is a "cancel" gesture first: back out of an
-                                // in-progress transition drag or the graph window, and
-                                // never silently discard unsaved work.
-                                if self.anim_ui.drag_from.is_some() {
+                                // Escape is a "cancel" gesture first: free a trapped Game
+                                // cursor, back out of an in-progress transition drag or the
+                                // graph window, and never silently discard unsaved work.
+                                if self.game_trap {
+                                    self.game_trap = false;
+                                    if let Some(window) = self.window.as_ref() {
+                                        self.cursor_lock_soft = grab_cursor(window, false);
+                                    }
+                                } else if self.anim_ui.drag_from.is_some() {
                                     self.anim_ui.drag_from = None;
                                 } else if self.scene_dirty {
                                     self.show_quit_confirm = true;
@@ -1114,6 +1137,17 @@ impl ApplicationHandler for Editor {
                 let pressed = state == ElementState::Pressed;
                 self.track_mouse_button(0, pressed);
                 if pressed {
+                    // Clicking into the Game view while playing traps the cursor there
+                    // (Escape or Stop releases it) so playing doesn't let the mouse
+                    // wander onto editor panels. `cursor_over_game()` gates it to the
+                    // Game rect, so a click on any panel never grabs.
+                    if self.playing && !self.game_trap && self.cursor_over_game() {
+                        self.game_trap = true;
+                        if let Some(window) = self.window.as_ref() {
+                            self.cursor_lock_soft = grab_cursor(window, true);
+                        }
+                        self.cursor = None;
+                    }
                     // Clicking anywhere outside a text field ends text editing —
                     // a click into the viewport (which egui never sees) included.
                     if let Some(eg) = self.egui.as_ref()
@@ -1181,7 +1215,28 @@ impl ApplicationHandler for Editor {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
-                self.track_mouse_button(2, state == ElementState::Pressed);
+                let pressed = state == ElementState::Pressed;
+                self.track_mouse_button(2, pressed);
+                // MMB drag over the Scene viewport pans the fly camera. Grab the cursor
+                // (raw delta, so panning never freezes at a window edge) and restore it
+                // to the press point on release. Editor Scene view only.
+                let editor_scene = !self.game_view() && self.cursor_over_scene();
+                if pressed && editor_scene {
+                    self.panning = true;
+                    self.pan_press = self.cursor;
+                    if let Some(window) = self.window.as_ref() {
+                        self.cursor_lock_soft = grab_cursor(window, true);
+                    }
+                    self.cursor = None;
+                } else if !pressed && self.panning {
+                    self.panning = false;
+                    if !self.script_mouse_lock && !self.input.looking && !self.game_trap
+                        && let Some(window) = self.window.as_ref()
+                    {
+                        self.cursor_lock_soft = grab_cursor(window, false);
+                    }
+                    self.cursor = self.pan_press.take().or(self.cursor);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.input_scroll += match delta {
@@ -1215,8 +1270,9 @@ impl ApplicationHandler for Editor {
                 } else {
                     let was_looking = self.input.looking;
                     self.input.looking = false;
-                    // Don't release the grab if a script is holding the mouse locked.
-                    if !self.script_mouse_lock
+                    // Don't release the grab if a script is holding the mouse locked, the
+                    // Game view has it trapped, or an MMB pan is still dragging.
+                    if !self.script_mouse_lock && !self.game_trap && !self.panning
                         && let Some(window) = self.window.as_ref() {
                             self.cursor_lock_soft = grab_cursor(window, false);
                         }
@@ -1251,11 +1307,13 @@ impl ApplicationHandler for Editor {
             // Accumulate raw mouse delta for the script `input` API.
             self.input_mouse_delta.0 += delta.0 as f32;
             self.input_mouse_delta.1 += delta.1 as f32;
-            // Priority: RMB-look > grabbed gizmo handle. (Free dragging an object now
-            // requires the Move tool's center handle — no more accidental moves.)
+            // Priority: RMB-look > MMB-pan > grabbed gizmo handle. (Free dragging an
+            // object now requires the Move tool's center handle — no accidental moves.)
             if self.input.looking {
                 self.camera.look(delta.0 as f32, delta.1 as f32);
                 self.rmb_moved += (delta.0.abs() + delta.1.abs()) as f32;
+            } else if self.panning {
+                self.camera.pan(delta.0 as f32, delta.1 as f32);
             } else if self.grabbed.is_some() {
                 self.gizmo_drag();
             }

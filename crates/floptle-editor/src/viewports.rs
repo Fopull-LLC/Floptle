@@ -307,14 +307,15 @@ impl Editor {
         }
     }
 
-    /// When the Scene and Game tabs are both visible (split), render the active-camera
-    /// "game" view into its own offscreen target so the two viewports show independent
-    /// views instead of the same surface render. (In single-view, the surface path draws
-    /// whichever one view is shown — this is skipped.)
+    /// Render the active-camera "game" view into its own offscreen target sized to the
+    /// Game tab's rect, whenever a docked (non-fullscreen) Game tab is front — single-view
+    /// or split. The tab then blits this at its exact rect+aspect, so the game view is
+    /// always framed to its panel and never spills the full-window render behind other
+    /// tabs. (A FULLSCREEN Game tab renders straight to the surface — it fills the window.)
     pub(crate) fn update_game_viewport(&mut self, elapsed: f32) {
-        let split = self.fullscreen_tab.is_none()
-            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
-        if !split {
+        let active = self.fullscreen_tab.is_none()
+            && self.dock_state.as_ref().is_some_and(game_tab_active);
+        if !active {
             return;
         }
         let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);

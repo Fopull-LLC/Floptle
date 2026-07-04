@@ -67,6 +67,13 @@ impl Editor {
         scene_hit(&eg.ctx, self.cursor, self.scene_rect)
     }
 
+    /// True when the cursor is over the Game viewport rect (and not under a popup) —
+    /// the gate for trapping the cursor into the Game view on click.
+    pub(crate) fn cursor_over_game(&self) -> bool {
+        let Some(eg) = self.egui.as_ref() else { return false };
+        scene_hit(&eg.ctx, self.cursor, self.game_rect)
+    }
+
     /// The world point under the cursor — its ray's hit on the ground plane (y=0),
     /// or ~6 units in front of the camera if the ray doesn't meet the ground. Used to
     /// place a dropped asset where the cursor is.

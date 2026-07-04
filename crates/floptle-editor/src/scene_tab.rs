@@ -16,7 +16,7 @@ impl EditorTabViewer<'_> {
         let rect = ui.max_rect();
         if game {
             *self.game_rect = Some(rect);
-            if self.game_split
+            if self.game_offscreen
                 && let Some(tex) = self.game_tex {
                     egui::Image::new((tex, rect.size())).paint_at(ui, rect);
                 }

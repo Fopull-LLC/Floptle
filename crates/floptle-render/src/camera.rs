@@ -62,6 +62,27 @@ impl FlyCamera {
         self.pitch = (self.pitch - dy * self.sensitivity).clamp(-limit, limit);
     }
 
+    /// Slide the camera in its own view plane by a screen-drag delta (pixels): the
+    /// world tracks the pointer (drag right ⏵ the scene moves right). Speed scales
+    /// with the fly speed so it feels consistent as you dial that up/down.
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        let rot = self.rotation();
+        let right = rot * Vec3::X;
+        let up = rot * Vec3::Y;
+        let k = self.speed as f32 * 0.01;
+        self.position += ((right * -dx) + (up * dy)).as_dvec3() * k as f64;
+    }
+
+    /// Dolly along the view direction (mouse wheel): positive `amount` moves forward
+    /// (toward what you're looking at). Steps scale with the fly speed.
+    pub fn dolly(&mut self, amount: f32) {
+        if amount == 0.0 {
+            return;
+        }
+        let forward = self.rotation() * Vec3::NEG_Z;
+        self.position += forward.as_dvec3() * (amount * self.speed as f32 * 0.5) as f64;
+    }
+
     /// Integrate movement for `dt` seconds from the held keys.
     pub fn update(&mut self, input: &Input, dt: f32) {
         let rot = self.rotation();

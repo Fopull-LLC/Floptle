@@ -196,9 +196,11 @@ impl Editor {
             self.playing = false;
             self.paused = false;
             self.sim = None; // drop the physics sim; restore reverts moved transforms
-            // Release any script-held mouse lock so you're not stuck grabbed after Stop.
-            if self.script_mouse_lock {
+            // Release any script-held mouse lock or Game-view cursor trap so you're not
+            // stuck grabbed after Stop.
+            if self.script_mouse_lock || self.game_trap {
                 self.script_mouse_lock = false;
+                self.game_trap = false;
                 if let Some(window) = self.window.as_ref() {
                     self.cursor_lock_soft = grab_cursor(window, false);
                 }
