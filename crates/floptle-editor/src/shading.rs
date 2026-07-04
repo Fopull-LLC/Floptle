@@ -98,6 +98,16 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
     )
 }
 
+/// The depth-fog uniforms for the Lighting node: `(fog_color, fog_params)` where
+/// `fog_params = [start, end, on, 0]`. Fed to the raymarch/raster field globals AND
+/// the particle globals so meshes, matter, terrain and particles fog together.
+pub(crate) fn fog_uniforms(l: &Light) -> ([f32; 4], [f32; 4]) {
+    (
+        [l.fog_color[0], l.fog_color[1], l.fog_color[2], 0.0],
+        [l.fog_start, l.fog_end.max(l.fog_start + 1e-3), if l.fog { 1.0 } else { 0.0 }, 0.0],
+    )
+}
+
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
 /// how DYNAMIC raster meshes CAST sun shadows without being in the SDF field.
 /// Mirrors the physics build: a RigidBody node casts its body shape; a Collidable

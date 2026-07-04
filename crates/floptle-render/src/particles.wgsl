@@ -22,6 +22,8 @@ struct ParticleGlobals {
     view_proj: mat4x4<f32>,
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
+    fog_color: vec4<f32>,   // rgb = fog color
+    fog_params: vec4<f32>,  // x start, y end, z on (0/1)
 };
 
 @group(0) @binding(0) var<uniform> g: ParticleGlobals;
@@ -47,6 +49,8 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    // Camera-relative position, so the fragment can compute its own view distance.
+    @location(2) view_pos: vec3<f32>,
 };
 
 @vertex
@@ -73,17 +77,27 @@ fn vs(in: VsIn) -> VsOut {
     let rect = vec4<f32>(in.size.z, in.size.w, in.basis_right.w, in.basis_up.w);
     out.uv = base_uv * rect.zw + rect.xy;
     out.color = in.color;
+    out.view_pos = world;
     return out;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(tex, samp, in.uv);
-    let col = texel * in.color;
+    var col = texel * in.color;
     // Fully transparent texels are discarded so depth-adjacent particles don't
     // fog each other's edges with invisible quads.
     if (col.a <= 0.001) {
         discard;
+    }
+    // Depth fog: fade the WHOLE contribution to zero with distance (attenuation, not
+    // a tint) so it's correct across every blend family — alpha particles vanish,
+    // additive/screen light dims, premultiplied fades out — instead of adding
+    // fog-coloured light. `view_pos` is camera-relative, so length = view distance.
+    if (g.fog_params.z > 0.5) {
+        let denom = max(g.fog_params.y - g.fog_params.x, 1e-4);
+        let f = clamp((length(in.view_pos) - g.fog_params.x) / denom, 0.0, 1.0);
+        col = col * (1.0 - f);
     }
     return col;
 }

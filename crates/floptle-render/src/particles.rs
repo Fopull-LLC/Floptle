@@ -117,6 +117,10 @@ pub struct ParticleGlobals {
     pub cam_right: [f32; 4],
     /// The camera's world up vector (w unused).
     pub cam_up: [f32; 4],
+    /// Depth fog: rgb = color (w unused).
+    pub fog_color: [f32; 4],
+    /// Depth fog: x = start dist, y = end dist, z = enabled (0/1), w unused.
+    pub fog_params: [f32; 4],
 }
 
 pub struct Particles {
@@ -171,7 +175,8 @@ impl Particles {
             label: Some("particles-globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Fragment reads it too now (fog params), not just the vertex basis.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,

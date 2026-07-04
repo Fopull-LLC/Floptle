@@ -409,13 +409,21 @@ impl VfxSystem {
     }
 }
 
-/// The particle pass's frame globals for `cam` (billboard basis from its rotation).
-pub fn particle_globals(cam: &RenderCamera, aspect: f32) -> ParticleGlobals {
+/// The particle pass's frame globals for `cam` (billboard basis from its rotation),
+/// plus the scene's depth-fog uniforms so distant particles fade into the fog.
+pub fn particle_globals(
+    cam: &RenderCamera,
+    aspect: f32,
+    fog_color: [f32; 4],
+    fog_params: [f32; 4],
+) -> ParticleGlobals {
     let (r, u) = (cam.rotation * Vec3::X, cam.rotation * Vec3::Y);
     ParticleGlobals {
         view_proj: cam.view_proj(aspect).to_cols_array_2d(),
         cam_right: [r.x, r.y, r.z, 0.0],
         cam_up: [u.x, u.y, u.z, 0.0],
+        fog_color,
+        fog_params,
     }
 }
 

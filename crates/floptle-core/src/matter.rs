@@ -162,6 +162,17 @@ pub struct Light {
     /// Max distance (world units) a shadow ray marches before giving up — a perf
     /// fence; far geometry simply stops casting past it.
     pub shadow_distance: f32,
+
+    /// Depth fog: blend everything toward `fog_color` between `fog_start` and
+    /// `fog_end` world units from the camera. Dirt-cheap (one mix per fragment) and
+    /// off by default. The skybox stays crisp, so match `fog_color` to the horizon
+    /// (or the background color) to avoid a seam.
+    pub fog: bool,
+    pub fog_color: [f32; 3],
+    /// World distance where fog begins (fully clear nearer than this).
+    pub fog_start: f32,
+    /// World distance where fog is full (fully `fog_color` past this).
+    pub fog_end: f32,
 }
 
 impl Default for Light {
@@ -178,6 +189,10 @@ impl Default for Light {
             shadow_quantize: 0,
             shadow_dither: false,
             shadow_distance: 150.0,
+            fog: false,
+            fog_color: [0.6, 0.65, 0.72],
+            fog_start: 40.0,
+            fog_end: 200.0,
         }
     }
 }

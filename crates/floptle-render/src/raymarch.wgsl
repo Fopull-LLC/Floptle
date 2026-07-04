@@ -484,7 +484,10 @@ fn fs(in: VOut) -> FsOut {
                     col = (col + G.blob_rim[bi].rgb * rim_f) * occ + emissive;
                 }
             }
-            out.color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+            // Depth fog by camera-relative distance (p is camera-relative). The sky
+            // branch below stays UNFOGGED so a textured skybox reads crisp.
+            let fogged = apply_fog(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), p);
+            out.color = vec4<f32>(fogged, 1.0);
             out.depth = ndc_z;
             drawn = true;
         }

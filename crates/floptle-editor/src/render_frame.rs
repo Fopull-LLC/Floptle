@@ -33,7 +33,7 @@ use crate::gizmo::build_gizmo;
 use crate::hierarchy::{node_new_menu};
 use crate::matter_catalog::{new_cube, new_sphere};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
-use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
+use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, mesh_collider_wire_local, oriented_box_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
@@ -456,6 +456,7 @@ impl Editor {
         // raster meshes cast — both ride the raymarch globals, which the raster pass
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
+        let (fog_color, fog_params) = fog_uniforms(&light_node);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -712,6 +713,8 @@ impl Editor {
                 prox_a,
                 prox_b,
                 prox_rot,
+                fog_color,
+                fog_params,
             }
         };
 
@@ -1707,7 +1710,7 @@ impl Editor {
                         gpu,
                         color,
                         depth,
-                        crate::vfx::particle_globals(&cam, aspect),
+                        crate::vfx::particle_globals(&cam, aspect, fog_color, fog_params),
                         &vfx_instances,
                         &vfx_batches,
                         raster,
@@ -2784,6 +2787,7 @@ impl Editor {
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
+        let (fog_color, fog_params) = fog_uniforms(&light_node);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -2898,6 +2902,8 @@ impl Editor {
                 prox_a,
                 prox_b,
                 prox_rot,
+                fog_color,
+                fog_params,
             };
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             g
@@ -2947,7 +2953,7 @@ impl Editor {
                     gpu,
                     color,
                     depth,
-                    crate::vfx::particle_globals(cam, aspect),
+                    crate::vfx::particle_globals(cam, aspect, fog_color, fog_params),
                     &vfx_instances,
                     &vfx_batches,
                     raster,

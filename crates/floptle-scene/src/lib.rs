@@ -532,6 +532,14 @@ pub struct LightDoc {
     pub shadow_dither: bool,
     #[serde(default = "default_shadow_distance")]
     pub shadow_distance: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog: bool,
+    #[serde(default = "default_fog_color")]
+    pub fog_color: [f32; 3],
+    #[serde(default = "default_fog_start")]
+    pub fog_start: f32,
+    #[serde(default = "default_fog_end")]
+    pub fog_end: f32,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -539,6 +547,15 @@ fn default_shadow_softness() -> f32 {
 }
 fn default_shadow_distance() -> f32 {
     150.0
+}
+fn default_fog_color() -> [f32; 3] {
+    [0.6, 0.65, 0.72]
+}
+fn default_fog_start() -> f32 {
+    40.0
+}
+fn default_fog_end() -> f32 {
+    200.0
 }
 
 impl Default for LightDoc {
@@ -561,6 +578,10 @@ impl From<&Light> for LightDoc {
             shadow_quantize: l.shadow_quantize,
             shadow_dither: l.shadow_dither,
             shadow_distance: l.shadow_distance,
+            fog: l.fog,
+            fog_color: l.fog_color,
+            fog_start: l.fog_start,
+            fog_end: l.fog_end,
         }
     }
 }
@@ -579,6 +600,10 @@ impl LightDoc {
             shadow_quantize: self.shadow_quantize,
             shadow_dither: self.shadow_dither,
             shadow_distance: self.shadow_distance,
+            fog: self.fog,
+            fog_color: self.fog_color,
+            fog_start: self.fog_start,
+            fog_end: self.fog_end,
         }
     }
 }

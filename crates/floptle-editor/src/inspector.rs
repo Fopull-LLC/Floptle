@@ -322,6 +322,31 @@ impl EditorTabViewer<'_> {
                             .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
                             .changed();
                     });
+                    // Depth fog — dirt-cheap distance haze (independent of shadows).
+                    ui.separator();
+                    cmd.inspector_changed |= ui
+                        .checkbox(&mut l.fog, "depth fog")
+                        .on_hover_text("fade the scene toward a color with distance — cheap atmosphere; the skybox stays crisp")
+                        .changed();
+                    ui.add_enabled_ui(l.fog, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("color");
+                            cmd.inspector_changed |= ui
+                                .color_edit_button_rgb(&mut l.fog_color)
+                                .on_hover_text("match the horizon / background so no seam shows at the skybox")
+                                .changed();
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("start");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_start).speed(0.5).range(0.0..=10000.0).suffix("m"))
+                                .changed();
+                            ui.label("end");
+                            cmd.inspector_changed |= ui
+                                .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
+                                .changed();
+                        });
+                    });
                 }
             }
             Some(e) if world.get::<Transform>(e).is_some() => {

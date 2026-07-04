@@ -300,6 +300,8 @@ fn main() {
         view_proj: cam.view_proj(aspect).to_cols_array_2d(),
         cam_right: [r.x, r.y, r.z, 0.0],
         cam_up: [u.x, u.y, u.z, 0.0],
+        fog_color: [0.0; 4],
+        fog_params: [0.0; 4], // fog off in the probe
     };
     let (cam_right, cam_up) = (r, u);
 
