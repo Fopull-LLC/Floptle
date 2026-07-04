@@ -15,13 +15,13 @@ use floptle_core::{Entity, ParticleSystem, World};
 use floptle_render::particles::{ParticleBatch, ParticleGlobals};
 use floptle_render::{ParticleInstance, RenderCamera, TexId};
 use floptle_scene::{
-    VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxInterpDoc, VfxLaneTargetDoc, VfxPlaybackDoc,
-    VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
+    VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxInterpDoc, VfxLaneTargetDoc, VfxOrientDoc,
+    VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxValueDoc, VFX_EXT,
 };
 use floptle_vfx::{
-    Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape, EndBehavior,
-    Extrapolate, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback, RenderMode,
-    Space, Track, Value, ValueOrCurve, collect_billboards,
+    BillboardOrient, Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape,
+    EndBehavior, Extrapolate, Interp, Key, Lane, LaneTarget, Look, ParticleEffect, Playback,
+    RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
 };
 
 use crate::anim::asset_key;
@@ -213,6 +213,8 @@ impl VfxSystem {
         out_batches: &mut Vec<ParticleBatch>,
     ) {
         let fwd = cam.rotation * Vec3::NEG_Z;
+        let cam_right = cam.rotation * Vec3::X;
+        let cam_up = cam.rotation * Vec3::Y;
         let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
             let local_xf = match anchor {
                 Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
@@ -222,7 +224,9 @@ impl VfxSystem {
             // World-space tracks live at the instance's world anchor (camera-relative).
             let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
             let mut draws = Vec::new();
-            collect_billboards(inst, local_xf, world_xf, fwd, out_instances, &mut draws);
+            collect_billboards(
+                inst, local_xf, world_xf, fwd, cam_right, cam_up, out_instances, &mut draws,
+            );
             for d in draws {
                 out_batches.push(ParticleBatch {
                     texture: d.texture.as_deref().and_then(|p| textures.get(p).copied()),
@@ -336,6 +340,9 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         enabled: true,
         render: VfxRenderDoc::Billboard { texture: None },
         blend: VfxBlendDoc::Additive,
+        orient: VfxOrientDoc::FaceCamera,
+        aspect: 1.0,
+        stretch: 1.0,
         lit: false,
         cast_shadows: false,
         space: floptle_scene::VfxSpaceDoc::Local,
@@ -456,6 +463,15 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                         VfxBlendDoc::Alpha => Blend::Alpha,
                         VfxBlendDoc::Additive => Blend::Additive,
                     },
+                    orient: match t.orient {
+                        VfxOrientDoc::FaceCamera => BillboardOrient::FaceCamera,
+                        VfxOrientDoc::Velocity => BillboardOrient::Velocity,
+                        VfxOrientDoc::Vertical => BillboardOrient::Vertical,
+                        VfxOrientDoc::Horizontal => BillboardOrient::Horizontal,
+                        VfxOrientDoc::WorldFixed => BillboardOrient::WorldFixed,
+                    },
+                    aspect: t.aspect,
+                    stretch: t.stretch,
                     lit: t.lit,
                     cast_shadows: t.cast_shadows,
                 },

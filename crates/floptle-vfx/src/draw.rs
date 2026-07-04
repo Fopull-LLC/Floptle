@@ -6,8 +6,8 @@
 //! raster [`TexId`](floptle_render::TexId) through its own registry, and issues one
 //! `Particles::draw`.
 
-use crate::effect::{Blend, RenderMode, Space};
-use crate::sim::EffectInstance;
+use crate::effect::{BillboardOrient, Blend, RenderMode, Space};
+use crate::sim::{EffectInstance, ParticleSample};
 use floptle_core::math::{Mat4, Quat, Vec3};
 use floptle_render::particles::{ParticleBlend, ParticleInstance};
 
@@ -27,13 +27,18 @@ pub struct BillboardDraw {
 /// `render_matrix`, ADR-0015) — used by `Space::Local` tracks; `world_xf` maps the
 /// instance's world anchor to camera-relative space — used by `Space::World` tracks
 /// (whose particles are already world-baked). Billboard size scales by the chosen
-/// transform's mean axis scale. `cam_forward` is the view direction — `Alpha` tracks
-/// sort back-to-front along it (`Additive` needs no order).
+/// transform's mean axis scale. `cam_forward`/`cam_right`/`cam_up` are the camera's
+/// world basis (also camera-relative, since the camera sits at the origin): `Alpha`
+/// tracks sort back-to-front along `cam_forward`, and face-camera tracks span the
+/// right/up vectors. Non-face-camera modes derive their own basis per particle.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_billboards(
     inst: &EffectInstance,
     local_xf: Mat4,
     world_xf: Mat4,
     cam_forward: Vec3,
+    cam_right: Vec3,
+    cam_up: Vec3,
     instances: &mut Vec<ParticleInstance>,
     draws: &mut Vec<BillboardDraw>,
 ) {
@@ -44,15 +49,24 @@ pub fn collect_billboards(
             let m = glam_mat3_scale(&xf);
             (m.0 + m.1 + m.2) / 3.0
         };
+        let orient = ct.look.orient;
+        let aspect = ct.look.aspect.max(1e-3);
+        let stretch = ct.look.stretch.max(1e-3);
         let start = instances.len();
         inst.sample_track(ti, |s| {
             let world = xf.transform_point3(s.pos);
-            let size = s.size * scale;
+            let base = s.size * scale;
+            // Width takes the aspect ratio; height stays the size (velocity stretch
+            // rides the up-vector length, so the shader needs no stretch term).
+            let (w, h) = (base * aspect, base);
+            let (right, up, spin) =
+                billboard_basis(orient, &xf, world, &s, cam_right, cam_up, stretch);
             instances.push(ParticleInstance {
-                // Billboards face the camera, so only the roll (z) is a visible spin.
-                pos_rot: [world.x, world.y, world.z, s.rotation.z],
-                size: [size, size, 0.0, 0.0],
+                pos_rot: [world.x, world.y, world.z, spin],
+                size: [w, h, 0.0, 0.0],
                 color: s.color,
+                basis_right: [right.x, right.y, right.z, 0.0],
+                basis_up: [up.x, up.y, up.z, 0.0],
             });
         });
         if instances.len() == start {
@@ -79,6 +93,73 @@ pub fn collect_billboards(
             },
             range: start as u32..instances.len() as u32,
         });
+    }
+}
+
+/// The world-space in-plane basis (+X width axis, +Y height axis) a particle's quad
+/// spans, plus the roll spin to apply, for the track's [`BillboardOrient`]. All
+/// vectors are camera-relative (ADR-0015: the camera sits at the origin), so
+/// `view_dir` is just the direction from the origin to the particle.
+///
+/// Degenerate cases (zero velocity, velocity parallel to the view, looking straight
+/// down the up axis) fall back to the camera basis so a quad never collapses to a
+/// line or NaNs out.
+fn billboard_basis(
+    orient: BillboardOrient,
+    xf: &Mat4,
+    world_pos: Vec3,
+    s: &ParticleSample,
+    cam_right: Vec3,
+    cam_up: Vec3,
+    stretch: f32,
+) -> (Vec3, Vec3, f32) {
+    const EPS: f32 = 1e-6;
+    let view_dir = world_pos.normalize_or_zero();
+    match orient {
+        // Classic billboard: the camera basis, spun by roll.
+        BillboardOrient::FaceCamera => (cam_right, cam_up, s.rotation.z),
+        // Stretched along motion: up = velocity (scaled by stretch), width faces the
+        // camera around that axis. Roll is meaningless here, so it's dropped.
+        BillboardOrient::Velocity => {
+            let vel = xf.transform_vector3(s.velocity);
+            let up = vel.normalize_or_zero();
+            if up == Vec3::ZERO || view_dir == Vec3::ZERO {
+                return (cam_right, cam_up, 0.0);
+            }
+            let right = view_dir.cross(up);
+            if right.length_squared() < EPS {
+                // Velocity points at/away from the camera — no stable in-plane right.
+                return (cam_right, cam_up, 0.0);
+            }
+            (right.normalize(), up * stretch, 0.0)
+        }
+        // Upright: locked to world up, yawing to the camera. Roll would tip it, so 0.
+        BillboardOrient::Vertical => {
+            let up = Vec3::Y;
+            let mut right = up.cross(view_dir);
+            if right.length_squared() < EPS {
+                // Looking straight down the up axis — use the camera right, flattened.
+                right = Vec3::new(cam_right.x, 0.0, cam_right.z);
+                if right.length_squared() < EPS {
+                    right = Vec3::X;
+                }
+            }
+            (right.normalize(), up, 0.0)
+        }
+        // Flat on the ground (normal = world up); roll spins it in the ground plane.
+        BillboardOrient::Horizontal => (Vec3::X, Vec3::Z, s.rotation.z),
+        // Fixed to the birth (emit-direction) frame; rotate it into world space. For
+        // World-space tracks `xf` is a pure translation, so the world-baked frame is
+        // used as-is.
+        BillboardOrient::WorldFixed => {
+            let right = xf.transform_vector3(s.frame * Vec3::X).normalize_or_zero();
+            let up = xf.transform_vector3(s.frame * Vec3::Y).normalize_or_zero();
+            if right == Vec3::ZERO || up == Vec3::ZERO {
+                (cam_right, cam_up, s.rotation.z)
+            } else {
+                (right, up, s.rotation.z)
+            }
+        }
     }
 }
 
@@ -162,7 +243,9 @@ mod tests {
         let mut packed = Vec::new();
         let mut draws = Vec::new();
         let fwd = Vec3::Z;
-        collect_billboards(&inst, Mat4::IDENTITY, Mat4::IDENTITY, fwd, &mut packed, &mut draws);
+        collect_billboards(
+            &inst, Mat4::IDENTITY, Mat4::IDENTITY, fwd, Vec3::X, Vec3::Y, &mut packed, &mut draws,
+        );
 
         assert_eq!(draws.len(), 1);
         assert_eq!(packed.len(), 20);
@@ -170,6 +253,113 @@ mod tests {
         for w in packed.windows(2) {
             assert!(w[0].pos_rot[2] >= w[1].pos_rot[2], "not back-to-front along +Z");
         }
+        // Face-camera (default) packs the camera basis verbatim.
+        for p in &packed {
+            assert_eq!([p.basis_right[0], p.basis_right[1], p.basis_right[2]], [1.0, 0.0, 0.0]);
+            assert_eq!([p.basis_up[0], p.basis_up[1], p.basis_up[2]], [0.0, 1.0, 0.0]);
+        }
+    }
+
+    /// Every orientation mode must produce a finite, non-degenerate basis (two
+    /// non-parallel axes) so no quad collapses to a line — including the tricky
+    /// velocity-parallel-to-view and straight-down cases.
+    #[test]
+    fn orientation_modes_yield_finite_non_degenerate_bases() {
+        use crate::effect::{BillboardOrient, Look};
+        use crate::curve::{Value, ValueOrCurve};
+        for orient in [
+            BillboardOrient::FaceCamera,
+            BillboardOrient::Velocity,
+            BillboardOrient::Vertical,
+            BillboardOrient::Horizontal,
+            BillboardOrient::WorldFixed,
+        ] {
+            let fx = Arc::new(
+                ParticleEffect {
+                    lifetime: 1.0,
+                    playback: Playback::OneShot,
+                    tracks: vec![Track {
+                        rate: 0.0,
+                        bursts: vec![Burst { t: 0.0, count: 16 }],
+                        particle_lifetime: 5.0,
+                        // Sphere spread gives velocities in every direction, incl.
+                        // straight at/away from the camera and along the up axis.
+                        shape: crate::effect::EmitShape::Sphere { radius: 1.0, shell: true },
+                        velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
+                        look: Look { orient, ..Look::default() },
+                        ..Track::default()
+                    }],
+                    ..ParticleEffect::default()
+                }
+                .compile(),
+            );
+            let mut inst = EffectInstance::new(fx, 3);
+            inst.simulate_to(0.2, Vec3::ZERO);
+            let mut packed = Vec::new();
+            let mut draws = Vec::new();
+            // A camera looking down -Z from +Z, plus one looking straight down -Y.
+            for (fwd, right, up) in
+                [(Vec3::NEG_Z, Vec3::X, Vec3::Y), (Vec3::NEG_Y, Vec3::X, Vec3::NEG_Z)]
+            {
+                packed.clear();
+                draws.clear();
+                collect_billboards(
+                    &inst, Mat4::IDENTITY, Mat4::IDENTITY, fwd, right, up, &mut packed, &mut draws,
+                );
+                assert!(!packed.is_empty(), "{orient:?} produced no instances");
+                for p in &packed {
+                    let r = Vec3::new(p.basis_right[0], p.basis_right[1], p.basis_right[2]);
+                    let u = Vec3::new(p.basis_up[0], p.basis_up[1], p.basis_up[2]);
+                    assert!(r.is_finite() && u.is_finite(), "{orient:?} NaN basis");
+                    assert!(r.length() > 1e-4 && u.length() > 1e-4, "{orient:?} zero basis");
+                    // Non-parallel: the cross product (the quad normal) is non-zero.
+                    assert!(r.cross(u).length() > 1e-4, "{orient:?} collapsed basis");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn velocity_stretch_lengthens_the_up_axis() {
+        use crate::effect::{BillboardOrient, Look};
+        use crate::curve::{Value, ValueOrCurve};
+        // A single particle moving +Y at a viewer on +Z: stretch 3 must triple the
+        // up-basis length vs. stretch 1, and drop the roll spin.
+        let mk = |stretch: f32| {
+            let fx = Arc::new(
+                ParticleEffect {
+                    lifetime: 1.0,
+                    playback: Playback::OneShot,
+                    tracks: vec![Track {
+                        rate: 0.0,
+                        bursts: vec![Burst { t: 0.0, count: 1 }],
+                        particle_lifetime: 5.0,
+                        velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 4.0, 0.0))),
+                        rotation: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 0.0, 1.0))),
+                        look: Look { orient: BillboardOrient::Velocity, stretch, ..Look::default() },
+                        ..Track::default()
+                    }],
+                    ..ParticleEffect::default()
+                }
+                .compile(),
+            );
+            let mut inst = EffectInstance::new(fx, 1);
+            inst.simulate_to(0.1, Vec3::ZERO);
+            let (mut packed, mut draws) = (Vec::new(), Vec::new());
+            // Push the particle out along +Z so the view direction isn't parallel to
+            // its +Y motion (which would trip the degenerate fallback, not stretch).
+            let xf = Mat4::from_translation(Vec3::new(0.0, 0.0, 5.0));
+            collect_billboards(
+                &inst, xf, xf, Vec3::NEG_Z, Vec3::X, Vec3::Y, &mut packed, &mut draws,
+            );
+            packed[0]
+        };
+        let a = mk(1.0);
+        let b = mk(3.0);
+        let up_a = Vec3::new(a.basis_up[0], a.basis_up[1], a.basis_up[2]).length();
+        let up_b = Vec3::new(b.basis_up[0], b.basis_up[1], b.basis_up[2]).length();
+        assert!((up_b / up_a - 3.0).abs() < 0.05, "stretch should triple up length");
+        assert_eq!(a.pos_rot[3], 0.0, "velocity mode drops roll spin");
     }
 
     #[test]

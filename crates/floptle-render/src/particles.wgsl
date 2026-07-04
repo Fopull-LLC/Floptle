@@ -1,14 +1,19 @@
-// Billboard particles: camera-facing textured quads, instanced.
+// Billboard particles: oriented textured quads, instanced.
 //
-// Group 0 (per frame): camera globals — view·projection + the camera's right/up
-// basis (the view matrix has no translation, ADR-0015: instance positions arrive
-// camera-relative, so the camera is the origin). Group 1 (per batch): the track's
-// texture + sampler — the SAME layout as the raster pass's material textures, so
-// both passes share one registry.
+// Each quad spans a PER-INSTANCE basis (`basis_right`/`basis_up`) the CPU packer
+// picks per orientation mode — face-camera, upright, flat-on-ground, or stretched
+// along velocity — so a track need not face the camera. Positions arrive
+// camera-relative (the view matrix has no translation, ADR-0015: the camera is the
+// origin), so the basis vectors are camera-relative world directions too.
+//
+// Group 0 (per frame): camera globals — view·projection (+ a camera right/up basis
+// the packer reads on the CPU for face-camera tracks). Group 1 (per batch): the
+// track's texture + sampler — the SAME layout as the raster pass's material
+// textures, so both passes share one registry.
 //
 // Vertex stream (buffer 0): the unit quad corner. Instance stream (buffer 1):
-// position+spin, size, tint — written by the CPU sim each frame (and, later, by
-// the GPU compute backend directly; this shader never knows which).
+// position+spin, size, tint, basis — written by the CPU sim each frame (and, later,
+// by the GPU compute backend directly; this shader never knows which).
 //
 // Deliberately self-contained: when the shader system (ADR-0007) lands, a track's
 // material IR compiles to a replacement fragment stage against these same inputs.
@@ -32,6 +37,10 @@ struct VsIn {
     @location(2) size: vec4<f32>,
     // Instance: tint × life-curve color, straight alpha.
     @location(3) color: vec4<f32>,
+    // Instance: the quad's in-plane +X axis (xyz) in camera-relative world space.
+    @location(4) basis_right: vec4<f32>,
+    // Instance: the quad's in-plane +Y axis (xyz); its length carries stretch.
+    @location(5) basis_up: vec4<f32>,
 };
 
 struct VsOut {
@@ -42,7 +51,9 @@ struct VsOut {
 
 @vertex
 fn vs(in: VsIn) -> VsOut {
-    // Spin the corner in the billboard plane, then span the camera basis.
+    // Spin the corner in the billboard plane, then span the per-instance basis (the
+    // CPU packer picks it per orientation mode — camera-facing, upright, flat, or
+    // velocity-stretched; `basis_up`'s length already carries any stretch).
     let ca = cos(in.pos_rot.w);
     let sa = sin(in.pos_rot.w);
     let c = vec2<f32>(
@@ -50,8 +61,8 @@ fn vs(in: VsIn) -> VsOut {
         in.corner.x * sa + in.corner.y * ca,
     );
     let world = in.pos_rot.xyz
-        + g.cam_right.xyz * (c.x * in.size.x)
-        + g.cam_up.xyz * (c.y * in.size.y);
+        + in.basis_right.xyz * (c.x * in.size.x)
+        + in.basis_up.xyz * (c.y * in.size.y);
 
     var out: VsOut;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);

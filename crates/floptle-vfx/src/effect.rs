@@ -41,9 +41,10 @@ pub enum Blend {
 /// How a particle is drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderMode {
-    /// A camera-facing textured quad. `None` texture = plain tinted quad.
+    /// A textured quad. `None` texture = plain tinted quad. How the quad is
+    /// oriented in the world is the track's [`Look::orient`] (default: face camera).
     Billboard { texture: Option<String> },
-    /// An instanced mesh drawn through the raster pass (phase 4).
+    /// An instanced mesh drawn through the raster pass.
     Mesh { asset_path: String },
 }
 
@@ -51,6 +52,29 @@ impl Default for RenderMode {
     fn default() -> Self {
         Self::Billboard { texture: None }
     }
+}
+
+/// How a billboard quad is oriented in the world — the alignment of its plane.
+/// Only meaningful for [`RenderMode::Billboard`]; meshes use their full 3D rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BillboardOrient {
+    /// Always faces the camera (classic billboard). The `roll` rotation spins it
+    /// in the screen plane.
+    #[default]
+    FaceCamera,
+    /// Stretched along the particle's velocity (sprays, sparks, rain, speed lines).
+    /// The quad still turns its flat side to the camera around the motion axis; its
+    /// height scales with [`Look::stretch`]. Roll is ignored (motion defines up).
+    Velocity,
+    /// Upright: locked to the world up-axis, yawing to face the camera (flames,
+    /// grass, upright smoke that shouldn't tip over when you look down on it).
+    Vertical,
+    /// Flat on the ground: the quad lies in the world's horizontal plane, its normal
+    /// pointing up (decals, shockwaves, ripples, magic circles). `roll` spins it flat.
+    Horizontal,
+    /// Fixed to the particle's birth orientation (the emit direction) — debris and
+    /// cards keep the pose they were fired with, independent of the camera.
+    WorldFixed,
 }
 
 /// Where particles are born, and the emit direction their velocity frame aligns to.
@@ -123,14 +147,37 @@ pub struct Lane {
 
 /// The rendered look of a track. Lighting and shadow casting are per-track opt-ins,
 /// both OFF by default (classic crisp VFX costs nothing until asked).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Look {
     pub render: RenderMode,
     pub blend: Blend,
+    /// How a billboard quad is aligned in the world (ignored for meshes).
+    pub orient: BillboardOrient,
+    /// Billboard width-to-height ratio: rendered width = size × `aspect`, height =
+    /// size. 1 = square; >1 = wide; <1 = tall. Lets one size curve drive non-square
+    /// quads (embers, ground streaks, tall flames).
+    pub aspect: f32,
+    /// [`BillboardOrient::Velocity`] length multiplier: the quad's height is scaled
+    /// by `stretch` along the motion axis. 1 = neutral; higher = longer speed lines.
+    pub stretch: f32,
     /// Full scene lighting per particle: sun + point lights + field shadow + AO.
     pub lit: bool,
     /// The track's live cloud casts into the field shadow march (aggregate proxy).
     pub cast_shadows: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            render: RenderMode::default(),
+            blend: Blend::default(),
+            orient: BillboardOrient::default(),
+            aspect: 1.0,
+            stretch: 1.0,
+            lit: false,
+            cast_shadows: false,
+        }
+    }
 }
 
 /// One visual layer AND its timeline lane — the unit you select, drag, mute, copy.

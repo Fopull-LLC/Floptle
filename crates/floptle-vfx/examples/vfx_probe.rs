@@ -20,8 +20,8 @@ use floptle_render::{
     RenderCamera, Retro, TexId, TexSampling, TextureData, cube, instance_of_mat,
 };
 use floptle_vfx::{
-    Blend, Burst, Clip, Curve, EffectInstance, EmitShape, Key, Lane, LaneTarget, Look,
-    ParticleEffect, Playback, RenderMode, Track, Value, ValueOrCurve, collect_billboards,
+    BillboardOrient, Blend, Burst, Clip, Curve, EffectInstance, EmitShape, Key, Lane, LaneTarget,
+    Look, ParticleEffect, Playback, RenderMode, Track, Value, ValueOrCurve, collect_billboards,
 };
 use std::sync::Arc;
 
@@ -117,6 +117,65 @@ fn fountain_effect() -> ParticleEffect {
     }
 }
 
+/// A showcase of the non-camera-facing orientation modes, all at once, so one frame
+/// proves each looks right: a ring of FLAT decals on the ground, a row of UPRIGHT
+/// cards down the middle, and a fountain of VELOCITY-stretched sparks. Viewed from a
+/// near-level camera, the ground ring reads as thin ellipses (proving it's flat, not
+/// facing us), the cards stay vertical, and the sparks elongate along their motion.
+fn orient_showcase() -> ParticleEffect {
+    let card = |name: &str, orient, blend, aspect, stretch, color: [f32; 4]| Track {
+        name: name.into(),
+        look: Look {
+            render: RenderMode::Billboard { texture: Some("soft".into()) },
+            blend,
+            orient,
+            aspect,
+            stretch,
+            ..Look::default()
+        },
+        clips: vec![Clip { start: 0.0, end: 4.0 }],
+        rate: 0.0,
+        particle_lifetime: 20.0,
+        velocity: ValueOrCurve::Const(Value::Vec3(Vec3::ZERO)),
+        size: ValueOrCurve::Const(Value::F32(0.5)),
+        color: ValueOrCurve::Const(Value::Rgba(color)),
+        ..Track::default()
+    };
+    // A ring of flat decals lying on the floor (big + bright so the flat ellipses
+    // read against the floor even at a shallow viewing angle).
+    let ground = Track {
+        bursts: vec![Burst { t: 0.0, count: 10 }],
+        shape: EmitShape::Ring { radius: 2.2 },
+        ..card("Ground", BillboardOrient::Horizontal, Blend::Additive, 1.0, 1.0, [0.2, 0.9, 1.0, 1.0])
+    };
+    // A row of tall upright cards along X.
+    let upright = Track {
+        bursts: vec![Burst { t: 0.0, count: 5 }],
+        shape: EmitShape::Edge { length: 3.6 },
+        ..card("Upright", BillboardOrient::Vertical, Blend::Additive, 0.45, 1.0, [0.4, 1.0, 0.4, 1.0])
+    };
+    // A spray of velocity-stretched sparks shooting up.
+    let sparks = Track {
+        rate: 60.0,
+        shape: EmitShape::Cone { angle: 14.0, radius: 0.04 },
+        particle_lifetime: 0.9,
+        lifetime_jitter: 0.3,
+        velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 6.0, 0.0))),
+        size: ValueOrCurve::Const(Value::F32(0.12)),
+        color: ValueOrCurve::Const(Value::Rgba([1.0, 0.95, 0.6, 1.0])),
+        gravity: 1.0,
+        ..card("Sparks", BillboardOrient::Velocity, Blend::Additive, 0.4, 3.0, [1.0, 0.9, 0.5, 1.0])
+    };
+    ParticleEffect {
+        name: "OrientShowcase".into(),
+        lifetime: 4.0,
+        playback: Playback::OneShot,
+        tracks: vec![ground, upright, sparks],
+        seed: 3,
+        ..ParticleEffect::default()
+    }
+}
+
 /// A soft radial puff — the classic smoke sprite, generated so the probe needs
 /// no asset files.
 fn soft_puff(size: u32) -> TextureData {
@@ -146,6 +205,8 @@ struct Harness {
     globals: Globals,
     pglobals: ParticleGlobals,
     cam: RenderCamera,
+    cam_right: Vec3,
+    cam_up: Vec3,
     fx: Arc<floptle_vfx::CompiledEffect>,
     registry: std::collections::HashMap<String, TexId>,
     emitter: Transform,
@@ -161,7 +222,9 @@ impl Harness {
         let fwd = self.cam.rotation * Vec3::NEG_Z;
         let mut packed = Vec::new();
         let mut draws = Vec::new();
-        collect_billboards(&inst, xf, xf, fwd, &mut packed, &mut draws);
+        collect_billboards(
+            &inst, xf, xf, fwd, self.cam_right, self.cam_up, &mut packed, &mut draws,
+        );
         println!(
             "t={t}: alive={} packed={} draws={:?}",
             inst.alive(),
@@ -238,6 +301,7 @@ fn main() {
         cam_right: [r.x, r.y, r.z, 0.0],
         cam_up: [u.x, u.y, u.z, 0.0],
     };
+    let (cam_right, cam_up) = (r, u);
 
     // Floor + an occluder box in front of the fountain: particles passing behind
     // it must clip against the shared depth buffer.
@@ -268,6 +332,8 @@ fn main() {
         globals,
         pglobals,
         cam,
+        cam_right,
+        cam_up,
         fx,
         registry,
         emitter,
@@ -279,6 +345,12 @@ fn main() {
     }
     let px = h.render(0.9, true);
     save_png(&px, &format!("{out_dir}/vfx_retro.png"));
+
+    // Orientation showcase: swap in the multi-mode effect and grab one frame.
+    h.fx = Arc::new(orient_showcase().compile());
+    let px = h.render(0.6, false);
+    save_png(&px, &format!("{out_dir}/vfx_orient.png"));
+    h.fx = Arc::new(fountain_effect().compile());
 
     // Determinism: same t, fresh sim, fresh render — must be byte-identical.
     let a = h.render(0.9, false);

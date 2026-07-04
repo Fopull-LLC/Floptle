@@ -1,4 +1,8 @@
-//! The billboard particle pass — instanced camera-facing quads.
+//! The billboard particle pass — instanced oriented quads.
+//!
+//! Each quad spans a per-instance basis the CPU packer chooses per orientation mode
+//! (face-camera, upright, flat-on-ground, velocity-stretched), so a track need not
+//! face the camera.
 //!
 //! Draws the per-frame instance data the VFX sim produces (`floptle-vfx`), into the
 //! same color/depth targets the scene composited in, BEFORE post and the retro
@@ -23,9 +27,12 @@ pub enum ParticleBlend {
     Additive,
 }
 
-/// Per-particle GPU data: camera-relative position + spin, size, tint.
-/// Written by the CPU sim today; the GPU compute backend will write the very same
-/// buffer on-device (proposal §4.4 — the sim's output IS the instance buffer).
+/// Per-particle GPU data: camera-relative position + spin, size, tint, and the
+/// world-space basis the quad spans (so a track can face the camera, lie flat,
+/// stand upright, or stretch along its motion — the CPU packer picks the basis per
+/// [`BillboardOrient`]). Written by the CPU sim today; the GPU compute backend will
+/// write the very same buffer on-device (proposal §4.4 — the sim's output IS the
+/// instance buffer).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleInstance {
@@ -34,6 +41,13 @@ pub struct ParticleInstance {
     /// xy = width/height in world units (zw unused, kept vec4-aligned).
     pub size: [f32; 4],
     pub color: [f32; 4],
+    /// The quad's in-plane +X axis in camera-relative world space (xyz; w unused).
+    /// Its length scales width; the corner is spun in the `basis_right`×`basis_up`
+    /// plane. For a camera-facing track this is the camera's right vector.
+    pub basis_right: [f32; 4],
+    /// The quad's in-plane +Y axis (xyz; w unused). Length scales height — velocity
+    /// stretch bakes the motion-length here so the shader needs no stretch term.
+    pub basis_up: [f32; 4],
 }
 
 /// One instanced draw: a contiguous `range` of this frame's instance array, with
@@ -46,7 +60,10 @@ pub struct ParticleBatch {
     pub range: std::ops::Range<u32>,
 }
 
-/// Frame globals for the particle shader: camera transform + billboard basis.
+/// Frame globals for the particle shader: the camera transform. `cam_right`/`cam_up`
+/// carry the camera basis the CPU packer reads for face-camera tracks (the shader
+/// itself now spans the per-instance basis, so it no longer reads them — they stay
+/// for the packer's convenience and the future on-device backend).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ParticleGlobals {
@@ -83,10 +100,12 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 5 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
