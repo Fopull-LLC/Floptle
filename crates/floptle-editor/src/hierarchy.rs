@@ -145,6 +145,9 @@ impl EditorTabViewer<'_> {
         let matter = self.world.get::<Matter>(e);
         let is_folder = matches!(matter, Some(Matter::Empty));
         let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
+        // A rigged Mesh expands to reveal its bones/sub-objects as attach targets.
+        let has_bones = self.bone_names.contains_key(&e);
+        let expandable = (is_folder && has_kids) || has_bones;
         let collapsed = self.collapsed.contains(&e);
         let icon = if is_folder {
             "🗀"
@@ -172,7 +175,7 @@ impl EditorTabViewer<'_> {
         let resp = ui
             .horizontal(|ui| {
                 ui.add_space(depth as f32 * 14.0);
-                if is_folder && has_kids {
+                if expandable {
                     let tri = if collapsed { "⏵" } else { "⏷" };
                     let t = ui.add(
                         egui::Label::new(tri).selectable(false).sense(egui::Sense::click()),
@@ -266,5 +269,27 @@ impl EditorTabViewer<'_> {
                     self.hierarchy_node(ui, c, children, names, depth + 1);
                 }
             }
+
+        // A rigged mesh's bones/sub-objects, shown as a read-only tree of attach
+        // targets (indented by skeleton depth) — select a node and pick one in the
+        // Inspector's 🦴 Bone attachment to ride it.
+        if !self.collapsed.contains(&e)
+            && let Some(bones) = self.bone_names.get(&e)
+        {
+            let mut bdepth = vec![0usize; bones.len()];
+            for (i, (_, parent)) in bones.iter().enumerate() {
+                bdepth[i] = parent.map_or(0, |p| bdepth.get(p).copied().unwrap_or(0) + 1);
+            }
+            for (i, (bname, _)) in bones.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add_space((depth + 1 + bdepth[i]) as f32 * 14.0 + 12.0);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(format!("🦴 {bname}")).weak())
+                            .selectable(false),
+                    )
+                    .on_hover_text("a bone/sub-object — attach a node to it in the Inspector");
+                });
+            }
+        }
     }
 }
