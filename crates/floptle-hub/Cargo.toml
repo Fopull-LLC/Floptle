@@ -1,0 +1,33 @@
+# Floptle Hub — the cross-platform launcher / version manager / project manager.
+# See ADR-0021 + docs/hub-proposal.md. Depends only on light crates (floptle-scene for
+# reading project.ron); never on render/editor, so it stays small and fast to launch.
+[package]
+name = "floptle-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "floptle-hub"
+path = "src/main.rs"
+
+[dependencies]
+# eframe on the wgpu backend (reuses the workspace's wgpu 29 / winit 0.30, no extra GL
+# stack). eframe tracks egui's version (workspace pins egui 0.35).
+eframe = { version = "0.35", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+serde = { workspace = true }
+serde_json = "1"
+directories = "6"
+ureq = { version = "2", features = ["json"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+log = { workspace = true }
+env_logger = { workspace = true }
+floptle-scene = { path = "../floptle-scene" }
+
+[dev-dependencies]
+tempfile = "3"
