@@ -418,3 +418,180 @@ pub(crate) fn rigidbody_lines(
     }
     lines
 }
+
+// ---- particle emitter + force gizmos ------------------------------------
+// Visualize the SELECTED particle track: where particles are born (the emit shape,
+// warm) and which way they head / what forces push them (arrows). Geometry mirrors
+// `floptle_vfx::sim::sample_shape` exactly so the gizmo matches what emits.
+
+/// A particle emitter's birth shape, decoupled from the scene doc types. Cone `angle`
+/// is in DEGREES (half-angle of the spread cone about +Y), matching `EmitShape::Cone`.
+pub(crate) enum EmitterViz {
+    Point,
+    Cone { angle: f32, radius: f32 },
+    Sphere { radius: f32 },
+    Edge { length: f32 },
+    Ring { radius: f32 },
+}
+
+/// A steady force on a track's particles, for the viewport arrow(s).
+pub(crate) enum ForceViz {
+    Directional { dir: Vec3 },
+    Point { center: Vec3, attract: bool },
+    Vortex { center: Vec3, axis: Vec3 },
+}
+
+const PG_SHAPE: [f32; 3] = [0.98, 0.62, 0.25]; // emitter birth shape (warm orange)
+const PG_EMIT: [f32; 3] = [0.40, 0.95, 0.75]; // emit direction (cyan-green)
+const PG_FORCE: [f32; 3] = [0.95, 0.50, 0.90]; // force fields (magenta)
+
+/// Project a node-local point through world matrix `m` (camera-relative, ADR-0015).
+fn plocal(m: Mat4, p: Vec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Option<Vec2> {
+    project(m.transform_point3(p).as_dvec3(), cam_world, vp, w, h)
+}
+
+/// Push one local segment (a→b) if both ends project.
+#[allow(clippy::too_many_arguments)]
+fn seg3(
+    out: &mut Vec<(Vec2, Vec2, [f32; 3])>, m: Mat4, a: Vec3, b: Vec3, col: [f32; 3],
+    cam_world: DVec3, vp: Mat4, w: f32, h: f32,
+) {
+    if let (Some(pa), Some(pb)) = (plocal(m, a, cam_world, vp, w, h), plocal(m, b, cam_world, vp, w, h)) {
+        out.push((pa, pb, col));
+    }
+}
+
+/// Push a ring of `radius` in a local plane (0=XZ, 1=XY, 2=YZ) centered at local `c`.
+#[allow(clippy::too_many_arguments)]
+fn push_ring(
+    out: &mut Vec<(Vec2, Vec2, [f32; 3])>, m: Mat4, c: Vec3, radius: f32, plane: u8, col: [f32; 3],
+    cam_world: DVec3, vp: Mat4, w: f32, h: f32,
+) {
+    let segs = 28;
+    let at = |a: f32| -> Vec3 {
+        let (s, co) = (a.sin() * radius, a.cos() * radius);
+        c + match plane {
+            0 => Vec3::new(co, 0.0, s),
+            1 => Vec3::new(co, s, 0.0),
+            _ => Vec3::new(0.0, co, s),
+        }
+    };
+    let mut prev = plocal(m, at(0.0), cam_world, vp, w, h);
+    for i in 1..=segs {
+        let p = plocal(m, at(i as f32 / segs as f32 * std::f32::consts::TAU), cam_world, vp, w, h);
+        if let (Some(a), Some(b)) = (prev, p) {
+            out.push((a, b, col));
+        }
+        prev = p;
+    }
+}
+
+/// Push a shafted arrow from local `base` along local `dir` of `len`, with a 4-line head.
+#[allow(clippy::too_many_arguments)]
+fn push_arrow(
+    out: &mut Vec<(Vec2, Vec2, [f32; 3])>, m: Mat4, base: Vec3, dir: Vec3, len: f32, col: [f32; 3],
+    cam_world: DVec3, vp: Mat4, w: f32, h: f32,
+) {
+    if dir.length_squared() < 1e-10 {
+        return;
+    }
+    let d = dir.normalize();
+    let tip = base + d * len;
+    let refv = if d.y.abs() > 0.9 { Vec3::X } else { Vec3::Y };
+    let side = d.cross(refv).normalize();
+    let up = side.cross(d);
+    let barb = (len * 0.25).max(0.04);
+    seg3(out, m, base, tip, col, cam_world, vp, w, h);
+    for hd in [
+        tip - d * barb + side * barb * 0.6,
+        tip - d * barb - side * barb * 0.6,
+        tip - d * barb + up * barb * 0.6,
+        tip - d * barb - up * barb * 0.6,
+    ] {
+        seg3(out, m, tip, hd, col, cam_world, vp, w, h);
+    }
+}
+
+/// Build the selected particle track's emitter-shape + emit-direction + force gizmos,
+/// as colored screen-space line segments. `m_shape` is the emitter node's world matrix
+/// (birth is always emitter-local); `m_force` is the frame the forces act in
+/// (emitter-local for `Space::Local`, translation-only world/anchor for `Space::World`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn particle_gizmo_lines(
+    shape: &EmitterViz, forces: &[ForceViz], m_shape: Mat4, m_force: Mat4,
+    cam_world: DVec3, vp: Mat4, w: f32, h: f32,
+) -> Vec<(Vec2, Vec2, [f32; 3])> {
+    use std::f32::consts::TAU;
+    let mut out = Vec::new();
+    let m = m_shape;
+    match *shape {
+        EmitterViz::Point => {
+            let s = 0.12;
+            for a in [Vec3::X, Vec3::Y, Vec3::Z] {
+                seg3(&mut out, m, -a * s, a * s, PG_SHAPE, cam_world, vp, w, h);
+            }
+            push_arrow(&mut out, m, Vec3::ZERO, Vec3::Y, 0.6, PG_EMIT, cam_world, vp, w, h);
+        }
+        EmitterViz::Sphere { radius } => {
+            let r = radius.max(0.01);
+            for plane in 0..3 {
+                push_ring(&mut out, m, Vec3::ZERO, r, plane, PG_SHAPE, cam_world, vp, w, h);
+            }
+        }
+        EmitterViz::Ring { radius } => {
+            let r = radius.max(0.01);
+            push_ring(&mut out, m, Vec3::ZERO, r, 0, PG_SHAPE, cam_world, vp, w, h);
+            for i in 0..8 {
+                let a = i as f32 / 8.0 * TAU;
+                let d = Vec3::new(a.cos(), 0.0, a.sin());
+                seg3(&mut out, m, d * r, d * (r + 0.2), PG_EMIT, cam_world, vp, w, h);
+            }
+        }
+        EmitterViz::Edge { length } => {
+            let hx = (length * 0.5).max(0.01);
+            seg3(&mut out, m, Vec3::new(-hx, 0.0, 0.0), Vec3::new(hx, 0.0, 0.0), PG_SHAPE, cam_world, vp, w, h);
+            for x in [-hx, 0.0, hx] {
+                push_arrow(&mut out, m, Vec3::new(x, 0.0, 0.0), Vec3::Z, 0.35, PG_EMIT, cam_world, vp, w, h);
+            }
+        }
+        EmitterViz::Cone { angle, radius } => {
+            let r = radius.max(0.0);
+            if r > 0.001 {
+                push_ring(&mut out, m, Vec3::ZERO, r, 0, PG_SHAPE, cam_world, vp, w, h);
+            }
+            let l = (r * 2.5).max(0.7);
+            let half = angle.to_radians().clamp(0.0, std::f32::consts::PI * 0.5);
+            let (st, ct) = (half.sin(), half.cos());
+            for i in 0..4 {
+                let ph = i as f32 / 4.0 * TAU;
+                let d = Vec3::new(st * ph.cos(), ct, st * ph.sin());
+                seg3(&mut out, m, Vec3::ZERO, d * l, PG_EMIT, cam_world, vp, w, h);
+            }
+            push_ring(&mut out, m, Vec3::new(0.0, l * ct, 0.0), l * st, 0, PG_EMIT, cam_world, vp, w, h);
+        }
+    }
+    for f in forces {
+        match *f {
+            ForceViz::Directional { dir } => {
+                push_arrow(&mut out, m_force, Vec3::ZERO, dir, 0.9, PG_FORCE, cam_world, vp, w, h);
+            }
+            ForceViz::Point { center, attract } => {
+                let s = 0.12;
+                for a in [Vec3::X, Vec3::Y, Vec3::Z] {
+                    seg3(&mut out, m_force, center - a * s, center + a * s, PG_FORCE, cam_world, vp, w, h);
+                }
+                for a in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z] {
+                    // Attractor: arrows point IN toward the center; repeller: OUT.
+                    let (base, dir) =
+                        if attract { (center + a * 0.6, -a) } else { (center + a * 0.28, a) };
+                    push_arrow(&mut out, m_force, base, dir, 0.32, PG_FORCE, cam_world, vp, w, h);
+                }
+            }
+            ForceViz::Vortex { center, axis } => {
+                push_arrow(&mut out, m_force, center, axis, 0.8, PG_FORCE, cam_world, vp, w, h);
+                push_ring(&mut out, m_force, center, 0.4, 0, PG_FORCE, cam_world, vp, w, h);
+            }
+        }
+    }
+    out
+}

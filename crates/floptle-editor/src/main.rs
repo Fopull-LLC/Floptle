@@ -370,6 +370,8 @@ struct EditorTabViewer<'a> {
     script_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
     terrain_wire: &'a [(Vec2, Vec2)],
     mesh_wire: &'a [(Vec2, Vec2)],
+    /// Selected particle track's emitter/force gizmo (colored screen segments).
+    particle_gizmo: &'a [(Vec2, Vec2, [f32; 3])],
     show_gizmos: &'a mut bool,
     grabbed: Option<Handle>,
     tool: Tool,
@@ -626,6 +628,9 @@ struct Editor {
     mesh_wire_cache: HashMap<String, Vec<(Vec3, Vec3)>>,
     /// This frame's projected mesh-collider wireframe segments (screen space).
     mesh_wire_gizmo: Vec<(Vec2, Vec2)>,
+    /// This frame's projected particle-emitter gizmo: the selected track's birth shape,
+    /// emit-direction and force arrows, as colored `(a, b, rgb)` screen segments.
+    particle_gizmo: Vec<(Vec2, Vec2, [f32; 3])>,
     /// Project-wide render settings (retro / matter), edited in Project Settings.
     project: ProjectConfigDoc,
     /// The open project's root folder (holds `scenes/`, `models/`, `scripts/`…).
