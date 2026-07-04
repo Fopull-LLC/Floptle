@@ -64,6 +64,14 @@ pub struct AnimUiState {
     pub record: bool,
     /// Timeline zoom (pixels per second).
     pub zoom: f32,
+    /// Vertical (row-height) zoom multiplier — Alt+scroll over the dopesheet.
+    pub row_scale: f32,
+    /// Last frame's ScrollArea offset (the anchor for cursor-centred zoom).
+    pub scroll_off: egui::Vec2,
+    /// A scroll offset to force next frame (cursor-anchored zoom / Fit).
+    pub scroll_target: Option<egui::Vec2>,
+    /// A pending Fit (the F key / Fit button) — zoom the whole clip into view.
+    pub fit_pending: bool,
     /// Key-snap grid (frames/sec); 0 = off.
     pub snap_fps: f32,
     pub sel_event: Option<usize>,
@@ -106,6 +114,10 @@ impl Default for AnimUiState {
             preview_playing: false,
             record: false,
             zoom: 120.0,
+            row_scale: 1.0,
+            scroll_off: egui::Vec2::ZERO,
+            scroll_target: None,
+            fit_pending: false,
             snap_fps: 0.0,
             sel_event: None,
             tab_visible: false,
@@ -1186,11 +1198,18 @@ impl EditorTabViewer<'_> {
                     }
                 });
             ui.add(
-                egui::Slider::new(&mut self.anim_ui.zoom, 30.0..=600.0)
+                egui::Slider::new(&mut self.anim_ui.zoom, ANIM_ZOOM_MIN..=ANIM_ZOOM_MAX)
                     .logarithmic(true)
                     .show_value(false)
                     .text("zoom"),
+            )
+            .on_hover_text(
+                "over the dopesheet: scroll = zoom · Alt+scroll = row height · Shift+scroll = pan · \
+                 Space play · ←/→ step · Home/End · F fit · Del remove event",
             );
+            if ui.button("Fit").on_hover_text("zoom to fit the whole clip (F)").clicked() {
+                self.anim_ui.fit_pending = true;
+            }
         });
 
         // New-animation prompt.
@@ -1347,15 +1366,68 @@ impl EditorTabViewer<'_> {
 
 }
 
+/// Dopesheet zoom bounds (pixels/sec) + row-height multiplier bounds — same feel as
+/// the particle timeline.
+const ANIM_ZOOM_MIN: f32 = 6.0;
+const ANIM_ZOOM_MAX: f32 = 3000.0;
+const ANIM_ROW_MIN: f32 = 0.5;
+const ANIM_ROW_MAX: f32 = 4.0;
+const ANIM_LABEL_W: f32 = 130.0;
+
+/// Scroll-wheel navigation for the dopesheet, mirroring the particle timeline: plain
+/// wheel zooms X about the cursor (keeping the time under the pointer fixed), Alt+wheel
+/// zooms Y (row height), Shift+wheel falls through to the ScrollArea to pan, and a
+/// pending Fit sizes the whole clip to the view. Runs BEFORE the `clip_doc` borrow
+/// (it mutates disjoint `st` fields), so `dur` is passed in.
+fn handle_anim_wheel(ui: &egui::Ui, st: &mut AnimUiState, dur: f32) {
+    let region = ui.available_rect_before_wrap();
+    let body_w = (region.width() - ANIM_LABEL_W - 16.0).max(50.0);
+    if st.fit_pending {
+        st.zoom = (body_w / dur).clamp(ANIM_ZOOM_MIN, ANIM_ZOOM_MAX);
+        st.scroll_target = Some(egui::Vec2::ZERO);
+        st.fit_pending = false;
+    }
+    let Some(p) = ui.ctx().pointer_hover_pos() else { return };
+    if !region.contains(p) {
+        return;
+    }
+    let (scroll, mods) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers));
+    let wheel = if scroll.y.abs() >= scroll.x.abs() { scroll.y } else { scroll.x };
+    if wheel.abs() < 0.5 || mods.shift {
+        return; // Shift+wheel: let the ScrollArea pan (don't consume).
+    }
+    let z = (wheel * 0.0015).exp();
+    if mods.alt {
+        st.row_scale = (st.row_scale * z).clamp(ANIM_ROW_MIN, ANIM_ROW_MAX);
+    } else {
+        let px = st.zoom;
+        let off = st.scroll_off;
+        let vrel = p.x - region.left();
+        let time = ((vrel + off.x - ANIM_LABEL_W) / px).max(0.0);
+        let new_px = (px * z).clamp(ANIM_ZOOM_MIN, ANIM_ZOOM_MAX);
+        let new_off_x = (ANIM_LABEL_W + time * new_px - vrel).max(0.0);
+        st.zoom = new_px;
+        st.scroll_target = Some(egui::vec2(new_off_x, off.y));
+    }
+    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+}
+
 impl EditorTabViewer<'_> {
     /// The full dopesheet for an editable clip doc.
     fn timeline_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
+        let playing = self.playing;
         let st = &mut *self.anim_ui;
+        // Read `dur` and run the wheel handler BEFORE borrowing `clip_doc` mutably (the
+        // handler needs &mut st, which would alias the `doc` borrow).
+        let dur = match st.clip_doc.as_ref() {
+            Some((_, d)) => d.duration.max(0.01),
+            None => return,
+        };
+        handle_anim_wheel(ui, st, dur);
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
-        let dur = doc.duration.max(0.01);
         let px = st.zoom;
-        let label_w = 130.0;
-        let lane_h = 20.0;
+        let label_w = ANIM_LABEL_W;
+        let lane_h = 20.0 * st.row_scale;
         let ruler_h = 22.0;
         let event_h = 20.0;
 
@@ -1406,7 +1478,11 @@ impl EditorTabViewer<'_> {
         // Per-node key rows: union of lane times per channel.
         let n_rows = doc.channels.len();
         let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
-        egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height()).show(ui, |ui| {
+        let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
+        if let Some(t) = st.scroll_target.take() {
+            area = area.scroll_offset(t);
+        }
+        let out = area.show(ui, |ui| {
             let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
             let (full, _) = ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::hover());
             let painter = ui.painter_at(full);
@@ -1584,6 +1660,52 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
 
+            // ---- keyboard transport (only when no text field is focused, not playing) ----
+            if !playing && ui.memory(|m| m.focused().is_none()) {
+                let (sp, home, end, left, right, del, fit) = ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Space),
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::ArrowLeft),
+                        i.key_pressed(egui::Key::ArrowRight),
+                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                        i.key_pressed(egui::Key::F),
+                    )
+                });
+                let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+                if sp {
+                    st.preview_playing = !st.preview_playing;
+                }
+                if home {
+                    st.playhead = 0.0;
+                    st.preview_playing = false;
+                }
+                if end {
+                    st.playhead = dur;
+                    st.preview_playing = false;
+                }
+                if left {
+                    st.playhead = (st.playhead - step).max(0.0);
+                    st.preview_playing = false;
+                }
+                if right {
+                    st.playhead = (st.playhead + step).min(dur);
+                    st.preview_playing = false;
+                }
+                if fit {
+                    st.fit_pending = true;
+                }
+                // Delete removes the selected event.
+                if del
+                    && let Some(ei) = st.sel_event.take()
+                    && ei < doc.events.len()
+                {
+                    doc.events.remove(ei);
+                    st.clip_dirty = true;
+                }
+            }
+
             // ---- playhead over everything ----
             let xp = time_to_x(st.playhead.min(dur));
             painter.line_segment(
@@ -1598,6 +1720,8 @@ impl EditorTabViewer<'_> {
             // ruler ticks over the top strip
             draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px);
         });
+        // Remember the offset so next frame's cursor-anchored zoom has an anchor.
+        st.scroll_off = out.state.offset;
 
         // Loop the preview playhead.
         if st.preview_playing && st.playhead > dur {
