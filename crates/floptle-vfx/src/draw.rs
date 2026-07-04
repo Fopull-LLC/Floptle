@@ -50,7 +50,7 @@ pub fn collect_billboards(
             (m.0 + m.1 + m.2) / 3.0
         };
         let orient = ct.look.orient;
-        let aspect = ct.look.aspect.max(1e-3);
+        let aspect = inst.track_aspect(ti);
         let stretch = ct.look.stretch.max(1e-3);
         let flip = ct.look.flipbook;
         let start = instances.len();

@@ -614,6 +614,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                             VfxLaneTargetDoc::Size => LaneTarget::Size,
                             VfxLaneTargetDoc::Tint => LaneTarget::Tint,
                             VfxLaneTargetDoc::ShapeScale => LaneTarget::ShapeScale,
+                            VfxLaneTargetDoc::Aspect => LaneTarget::Aspect,
                         },
                         curve: curve_from_doc(&l.curve),
                     })

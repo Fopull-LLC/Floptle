@@ -195,6 +195,7 @@ pub enum VfxLaneTargetDoc {
     Size,
     Tint,
     ShapeScale,
+    Aspect,
 }
 
 /// A DAW-style automation lane: one curve over effect time (keys in seconds).

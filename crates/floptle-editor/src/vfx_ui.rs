@@ -182,13 +182,14 @@ const ROW_SCALE_MIN: f32 = 0.5;
 const ROW_SCALE_MAX: f32 = 4.0;
 
 /// Every automation target, for the track's "Add automation" menu.
-const ALL_TARGETS: [VfxLaneTargetDoc; 6] = [
+const ALL_TARGETS: [VfxLaneTargetDoc; 7] = [
     VfxLaneTargetDoc::Rate,
     VfxLaneTargetDoc::Count,
     VfxLaneTargetDoc::Speed,
     VfxLaneTargetDoc::Size,
     VfxLaneTargetDoc::Tint,
     VfxLaneTargetDoc::ShapeScale,
+    VfxLaneTargetDoc::Aspect,
 ];
 
 /// A human label for an automation target (shared with the Inspector's point editor).
@@ -200,6 +201,7 @@ pub(crate) fn lane_label(t: VfxLaneTargetDoc) -> &'static str {
         VfxLaneTargetDoc::Size => "× size",
         VfxLaneTargetDoc::Tint => "× tint",
         VfxLaneTargetDoc::ShapeScale => "× shape scale",
+        VfxLaneTargetDoc::Aspect => "× aspect",
     }
 }
 
@@ -210,9 +212,10 @@ pub(crate) fn lane_label(t: VfxLaneTargetDoc) -> &'static str {
 pub(crate) fn lane_vrange(t: VfxLaneTargetDoc) -> (f32, f32) {
     match t {
         VfxLaneTargetDoc::Rate | VfxLaneTargetDoc::Count => (0.0, 4.0),
-        VfxLaneTargetDoc::Speed | VfxLaneTargetDoc::Size | VfxLaneTargetDoc::ShapeScale => {
-            (0.0, 3.0)
-        }
+        VfxLaneTargetDoc::Speed
+        | VfxLaneTargetDoc::Size
+        | VfxLaneTargetDoc::ShapeScale
+        | VfxLaneTargetDoc::Aspect => (0.0, 3.0),
         VfxLaneTargetDoc::Tint => (0.0, 1.0),
     }
 }
@@ -242,8 +245,15 @@ fn starter_lane(target: VfxLaneTargetDoc, dur: f32) -> VfxLaneDoc {
 /// A curve-shaped property of a track, addressable as one timeline lane.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum LaneRef {
-    /// A per-particle life-curve (x-domain = the particle's life, 0→1).
+    /// A per-particle life-curve (x-domain = the particle's life, 0→1). Used for
+    /// scalar (size) and colour props, which draw as one lane.
     Life(LifeProp),
+    /// ONE component (0=x,1=y,2=z) of a Vec3 life-curve, drawn as its own scalar
+    /// sub-lane with independent value dragging + auto-fit axis — the elegant way to
+    /// automate a vector without wrestling a single 3-channel stop lane. The three
+    /// sub-lanes share the underlying curve's key TIMES (a component edit rewrites
+    /// only its channel of the shared key).
+    LifeChannel(LifeProp, u8),
     /// An automation multiplier over effect time (index into `track.automation`).
     Auto(usize),
 }
@@ -287,6 +297,13 @@ fn life_prop_name(p: LifeProp) -> &'static str {
     }
 }
 
+/// How many independently-editable channels a life prop has: 3 for the Vec3 props
+/// (shown as x/y/z sub-lanes), 1 for size, and — for colour — 0, meaning "keep the
+/// single gradient-strip lane" (colour is edited via swatches, not per-channel curves).
+fn life_prop_vec3(p: LifeProp) -> bool {
+    matches!(p, LifeProp::Velocity | LifeProp::Rotation | LifeProp::AngularVelocity)
+}
+
 fn life_prop_doc(track: &VfxTrackDoc, p: LifeProp) -> &VfxPropDoc {
     match p {
         LifeProp::Velocity => &track.velocity,
@@ -321,7 +338,15 @@ fn visible_lanes(track: &VfxTrackDoc) -> Vec<LaneRef> {
     let mut out = Vec::new();
     for p in LIFE_PROPS {
         if matches!(life_prop_doc(track, p), VfxPropDoc::Curve(_)) {
-            out.push(LaneRef::Life(p));
+            // A Vec3 life prop expands into three scalar x/y/z sub-lanes so each
+            // component is a draggable curve; scalar/colour props stay one lane.
+            if life_prop_vec3(p) {
+                out.push(LaneRef::LifeChannel(p, 0));
+                out.push(LaneRef::LifeChannel(p, 1));
+                out.push(LaneRef::LifeChannel(p, 2));
+            } else {
+                out.push(LaneRef::Life(p));
+            }
         }
     }
     out.extend((0..track.automation.len()).map(LaneRef::Auto));
@@ -332,7 +357,7 @@ fn visible_lanes(track: &VfxTrackDoc) -> Vec<LaneRef> {
 fn lane_curve(track: &VfxTrackDoc, lref: LaneRef) -> Option<&VfxCurveDoc> {
     match lref {
         LaneRef::Auto(i) => track.automation.get(i).map(|l| &l.curve),
-        LaneRef::Life(p) => match life_prop_doc(track, p) {
+        LaneRef::Life(p) | LaneRef::LifeChannel(p, _) => match life_prop_doc(track, p) {
             VfxPropDoc::Curve(c) => Some(c),
             _ => None,
         },
@@ -342,7 +367,7 @@ fn lane_curve(track: &VfxTrackDoc, lref: LaneRef) -> Option<&VfxCurveDoc> {
 pub(crate) fn lane_curve_mut(track: &mut VfxTrackDoc, lref: LaneRef) -> Option<&mut VfxCurveDoc> {
     match lref {
         LaneRef::Auto(i) => track.automation.get_mut(i).map(|l| &mut l.curve),
-        LaneRef::Life(p) => match life_prop_doc_mut(track, p) {
+        LaneRef::Life(p) | LaneRef::LifeChannel(p, _) => match life_prop_doc_mut(track, p) {
             VfxPropDoc::Curve(c) => Some(c),
             _ => None,
         },
@@ -356,6 +381,9 @@ pub(crate) fn lane_ref_label(track: &VfxTrackDoc, lref: LaneRef) -> String {
             format!("{} · time", track.automation.get(i).map(|l| lane_label(l.target)).unwrap_or(""))
         }
         LaneRef::Life(p) => format!("{} · life", life_prop_name(p)),
+        LaneRef::LifeChannel(p, ch) => {
+            format!("{}.{} · life", life_prop_name(p), ["x", "y", "z"][(ch as usize).min(2)])
+        }
     }
 }
 
@@ -369,7 +397,7 @@ fn lane_is_time(lref: LaneRef) -> bool {
 pub(crate) fn lane_fixed_range(track: &VfxTrackDoc, lref: LaneRef) -> Option<(f32, f32)> {
     match lref {
         LaneRef::Auto(i) => track.automation.get(i).map(|l| lane_vrange(l.target)),
-        LaneRef::Life(_) => None,
+        LaneRef::Life(_) | LaneRef::LifeChannel(..) => None,
     }
 }
 
@@ -388,6 +416,49 @@ fn auto_fit_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
     }
     let pad = ((hi - lo) * 0.15).max(0.25);
     (lo - pad, hi + pad)
+}
+
+/// Auto-fit ONE channel `ch` of a curve — each Vec3 sub-lane gets its own y-axis, so
+/// e.g. a radians rotation channel and a 0..1 channel no longer share a cramped scale.
+fn auto_fit_channel(rt: &floptle_vfx::Curve, ch: usize) -> (f32, f32) {
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for i in 0..=24 {
+        let v = rt.eval(i as f32 / 24.0)[ch.min(3)];
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return (0.0, 1.0);
+    }
+    let pad = ((hi - lo) * 0.15).max(0.25);
+    (lo - pad, hi + pad)
+}
+
+/// Read one scalar from a value doc for a (possibly channel-specific) scalar lane.
+fn value_scalar(v: &VfxValueDoc, channel: Option<usize>) -> f32 {
+    match (v, channel) {
+        (VfxValueDoc::F32(x), _) => *x,
+        (VfxValueDoc::Vec3(a), Some(ch)) => a[ch.min(2)],
+        (VfxValueDoc::Vec3(a), None) => a[0],
+        (VfxValueDoc::Rgba(a), Some(ch)) => a[ch.min(3)],
+        (VfxValueDoc::Rgba(a), None) => a[0],
+    }
+}
+
+/// Write scalar `x` into channel `ch` of a value doc, preserving the other channels —
+/// so dragging a Vec3 sub-lane point rewrites only that component of the shared key.
+fn value_with_channel(v: VfxValueDoc, ch: usize, x: f32) -> VfxValueDoc {
+    match v {
+        VfxValueDoc::Vec3(mut a) => {
+            a[ch.min(2)] = x;
+            VfxValueDoc::Vec3(a)
+        }
+        VfxValueDoc::Rgba(mut a) => {
+            a[ch.min(3)] = x;
+            VfxValueDoc::Rgba(a)
+        }
+        VfxValueDoc::F32(_) => VfxValueDoc::F32(x),
+    }
 }
 
 /// A fresh flat life-curve at the property's current constant (domain = life 0→1),
@@ -1280,21 +1351,30 @@ fn curve_lane_ui(
 ) {
     let Some(curve) = lane_curve(track, lref) else { return };
     let kind = curve.keys.first().map(|k| value_kind(&k.v)).unwrap_or(LaneVis::Scalar);
-    let is_stops = matches!(kind, LaneVis::Color | LaneVis::Vec3); // time-only handles
+    // A Vec3 sub-lane edits ONE channel of the shared curve as a draggable scalar; other
+    // lanes keep their natural kind (scalar curve, colour strip, whole-vec3 stops).
+    let channel: Option<usize> = match lref {
+        LaneRef::LifeChannel(_, ch) => Some((ch as usize).min(2)),
+        _ => None,
+    };
+    let render_kind = if channel.is_some() { LaneVis::Scalar } else { kind };
+    let is_stops = channel.is_none() && matches!(kind, LaneVis::Color | LaneVis::Vec3);
     let dmax = if lane_is_time(lref) { dur } else { 1.0 }; // x-axis maximum
     let is_time = lane_is_time(lref);
     let snap = st.snap_fps;
     let rt = curve_from_doc(curve);
 
-    // Value range: fixed for automation multipliers; auto-fit for life scalars/vec3,
-    // frozen while THIS lane's scalar point is dragged so the fit can't feed back.
-    let chans = if kind == LaneVis::Vec3 { 3 } else { 1 };
+    // Value range: fixed for automation multipliers; auto-fit for life scalars (per
+    // channel for a Vec3 sub-lane, so each axis is independent), frozen while THIS lane's
+    // point is dragged so the fit can't feed back.
+    let fit = || match channel {
+        Some(ch) => auto_fit_channel(&rt, ch),
+        None => auto_fit_range(&rt, if kind == LaneVis::Vec3 { 3 } else { 1 }),
+    };
     let (lo, hi) = match lane_fixed_range(track, lref) {
         Some(r) => r,
-        None if st.lane_drag == Some((ti, lref)) => {
-            st.lane_vrange.unwrap_or_else(|| auto_fit_range(&rt, chans))
-        }
-        None => auto_fit_range(&rt, chans),
+        None if st.lane_drag == Some((ti, lref)) => st.lane_vrange.unwrap_or_else(&fit),
+        None => fit(),
     };
     let to_x = |t: f32| strip.left() + (t / dmax).clamp(0.0, 1.0) * strip.width();
     let v_to_y = |v: f32| strip.bottom() - ((v - lo) / (hi - lo).max(1e-4)) * strip.height();
@@ -1356,16 +1436,21 @@ fn curve_lane_ui(
     {
         let t = x_to_t(p.x);
         let sc = rt.eval(t);
-        let v = match kind {
-            LaneVis::Scalar => VfxValueDoc::F32(y_to_v(p.y)),
-            LaneVis::Vec3 => VfxValueDoc::Vec3([sc[0], sc[1], sc[2]]),
-            LaneVis::Color => VfxValueDoc::Rgba([sc[0], sc[1], sc[2], sc[3]]),
+        let v = if let Some(ch) = channel {
+            // New key holds the curve's other channels at t, this channel = clicked y.
+            value_with_channel(VfxValueDoc::Vec3([sc[0], sc[1], sc[2]]), ch, y_to_v(p.y))
+        } else {
+            match kind {
+                LaneVis::Scalar => VfxValueDoc::F32(y_to_v(p.y)),
+                LaneVis::Vec3 => VfxValueDoc::Vec3([sc[0], sc[1], sc[2]]),
+                LaneVis::Color => VfxValueDoc::Rgba([sc[0], sc[1], sc[2], sc[3]]),
+            }
         };
         *deferred = Some(DeferredEdit::AddKey(ti, lref, t, v));
     }
 
     // ---- the curve / channels / gradient ----
-    match kind {
+    match render_kind {
         LaneVis::Color => {
             let n = strip.width().max(2.0) as usize;
             for i in 0..n {
@@ -1405,9 +1490,10 @@ fn curve_lane_ui(
             }
             let mut pts = Vec::new();
             let n = 48;
+            let dch = channel.unwrap_or(0);
             for i in 0..=n {
                 let u = i as f32 / n as f32;
-                let v = rt.eval(u * dmax)[0];
+                let v = rt.eval(u * dmax)[dch];
                 pts.push(Pos2::new(strip.left() + u * strip.width(), v_to_y(v).clamp(strip.top(), strip.bottom())));
             }
             painter.add(egui::Shape::line(pts, Stroke::new(1.5, ACCENT)));
@@ -1426,10 +1512,7 @@ fn curve_lane_ui(
             painter.circle(Pos2::new(x, strip.bottom()), if sel { 4.0 } else { 3.0 }, if sel { ACCENT } else { KEY_COLOR }, Stroke::new(1.0, Color32::from_black_alpha(160)));
             Rect::from_center_size(Pos2::new(x, strip.center().y), egui::vec2(12.0, strip.height()))
         } else {
-            let v = match k.v {
-                VfxValueDoc::F32(x) => x,
-                _ => 0.0,
-            };
+            let v = value_scalar(&k.v, channel);
             let c = Pos2::new(x, v_to_y(v).clamp(strip.top(), strip.bottom()));
             painter.circle(c, if sel { 5.0 } else { 4.0 }, if sel { ACCENT } else { KEY_COLOR }, Stroke::new(1.0, Color32::from_black_alpha(160)));
             Rect::from_center_size(c, egui::vec2(12.0, 12.0))
@@ -1448,7 +1531,14 @@ fn curve_lane_ui(
             && let Some(p) = resp.interact_pointer_pos()
         {
             let t = x_to_t(p.x);
-            let v = if is_stops { k.v } else { VfxValueDoc::F32(y_to_v(p.y)) };
+            let v = if is_stops {
+                k.v
+            } else if let Some(ch) = channel {
+                // Rewrite only this channel of the shared key; the others are preserved.
+                value_with_channel(k.v, ch, y_to_v(p.y))
+            } else {
+                VfxValueDoc::F32(y_to_v(p.y))
+            };
             *deferred = Some(DeferredEdit::MoveKey(ti, lref, ki, t, v));
         }
         resp.context_menu(|ui| {
@@ -1597,9 +1687,10 @@ fn apply_deferred(edit: DeferredEdit, st: &mut VfxUiState, doc: &mut VfxEffectDo
                     LaneRef::Auto(li) if li < t.automation.len() => {
                         t.automation.remove(li);
                     }
-                    LaneRef::Life(p) => {
-                        // "Removing" a life lane = stop animating it: collapse to a
-                        // constant (the value the curve held at birth).
+                    LaneRef::Life(p) | LaneRef::LifeChannel(p, _) => {
+                        // "Removing" a life lane = stop animating the whole prop (all
+                        // channels): collapse to the constant it held at birth. (Removing
+                        // one Vec3 sub-lane removes the vector curve — they share it.)
                         let prop = life_prop_doc_mut(t, p);
                         if let VfxPropDoc::Curve(c) = prop {
                             let v0 = c.keys.first().map(|k| k.v).unwrap_or(VfxValueDoc::F32(0.0));
