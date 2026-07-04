@@ -1,0 +1,149 @@
+# Release pipeline (ADR-0021 / docs/hub-proposal.md §3). On a semver tag `v*`, build a
+# self-contained editor bundle per OS, checksum it, publish the archives + a machine-
+# readable `releases.json` manifest to GitHub Releases. The Floptle Hub reads that manifest
+# to list + install versions.
+#
+# NOTE: this workflow can only be validated by an actual tag push (CI is not runnable in
+# the dev sandbox). The bundle layout + manifest schema mirror the locally-tested
+# scripts/package.sh and the Hub's install/unpack code, so the shapes are known-good; the
+# GitHub-specific glue (uploads, URL construction) is what a first `v*` push exercises.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: bundle ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: linux-x86_64,  rust: x86_64-unknown-linux-gnu }
+          - { os: macos-14,       target: macos-aarch64, rust: aarch64-apple-darwin }
+          - { os: macos-13,       target: macos-x86_64,  rust: x86_64-apple-darwin }
+          - { os: windows-latest, target: windows-x86_64, rust: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux needs the windowing/GPU dev headers to build the editor (wgpu + winit).
+      - name: Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build editor
+        run: cargo build --release -p floptle-editor --target ${{ matrix.rust }}
+
+      # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
+      # archive root, matching floptle_hub::install::unpack.
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          VER="${{ steps.ver.outputs.version }}"; T="${{ matrix.target }}"
+          B="floptle-$VER-$T"
+          mkdir -p "$B"
+          cp "target/${{ matrix.rust }}/release/floptle" "$B/floptle"
+          printf '{ "version": "%s", "target": "%s", "commit": "%s" }\n' "$VER" "$T" "${GITHUB_SHA:0:7}" > "$B/version.json"
+          tar -C "$B" -czf "$B.tar.gz" .
+          if command -v sha256sum >/dev/null 2>&1; then SHA=$(sha256sum "$B.tar.gz" | cut -d' ' -f1)
+          else SHA=$(shasum -a 256 "$B.tar.gz" | cut -d' ' -f1); fi
+          SIZE=$(wc -c < "$B.tar.gz" | tr -d ' ')
+          printf '{"target":"%s","file":"%s.tar.gz","sha256":"%s","size":%s}\n' "$T" "$B" "$SHA" "$SIZE" > "fragment-$T.json"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"; $t = "${{ matrix.target }}"
+          $b = "floptle-$ver-$t"
+          New-Item -ItemType Directory -Force -Path $b | Out-Null
+          Copy-Item "target/${{ matrix.rust }}/release/floptle.exe" "$b/floptle.exe"
+          $commit = $env:GITHUB_SHA.Substring(0,7)
+          "{ ""version"": ""$ver"", ""target"": ""$t"", ""commit"": ""$commit"" }" | Set-Content -NoNewline "$b/version.json"
+          Compress-Archive -Path "$b/*" -DestinationPath "$b.zip" -Force
+          $sha  = (Get-FileHash "$b.zip" -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item "$b.zip").Length
+          "{""target"":""$t"",""file"":""$b.zip"",""sha256"":""$sha"",""size"":$size}" | Set-Content -NoNewline "fragment-$t.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: |
+            floptle-*.tar.gz
+            floptle-*.zip
+            fragment-*.json
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Merge this version into the manifest (fetch the existing one so past versions
+      # survive), pointing each artifact at its release download URL.
+      - name: Assemble releases.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"; TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
+          ARTIFACTS="{}"
+          for f in artifacts/*/fragment-*.json; do
+            T=$(jq -r .target "$f"); FILE=$(jq -r .file "$f"); SHA=$(jq -r .sha256 "$f"); SIZE=$(jq -r .size "$f")
+            URL="https://github.com/$REPO/releases/download/$TAG/$FILE"
+            ARTIFACTS=$(jq -n --argjson a "$ARTIFACTS" --arg t "$T" --arg u "$URL" --arg s "$SHA" --argjson z "$SIZE" \
+              '$a + {($t): {url:$u, sha256:$s, size:$z}}')
+          done
+          ENTRY=$(jq -n --arg v "$VER" --arg d "$(date +%F)" --arg n "https://github.com/$REPO/releases/tag/$TAG" --argjson a "$ARTIFACTS" \
+            '{version:$v, channel:"stable", date:$d, notes_url:$n, artifacts:$a}')
+          # Start from the existing manifest if one is published, else empty.
+          EXISTING='{"schema":1,"channels":{},"versions":[]}'
+          if gh release download manifest --repo "$REPO" --pattern releases.json --dir prev 2>/dev/null; then
+            EXISTING=$(cat prev/releases.json)
+          fi
+          jq -n --argjson m "$EXISTING" --argjson e "$ENTRY" --arg v "$VER" '
+            {
+              schema: 1,
+              channels: { stable: (((($m.channels.stable // []) + [$v]) | unique)) },
+              versions: (((($m.versions // []) | map(select(.version != $v))) + [$e]))
+            }' > releases.json
+          cat releases.json
+
+      - name: Publish release + manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "Automated release $TAG" || true
+          gh release upload "$TAG" artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip releases.json --clobber --repo "$REPO"
+          # A stable 'manifest' release so the Hub's default manifest URL always resolves to
+          # the newest list (releases/download/manifest/releases.json).
+          gh release create manifest --repo "$REPO" --title "Release manifest" --notes "Always-latest version manifest for the Floptle Hub." || true
+          gh release upload manifest releases.json --clobber --repo "$REPO"
