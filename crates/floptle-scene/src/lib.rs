@@ -920,6 +920,17 @@ pub fn load_project(path: &Path) -> ProjectConfigDoc {
         .unwrap_or_default()
 }
 
+/// Load the project config distinguishing the three cases: `Ok(None)` = the file is
+/// absent, `Ok(Some(cfg))` = present + parsed, `Err` = present but won't parse. Lets a
+/// migrate/upgrade step avoid clobbering a broken config or fabricating a missing one.
+pub fn try_load_project(path: &Path) -> Result<Option<ProjectConfigDoc>, SceneError> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SceneError::Io(e)),
+        Ok(text) => ron::from_str(&text).map(Some).map_err(SceneError::Ron),
+    }
+}
+
 /// Save the project-wide render config to a pretty RON file.
 pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneError> {
     let text = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default())

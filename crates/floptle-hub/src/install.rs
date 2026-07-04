@@ -44,11 +44,28 @@ fn run(version: &str, artifact: &Artifact, paths: &Paths, token: Option<&str>, t
 
     let _ = tx.send(Progress::Unpacking);
     let dest = paths.version_dir(version);
+    // Unpack into a STAGING dir and require the editor binary before committing, then
+    // atomically rename into place. So a corrupt/partial bundle never leaves a half-
+    // populated versions/<v>/ that reads as "installed", and a failed re-install/upgrade
+    // never destroys the previously working copy.
+    let staging = paths.versions_dir().join(format!(".staging-{version}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let staged = (|| {
+        unpack(&archive, &staging)?;
+        if !staging.join(crate::registry::editor_bin_name()).is_file() {
+            return Err("bundle contains no editor binary".to_string());
+        }
+        Ok(())
+    })();
+    if let Err(e) = staged {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     if dest.exists() {
         std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
     }
-    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-    unpack(&archive, &dest)?;
+    std::fs::rename(&staging, &dest).map_err(|e| format!("commit install: {e}"))?;
     Ok(dest)
 }
 
@@ -66,7 +83,11 @@ fn download(url: &str, token: Option<&str>, dest: &Path, expected_size: u64, tx:
         return Ok(());
     }
     let mut req = ureq::get(url).set("Accept", "application/octet-stream");
-    if let Some(t) = token {
+    // Only attach the token to GitHub hosts — never leak it to a manifest-supplied URL
+    // that points elsewhere.
+    if let Some(t) = token
+        && crate::releases::is_github_host(url)
+    {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
     let resp = req.call().map_err(|e| format!("download {url}: {e}"))?;

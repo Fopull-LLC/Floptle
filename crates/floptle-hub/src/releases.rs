@@ -80,18 +80,37 @@ pub fn platform_target() -> String {
     format!("{os}-{arch}")
 }
 
-/// A comparable key for a version string: dotted numeric components compare numerically
-/// (so 0.10 > 0.9, unlike lexical), and a pre-release suffix (`-rc1`) sorts BEFORE the same
-/// base release. Not a full semver implementation — just enough to order installs/releases.
-pub fn version_key(v: &str) -> (Vec<u64>, u8, String) {
+/// One dot-separated pre-release identifier. Per semver, an all-digit identifier compares
+/// numerically and sorts BEFORE an alphanumeric one — the derived `Ord` gives `Num < Text`.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+pub enum PreId {
+    Num(u64),
+    Text(String),
+}
+
+/// A comparable key for a version string: `(major, minor, patch)` compared numerically
+/// (so 0.10 > 0.9, and a missing component is 0), then a stage (0 = pre-release, sorts
+/// before 1 = final release of the same base), then the pre-release identifiers compared
+/// semver-style (so `rc2` < `rc10`). A fixed-width numeric head keeps the stage/pre tiebreak
+/// meaningful regardless of how many components the string has.
+pub fn version_key(v: &str) -> (u64, u64, u64, u8, Vec<PreId>) {
     let (base, pre) = match v.split_once('-') {
         Some((b, p)) => (b, Some(p)),
         None => (v, None),
     };
-    let nums: Vec<u64> = base.split('.').map(|s| s.trim().parse::<u64>().unwrap_or(0)).collect();
-    // 0 = pre-release (sorts first), 1 = final release (sorts after its pre-releases).
+    let mut nums = base.split('.').map(|s| s.trim().parse::<u64>().unwrap_or(0));
+    let major = nums.next().unwrap_or(0);
+    let minor = nums.next().unwrap_or(0);
+    let patch = nums.next().unwrap_or(0);
     let stage = if pre.is_some() { 0u8 } else { 1u8 };
-    (nums, stage, pre.unwrap_or("").to_string())
+    let ids = pre
+        .map(|p| {
+            p.split('.')
+                .map(|id| id.parse::<u64>().map(PreId::Num).unwrap_or_else(|_| PreId::Text(id.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    (major, minor, patch, stage, ids)
 }
 
 /// Where the Hub gets the list of installable versions.
@@ -106,10 +125,22 @@ pub struct GithubReleases {
     pub token: Option<String>,
 }
 
+/// True when `url`'s host is GitHub — the ONLY place it's safe to attach a private-repo
+/// token (so a manifest/artifact URL pointing elsewhere can't exfiltrate it). Covers the
+/// asset CDN (`*.githubusercontent.com`) that release downloads redirect to.
+pub fn is_github_host(url: &str) -> bool {
+    let after = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+    let authority = after.split('/').next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("").split(':').next().unwrap_or("");
+    host == "github.com" || host.ends_with(".github.com") || host.ends_with(".githubusercontent.com")
+}
+
 impl VersionSource for GithubReleases {
     fn manifest(&self) -> Result<Manifest, String> {
         let mut req = ureq::get(&self.manifest_url).set("Accept", "application/octet-stream");
-        if let Some(t) = &self.token {
+        if let Some(t) = &self.token
+            && is_github_host(&self.manifest_url)
+        {
             req = req.set("Authorization", &format!("Bearer {t}"));
         }
         let text = req
@@ -151,9 +182,11 @@ mod tests {
 
     #[test]
     fn version_key_orders_numerically_and_prereleases_first() {
-        let mut vs = ["0.10.0", "0.2.0", "1.0.0", "1.0.0-rc1", "0.9.0"];
+        // Numeric (0.10 > 0.9), pre-releases before the final, DOTTED numeric identifiers
+        // compared numerically (rc.2 < rc.10, not lexical), and a short "1.0" == "1.0.0".
+        let mut vs = ["0.10.0", "0.2.0", "1.0.0", "1.0.0-rc.10", "1.0.0-rc.2", "0.9.0", "1.0"];
         vs.sort_by(|a, b| version_key(a).cmp(&version_key(b)).then(a.cmp(b)));
-        assert_eq!(vs, ["0.2.0", "0.9.0", "0.10.0", "1.0.0-rc1", "1.0.0"]);
+        assert_eq!(vs, ["0.2.0", "0.9.0", "0.10.0", "1.0.0-rc.2", "1.0.0-rc.10", "1.0", "1.0.0"]);
     }
 
     #[test]

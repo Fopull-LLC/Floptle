@@ -31,11 +31,17 @@ pub fn launch(install: &Install, project: &Project) -> Result<(), String> {
     if !project.exists() {
         return Err(format!("project folder is gone: {}", project.path.display()));
     }
-    launch_command(install, &project.path)
+    let child = launch_command(install, &project.path)
         .current_dir(&project.path)
         .spawn()
-        .map(|_child| ())
-        .map_err(|e| format!("could not launch the editor: {e}"))
+        .map_err(|e| format!("could not launch the editor: {e}"))?;
+    // Reap the child on a detached thread so a long Hub session doesn't accumulate zombies
+    // on unix (the editor otherwise outlives the Hub's attention but not its process table).
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(test)]

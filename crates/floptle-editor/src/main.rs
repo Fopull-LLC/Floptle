@@ -490,14 +490,14 @@ fn main() {
                 return;
             }
             "--new" => {
-                let Some(p) = args.get(i + 1) else {
+                let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
                     eprintln!("--new needs a <dir>");
                     std::process::exit(2);
                 };
                 std::process::exit(new_project(Path::new(p)));
             }
             "--migrate" => {
-                let Some(p) = args.get(i + 1) else {
+                let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
                     eprintln!("--migrate needs a <dir>");
                     std::process::exit(2);
                 };
@@ -527,6 +527,11 @@ fn main() {
 /// scene, a `project.ron` pinned to THIS engine version) without a window/GPU. Returns the
 /// process exit code.
 fn new_project(path: &Path) -> i32 {
+    // Refuse to scaffold over an existing project — that would clobber its project.ron.
+    if path.join("project.ron").exists() {
+        eprintln!("{} already contains a project (project.ron); refusing to overwrite", path.display());
+        return 1;
+    }
     if let Err(e) = std::fs::create_dir_all(path) {
         eprintln!("could not create {}: {e}", path.display());
         return 1;
@@ -583,11 +588,17 @@ fn migrate_project(path: &Path) -> i32 {
             }
         }
     }
-    // Stamp the project's engine version.
+    // Stamp the project's engine version — but only if project.ron exists AND parses. Never
+    // fabricate a missing one or overwrite an unparseable one (that would lose data).
     let cfg_path = path.join("project.ron");
-    let mut cfg = floptle_scene::load_project(&cfg_path);
-    cfg.engine_version = Some(floptle_core::ENGINE_VERSION.to_string());
-    let _ = floptle_scene::save_project(&cfg, &cfg_path);
+    match floptle_scene::try_load_project(&cfg_path) {
+        Ok(Some(mut cfg)) => {
+            cfg.engine_version = Some(floptle_core::ENGINE_VERSION.to_string());
+            let _ = floptle_scene::save_project(&cfg, &cfg_path);
+        }
+        Ok(None) => {} // no project.ron — leave it that way.
+        Err(e) => eprintln!("leaving project.ron untouched (won't parse: {e})"),
+    }
     println!("migrated {migrated} effect(s) in {}", path.display());
     0
 }
