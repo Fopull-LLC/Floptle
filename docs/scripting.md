@@ -455,6 +455,25 @@ end
 > **Play on start** flag is also scriptable —
 > `node:getcomponent("ParticleSystem").play_on_start = 1`.
 
+### `spawnEffect` — fire a one-shot at a world point
+
+For hits, pickups, footstep poofs — effects that aren't tied to a node — spawn
+one anywhere in the world and forget it. It plays once and despawns itself:
+
+```lua
+function update(node, dt)
+  if input.clicked(0) then
+    local h = raycast(node.x, node.y, node.z, fx, fy, fz, 100)
+    if h then spawnEffect("vfx/Impact", h.x, h.y, h.z) end
+  end
+end
+```
+
+`spawnEffect(key, x, y, z)` — `key` is the effect asset (project-relative, no
+`.vfx.ron`); the position is world space. Author it as a **one-shot** effect on
+the ❋ Particles timeline so it ends cleanly. That's the whole loop: design it on
+the timeline → `spawnEffect` it from gameplay.
+
 ## 11. Recipe: a walkable first-person character
 
 No glue code required:

@@ -173,6 +173,10 @@ pub struct ScriptHost {
     /// Debug-draw commands scripts queued this frame (`gizmo.line(...)` etc.) —
     /// immediate mode: drained by the editor each frame and drawn for one frame.
     gizmos: Rc<RefCell<Vec<GizmoCmd>>>,
+    /// Fire-and-forget one-shot effects scripts requested this frame via
+    /// `spawnEffect(key, x, y, z)`. The editor spawns a detached instance at each
+    /// point; it plays once and auto-despawns.
+    spawn_effects: Rc<RefCell<Vec<SpawnedEffect>>>,
 }
 
 /// One immediate-mode debug-draw command from a script's `gizmo.*` call.
@@ -227,6 +231,10 @@ pub struct VfxInfo {
     /// The effect asset key the node's `ParticleSystem` references.
     pub asset: String,
 }
+
+/// A one-shot effect a script requested via `spawnEffect(...)`: (asset key, world
+/// position). The editor spawns a detached instance for each.
+pub type SpawnedEffect = (String, [f64; 3]);
 
 /// One queued `node:particles()` command, drained by the editor and applied to the
 /// live VFX instances before they advance (so intent set this frame lands this frame).
@@ -653,6 +661,25 @@ mod tests {
             "alive() must read the fed count"
         );
         assert!(host.take_vfx_commands().is_empty(), "no play() when already playing");
+    }
+
+    #[test]
+    fn spawn_effect_global_queues_a_one_shot() {
+        let dir = std::env::temp_dir().join("floptle_script_test_spawnfx");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "boom",
+            "function update(node, dt)\n  spawnEffect('vfx/Impact', 1.0, 2.0, 3.0)\nend\n",
+        );
+        let (mut world, _e) = world_with_script("boom");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let spawns = host.take_spawn_effects();
+        assert_eq!(spawns.len(), 1, "one spawnEffect call = one queued one-shot");
+        assert_eq!(spawns[0].0, "vfx/Impact");
+        assert_eq!(spawns[0].1, [1.0, 2.0, 3.0]);
+        assert!(host.take_spawn_effects().is_empty(), "drained");
     }
 
     #[test]

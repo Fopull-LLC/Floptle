@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use floptle_core::math::{Mat4, Vec3};
+use floptle_core::math::{DVec3, Mat4, Vec3};
 use floptle_core::{Entity, ParticleSystem, World};
 use floptle_render::particles::{ParticleBatch, ParticleGlobals};
 use floptle_render::{ParticleInstance, RenderCamera, TexId};
@@ -53,6 +53,14 @@ pub struct VfxPreview {
     pub anchor: Option<Entity>,
 }
 
+/// A fire-and-forget one-shot effect spawned from code (`spawnEffect(...)`), not
+/// bound to any node: it plays once at a fixed world point and drops itself when done.
+pub struct DetachedEffect {
+    pub inst: EffectInstance,
+    /// The world spawn point — a static emitter transform for the effect.
+    pub pos: DVec3,
+}
+
 /// Everything particles the editor owns. One field on `Editor`.
 #[derive(Default)]
 pub struct VfxSystem {
@@ -61,6 +69,8 @@ pub struct VfxSystem {
     /// Live play-mode instances per emitter entity, with the asset key each was
     /// spawned from (an asset swap mid-play rebuilds the instance).
     pub instances: HashMap<Entity, (String, EffectInstance)>,
+    /// Fire-and-forget one-shots from `spawnEffect(...)` — ticked + reaped each frame.
+    pub detached: Vec<DetachedEffect>,
     /// The Particles tab's edit-mode preview (drawn only outside Play).
     pub preview: Option<VfxPreview>,
 }
@@ -149,9 +159,22 @@ impl VfxSystem {
         }
     }
 
-    /// Drop every live instance (Play start/stop, scene load).
+    /// Drop every live instance + detached one-shot (Play start/stop, scene load).
     pub fn clear_instances(&mut self) {
         self.instances.clear();
+        self.detached.clear();
+    }
+
+    /// Spawn a fire-and-forget one-shot at a world point (`spawnEffect(...)` from a
+    /// script). It plays once and is reaped when it finishes — no node needed.
+    pub fn spawn_detached(&mut self, key: &str, pos: DVec3) {
+        if let Some(fx) = self.effect(key) {
+            // Vary the seed by spawn ordinal + position so repeats don't lockstep.
+            let seed = (self.detached.len() as u32)
+                .wrapping_add(1)
+                .wrapping_add(pos.x.to_bits() as u32 ^ pos.z.to_bits() as u32);
+            self.detached.push(DetachedEffect { inst: EffectInstance::new(fx, seed), pos });
+        }
     }
 
     /// Spawn instances for every `play_on_start` particle system in the scene.
@@ -198,6 +221,12 @@ impl VfxSystem {
         for (e, key) in missing {
             self.spawn(e, &key);
         }
+        // Detached one-shots: tick at their fixed world point, then reap the finished.
+        for d in &mut self.detached {
+            let emitter = floptle_core::transform::Transform::from_translation(d.pos);
+            d.inst.advance_at(dt, VFX_GRAVITY, emitter);
+        }
+        self.detached.retain(|d| !d.inst.is_done());
     }
 
     /// The per-node particle state scripts read via `node:particles()`: one entry per
@@ -262,12 +291,9 @@ impl VfxSystem {
         let fwd = cam.rotation * Vec3::NEG_Z;
         let cam_right = cam.rotation * Vec3::X;
         let cam_up = cam.rotation * Vec3::Y;
-        let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
-            let local_xf = match anchor {
-                Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
-                None => floptle_core::transform::Transform::IDENTITY
-                    .render_matrix(cam.world_position),
-            };
+        // `local_xf` maps the effect's emitter space to camera-relative space (a node's
+        // render matrix, a detached one-shot's world point, or the origin for a preview).
+        let mut pack = |inst: &EffectInstance, local_xf: Mat4| {
             // World-space tracks live at the instance's world anchor (camera-relative).
             let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
             let mut draws = Vec::new();
@@ -282,13 +308,22 @@ impl VfxSystem {
                 });
             }
         };
+        let node_xf =
+            |e: Entity| floptle_core::world_transform(world, e).render_matrix(cam.world_position);
+        let point_xf = |p: DVec3| {
+            floptle_core::transform::Transform::from_translation(p).render_matrix(cam.world_position)
+        };
         for (e, (_, inst)) in &self.instances {
-            pack(inst, Some(*e));
+            pack(inst, node_xf(*e));
+        }
+        for d in &self.detached {
+            pack(&d.inst, point_xf(d.pos));
         }
         if include_preview
             && let Some(p) = &self.preview
         {
-            pack(&p.inst, p.anchor);
+            let xf = p.anchor.map(node_xf).unwrap_or_else(|| point_xf(DVec3::ZERO));
+            pack(&p.inst, xf);
         }
     }
 
@@ -348,22 +383,26 @@ impl VfxSystem {
         include_preview: bool,
     ) -> Vec<floptle_vfx::MeshDraw> {
         let mut out = Vec::new();
-        let mut pack = |inst: &EffectInstance, anchor: Option<Entity>| {
-            let local_xf = match anchor {
-                Some(e) => floptle_core::world_transform(world, e).render_matrix(cam.world_position),
-                None => floptle_core::transform::Transform::IDENTITY
-                    .render_matrix(cam.world_position),
-            };
+        let mut pack = |inst: &EffectInstance, local_xf: Mat4| {
             let world_xf = Mat4::from_translation((inst.anchor() - cam.world_position).as_vec3());
             floptle_vfx::collect_mesh_particles(inst, local_xf, world_xf, &mut out);
         };
+        let node_xf =
+            |e: Entity| floptle_core::world_transform(world, e).render_matrix(cam.world_position);
+        let point_xf = |p: DVec3| {
+            floptle_core::transform::Transform::from_translation(p).render_matrix(cam.world_position)
+        };
         for (e, (_, inst)) in &self.instances {
-            pack(inst, Some(*e));
+            pack(inst, node_xf(*e));
+        }
+        for d in &self.detached {
+            pack(&d.inst, point_xf(d.pos));
         }
         if include_preview
             && let Some(p) = &self.preview
         {
-            pack(&p.inst, p.anchor);
+            let xf = p.anchor.map(node_xf).unwrap_or_else(|| point_xf(DVec3::ZERO));
+            pack(&p.inst, xf);
         }
         out
     }

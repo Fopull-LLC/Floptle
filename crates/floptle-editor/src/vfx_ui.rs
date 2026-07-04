@@ -427,6 +427,12 @@ impl EditorTabViewer<'_> {
             self.vfx_ui.dirty = false;
         }
 
+        // Effect switcher: jump between the project's effects without leaving the tab
+        // (saving the current one first). Shown whenever something is open.
+        if self.vfx_ui.open_key.is_some() {
+            self.effect_switcher_ui(ui);
+        }
+
         // Lazy-load the working copy from the registry.
         if self.vfx_ui.doc.is_none()
             && let Some(k) = self.vfx_ui.open_key.clone()
@@ -518,6 +524,55 @@ impl EditorTabViewer<'_> {
         }
 
         self.vfx_ui.doc = Some(doc);
+    }
+
+    /// A quick-switch bar: pick any of the project's effects (or the ◀ ▶ steppers)
+    /// to open it here, saving the current one first — so bouncing between the effects
+    /// in a scene doesn't mean digging through the asset tree each time.
+    fn effect_switcher_ui(&mut self, ui: &mut egui::Ui) {
+        let effects: Vec<(String, String)> =
+            self.vfx.effects.iter().map(|(k, a)| (k.clone(), a.doc.name.clone())).collect();
+        if effects.is_empty() {
+            return;
+        }
+        let cur_key = self.vfx_ui.open_key.clone().unwrap_or_default();
+        let cur_idx = effects.iter().position(|(k, _)| *k == cur_key);
+        let cur_name = cur_idx.map(|i| effects[i].1.clone()).unwrap_or_else(|| cur_key.clone());
+        let mut pick: Option<String> = None;
+        ui.horizontal(|ui| {
+            ui.label("Effect");
+            let n = effects.len();
+            if ui.add_enabled(n > 1, egui::Button::new("◀").small()).on_hover_text("previous effect").clicked() {
+                let i = cur_idx.unwrap_or(0);
+                pick = Some(effects[(i + n - 1) % n].0.clone());
+            }
+            egui::ComboBox::from_id_salt("vfx_switcher")
+                .width(240.0)
+                .selected_text(format!("✨ {cur_name}"))
+                .show_ui(ui, |ui| {
+                    for (k, name) in &effects {
+                        let label = if name == k { k.clone() } else { format!("{name}  ·  {k}") };
+                        if ui.selectable_label(*k == cur_key, label).clicked() && *k != cur_key {
+                            pick = Some(k.clone());
+                        }
+                    }
+                });
+            if ui.add_enabled(n > 1, egui::Button::new("▶").small()).on_hover_text("next effect").clicked() {
+                let i = cur_idx.unwrap_or(0);
+                pick = Some(effects[(i + 1) % n].0.clone());
+            }
+            ui.weak(format!("· {n} in project"));
+        });
+        if let Some(k) = pick {
+            // Save the current working copy before leaving it (open() drops it).
+            if self.vfx_ui.dirty
+                && let (Some(ok), Some(d)) = (self.vfx_ui.open_key.clone(), self.vfx_ui.doc.clone())
+            {
+                self.vfx.save(self.project_root, &ok, &d);
+            }
+            self.vfx_ui.dirty = false;
+            self.vfx_ui.open(k);
+        }
     }
 
     /// Shown when no effect is open: pick one, or point at the create flows.

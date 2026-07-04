@@ -2129,6 +2129,10 @@ impl Editor {
             // a script queued this frame first, so it takes effect immediately.
             let vfx_cmds = self.script_host.take_vfx_commands();
             self.vfx.apply_script_commands(&self.world, vfx_cmds);
+            // Fire-and-forget one-shots a script requested this frame (spawnEffect).
+            for (key, p) in self.script_host.take_spawn_effects() {
+                self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p));
+            }
             self.vfx.advance(&self.world, sdt);
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
