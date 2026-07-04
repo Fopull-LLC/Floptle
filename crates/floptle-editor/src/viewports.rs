@@ -278,10 +278,12 @@ impl Editor {
         }
         self.game_vp = Some(make_offscreen_target(gpu, egui, w, h, "game-vp"));
         self.game_vp_dims = (w, h);
-        // The viewport's own post chain, sized to match.
-        match self.game_post.as_mut() {
-            Some(p) => p.resize(gpu, w, h),
-            None => self.game_post = Some(floptle_render::PostStack::new(gpu, w, h)),
+        // Create the viewport's own post chain lazily; its actual size + retro mode are
+        // set by `configure` every frame in update_game_viewport (retro composites at the
+        // internal res, not the panel res), so we don't resize it here — that would
+        // reallocate all its targets twice on a resize frame.
+        if self.game_post.is_none() {
+            self.game_post = Some(floptle_render::PostStack::new(gpu, w, h));
         }
     }
 

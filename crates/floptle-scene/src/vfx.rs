@@ -408,10 +408,15 @@ fn default_color() -> VfxPropDoc {
 
 /// Legacy migration (pre-clip-emit): fold the old track-level `rate` / `particle_lifetime`
 /// / `lifetime_jitter` / `bursts` into per-clip `emit` + clip length, then clear the
-/// deprecated fields so new saves omit them. A clip without an explicit `emit` was a
-/// legacy stream clip; under the clip-length-is-lifetime model its length becomes the old
-/// `particle_lifetime`. Each old burst becomes a single-pulse burst clip of that lifetime.
-/// A no-op for already-migrated (new-format) tracks.
+/// deprecated fields so new saves omit them. A no-op for already-migrated tracks.
+///
+/// A clip without an explicit `emit` was a legacy stream clip. Under the
+/// clip-length-is-lifetime model its authored `[start, end]` span BECOMES the lifetime —
+/// we deliberately keep the span rather than shrinking it to the old `particle_lifetime`,
+/// so a continuous stream (e.g. a looping fountain that emitted across the whole loop)
+/// keeps streaming instead of emitting for `particle_lifetime` and then going silent to
+/// the loop end. Each old burst becomes a single-pulse burst clip whose length is that
+/// lifetime (a burst was a point in time, so a span has to be synthesized).
 fn migrate_clips(t: &mut VfxTrackDoc) {
     if t.clips.iter().all(|c| c.emit.is_some()) && t.bursts.is_empty() {
         return;
@@ -422,7 +427,7 @@ fn migrate_clips(t: &mut VfxTrackDoc) {
         if c.emit.is_none() {
             c.emit = Some(VfxEmitDoc::Rate { rate: t.rate });
             c.lifetime_jitter = ljit;
-            c.end = c.start + plife;
+            // Keep c.end (the authored emission window) as the clip length = lifetime.
         }
     }
     for b in std::mem::take(&mut t.bursts) {
@@ -678,9 +683,11 @@ mod tests {
         }
         let t = &doc.tracks[0];
         assert_eq!(t.clips.len(), 2, "one stream clip + one migrated burst clip");
-        // Stream clip: Rate(30), length reset to the old lifetime, jitter carried.
+        // Stream clip: Rate(30), the AUTHORED span [0,1.5] kept as the lifetime (not
+        // shrunk to particle_lifetime — that would make a continuous stream pulse), jitter
+        // carried.
         assert_eq!(t.clips[0].emit, Some(VfxEmitDoc::Rate { rate: 30.0 }));
-        assert!((t.clips[0].end - 0.9).abs() < 1e-6, "clip length = old lifetime");
+        assert!((t.clips[0].end - 1.5).abs() < 1e-6, "authored emission window kept as lifetime");
         assert!((t.clips[0].lifetime_jitter - 0.4).abs() < 1e-6);
         // Burst clip: single pulse of 8 at t=0.2, same lifetime length.
         assert_eq!(t.clips[1].start, 0.2);

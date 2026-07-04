@@ -190,8 +190,10 @@ impl TrackParticles {
 /// Per-track live state inside an instance.
 struct TrackState {
     particles: TrackParticles,
-    /// Fractional-emission accumulator; resets when the playhead enters a clip.
-    acc: f32,
+    /// Fractional-emission accumulator, one per clip (resets when the playhead enters
+    /// that clip). Per-clip so two overlapping rate clips on one track don't share — and
+    /// so entering one clip never wipes a co-active clip's fractional carry.
+    acc: Vec<f32>,
     /// Monotonic birth counter — the RNG stream position. Never resets mid-play.
     emit_counter: u32,
 }
@@ -229,7 +231,7 @@ impl EffectInstance {
             .iter()
             .map(|ct| TrackState {
                 particles: TrackParticles::with_capacity(ct.capacity as usize),
-                acc: 0.0,
+                acc: vec![0.0; ct.clips.len()],
                 emit_counter: 0,
             })
             .collect();
@@ -258,7 +260,7 @@ impl EffectInstance {
         self.anchored = false;
         for ts in &mut self.tracks {
             ts.particles.clear();
-            ts.acc = 0.0;
+            ts.acc.iter_mut().for_each(|a| *a = 0.0);
             ts.emit_counter = 0;
         }
     }
@@ -379,10 +381,14 @@ impl EffectInstance {
                 let jitter = clip.lifetime_jitter;
                 match clip.emit {
                     Emit::Rate { rate } => {
-                        // Entering a clip resets the fractional accumulator: each span
-                        // starts its emission phase fresh (deterministic across scrubs).
-                        if prev < clip.start && clip.start <= now {
-                            ts.acc = 0.0;
+                        // Entering a clip resets THIS clip's fractional accumulator: each
+                        // span starts its emission phase fresh (deterministic across
+                        // scrubs), without disturbing a co-active clip's carry.
+                        if prev < clip.start
+                            && clip.start <= now
+                            && let Some(a) = ts.acc.get_mut(ci)
+                        {
+                            *a = 0.0;
                         }
                         let (s, e) = (prev.max(clip.start), now.min(clip.end));
                         if e <= s || rate <= 0.0 {
@@ -393,10 +399,12 @@ impl EffectInstance {
                         if rate_eff <= 0.0 {
                             continue;
                         }
-                        let acc0 = ts.acc;
-                        ts.acc += rate_eff * (e - s);
-                        let n = ts.acc.floor() as u32;
-                        ts.acc -= n as f32;
+                        let acc0 = ts.acc.get(ci).copied().unwrap_or(0.0);
+                        let new_acc = acc0 + rate_eff * (e - s);
+                        let n = new_acc.floor() as u32;
+                        if let Some(a) = ts.acc.get_mut(ci) {
+                            *a = new_acc - n as f32;
+                        }
                         for k in 1..=n {
                             // Reconstruct the exact accumulator-crossing time so birth
                             // spacing is even regardless of frame boundaries.

@@ -233,7 +233,9 @@ pub fn pyramid(half: f32, height: f32) -> MeshData {
     for i in 0..4 {
         let p0 = b[i];
         let p1 = b[(i + 1) % 4];
-        let n = vnorm(vcross(vsub(p1, p0), vsub(apex, p0)));
+        // Outward+up normal: cross(apex-p0, p1-p0). (The reverse order points inward/down,
+        // which lit the sloped faces backwards.)
+        let n = vnorm(vcross(vsub(apex, p0), vsub(p1, p0)));
         let base = vertices.len() as u32;
         vertices.push(Vertex { pos: p0, normal: n, uv: [0.0, 0.0] });
         vertices.push(Vertex { pos: p1, normal: n, uv: [1.0, 0.0] });
@@ -387,6 +389,17 @@ mod tests {
                 assert!((l - 1.0).abs() < 1e-4, "normal not unit: {l}");
                 // centered: |y| ≤ half-height (+ε), radial extent ≤ ~0.71 for r=0.5.
                 assert!(v.pos[1].abs() <= 0.5 + 1e-4, "y out of extent: {}", v.pos[1]);
+            }
+        }
+        // The pyramid's sloped side faces must face OUTWARD: on a side vertex the normal's
+        // horizontal component points the same way as the vertex, and its Y is up.
+        let py = pyramid(0.5, 1.0);
+        for v in &py.vertices {
+            let horiz = v.pos[0] * v.normal[0] + v.pos[2] * v.normal[2];
+            let is_base_or_apex = v.normal[1] < -0.9 || (v.pos[0] == 0.0 && v.pos[2] == 0.0);
+            if !is_base_or_apex {
+                assert!(v.normal[1] > 0.0, "side normal points down: {:?}", v.normal);
+                assert!(horiz >= -1e-4, "side normal points inward: pos {:?} n {:?}", v.pos, v.normal);
             }
         }
     }
