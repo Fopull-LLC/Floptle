@@ -28,7 +28,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 use crate::assets::{AssetPayload, build_assets, collect_texture_paths, is_model};
-use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active, scene_and_game_split};
+use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active};
 use crate::gizmo::build_gizmo;
 use crate::hierarchy::{node_new_menu};
 use crate::matter_catalog::{new_cube, new_sphere};
@@ -74,7 +74,7 @@ impl Editor {
         // input only feeds scripts here. `game_view()` is pointer-aware in split view, so
         // when both tabs show, input goes to whichever viewport the mouse is over and the
         // Scene view stays fully interactive.
-        let game_focused = self.game_view();
+        let game_focused = self.game_view() || self.game_trap;
 
         // Nothing to drive until the window + GPU stack exist. (The borrows
         // themselves are taken per stage, and by the gather/draw core below.)
@@ -141,17 +141,16 @@ impl Editor {
         // (Scene tab) use the editor's free-fly camera. Works whether or not we're
         // playing, so you can frame the active camera's shot without entering play.
         // (Inlined — self methods can't be called while gpu/egui are borrowed.) A
-        // fullscreened tab overrides which view is front. When Scene + Game are split,
-        // the SURFACE renders the editor view (for the transparent Scene tab) while the
-        // Game tab shows its own offscreen render (update_game_viewport).
-        let split_views = self.fullscreen_tab.is_none()
-            && self.dock_state.as_ref().is_some_and(scene_and_game_split);
-        let game_view = !split_views
-            && match self.fullscreen_tab {
-                Some(EditorTab::Game) => true,
-                Some(_) => false,
-                None => self.dock_state.as_ref().is_some_and(game_tab_active),
-            };
+        // fullscreened tab overrides which view is front. A DOCKED (non-fullscreen)
+        // Game tab renders through its own offscreen target sized to the tab rect
+        // (update_game_viewport + the tab's Image blit), so the SURFACE renders the
+        // editor view underneath — this keeps the game framed to its panel instead of
+        // spilling the full-window render behind the other tabs. (Cost: a docked Game
+        // tab draws the scene once for the offscreen game view and once for the hidden
+        // editor surface; double-click the Game tab to fullscreen it for a single
+        // full-window render.) Only a FULLSCREEN Game tab renders the active camera
+        // straight to the surface (it fills the whole window, so that framing is right).
+        let game_view = matches!(self.fullscreen_tab, Some(EditorTab::Game));
         let cam = {
             let active = if game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
@@ -899,8 +898,9 @@ impl Editor {
             .copied()
             .filter(|&e| matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })))
             .and(self.cam_preview.as_ref().map(|p| p.tex_id));
-        // Split view: the Game tab paints its own offscreen render this frame.
-        let game_split = fullscreen_tab.is_none() && scene_and_game_split(dock_state);
+        // A docked (non-fullscreen) Game tab paints its own offscreen render this frame,
+        // sized+blit to its rect (single-view or split) so it never spills behind panels.
+        let game_offscreen = fullscreen_tab.is_none() && game_tab_active(dock_state);
         let particles_active = crate::dock::tab_is_front(dock_state, EditorTab::Particles);
         let game_tex = self.game_vp.as_ref().map(|p| p.tex_id);
         let game_rect = &mut self.game_rect;
@@ -1096,7 +1096,7 @@ impl Editor {
                 tool,
                 scene_rect: &mut *scene_rect,
                 game_rect,
-                game_split,
+                game_offscreen,
                 game_tex,
                 aspect: aspect_mode,
                 zoom: viewport_zoom,
@@ -1971,6 +1971,13 @@ impl Editor {
         // input belongs to the game (e.g. the mouse is over the Game view in split mode).
         if !game_focused {
             self.camera.update(&self.input, dt);
+            // Mouse wheel dollies the editor camera when hovering the Scene viewport.
+            // Consumed here (before scripts / finish_input_frame): scripts only read
+            // scroll while the Game view is focused, so this never steals game input.
+            if self.input_scroll != 0.0 && self.cursor_over_scene() {
+                self.camera.dolly(self.input_scroll);
+                self.input_scroll = 0.0;
+            }
         }
 
         // FPS in the window title (smoothed, refreshed a few times a second).
@@ -2220,17 +2227,32 @@ impl Editor {
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
         // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
-        // wander inside the window — pin it to the center ourselves while a
-        // look/lock is active. Look input reads RAW device motion, so this
-        // re-centering never pollutes the deltas.
-        if self.cursor_lock_soft && (self.script_mouse_lock || self.input.looking)
-            && let Some(window) = self.window.as_ref() {
-                let sz = window.inner_size();
-                let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
-                    sz.width / 2,
-                    sz.height / 2,
-                ));
+        // wander inside the window — pin it ourselves while a look/pan/lock/trap is
+        // active. Look/pan read RAW device motion, so re-centering never pollutes
+        // the deltas. A trapped Game cursor re-centers to the GAME rect (not the
+        // window) so a Confined pointer stays inside the viewport it's playing in.
+        if self.cursor_lock_soft
+            && (self.script_mouse_lock || self.input.looking || self.panning || self.game_trap)
+            && let Some(window) = self.window.as_ref()
+        {
+            let sz = window.inner_size();
+            let (cx, cy) = match (self.game_trap, self.game_rect) {
+                (true, Some(r)) => {
+                    let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
+                    ((r.center().x * ppp) as u32, (r.center().y * ppp) as u32)
+                }
+                _ => (sz.width / 2, sz.height / 2),
+            };
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
+        }
+        // Safety: never stay trapped once play stops (e.g. Stop while trapped, or a
+        // layout change hid the Game tab). Escape/Stop already handle the common path.
+        if self.game_trap && !self.playing {
+            self.game_trap = false;
+            if let Some(window) = self.window.as_ref() {
+                self.cursor_lock_soft = grab_cursor(window, false);
             }
+        }
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
             self.console.push(l.level, l.msg, l.source);
