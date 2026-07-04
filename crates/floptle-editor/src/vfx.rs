@@ -72,6 +72,9 @@ pub struct VfxSystem {
     pub instances: HashMap<Entity, (String, EffectInstance)>,
     /// Fire-and-forget one-shots from `spawnEffect(...)` — ticked + reaped each frame.
     pub detached: Vec<DetachedEffect>,
+    /// Monotonic spawn counter — the detached seed ordinal, so repeats at a fixed
+    /// point don't march in lockstep (the live pool length would collide as it reaps).
+    detached_seq: u32,
     /// The Particles tab's edit-mode preview (drawn only outside Play).
     pub preview: Option<VfxPreview>,
 }
@@ -170,10 +173,28 @@ impl VfxSystem {
     /// script). It plays once and is reaped when it finishes — no node needed.
     pub fn spawn_detached(&mut self, key: &str, pos: DVec3) {
         if let Some(fx) = self.effect(key) {
-            // Vary the seed by spawn ordinal + position so repeats don't lockstep.
-            let seed = (self.detached.len() as u32)
-                .wrapping_add(1)
-                .wrapping_add(pos.x.to_bits() as u32 ^ pos.z.to_bits() as u32);
+            // Fire-and-forget contract: coerce to a self-destructing one-shot even if
+            // the asset was authored Looping/Persist, so is_done() reaps it in advance()
+            // — otherwise a looping detached instance never drains and the pool grows
+            // for the whole play session.
+            let fx = if fx.playback == Playback::OneShot && fx.end == EndBehavior::Destroy {
+                fx
+            } else {
+                let mut once = (*fx).clone();
+                once.playback = Playback::OneShot;
+                once.end = EndBehavior::Destroy;
+                Arc::new(once)
+            };
+            // Seed from a monotonic counter (not the reaping pool length) + a full-64-bit
+            // fold of the position, so whole-number coords still vary the seed.
+            let bits = |b: f64| -> u32 {
+                let u = b.to_bits();
+                (u >> 32) as u32 ^ u as u32
+            };
+            self.detached_seq = self.detached_seq.wrapping_add(1);
+            let seed = self.detached_seq.wrapping_add(
+                bits(pos.x) ^ bits(pos.y).rotate_left(11) ^ bits(pos.z).rotate_left(22),
+            );
             self.detached.push(DetachedEffect { inst: EffectInstance::new(fx, seed), pos });
         }
     }

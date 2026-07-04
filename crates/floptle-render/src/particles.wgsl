@@ -30,6 +30,11 @@ struct ParticleGlobals {
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 
+// The RGB a particle fades TOWARD in full fog — the blend mode's no-op identity, set
+// per pipeline: 0 for alpha/additive/screen/premultiplied (fade to nothing), 1 for
+// Multiply (fade to white = stop darkening). Alpha always fades to 0 alongside.
+override fog_identity: f32 = 0.0;
+
 struct VsIn {
     // Unit quad corner in [-0.5, 0.5]².
     @location(0) corner: vec2<f32>,
@@ -90,14 +95,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (col.a <= 0.001) {
         discard;
     }
-    // Depth fog: fade the WHOLE contribution to zero with distance (attenuation, not
-    // a tint) so it's correct across every blend family — alpha particles vanish,
-    // additive/screen light dims, premultiplied fades out — instead of adding
-    // fog-coloured light. `view_pos` is camera-relative, so length = view distance.
+    // Depth fog: fade the contribution toward the blend mode's identity with distance
+    // (attenuation, not a tint), so it's correct across every blend family — alpha
+    // particles vanish, additive/screen light dims, premultiplied fades out, and
+    // Multiply fades to white (no darkening) via the per-pipeline `fog_identity`
+    // override — instead of adding fog-coloured light. `view_pos` is camera-relative,
+    // so length = view distance.
     if (g.fog_params.z > 0.5) {
         let denom = max(g.fog_params.y - g.fog_params.x, 1e-4);
         let f = clamp((length(in.view_pos) - g.fog_params.x) / denom, 0.0, 1.0);
-        col = col * (1.0 - f);
+        col = vec4<f32>(mix(col.rgb, vec3<f32>(fog_identity), f), col.a * (1.0 - f));
     }
     return col;
 }

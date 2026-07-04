@@ -70,6 +70,16 @@ impl ParticleBlend {
             }
         }
     }
+
+    /// The RGB value a fully-fogged particle fades toward — the blend mode's no-op
+    /// identity. Multiply's identity is white (stop darkening); every other mode's is
+    /// zero (fade to nothing). Fed to the shader as the `fog_identity` override.
+    fn fog_identity(self) -> f64 {
+        match self {
+            ParticleBlend::Multiply => 1.0,
+            _ => 0.0,
+        }
+    }
 }
 
 /// Per-particle GPU data: camera-relative position + spin, size, tint, and the
@@ -215,7 +225,10 @@ impl Particles {
             immediate_size: 0,
         });
 
-        let make_pipeline = |label: &str, blend: wgpu::BlendState| {
+        let make_pipeline = |label: &str, blend: wgpu::BlendState, fog_identity: f64| {
+            // Per-pipeline fog identity (see ParticleBlend::fog_identity) via a WGSL
+            // override constant on the fragment stage.
+            let fs_consts = [("fog_identity", fog_identity)];
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -239,7 +252,10 @@ impl Particles {
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some("fs"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &fs_consts,
+                        ..Default::default()
+                    },
                     targets: &[Some(wgpu::ColorTargetState {
                         format: gpu.surface_format(),
                         blend: Some(blend),
@@ -253,7 +269,7 @@ impl Particles {
         // One pipeline per blend mode, in discriminant order (indexed by `blend as usize`).
         let pipelines: Vec<wgpu::RenderPipeline> = ParticleBlend::ALL
             .iter()
-            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state()))
+            .map(|b| make_pipeline(&format!("particles-{b:?}"), b.state(), b.fog_identity()))
             .collect();
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
