@@ -30,6 +30,18 @@ struct InstallJob {
     frac: f32,
 }
 
+/// A create/upgrade running off the UI thread (it shells out to the editor's headless
+/// --new / --migrate, which can be slow on a big project — so it must not block repaint).
+enum ProcOutcome {
+    Created(Project),
+    Upgraded(usize),
+    Failed(String),
+}
+struct ProcJob {
+    rx: Receiver<ProcOutcome>,
+    label: String,
+}
+
 /// A pending "create project" form.
 #[derive(Default)]
 struct NewProjectForm {
@@ -50,7 +62,12 @@ pub struct HubApp {
     token: String,
     new_project: Option<NewProjectForm>,
     add_path: String,
+    proc: Option<ProcJob>,
     toast: Option<(String, bool)>,
+    /// Toast auto-expiry: the message shown last frame + the time it first appeared, so a
+    /// new toast resets the timer without threading a clock through every set-site.
+    toast_seen: Option<String>,
+    toast_at: f64,
 }
 
 impl HubApp {
@@ -69,7 +86,10 @@ impl HubApp {
             token,
             new_project: None,
             add_path: String::new(),
+            proc: None,
             toast: None,
+            toast_seen: None,
+            toast_at: 0.0,
         };
         app.refresh_projects();
         app
@@ -93,14 +113,16 @@ impl HubApp {
         }
     }
 
-    /// The install whose version an install list / default resolves to.
+    /// The install a project resolves to. For an explicit version, that exact install; for
+    /// the fallback (no pin), the default if it's VALID, else the newest valid install — a
+    /// corrupt newest install shouldn't shadow an older working one.
     fn install_for(&self, version: Option<&str>) -> Option<&Install> {
         match version {
             Some(v) => self.installs.iter().find(|i| i.version == v),
             None => {
                 let def = self.config.settings.default_version.as_deref();
-                def.and_then(|v| self.installs.iter().find(|i| i.version == v))
-                    .or_else(|| self.installs.last())
+                def.and_then(|v| self.installs.iter().find(|i| i.version == v && i.is_valid()))
+                    .or_else(|| self.installs.iter().rfind(|i| i.is_valid()))
             }
         }
     }
@@ -129,12 +151,17 @@ impl HubApp {
     }
 
     fn poll_manifest(&mut self) {
-        if let ManifestState::Loading(rx) = &self.manifest
-            && let Ok(result) = rx.try_recv()
-        {
-            self.manifest = match result {
-                Ok(m) => ManifestState::Loaded(m),
-                Err(e) => ManifestState::Error(e),
+        use std::sync::mpsc::TryRecvError;
+        if let ManifestState::Loading(rx) = &self.manifest {
+            self.manifest = match rx.try_recv() {
+                Ok(Ok(m)) => ManifestState::Loaded(m),
+                Ok(Err(e)) => ManifestState::Error(e),
+                // The worker died without sending (e.g. a panic) — don't leave the UI stuck
+                // on "fetching…" forever.
+                Err(TryRecvError::Disconnected) => {
+                    ManifestState::Error("the version check stopped unexpectedly".into())
+                }
+                Err(TryRecvError::Empty) => return,
             };
         }
     }
@@ -151,21 +178,30 @@ impl HubApp {
     }
 
     fn poll_install(&mut self) {
+        use std::sync::mpsc::TryRecvError;
         let Some(job) = &mut self.job else { return };
         let mut finished = None;
-        while let Ok(p) = job.rx.try_recv() {
-            match p {
-                install::Progress::Downloading { done, total } => {
+        loop {
+            match job.rx.try_recv() {
+                Ok(install::Progress::Downloading { done, total }) => {
                     job.frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
                     job.line = format!("downloading {:.0}%", job.frac * 100.0);
                 }
-                install::Progress::Verifying => job.line = "verifying checksum…".into(),
-                install::Progress::Unpacking => job.line = "unpacking…".into(),
-                install::Progress::Done(dir) => {
+                Ok(install::Progress::Verifying) => job.line = "verifying checksum…".into(),
+                Ok(install::Progress::Unpacking) => job.line = "unpacking…".into(),
+                Ok(install::Progress::Done(dir)) => {
                     log::info!("installed to {}", dir.display());
                     finished = Some(Ok(()));
                 }
-                install::Progress::Failed(e) => finished = Some(Err(e)),
+                Ok(install::Progress::Failed(e)) => finished = Some(Err(e)),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    // Worker gone (e.g. a panic) without a terminal message — don't wedge.
+                    if finished.is_none() {
+                        finished = Some(Err("the install stopped unexpectedly".into()));
+                    }
+                    break;
+                }
             }
         }
         if let Some(res) = finished {
@@ -187,36 +223,75 @@ impl HubApp {
 
     // ---- project operations ------------------------------------------------
 
-    /// Scaffold a new project by shelling out to the editor's headless `--new`, then
-    /// register it. Blocks briefly (the scaffold is fast + windowless).
-    fn create_project(&mut self, form: &NewProjectForm) -> Result<Project, String> {
-        let name = form.name.trim();
+    /// Poll the create/upgrade worker and apply its result once.
+    fn poll_proc(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(job) = &self.proc else { return };
+        let outcome = match job.rx.try_recv() {
+            Ok(o) => o,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => ProcOutcome::Failed("the operation stopped unexpectedly".into()),
+        };
+        self.proc = None;
+        match outcome {
+            ProcOutcome::Created(p) => {
+                self.toast = Some((format!("created {}", p.name), false));
+                self.config.upsert_project(p);
+                self.save();
+            }
+            ProcOutcome::Upgraded(idx) => {
+                if let Some(p) = self.config.projects.get_mut(idx) {
+                    p.refresh();
+                }
+                self.save();
+                self.toast = Some(("project upgraded".into(), false));
+            }
+            ProcOutcome::Failed(e) => self.toast = Some((e, true)),
+        }
+    }
+
+    /// Validate + start a "create project" (editor `--new`) on a worker thread; returns
+    /// true when a job was started (so the form can close), false on a validation error
+    /// (the form stays open with a toast).
+    fn start_create(&mut self, form: &NewProjectForm) -> bool {
+        let name = form.name.trim().to_string();
         if name.is_empty() {
-            return Err("give the project a name".into());
+            self.toast = Some(("give the project a name".into(), true));
+            return false;
         }
         if form.location.trim().is_empty() {
-            return Err("choose a location".into());
+            self.toast = Some(("choose a location".into(), true));
+            return false;
         }
-        let install = self
-            .install_for(Some(&form.version))
-            .or_else(|| self.install_for(None))
-            .ok_or("install an engine version first (Installs tab)")?;
-        let path = PathBuf::from(form.location.trim()).join(name);
+        let install = match self.install_for(Some(&form.version)).or_else(|| self.install_for(None)) {
+            Some(i) => i.clone(),
+            None => {
+                self.toast = Some(("install an engine version first (Installs tab)".into(), true));
+                return false;
+            }
+        };
+        let path = PathBuf::from(form.location.trim()).join(&name);
         if path.exists() {
-            return Err(format!("{} already exists", path.display()));
+            self.toast = Some((format!("{} already exists", path.display()), true));
+            return false;
         }
-        let status = std::process::Command::new(install.editor_bin())
-            .arg("--new")
-            .arg(&path)
-            .status()
-            .map_err(|e| format!("run editor --new: {e}"))?;
-        if !status.success() {
-            return Err("the editor could not scaffold the project".into());
-        }
-        let mut project =
-            Project { name: name.to_string(), path, engine_version: None, last_opened: None };
-        project.refresh();
-        Ok(project)
+        let bin = install.editor_bin();
+        let label = format!("creating {name}…");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = match std::process::Command::new(&bin).arg("--new").arg(&path).status() {
+                Ok(s) if s.success() => {
+                    let mut p = Project { name, path, engine_version: None, last_opened: None };
+                    p.refresh();
+                    ProcOutcome::Created(p)
+                }
+                Ok(_) => ProcOutcome::Failed("the editor could not scaffold the project".into()),
+                Err(e) => ProcOutcome::Failed(format!("run editor --new: {e}")),
+            };
+            let _ = tx.send(out);
+        });
+        self.proc = Some(ProcJob { rx, label });
+        true
     }
 
     fn add_existing(&mut self, raw: &str) -> Result<Project, String> {
@@ -249,27 +324,28 @@ impl HubApp {
             .cloned()
     }
 
-    /// Re-point a project to a newer installed engine: run that engine's headless
-    /// `--migrate` (which re-serializes assets + stamps engine_version), then refresh the
-    /// cached version. The migration is the engine's job — the Hub just drives it.
-    fn upgrade_project(&mut self, idx: usize, target: &Install) {
-        let Some(project) = self.config.projects.get(idx).cloned() else { return };
-        let name = project.name.clone();
-        let result = std::process::Command::new(target.editor_bin())
-            .arg("--migrate")
-            .arg(&project.path)
-            .status();
-        match result {
-            Ok(s) if s.success() => {
-                if let Some(p) = self.config.projects.get_mut(idx) {
-                    p.refresh();
-                }
-                self.save();
-                self.toast = Some((format!("{name} upgraded to {}", target.version), false));
-            }
-            Ok(_) => self.toast = Some(("migration exited with an error".into(), true)),
-            Err(e) => self.toast = Some((format!("upgrade failed: {e}"), true)),
+    /// Re-point a project to a newer installed engine on a worker thread: run that engine's
+    /// headless `--migrate` (re-serializes assets + stamps engine_version), then refresh the
+    /// cached version in poll_proc. The migration is the engine's job — the Hub drives it.
+    fn start_upgrade(&mut self, idx: usize, target: &Install) {
+        if !target.is_valid() {
+            self.toast = Some((format!("engine {} is missing its binary", target.version), true));
+            return;
         }
+        let Some(project) = self.config.projects.get(idx).cloned() else { return };
+        let bin = target.editor_bin();
+        let path = project.path.clone();
+        let label = format!("upgrading {} to {}…", project.name, target.version);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = match std::process::Command::new(&bin).arg("--migrate").arg(&path).status() {
+                Ok(s) if s.success() => ProcOutcome::Upgraded(idx),
+                Ok(_) => ProcOutcome::Failed("migration exited with an error".into()),
+                Err(e) => ProcOutcome::Failed(format!("upgrade failed: {e}")),
+            };
+            let _ = tx.send(out);
+        });
+        self.proc = Some(ProcJob { rx, label });
     }
 
     fn launch_project(&mut self, idx: usize) {
@@ -299,7 +375,25 @@ impl eframe::App for HubApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_manifest();
         self.poll_install();
-        if self.job.is_some() || matches!(self.manifest, ManifestState::Loading(_)) {
+        self.poll_proc();
+        // Auto-expire a toast ~6s after it appears (detect a new message by its text, so
+        // the ~10 set-sites don't each need a clock).
+        let now = ctx.input(|i| i.time);
+        let cur = self.toast.as_ref().map(|(m, _)| m.clone());
+        if cur != self.toast_seen {
+            self.toast_seen = cur;
+            self.toast_at = now;
+        }
+        if self.toast.is_some() && now - self.toast_at > 6.0 {
+            self.toast = None;
+            self.toast_seen = None;
+        }
+        // Keep repainting while anything is in flight (or a toast is counting down).
+        if self.job.is_some()
+            || self.proc.is_some()
+            || self.toast.is_some()
+            || matches!(self.manifest, ManifestState::Loading(_))
+        {
             ctx.request_repaint();
         }
     }
@@ -318,10 +412,20 @@ impl eframe::App for HubApp {
         });
 
         if let Some((msg, is_err)) = self.toast.clone() {
+            let mut dismiss = false;
             egui::Panel::bottom("toast").show(ui, |ui| {
-                let color = if is_err { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN };
-                ui.colored_label(color, msg);
+                ui.horizontal(|ui| {
+                    if ui.small_button("✕").clicked() {
+                        dismiss = true;
+                    }
+                    let color = if is_err { egui::Color32::LIGHT_RED } else { egui::Color32::LIGHT_GREEN };
+                    ui.colored_label(color, msg);
+                });
             });
+            if dismiss {
+                self.toast = None;
+                self.toast_seen = None;
+            }
         }
 
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
@@ -335,9 +439,17 @@ impl eframe::App for HubApp {
 impl HubApp {
     fn projects_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        // A running create/upgrade (off-thread).
+        if let Some(job) = &self.proc {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(&job.label);
+            });
+        }
+        let busy = self.proc.is_some();
         // New / add controls.
         ui.horizontal(|ui| {
-            if ui.button("＋ New project").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("＋ New project")).clicked() {
                 let version = self
                     .config
                     .settings
@@ -384,16 +496,8 @@ impl HubApp {
                         });
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("Create").clicked() {
-                        match self.create_project(&form) {
-                            Ok(p) => {
-                                self.toast = Some((format!("created {}", p.name), false));
-                                self.config.upsert_project(p);
-                                self.save();
-                                keep = false;
-                            }
-                            Err(e) => self.toast = Some((e, true)),
-                        }
+                    if ui.add_enabled(!busy, egui::Button::new("Create")).clicked() && self.start_create(&form) {
+                        keep = false;
                     }
                     if ui.button("Cancel").clicked() {
                         keep = false;
@@ -449,7 +553,7 @@ impl HubApp {
                             if let Some(target) = &upgrades[idx]
                                 && p.exists()
                                 && ui
-                                    .button(format!("⬆ {}", target.version))
+                                    .add_enabled(!busy, egui::Button::new(format!("⬆ {}", target.version)))
                                     .on_hover_text("migrate this project to the newer installed engine")
                                     .clicked()
                             {
@@ -464,7 +568,7 @@ impl HubApp {
             self.launch_project(idx);
         }
         if let Some((idx, target)) = upgrade {
-            self.upgrade_project(idx, &target);
+            self.start_upgrade(idx, &target);
         }
         if let Some(idx) = remove {
             let path = self.config.projects[idx].path.clone();
@@ -515,7 +619,8 @@ impl HubApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.strong("Available");
-            if ui.button("↻ Check for versions").clicked() {
+            let loading = matches!(self.manifest, ManifestState::Loading(_));
+            if ui.add_enabled(!loading, egui::Button::new("↻ Check for versions")).clicked() {
                 self.start_manifest_fetch();
             }
             ui.label(format!("channel: {}", self.config.settings.channel));

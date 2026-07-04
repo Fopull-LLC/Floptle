@@ -65,15 +65,25 @@ pub fn editor_bin_name() -> &'static str {
 }
 
 /// Scan `versions/` for installed bundles — one per subdirectory named by its version.
-/// Sorted by [`crate::releases::version_key`] so newest sorts last.
+/// Skips hidden/staging dirs (`.staging-*`) and stray non-version dirs (a real install's
+/// dir is version-named or carries a `version.json`). A genuinely-broken install (missing
+/// binary) is still listed so the UI can flag it and offer Uninstall. Sorted by
+/// [`crate::releases::version_key`] so newest sorts last.
 pub fn scan_installs(versions_dir: &Path) -> Vec<Install> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(versions_dir) {
         for e in rd.flatten() {
-            if e.path().is_dir()
-                && let Some(name) = e.file_name().to_str().map(String::from)
-            {
-                out.push(Install { version: name, path: e.path() });
+            let path = e.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = e.file_name().to_str().map(String::from) else { continue };
+            if name.starts_with('.') {
+                continue;
+            }
+            let looks_versioned = name.chars().next().is_some_and(|c| c.is_ascii_digit());
+            if looks_versioned || path.join("version.json").is_file() {
+                out.push(Install { version: name, path });
             }
         }
     }
