@@ -20,7 +20,7 @@ use floptle_scene::{
     VfxShapeDoc, VfxValueDoc, VFX_EXT,
 };
 use floptle_vfx::{
-    BillboardOrient, Blend, Burst, Clip, CompiledEffect, Curve, EffectInstance, EmitShape,
+    BillboardOrient, Blend, Clip, CompiledEffect, Curve, EffectInstance, Emit, EmitShape,
     EndBehavior, Extrapolate, FlipMode, Flipbook, Force, Interp, Key, Lane, LaneTarget, Look,
     ParticleEffect, Playback, RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
 };
@@ -499,14 +499,22 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         lit: false,
         cast_shadows: false,
         space: floptle_scene::VfxSpaceDoc::Local,
-        clips: vec![floptle_scene::VfxClipDoc { start: 0.0, end: 2.0 }],
-        bursts: Vec::new(),
+        // A continuous stream over the whole 1 s loop; each particle lives the clip's
+        // length (1 s), so it loops seamlessly. Deprecated track-level fields stay at
+        // their defaults (not serialized).
+        clips: vec![floptle_scene::VfxClipDoc {
+            start: 0.0,
+            end: 1.0,
+            lifetime_jitter: 0.4,
+            emit: Some(floptle_scene::VfxEmitDoc::Rate { rate: 40.0 }),
+        }],
         automation: Vec::new(),
-        rate: 40.0,
         shape: VfxShapeDoc::Cone { angle: 25.0, radius: 0.1 },
-        particle_lifetime: 1.0,
-        lifetime_jitter: 0.4,
         max_alive: None,
+        bursts: Vec::new(),
+        rate: 10.0,
+        particle_lifetime: 1.0,
+        lifetime_jitter: 0.0,
         velocity: VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 3.0, 0.0])),
         size: VfxPropDoc::Curve(VfxCurveDoc {
             keys: vec![
@@ -530,7 +538,8 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
     }];
     VfxEffectDoc {
         name: name.into(),
-        lifetime: 2.0,
+        // Loop length matches the clip so the continuous fountain wraps seamlessly.
+        lifetime: 1.0,
         playback: VfxPlaybackDoc::Looping,
         end: Default::default(),
         tracks,
@@ -574,6 +583,42 @@ pub(crate) fn curve_from_doc(c: &VfxCurveDoc) -> Curve {
             floptle_scene::VfxExtrapolateDoc::Repeat => Extrapolate::Repeat,
         },
     }
+}
+
+/// A clip's emission mode from its doc form; `fallback_rate` covers an unmigrated legacy
+/// clip (`emit == None`) — normally `migrate_clips` has already filled it on load.
+fn emit_from_doc(e: Option<floptle_scene::VfxEmitDoc>, fallback_rate: f32) -> Emit {
+    match e {
+        Some(floptle_scene::VfxEmitDoc::Rate { rate }) => Emit::Rate { rate },
+        Some(floptle_scene::VfxEmitDoc::Burst { count, count_jitter, pulses, interval, interval_jitter }) => {
+            Emit::Burst { count, count_jitter, pulses, interval, interval_jitter }
+        }
+        None => Emit::Rate { rate: fallback_rate },
+    }
+}
+
+/// Build the runtime clips for a track. Also folds any legacy `bursts` still on the doc
+/// into single-pulse burst clips (defensive — `migrate_clips` normally does this on load).
+fn clips_from_doc(t: &floptle_scene::VfxTrackDoc) -> Vec<Clip> {
+    let mut clips: Vec<Clip> = t
+        .clips
+        .iter()
+        .map(|c| Clip {
+            start: c.start,
+            end: c.end,
+            lifetime_jitter: c.lifetime_jitter,
+            emit: emit_from_doc(c.emit, t.rate),
+        })
+        .collect();
+    for b in &t.bursts {
+        clips.push(Clip {
+            start: b.t,
+            end: b.t + t.particle_lifetime.max(1e-3),
+            lifetime_jitter: t.lifetime_jitter,
+            emit: Emit::Burst { count: b.count, count_jitter: 0.0, pulses: 1, interval: 0.0, interval_jitter: 0.0 },
+        });
+    }
+    clips
 }
 
 fn prop_from_doc(p: &VfxPropDoc) -> ValueOrCurve {
@@ -637,8 +682,7 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     floptle_scene::VfxSpaceDoc::Local => Space::Local,
                     floptle_scene::VfxSpaceDoc::World => Space::World,
                 },
-                clips: t.clips.iter().map(|c| Clip { start: c.start, end: c.end }).collect(),
-                bursts: t.bursts.iter().map(|b| Burst { t: b.t, count: b.count }).collect(),
+                clips: clips_from_doc(t),
                 automation: t
                     .automation
                     .iter()
@@ -655,7 +699,6 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                         curve: curve_from_doc(&l.curve),
                     })
                     .collect(),
-                rate: t.rate,
                 shape: match t.shape {
                     VfxShapeDoc::Point => EmitShape::Point,
                     VfxShapeDoc::Cone { angle, radius } => EmitShape::Cone { angle, radius },
@@ -663,8 +706,6 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                     VfxShapeDoc::Edge { length } => EmitShape::Edge { length },
                     VfxShapeDoc::Ring { radius } => EmitShape::Ring { radius },
                 },
-                particle_lifetime: t.particle_lifetime,
-                lifetime_jitter: t.lifetime_jitter,
                 max_alive: t.max_alive,
                 velocity: prop_from_doc(&t.velocity),
                 size: prop_from_doc(&t.size),
