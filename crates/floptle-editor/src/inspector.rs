@@ -247,6 +247,7 @@ impl EditorTabViewer<'_> {
         }
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
+        let bone_names = self.bone_names;
         match primary {
             Some(e) if world.get::<Light>(e).is_some() => {
                 if let Some(l) = world.get_mut::<Light>(e) {
@@ -1046,6 +1047,90 @@ impl EditorTabViewer<'_> {
 
                 // ===== Animation Controller (when attached) =====
                 anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
+
+                // ===== 🦴 Bone attachment (node parented to a rigged mesh) =====
+                if let Some(floptle_core::Parent(mesh)) = world.get::<floptle_core::Parent>(e).copied()
+                    && let Some(bones) = bone_names.get(&mesh)
+                {
+                    ui.separator();
+                    ui.strong("🦴 Bone attachment");
+                    ui.small("ride a bone / part of the parent model (a weapon on a hand)");
+                    let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
+                    egui::ComboBox::from_id_salt("bone_attach_pick")
+                        .selected_text(cur.clone().unwrap_or_else(|| "(not attached)".into()))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(cur.is_none(), "(not attached)").clicked()
+                                && cur.is_some()
+                            {
+                                world.remove::<floptle_core::BoneAttach>(e);
+                                cmd.inspector_changed = true;
+                            }
+                            for (name, _parent) in bones {
+                                let sel = cur.as_deref() == Some(name.as_str());
+                                if ui.selectable_label(sel, name).clicked() && !sel {
+                                    // Attach snapping the node to the bone (offset kept if
+                                    // re-picking, else identity — then nudge it below).
+                                    let offset = world
+                                        .get::<floptle_core::BoneAttach>(e)
+                                        .map(|a| a.offset)
+                                        .unwrap_or(floptle_core::transform::Transform::IDENTITY);
+                                    world.insert(
+                                        e,
+                                        floptle_core::BoneAttach { target: mesh, bone: name.clone(), offset },
+                                    );
+                                    cmd.inspector_changed = true;
+                                }
+                            }
+                        });
+                    // Offset editor + detach (only when attached) — position the node on
+                    // the bone relative to it.
+                    if let Some(a) = world.get::<floptle_core::BoneAttach>(e).cloned() {
+                        let mut off = a.offset;
+                        let mut ch = false;
+                        ui.horizontal(|ui| {
+                            ui.label("pos");
+                            ch |= ui.add(egui::DragValue::new(&mut off.translation.x).speed(0.01).prefix("x ")).changed();
+                            ch |= ui.add(egui::DragValue::new(&mut off.translation.y).speed(0.01).prefix("y ")).changed();
+                            ch |= ui.add(egui::DragValue::new(&mut off.translation.z).speed(0.01).prefix("z ")).changed();
+                        });
+                        let (ey, ex, ez) = off.rotation.to_euler(EulerRot::YXZ);
+                        let mut deg = [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()];
+                        ui.horizontal(|ui| {
+                            ui.label("rot°");
+                            let mut rc = false;
+                            rc |= ui.add(egui::DragValue::new(&mut deg[0]).speed(0.5).prefix("x ")).changed();
+                            rc |= ui.add(egui::DragValue::new(&mut deg[1]).speed(0.5).prefix("y ")).changed();
+                            rc |= ui.add(egui::DragValue::new(&mut deg[2]).speed(0.5).prefix("z ")).changed();
+                            if rc {
+                                off.rotation = Quat::from_euler(
+                                    EulerRot::YXZ,
+                                    deg[1].to_radians(),
+                                    deg[0].to_radians(),
+                                    deg[2].to_radians(),
+                                );
+                                ch = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("scale");
+                            let mut s = off.scale.x;
+                            if ui.add(egui::DragValue::new(&mut s).speed(0.01).range(0.001..=100.0)).changed() {
+                                off.scale = floptle_core::math::Vec3::splat(s);
+                                ch = true;
+                            }
+                            if ui.button("🗑 detach").clicked() {
+                                world.remove::<floptle_core::BoneAttach>(e);
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                        if ch {
+                            if let Some(at) = world.get_mut::<floptle_core::BoneAttach>(e) {
+                                at.offset = off;
+                            }
+                            cmd.inspector_changed = true;
+                        }
+                    }
+                }
 
                 // ===== ➕ Add Component (searchable, icon'd) =====
                 ui.separator();

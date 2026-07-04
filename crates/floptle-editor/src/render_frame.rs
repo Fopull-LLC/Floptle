@@ -822,6 +822,23 @@ impl Editor {
         let old_retro_h = self.project.retro_height;
         let ppp = ctx.pixels_per_point();
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
+        // Bone names per rigged Mesh entity (name + parent index) — for the hierarchy's
+        // expandable sub-objects and the inspector's bone-attach picker. Built read-only
+        // before the borrow split so the UI never touches the mesh registry itself.
+        let bone_names: HashMap<Entity, Vec<(String, Option<usize>)>> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Mesh { asset_path } => self
+                    .mesh_registry
+                    .get(asset_path)
+                    .and_then(|a| a.rig.as_ref())
+                    .map(|rig| {
+                        (e, rig.skeleton.nodes.iter().map(|n| (n.name.clone(), n.parent)).collect())
+                    }),
+                _ => None,
+            })
+            .collect();
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
         let selection = &mut self.selection;
@@ -1036,6 +1053,7 @@ impl Editor {
                 selection,
                 fullscreen_tab,
                 collapsed,
+                bone_names: &bone_names,
                 console,
                 preview: preview_view.clone(),
                 preview_zoom,

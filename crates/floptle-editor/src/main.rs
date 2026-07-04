@@ -314,6 +314,9 @@ struct EditorTabViewer<'a> {
     fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
+    /// Per rigged-Mesh entity: its skeleton bones (name + parent index), for the
+    /// hierarchy's expandable sub-objects + the inspector bone-attach picker.
+    bone_names: &'a HashMap<Entity, Vec<(String, Option<usize>)>>,
     /// The engine Console (script logs / warnings / errors).
     console: &'a mut ConsoleState,
     /// The Inspector asset preview to draw (model/material render or texture image).

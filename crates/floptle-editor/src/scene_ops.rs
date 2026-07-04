@@ -129,6 +129,7 @@ impl Editor {
             anim_controller,
             particles,
             parent: None,
+            attachment: None, // captured/restored by save-load (to_doc/from_doc), not the clipboard
         })
     }
 
@@ -195,6 +196,7 @@ impl Editor {
             anim_controller: None,
             particles: None,
             parent: None,
+            attachment: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -230,6 +232,7 @@ impl Editor {
                 anim_controller: None,
                 particles: None,
                 parent: None,
+                attachment: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);
@@ -336,6 +339,9 @@ impl Editor {
             }
         self.record();
         let world = floptle_core::world_transform(&self.world, child);
+        // Moving a node in the hierarchy detaches it from any bone (else BoneAttach's
+        // target would diverge from the new Parent and resolve the wrong mesh).
+        self.world.remove::<floptle_core::BoneAttach>(child);
         match parent {
             Some(p) => self.world.insert(child, floptle_core::Parent(p)),
             None => {
