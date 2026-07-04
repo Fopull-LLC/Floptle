@@ -106,6 +106,25 @@ impl Retro {
     /// Rebuild the target at a new internal height and/or window aspect.
     pub fn resize(&mut self, gpu: &Gpu, internal_height: u32) {
         let (color_view, depth_view, width, height) = make_targets(gpu, internal_height);
+        self.rebind(gpu, color_view, depth_view, width, height);
+    }
+
+    /// Rebuild the target at an explicit `width × height` — for an offscreen viewport
+    /// whose aspect differs from the window (e.g. a docked/split Game tab that wants the
+    /// same retro look as fullscreen but at its own panel aspect).
+    pub fn resize_to(&mut self, gpu: &Gpu, width: u32, height: u32) {
+        let (color_view, depth_view, width, height) = make_targets_wh(gpu, width.max(1), height.max(1));
+        self.rebind(gpu, color_view, depth_view, width, height);
+    }
+
+    fn rebind(
+        &mut self,
+        gpu: &Gpu,
+        color_view: wgpu::TextureView,
+        depth_view: wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
         self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, &self.sampler);
         self.color_view = color_view;
         self.depth_view = depth_view;
@@ -173,7 +192,15 @@ fn make_targets(
     let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
     let height = internal_height.max(1);
     let width = ((height as f32 * aspect).round() as u32).max(1);
+    make_targets_wh(gpu, width, height)
+}
 
+/// Build the color + depth targets at an explicit pixel size.
+fn make_targets_wh(
+    gpu: &Gpu,
+    width: u32,
+    height: u32,
+) -> (wgpu::TextureView, wgpu::TextureView, u32, u32) {
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("retro-color"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },

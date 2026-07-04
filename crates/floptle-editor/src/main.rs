@@ -709,6 +709,10 @@ struct Editor {
     /// The split Game viewport's own PostStack (sized with `game_vp`), so the scene's
     /// PostProcess node applies there exactly like in the full-window view.
     game_post: Option<floptle_render::PostStack>,
+    /// The docked/split Game viewport's own retro pass, sized to the panel's aspect (the
+    /// shared `retro` is sized to the window). Lets a docked Game tab pixelate + dither
+    /// exactly like the fullscreen view instead of rendering crisp.
+    game_retro: Option<Retro>,
     /// The Game tab's screen rect (points), captured each frame it draws, used to size
     /// `game_vp` on the next frame.
     game_rect: Option<egui::Rect>,

@@ -23,7 +23,58 @@ use std::path::Path;
 use crate::assets::{is_material, is_model, is_texture};
 use crate::dock::{EditorTab, game_tab_active, scene_and_game_split};
 use crate::shading::{material_params, post_process_uniforms};
-use crate::{Editor, PreviewTarget, PreviewView, scene_hit};
+use crate::{Editor, Egui, PreviewTarget, PreviewView, scene_hit};
+
+/// Create a `w×h` offscreen color+depth target the scene renders into, and register its
+/// color with egui so a tab/inspector can draw it as an `Image`.
+///
+/// The color texture is the sRGB **surface** format, so the raster/raymarch/post
+/// pipelines (all built against `surface_format()`) render into it unchanged and the
+/// render-target view stays sRGB. But egui is handed a NON-sRGB *view* of the same
+/// texture: egui-wgpu treats a sampled native texture as already gamma-encoded and
+/// decodes it once in its shader, so sampling through an sRGB-format view would decode a
+/// SECOND time (hardware sRGB→linear) and display the offscreen view ~40% too dark
+/// (`srgb_to_linear` applied twice). A linear view makes egui sample the stored bytes
+/// verbatim, so the docked Game view / camera POV / asset preview match the surface. On a
+/// non-sRGB surface `remove_srgb_suffix()` is a no-op, so this stays correct there too.
+fn make_offscreen_target(gpu: &Gpu, egui: &mut Egui, w: u32, h: u32, label: &str) -> PreviewTarget {
+    let (w, h) = (w.max(1), h.max(1));
+    let srgb = gpu.surface_format();
+    let linear = srgb.remove_srgb_suffix();
+    let view_formats: &[wgpu::TextureFormat] = if linear != srgb { &[linear] } else { &[] };
+    let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: srgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats,
+    });
+    // sRGB view = render target (pipeline unchanged); linear view = what egui samples.
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let egui_view = color.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(linear),
+        ..Default::default()
+    });
+    let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: Gpu::DEPTH_FORMAT,
+        // TEXTURE_BINDING so a viewport's SSAO pass can sample this depth (harmless for
+        // the previews that never do).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    let tex_id =
+        egui.renderer.register_native_texture(&gpu.device, &egui_view, wgpu::FilterMode::Linear);
+    PreviewTarget { color_view, depth_view, tex_id }
+}
 
 impl Editor {
     // ---- asset preview (Inspector) ------------------------------------------
@@ -34,30 +85,7 @@ impl Editor {
             return;
         }
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
-        let size = 320u32;
-        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
-            gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: fmt,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let color = make(
-            gpu.surface_format(),
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            "preview-color",
-        );
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "preview-depth");
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex_id =
-            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
-        self.preview = Some(PreviewTarget { color_view, depth_view, tex_id });
+        self.preview = Some(make_offscreen_target(gpu, egui, 320, 320, "preview"));
     }
 
     /// (Re)load a selected texture asset into an egui texture handle for preview.
@@ -209,30 +237,7 @@ impl Editor {
             return;
         }
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
-        let (w, h) = (320u32, 180u32);
-        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
-            gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: fmt,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let color = make(
-            gpu.surface_format(),
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            "cam-preview-color",
-        );
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = make(Gpu::DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT, "cam-preview-depth");
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex_id =
-            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
-        self.cam_preview = Some(PreviewTarget { color_view, depth_view, tex_id });
+        self.cam_preview = Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview"));
     }
 
     /// Each frame: if a single Camera node is selected, render the scene from its POV
@@ -271,34 +276,7 @@ impl Editor {
         if let Some(old) = self.game_vp.take() {
             egui.renderer.free_texture(&old.tex_id);
         }
-        let make = |fmt: wgpu::TextureFormat, usage: wgpu::TextureUsages, label| {
-            gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: fmt,
-                usage,
-                view_formats: &[],
-            })
-        };
-        let color = make(
-            gpu.surface_format(),
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            "game-vp-color",
-        );
-        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        // TEXTURE_BINDING so the viewport's SSAO pass can sample its depth.
-        let depth = make(
-            Gpu::DEPTH_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            "game-vp-depth",
-        );
-        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let tex_id =
-            egui.renderer.register_native_texture(&gpu.device, &color_view, wgpu::FilterMode::Linear);
-        self.game_vp = Some(PreviewTarget { color_view, depth_view, tex_id });
+        self.game_vp = Some(make_offscreen_target(gpu, egui, w, h, "game-vp"));
         self.game_vp_dims = (w, h);
         // The viewport's own post chain, sized to match.
         match self.game_post.as_mut() {
@@ -351,24 +329,76 @@ impl Editor {
         else {
             return;
         };
-        // The scene's PostProcess node applies here too: render into the viewport's
-        // own PostStack input, then run the chain (SSAO reads this viewport's depth)
-        // into the egui-registered color target.
         let (post_settings, _) = post_process_uniforms(&self.world);
-        if post_settings.any() && self.game_post.is_some() {
-            let input = self.game_post.as_ref().map(|p| p.input_view().clone()).unwrap();
-            self.render_world_into(&input, &dv, &cam, aspect, elapsed);
-            if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
-                let proj = cam.proj_matrix(aspect);
-                let ssao_frame = floptle_render::SsaoFrame {
-                    depth: &dv,
-                    proj: proj.to_cols_array_2d(),
-                    inv_proj: proj.inverse().to_cols_array_2d(),
-                };
-                post.run(gpu, &post_settings, Some(&ssao_frame), &cv);
-            }
+        let post_on = post_settings.any();
+        let retro_on = self.project.retro;
+
+        // Composited resolution: the retro internal res in retro mode (so post/AO/dither
+        // land on the same chunky pixel grid as the fullscreen view, THEN upscale), else
+        // the panel res. This mirrors the surface path so a docked/split Game tab looks
+        // identical to fullscreen instead of rendering crisp + unprocessed.
+        let (cw, ch) = if retro_on {
+            let rh = self.project.retro_height.max(80);
+            (((rh as f32 * aspect).round() as u32).max(1), rh)
         } else {
-            self.render_world_into(&cv, &dv, &cam, aspect, elapsed);
+            (w, h)
+        };
+        if let Some(gpu) = self.gpu.as_ref() {
+            // The game's own retro pass, sized to the PANEL aspect (the shared `retro` is
+            // window-sized, and same-frame reuse would fight the surface render).
+            if retro_on {
+                match self.game_retro.as_mut() {
+                    Some(r) if r.resolution() == (cw, ch) => {}
+                    Some(r) => r.resize_to(gpu, cw, ch),
+                    None => {
+                        let mut r = floptle_render::Retro::new(gpu, ch);
+                        r.resize_to(gpu, cw, ch);
+                        self.game_retro = Some(r);
+                    }
+                }
+            }
+            if post_on && let Some(post) = self.game_post.as_mut() {
+                post.configure(gpu, cw, ch, retro_on);
+            }
+        }
+
+        // In retro mode the scene composites at retro res into the retro target (its own
+        // color/depth); post — if any — runs there, then a nearest-neighbor blit upscales
+        // into the egui-registered game_vp color. Non-retro composites straight at panel res.
+        let retro_views =
+            self.game_retro.as_ref().map(|r| (r.color_view().clone(), r.depth_view().clone()));
+        let depth = if retro_on {
+            retro_views.as_ref().map(|(_, d)| d.clone()).unwrap_or_else(|| dv.clone())
+        } else {
+            dv.clone()
+        };
+        let scene_target = if post_on {
+            self.game_post.as_ref().map(|p| p.input_view().clone())
+        } else if retro_on {
+            retro_views.as_ref().map(|(c, _)| c.clone())
+        } else {
+            Some(cv.clone())
+        };
+        let Some(scene_target) = scene_target else { return };
+        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed);
+        // Post composites into the retro color (retro) or the game_vp color (non-retro).
+        if post_on && let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
+            let proj = cam.proj_matrix(aspect);
+            let ssao_frame = floptle_render::SsaoFrame {
+                depth: &depth,
+                proj: proj.to_cols_array_2d(),
+                inv_proj: proj.inverse().to_cols_array_2d(),
+            };
+            let out = if retro_on {
+                retro_views.as_ref().map(|(c, _)| c.clone()).unwrap_or_else(|| cv.clone())
+            } else {
+                cv.clone()
+            };
+            post.run(gpu, &post_settings, Some(&ssao_frame), &out);
+        }
+        // Retro upscale: chunky nearest-neighbor blit of the retro color into game_vp.
+        if retro_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
+            retro.blit_to(gpu, &cv);
         }
     }
 
