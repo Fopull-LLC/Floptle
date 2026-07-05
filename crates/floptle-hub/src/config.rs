@@ -69,6 +69,10 @@ pub struct Settings {
     /// the user isn't retyping a path each time; seeded with [`default_projects_dir`].
     #[serde(default)]
     pub projects_dir: Option<String>,
+    /// The OAuth/OIDC provider the Hub signs into (fopull.com in production; point it at a
+    /// dev instance to test the flow). The account token is only ever sent here.
+    #[serde(default = "default_auth_base_url")]
+    pub auth_base_url: String,
 }
 
 fn default_channel() -> String {
@@ -76,6 +80,9 @@ fn default_channel() -> String {
 }
 fn default_manifest_url() -> String {
     DEFAULT_MANIFEST_URL.to_string()
+}
+fn default_auth_base_url() -> String {
+    "https://fopull.com".to_string()
 }
 
 /// A sensible default parent for new projects: `~/Floptle Projects` (under the user's home),
@@ -96,6 +103,7 @@ impl Default for Settings {
             default_version: None,
             manifest_url: default_manifest_url(),
             projects_dir: None,
+            auth_base_url: default_auth_base_url(),
         }
     }
 }

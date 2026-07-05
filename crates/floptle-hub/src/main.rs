@@ -7,6 +7,7 @@
 //! per-user data dir; the editor is launched as a child process for a chosen project.
 
 mod app;
+mod auth;
 mod config;
 mod install;
 mod launch;
