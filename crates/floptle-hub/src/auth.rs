@@ -196,15 +196,7 @@ impl Provider for HttpProvider {
             // failure while the device code is still valid — back off, don't abort.
             Err(ureq::Error::Status(code, resp)) => {
                 let err = resp.into_json::<OauthError>().map(|e| e.error).unwrap_or_default();
-                Ok(match err.as_str() {
-                    "authorization_pending" => PollOutcome::Pending,
-                    "slow_down" => PollOutcome::SlowDown,
-                    "expired_token" => PollOutcome::Expired,
-                    "access_denied" => PollOutcome::Denied("access_denied".into()),
-                    _ if code >= 500 || code == 429 => PollOutcome::Transient,
-                    "" => PollOutcome::Transient,
-                    other => PollOutcome::Denied(other.into()),
-                })
+                Ok(classify_token_error(code, &err))
             }
             // Transport failure (DNS / reset / timeout): transient, keep polling.
             Err(ureq::Error::Transport(_)) => Ok(PollOutcome::Transient),
@@ -259,6 +251,24 @@ impl Provider for HttpProvider {
             .map_err(|e| format!("could not read your plan: {e}"))?
             .into_json()
             .map_err(|e| format!("unexpected entitlements response: {e}"))
+    }
+}
+
+/// Map a token-endpoint 4xx/5xx result to a poll outcome. Split out so it's unit-testable
+/// against the live provider's real error vocabulary — which, being generic Laravel OAuth
+/// infra, reports an **expired or consumed** `device_code` as `invalid_grant`, not RFC 8628's
+/// `expired_token`. Both mean "this code is no longer usable," so we surface them the same
+/// friendly "try again," never a scary "denied."
+fn classify_token_error(code: u16, err: &str) -> PollOutcome {
+    match err {
+        "authorization_pending" => PollOutcome::Pending,
+        "slow_down" => PollOutcome::SlowDown,
+        "expired_token" | "invalid_grant" => PollOutcome::Expired,
+        "access_denied" => PollOutcome::Denied("access_denied".into()),
+        // A gateway 5xx / rate-limit with a non-OAuth (unparseable) body is transient.
+        _ if code >= 500 || code == 429 => PollOutcome::Transient,
+        "" => PollOutcome::Transient,
+        other => PollOutcome::Denied(other.into()),
     }
 }
 
@@ -488,6 +498,24 @@ mod tests {
     }
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    fn token_error_classification_matches_live_provider() {
+        use PollOutcome::*;
+        assert!(matches!(classify_token_error(400, "authorization_pending"), Pending));
+        assert!(matches!(classify_token_error(400, "slow_down"), SlowDown));
+        assert!(matches!(classify_token_error(400, "expired_token"), Expired));
+        // The live fopull.com provider reports an expired/consumed device_code as
+        // `invalid_grant` — surface it as "expired, try again", not "denied".
+        assert!(matches!(classify_token_error(400, "invalid_grant"), Expired));
+        assert!(matches!(classify_token_error(400, "access_denied"), Denied(_)));
+        // Transient upstream: 5xx / 429 / empty body → keep polling.
+        assert!(matches!(classify_token_error(503, ""), Transient));
+        assert!(matches!(classify_token_error(429, "slow_down"), SlowDown)); // known error wins
+        assert!(matches!(classify_token_error(400, ""), Transient));
+        // A genuinely unknown error is a terminal denial.
+        assert!(matches!(classify_token_error(400, "invalid_client"), Denied(_)));
     }
 
     #[test]
