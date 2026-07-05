@@ -1,12 +1,15 @@
 //! The eframe application: a top tab bar over Projects / Installs / Settings, plus the
 //! background jobs (manifest fetch + install) whose channels are polled each frame.
 
+use crate::auth::{self, Provider, RefreshError, TokenStore};
 use crate::config::{HubConfig, Paths};
 use crate::registry::{self, Install, Project};
 use crate::releases::{GithubReleases, LocalBuilds, Manifest, VersionSource};
 use crate::{install, launch};
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 
 /// Fopull LLC identity + the open-source links surfaced in the About tab.
@@ -43,6 +46,8 @@ mod ico {
     pub const BUG: &str = "🐛";
     pub const BOOK: &str = "📖";
     pub const ROCKET: &str = "🚀";
+    pub const ACCOUNT: &str = "👤";
+    pub const SIGNIN: &str = "🔑";
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,6 +101,46 @@ struct ProcJob {
     label: String,
 }
 
+/// Whether the running auth worker is an interactive sign-in (shows a device-code prompt +
+/// Cancel + a toast) or a silent background token refresh (invisible unless it hard-fails).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    SignIn,
+    Refresh,
+}
+
+/// An account sign-in / token-refresh running off the UI thread — the device flow polls the
+/// provider for up to several minutes, so it must never block repaint. (Sign-out is fire-and-
+/// forget and is NOT tracked here, so it can't wedge the Account panel.)
+enum AuthEvent {
+    /// The provider issued a device code — show it and open the approval page.
+    Prompt { user_code: String, approve_url: String },
+    /// Signed in (or a refresh completed) — the worker already persisted it; just display it.
+    Signed(Box<auth::Session>),
+    /// A refresh hit `invalid_grant` — the session is unrecoverable, sign the user out.
+    SessionExpired,
+    /// A transient/interactive failure. For a silent refresh the session is kept; for an
+    /// interactive sign-in it's surfaced as an error toast.
+    Failed(String),
+}
+struct AuthJob {
+    rx: Receiver<AuthEvent>,
+    /// The device code + approval URL once the provider returns them (shown in the UI while
+    /// polling).
+    prompt: Option<(String, String)>,
+    /// Set to cancel a pending sign-in (the worker's poll loop observes it).
+    cancel: Arc<AtomicBool>,
+    kind: AuthKind,
+}
+
+/// Current unix time in seconds (for token-expiry checks). 0 on the impossible pre-1970 error.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// A pending "create project" form.
 #[derive(Default)]
 struct NewProjectForm {
@@ -122,6 +167,11 @@ pub struct HubApp {
     /// new toast resets the timer without threading a clock through every set-site.
     toast_seen: Option<String>,
     toast_at: f64,
+    /// Signed-in fopull.com account (persisted in the OS keyring) + the running sign-in/refresh
+    /// worker. Workers build their own [`auth::KeyringStore`] so keyring I/O stays off the UI
+    /// thread; only the one-time startup load runs inline.
+    session: Option<auth::Session>,
+    auth_job: Option<AuthJob>,
 }
 
 impl HubApp {
@@ -134,6 +184,9 @@ impl HubApp {
         }
         let installs = registry::scan_installs(&paths.versions_dir());
         let token = std::env::var("FLOPTLE_HUB_TOKEN").unwrap_or_default();
+        // Restore a previously signed-in account from the OS keyring (one-time, before the
+        // window is interactive).
+        let session = auth::KeyringStore::default().load();
         let mut app = Self {
             paths,
             config,
@@ -148,11 +201,15 @@ impl HubApp {
             toast: None,
             toast_seen: None,
             toast_at: 0.0,
+            session,
+            auth_job: None,
         };
         app.refresh_projects();
         // Fetch the available-versions list up front so the Installs tab is populated without
         // a manual click (best-effort — an offline start just shows an error there).
         app.start_manifest_fetch();
+        // Proactively refresh a restored session whose access token is near expiry.
+        app.refresh_session_if_stale();
         app
     }
 
@@ -190,6 +247,260 @@ impl HubApp {
 
     fn token_opt(&self) -> Option<&str> {
         (!self.token.trim().is_empty()).then_some(self.token.trim())
+    }
+
+    // ---- account (fopull.com sign-in) --------------------------------------
+
+    /// Start the OAuth device flow on a worker thread: PKCE, `/oauth/device`, show the code and
+    /// open the approval page, poll `/oauth/token` (cancellable, with the code's deadline),
+    /// then fetch identity into a [`auth::Session`] and persist it — all off the UI thread.
+    fn start_sign_in(&mut self) {
+        if self.auth_job.is_some() {
+            return;
+        }
+        let base = self.config.settings.auth_base_url.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_worker = cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let provider = auth::HttpProvider::new(&base);
+            let pkce = auth::Pkce::generate();
+            let dev = match provider.start_device(&pkce.challenge) {
+                Ok(d) => d,
+                Err(e) => {
+                    let _ = tx.send(AuthEvent::Failed(e));
+                    return;
+                }
+            };
+            let _ = tx.send(AuthEvent::Prompt {
+                user_code: dev.user_code.clone(),
+                approve_url: dev.approve_url().to_string(),
+            });
+            // Sleep in 1s steps so a cancel is observed promptly, not only between polls.
+            let tokens = match auth::poll_until(
+                &provider,
+                &dev.device_code,
+                &pkce.verifier,
+                dev.interval,
+                dev.expires_in,
+                &cancel_worker,
+                |s| {
+                    for _ in 0..s {
+                        if cancel_worker.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                },
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = tx.send(AuthEvent::Failed(e));
+                    return;
+                }
+            };
+            // Identity is required — never persist an empty-identity "signed in" state.
+            let who = match provider.userinfo(&tokens.access_token) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = tx.send(AuthEvent::Failed(e));
+                    return;
+                }
+            };
+            // The plan is secondary: a failed fetch shows "unknown" (not a wrong "free") and is
+            // reconciled on the next refresh.
+            let ent = provider
+                .entitlements(&tokens.access_token)
+                .unwrap_or(auth::Entitlements { tier: "unknown".into() });
+            let session = auth::Session::from_parts(tokens, who, ent);
+            let _ = auth::KeyringStore::default().save(&session);
+            let _ = tx.send(AuthEvent::Signed(Box::new(session)));
+        });
+        self.auth_job = Some(AuthJob { rx, prompt: None, cancel, kind: AuthKind::SignIn });
+    }
+
+    /// Cancel a pending sign-in: signal the worker to stop and free the panel immediately.
+    fn cancel_sign_in(&mut self) {
+        if let Some(job) = &self.auth_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.auth_job = None;
+    }
+
+    /// Sign out: forget the session locally now, and clear the keyring + revoke the refresh
+    /// token server-side best-effort on a detached thread (not tracked as an auth_job, so it
+    /// can't briefly show a spinner or block a re-sign-in).
+    fn start_sign_out(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        self.toast = Some(("signed out".into(), false));
+        let base = self.config.settings.auth_base_url.clone();
+        std::thread::spawn(move || {
+            let _ = auth::KeyringStore::default().clear();
+            if let Some(rt) = session.refresh_token {
+                let _ = auth::HttpProvider::new(&base).revoke(&rt);
+            }
+        });
+    }
+
+    /// If a restored session's access token is at/near expiry, refresh it off-thread (silently)
+    /// so Cloud calls don't start with a stale token. A permanent `invalid_grant` signs the
+    /// user out; a transient failure keeps the session.
+    fn refresh_session_if_stale(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if !session.needs_refresh(now_unix()) {
+            return;
+        }
+        let Some(rt) = session.refresh_token.clone() else {
+            return;
+        };
+        let old = session.clone();
+        let base = self.config.settings.auth_base_url.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let provider = auth::HttpProvider::new(&base);
+            match provider.refresh(&rt) {
+                Ok(new) => {
+                    let mut s = old;
+                    s.access_token = new.access_token;
+                    if let Some(r) = new.refresh_token {
+                        s.refresh_token = Some(r);
+                    }
+                    // Reconcile identity + plan on refresh (fixes a prior "unknown" tier);
+                    // tolerate a failed sub-call by keeping the previous values.
+                    if let Ok(who) = provider.userinfo(&s.access_token) {
+                        s.sub = who.sub;
+                        s.email = who.email;
+                    }
+                    if let Ok(ent) = provider.entitlements(&s.access_token)
+                        && !ent.tier.is_empty()
+                    {
+                        s.tier = ent.tier;
+                    }
+                    let _ = auth::KeyringStore::default().save(&s);
+                    let _ = tx.send(AuthEvent::Signed(Box::new(s)));
+                }
+                Err(RefreshError::Invalid) => {
+                    let _ = tx.send(AuthEvent::SessionExpired);
+                }
+                Err(RefreshError::Transient(e)) => {
+                    let _ = tx.send(AuthEvent::Failed(e));
+                }
+            }
+        });
+        self.auth_job = Some(AuthJob { rx, prompt: None, cancel: Arc::new(AtomicBool::new(false)), kind: AuthKind::Refresh });
+    }
+
+    /// Poll the sign-in/refresh worker and apply its result once. Interactive vs silent
+    /// (refresh) determines whether success/failure surfaces a toast.
+    fn poll_auth(&mut self, ctx: &egui::Context) {
+        use std::sync::mpsc::TryRecvError;
+        let (event, kind) = match &self.auth_job {
+            Some(job) => match job.rx.try_recv() {
+                Ok(e) => (e, job.kind),
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => (AuthEvent::Failed("worker stopped unexpectedly".into()), job.kind),
+            },
+            None => return,
+        };
+        match event {
+            AuthEvent::Prompt { user_code, approve_url } => {
+                if let Some(job) = &mut self.auth_job {
+                    job.prompt = Some((user_code, approve_url.clone()));
+                }
+                // Auto-open the approval page (it's also shown as a clickable link).
+                ctx.output_mut(|o| {
+                    o.commands.push(egui::OutputCommand::OpenUrl(egui::OpenUrl::new_tab(approve_url)))
+                });
+            }
+            AuthEvent::Signed(session) => {
+                // The worker already persisted to the keyring.
+                let who = session.display_name().to_string();
+                self.session = Some(*session);
+                self.auth_job = None;
+                if kind == AuthKind::SignIn {
+                    self.toast = Some((format!("signed in as {who}"), false));
+                }
+            }
+            AuthEvent::SessionExpired => {
+                self.session = None;
+                self.auth_job = None;
+                std::thread::spawn(|| {
+                    let _ = auth::KeyringStore::default().clear();
+                });
+                self.toast = Some(("your session expired — please sign in again".into(), true));
+            }
+            AuthEvent::Failed(e) => {
+                self.auth_job = None;
+                if kind == AuthKind::SignIn {
+                    self.toast = Some((format!("sign-in failed: {e}"), true));
+                } else {
+                    // Silent refresh: a transient blip must not alarm the user or sign them out.
+                    log::warn!("session refresh failed (session kept): {e}");
+                }
+            }
+        }
+    }
+
+    /// The Account panel (shown atop Settings): the pending device-code prompt while an
+    /// interactive sign-in runs (a silent background refresh stays invisible), else the
+    /// signed-in identity + plan, else a Sign in button.
+    fn account_section(&mut self, ui: &mut egui::Ui) {
+        let mut sign_in = false;
+        let mut sign_out = false;
+        let mut cancel = false;
+        // Only an INTERACTIVE sign-in takes over the panel; a silent refresh does not.
+        let signing_in = matches!(&self.auth_job, Some(j) if j.kind == AuthKind::SignIn);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(ico::ACCOUNT).size(16.0));
+                ui.strong("Account");
+            });
+            if signing_in {
+                match self.auth_job.as_ref().and_then(|j| j.prompt.as_ref()) {
+                    Some((code, url)) => {
+                        ui.label("Approve this code in your browser to finish signing in:");
+                        ui.horizontal(|ui| {
+                            ui.strong(egui::RichText::new(code).monospace().size(20.0));
+                            ui.hyperlink_to("open approval page", url);
+                        });
+                        ui.small("waiting for approval…");
+                    }
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("starting sign-in…");
+                        });
+                    }
+                }
+                if ui.button(format!("{} Cancel", ico::CLOSE)).clicked() {
+                    cancel = true;
+                }
+            } else if let Some(session) = &self.session {
+                ui.label(format!("Signed in as {}", session.display_name()));
+                ui.small(format!("plan: {}", session.tier));
+                if ui.button(format!("{} Sign out", ico::CLOSE)).clicked() {
+                    sign_out = true;
+                }
+            } else {
+                ui.small("Sign in to fopull.com to use Floptle Cloud (managed relay, matchmaking, hosting).");
+                if ui.button(format!("{} Sign in", ico::SIGNIN)).clicked() {
+                    sign_in = true;
+                }
+            }
+        });
+        if sign_in {
+            self.start_sign_in();
+        }
+        if sign_out {
+            self.start_sign_out();
+        }
+        if cancel {
+            self.cancel_sign_in();
+        }
     }
 
     // ---- background jobs ---------------------------------------------------
@@ -470,6 +781,7 @@ impl eframe::App for HubApp {
         self.poll_manifest();
         self.poll_install();
         self.poll_proc();
+        self.poll_auth(ctx);
         // Auto-expire a toast ~6s after it appears (detect a new message by its text, so
         // the ~10 set-sites don't each need a clock).
         let now = ctx.input(|i| i.time);
@@ -482,13 +794,12 @@ impl eframe::App for HubApp {
             self.toast = None;
             self.toast_seen = None;
         }
-        // Keep repainting while anything is in flight (or a toast is counting down).
-        if self.job.is_some()
-            || self.proc.is_some()
-            || self.toast.is_some()
-            || matches!(self.manifest, ManifestState::Loading(_))
-        {
+        // Repaint at full rate only for the short, active jobs; the minutes-long device flow
+        // and the toast countdown just need a gentle tick so they don't spin the CPU/GPU.
+        if self.job.is_some() || self.proc.is_some() || matches!(self.manifest, ManifestState::Loading(_)) {
             ctx.request_repaint();
+        } else if self.auth_job.is_some() || self.toast.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 
@@ -865,6 +1176,8 @@ impl HubApp {
 
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        self.account_section(ui);
+        ui.add_space(6.0);
         ui.strong(format!("{} Settings", ico::SETTINGS));
         let mut changed = false;
         let mut reveal_data = false;
@@ -883,6 +1196,12 @@ impl HubApp {
 
             ui.label("Manifest URL");
             changed |= ui.text_edit_singleline(&mut self.config.settings.manifest_url).changed();
+            ui.end_row();
+
+            ui.label("Account (auth) URL");
+            let r = ui.text_edit_singleline(&mut self.config.settings.auth_base_url);
+            changed |= r.changed();
+            r.on_hover_text("fopull.com in production; point at a dev instance to test sign-in");
             ui.end_row();
 
             ui.label("Default engine");

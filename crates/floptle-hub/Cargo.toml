@@ -24,6 +24,11 @@ serde_json = "1"
 directories = "6"
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
+# OAuth device-flow login (task 0002): PKCE (getrandom+sha2+base64url), token storage in
+# the OS keyring.
+base64 = "0.22"
+getrandom = "0.2"
+keyring = "3"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }
