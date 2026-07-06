@@ -123,7 +123,8 @@ replicated = { health = 100, stamina = 100, parrying = false }  -- NEW: synced v
 
 At runtime scripts read/write **`synced.health`** the way they read `params.walk`. Writes are
 authoritative only on the server (client writes to a non-predicted var log a warning in the
-Console); deltas ride the snapshot stream; numbers, booleans, and strings in v1. `replicated`
+Console); deltas ride the snapshot stream. v1 value types: numbers, booleans, strings, **and
+tables** (nested scalars, depth ≤ 4, ≤ 1 KB encoded per var — guardrails in §13.2). `replicated`
 on a `Predicted` node's script participates in rollback (§6): predicted writes are speculative
 until acknowledged.
 
@@ -396,7 +397,8 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   `NetId`; `Replicated` component + Inspector "Networked"; serializable body-state capture.
 - **2b — Replication core:** `NetSession`, wire format, `MemoryTransport`; server-authoritative
   transform/`synced` replication + interpolation; `net.host/join`, spawn/despawn, RPC, events;
-  two-editor-instance loopback demo.
+  the in-editor **"Host & Join locally"** harness (two simulated worlds in one process over
+  loopback, latency/loss sliders) so every later stage is one-click testable.
 - **2c — Prediction:** input commands, prediction ring, rewind-replay reconciliation, error
   smoothing; `third_person.lua` walks predicted with artificial 100 ms latency and feels local.
 - **2d — Combat netcode:** lag-comp history + `net.rewind`; tick-stamped intents; the parry
@@ -407,14 +409,21 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   IDE completion/docs entries (all three doc surfaces), Console net-stats overlay, bandwidth
   profiler in the editor.
 
-## 13. Open questions for review
+## 13. Decisions (resolved by Ty, 2026-07-06)
 
-1. **Tick rate default** — 60 Hz gameplay tick (recommended; parry timing wants it) vs 30 Hz
-   (cheaper servers). Per-project setting either way; the question is the default.
-2. **`replicated` var types v1** — numbers/bools/strings only (recommended) or tables too
-   (tables invite large-blob abuse; can add later with size guards)?
-3. **Editor "Host & Join locally"** — worth building the in-process two-world debug harness in
-   2b (recommended — it makes every later stage testable in one click) or defer and test with
-   two OS processes?
-4. **Relay v1 posture** — relay-always (recommended, simple) vs hole-punch-with-relay-fallback
-   (better p95 latency for direct-connectable peers, meaningfully more complexity)?
+1. **Tick rate default = 60 Hz.** Parry timing wants the 16.6 ms input granularity; per-project
+   configurable for games that want cheaper servers.
+2. **`replicated` vars support tables from day one** — with guardrails so table sync can't
+   become the large-blob footgun:
+   - values: scalars + nested tables of scalars (arrays or string-keyed maps);
+     **no functions/userdata/metatables** (rejected with a Console error at declaration);
+   - **depth ≤ 4**, **encoded size ≤ 1 KB per var** (over-limit writes warn + drop, never
+     silently truncate);
+   - v1 sync granularity is **whole-value replace on change** (dirty-flagged per var);
+     within-table deltas are a later optimization once real usage shows the shapes;
+   - on `Predicted` nodes, table vars participate in rollback via per-tick copies — the 1 KB
+     cap is what keeps that affordable.
+3. **The in-editor "Host & Join locally" harness ships in 2b** (see §12) — loopback transport,
+   two worlds in one process, latency/loss sliders.
+4. **`floptle-relay` v1 is relay-always.** Simple, predictable, no NAT edge cases; direct-P2P
+   hole-punch with relay fallback is a later optimization behind the same `relay://` URL.
