@@ -122,6 +122,16 @@ pub struct ReplicatedDoc {
     /// Smooth remote entities between snapshots (default true).
     #[serde(default = "true_bool")]
     pub interp: bool,
+    /// Remote-render delay in gameplay ticks (default 6 ≈ 100 ms @ 60 Hz).
+    #[serde(default = "default_interp_delay", skip_serializing_if = "is_default_interp_delay")]
+    pub interp_delay: u8,
+}
+
+fn default_interp_delay() -> u8 {
+    floptle_core::Replicated::DEFAULT_INTERP_DELAY
+}
+fn is_default_interp_delay(d: &u8) -> bool {
+    *d == floptle_core::Replicated::DEFAULT_INTERP_DELAY
 }
 
 impl ReplicatedDoc {
@@ -136,6 +146,7 @@ impl ReplicatedDoc {
             transform: self.transform,
             physics: self.physics,
             interp: self.interp,
+            interp_delay: self.interp_delay,
         }
     }
 
@@ -145,6 +156,7 @@ impl ReplicatedDoc {
             transform: r.transform,
             physics: r.physics,
             interp: r.interp,
+            interp_delay: r.interp_delay,
         }
     }
 }
@@ -1220,6 +1232,7 @@ mod tests {
                         transform: true,
                         physics: true,
                         interp: false,
+                        interp_delay: 12, // exercise the non-default round-trip
                     }),
                 },
                 NodeDoc {
