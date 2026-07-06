@@ -1787,6 +1787,10 @@ const LUA_SNIPPETS: &[(&str, &str)] = &[
         "\nfunction fixedUpdate(node, dt)\n  \nend\n",
     ),
     (
+        "networked door (rpc + synced)",
+        "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
+    ),
+    (
         "spin (yaw)",
         "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
     ),
@@ -1833,6 +1837,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets", "gizmo",
+    "net", "synced", "replicated", "onRpc",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -1842,6 +1847,7 @@ const API_CATEGORIES: &[&str] = &[
     "node — methods & handles",
     "scene lookups & raycast",
     "input — keyboard & mouse",
+    "networking — net.*, synced",
     "components — getcomponent",
     "animation — node:animator",
     "assets",
@@ -1859,6 +1865,10 @@ fn api_category(label: &str) -> &'static str {
         "node — transform & body fields"
     } else if label.starts_with("input") {
         "input — keyboard & mouse"
+    } else if label.starts_with("net")
+        || matches!(label, "synced" | "replicated" | "onRpc")
+    {
+        "networking — net.*, synced"
     } else if label.starts_with("gizmo") {
         "debug gizmos"
     } else if label.starts_with("assets") {
@@ -1888,6 +1898,21 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "fixedUpdate", insert: "fixedUpdate", doc: "function fixedUpdate(node, dt) — runs every GAMEPLAY TICK (60 Hz, constant dt). Movement/gameplay/physics writes belong here; cameras & cosmetics in update. Same cadence physics steps at — frame-rate independent." },
     ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
+    ApiEntry { label: "net.host", insert: "net.host{}", doc: "net.host{ maxPlayers = 16 } — become the authoritative host of a multiplayer session." },
+    ApiEntry { label: "net.join", insert: "net.join(\"local://\")", doc: "net.join(addr) — join a session. In-editor \"local://\" joins the local test harness; network transports arrive in a later phase." },
+    ApiEntry { label: "net.leave", insert: "net.leave()", doc: "net.leave() — end the session." },
+    ApiEntry { label: "net.role", insert: "net.role()", doc: "net.role() — \"offline\" | \"server\" | \"client\"." },
+    ApiEntry { label: "net.isServer", insert: "net.isServer()", doc: "net.isServer() — true on the authoritative host." },
+    ApiEntry { label: "net.isClient", insert: "net.isClient()", doc: "net.isClient() — true on a connected client." },
+    ApiEntry { label: "net.peers", insert: "net.peers()", doc: "net.peers() — connected client peer ids (server)." },
+    ApiEntry { label: "net.ping", insert: "net.ping()", doc: "net.ping(peer?) — round-trip time in ms." },
+    ApiEntry { label: "net.rpc", insert: "net.rpc(\"name\", {})", doc: "net.rpc(name, args, {to=peer}) — remote call: server→clients or client→server. Handle with function onRpc.name(args, sender). Args: scalars + tables (≤4 deep, ≤1KB)." },
+    ApiEntry { label: "net.on", insert: "net.on(\"playerJoined\", function(peer) end)", doc: "net.on(event, fn) — session events: playerJoined/playerLeft (peer id), connected, disconnected (reason)." },
+    ApiEntry { label: "net.spawn", insert: "net.spawn(\"scenes/thing.ron\", { x = 0, y = 0, z = 0 })", doc: "SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a replicated runtime object on every client (available next tick)." },
+    ApiEntry { label: "net.despawn", insert: "net.despawn(node)", doc: "SERVER ONLY: net.despawn(node) — remove a replicated runtime object everywhere." },
+    ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
+    ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
+    ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
     ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },
     ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
     ApiEntry { label: "node.x", insert: "node.x", doc: "World X position (number)." },

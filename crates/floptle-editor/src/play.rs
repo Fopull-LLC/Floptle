@@ -196,6 +196,8 @@ impl Editor {
             self.playing = false;
             self.paused = false;
             self.sim = None; // drop the physics sim; restore reverts moved transforms
+            // Multiplayer sessions live inside a play session — never across Stop.
+            self.net_stop("play stopped");
             // Release any script-held mouse lock or Game-view cursor trap so you're not
             // stuck grabbed after Stop.
             if self.script_mouse_lock || self.game_trap {

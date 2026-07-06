@@ -23,6 +23,7 @@ it up immediately.
 12. [Bundled example scripts](#12-bundled-example-scripts)
 13. [The in-engine IDE](#13-the-in-engine-ide)
 14. [Tips & gotchas](#14-tips--gotchas)
+15. [Networking: `net.*`, `synced`, `onRpc`](#15-networking-net-synced-onrpc)
 
 ---
 
@@ -586,3 +587,60 @@ The full shortcut list lives on the tab's **§ Docs** page.
   script name + line — double-click to jump to the source.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
+
+## 15. Networking: `net.*`, `synced`, `onRpc`
+
+Multiplayer in Floptle is **server-authoritative**: the host simulates the
+truth, clients receive smoothed snapshots, and clients send *intents* (RPCs),
+never state — so cheating means asking the server nicely. Making a node
+multiplayer takes two steps, no rewrite:
+
+1. Give it the **Networked** component (Inspector → ➕ Add Component →
+   Networking), or from code: mark what syncs in its settings.
+2. Declare which script vars sync with a top-level `replicated` table, and
+   read/write them through `synced`:
+
+```lua
+-- door.lua — a fully networked, late-joiner-correct door in ten lines
+replicated = { open = false }
+
+onRpc = {}
+function onRpc.use(args, sender)          -- a client walked up and sent net.rpc("use")
+  if net.isServer() then synced.open = not synced.open end
+end
+
+function update(node, dt)                 -- cosmetic: everyone eases toward the truth
+  local target = synced.open and 1.6 or 0.0
+  node.y = node.y + (target - node.y) * math.min(1, dt * 6)
+end
+```
+
+| Call | What it does |
+|---|---|
+| `net.host{ maxPlayers = 16 }` | become the authoritative host |
+| `net.join(addr)` | join a session (`"local://"` = the in-editor test harness) |
+| `net.leave()` | end the session |
+| `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
+| `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
+| `net.rpc(name, args, {to=peer})` | remote call — server→clients, or client→server |
+| `net.on(event, fn)` | `"playerJoined"/"playerLeft"` (peer id), `"connected"`, `"disconnected"` |
+| `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene's first node, replicated everywhere |
+| `net.despawn(node)` | SERVER: remove it everywhere |
+
+**`synced` rules.** Values can be numbers, booleans, strings, and tables
+(nested up to 4 levels, ≤ 1 KB encoded per var — an oversized write is dropped
+whole with a Console warning, never truncated). Only the **server's** writes
+replicate; writing on a client warns and gets overwritten. Late joiners receive
+the current values automatically.
+
+**RPC handlers** live in an `onRpc` table: `function onRpc.use(args, sender)`.
+`sender` is the *verified* peer id (`0` = the server) — clients can't spoof it.
+Args follow the same size/type rules as `synced`.
+
+> **Test it without a second machine:** press Play, then the **🌐** toolbar
+> button → *Host + join a local client*. A hidden ghost client joins over a
+> simulated link — **cyan ghost spheres** show where *it* believes every
+> networked node is. Drag the latency/loss sliders and watch the ghosts lag
+> and stutter exactly as a real remote player would. (Real network transports
+> — QUIC + the relay — arrive with the transport phase; the API you write
+> against today doesn't change.)

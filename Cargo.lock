@@ -1092,6 +1092,7 @@ dependencies = [
  "floptle-field",
  "floptle-input",
  "floptle-matter",
+ "floptle-net",
  "floptle-physics",
  "floptle-render",
  "floptle-rules",
@@ -1249,6 +1250,7 @@ version = "0.0.0"
 dependencies = [
  "floptle-core",
  "floptle-input",
+ "floptle-net",
  "floptle-physics",
  "glam",
  "mlua",

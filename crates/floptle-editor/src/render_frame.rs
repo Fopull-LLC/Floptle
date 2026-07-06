@@ -1010,6 +1010,14 @@ impl Editor {
         let vfx_ui_state = &mut self.vfx_ui;
         let anim_ui_state = &mut self.anim_ui;
         let mesh_registry = &self.mesh_registry;
+        // Multiplayer harness panel state: read-only status snapshot + live knobs.
+        let net_hosting = self.net_server.is_some();
+        let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
+        let net_has_client = self.net_client.is_some();
+        let show_net_panel = &mut self.show_net_panel;
+        let net_latency_ticks = &mut self.net_latency_ticks;
+        let net_loss = &mut self.net_loss;
+        let net_ghosts = &mut self.net_ghosts;
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
@@ -1108,10 +1116,82 @@ impl Editor {
                             cmd.toggle_pause = true;
                         }
                     }
+                    if ui
+                        .button(if net_hosting { "🌐 hosting" } else { "🌐" })
+                        .on_hover_text("Multiplayer — host & join locally, latency/loss sliders (docs/netcode-design.md)")
+                        .clicked()
+                    {
+                        *show_net_panel = !*show_net_panel;
+                    }
                     // The view is now chosen by the Scene / Game dock tabs (the editor
                     // free-fly view vs the active-camera gameplay view), not a toggle here.
                 });
             });
+
+            // ---- 🌐 multiplayer harness (Host & Join locally) ----
+            if *show_net_panel {
+                let mut open = true;
+                egui::Window::new("🌐 Multiplayer (local test)")
+                    .open(&mut open)
+                    .default_width(280.0)
+                    .show(ui, |ui| {
+                        if !playing {
+                            ui.label("Enter Play mode, then host a local session here.");
+                            ui.small(
+                                "The play world becomes the SERVER; a hidden ghost client \
+                                 joins over a simulated link — cyan ghosts show exactly what \
+                                 a remote player would see.",
+                            );
+                            return;
+                        }
+                        match (net_hosting, net_has_client) {
+                            (false, _) => {
+                                if ui.button("⏵ Host + join a local client").clicked() {
+                                    cmd.net_host_local = true;
+                                    cmd.net_join_local = true;
+                                }
+                                ui.small("or call net.host{} from a script");
+                            }
+                            (true, false) => {
+                                ui.label("hosting · 0 ghost clients");
+                                if ui.button("➕ Join a local ghost client").clicked() {
+                                    cmd.net_join_local = true;
+                                }
+                            }
+                            (true, true) => {
+                                ui.label(format!(
+                                    "hosting · {net_peer_count} client(s) connected"
+                                ));
+                            }
+                        }
+                        if net_hosting {
+                            ui.separator();
+                            ui.label("simulated link");
+                            let mut lat = *net_latency_ticks as i32;
+                            if ui
+                                .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
+                                .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
+                                .changed()
+                            {
+                                *net_latency_ticks = lat as u64;
+                            }
+                            ui.add(
+                                egui::Slider::new(net_loss, 0.0..=0.9)
+                                    .text("packet loss")
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                            );
+                            ui.checkbox(net_ghosts, "show client ghosts (cyan)")
+                                .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
+                            ui.separator();
+                            if ui.button("⏹ End session").clicked() {
+                                cmd.net_stop_session = true;
+                            }
+                        }
+                    });
+                if !open {
+                    *show_net_panel = false;
+                }
+            }
 
             // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
             // The Scene tab is transparent so the 3D render shows through; the others
@@ -2234,6 +2314,8 @@ impl Editor {
                 for (eid, h) in self.script_host.take_body_height_changes() {
                     sim.set_body_height(eid, h);
                 }
+            }
+            if self.sim.is_some() {
                 self.game_tick.accumulate(sdt);
                 while self.game_tick.tick() {
                     self.game_tick_no += 1;
@@ -2261,47 +2343,61 @@ impl Editor {
                         floptle_script::InputSnapshot::default()
                     };
                     self.script_host.set_input(snap);
-                    // Fresh body state for THIS tick (post previous tick's physics).
-                    let mut states = HashMap::new();
-                    for (e, vel, up, grounded, height) in sim.body_states() {
-                        states.insert(
-                            e.index(),
-                            floptle_script::BodyState {
-                                vel: [vel.x, vel.y, vel.z],
-                                up: [up.x, up.y, up.z],
-                                grounded,
-                                height,
-                            },
+                    if let Some(sim) = self.sim.as_mut() {
+                        // Fresh body state for THIS tick (post previous tick's physics).
+                        let mut states = HashMap::new();
+                        for (e, vel, up, grounded, height) in sim.body_states() {
+                            states.insert(
+                                e.index(),
+                                floptle_script::BodyState {
+                                    vel: [vel.x, vel.y, vel.z],
+                                    up: [up.x, up.y, up.z],
+                                    grounded,
+                                    height,
+                                },
+                            );
+                        }
+                        self.script_host.set_bodies(states);
+                        // Lend colliders so `raycast(...)` works inside `fixedUpdate` too.
+                        self.script_host.set_colliders(
+                            std::mem::take(&mut sim.world.colliders),
+                            sim.world.origin,
                         );
                     }
-                    self.script_host.set_bodies(states);
-                    // Lend colliders so `raycast(...)` works inside `fixedUpdate` too.
-                    self.script_host
-                        .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
-                    sim.world.colliders = self.script_host.take_colliders(); // reclaim
-                    // Apply the tick's writes, then step physics exactly one tick.
-                    sim.sync_dynamic_params(&self.world);
-                    for (eid, v) in self.script_host.take_body_changes() {
-                        sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.world.colliders = self.script_host.take_colliders(); // reclaim
+                        // Apply the tick's writes, then step physics exactly one tick.
+                        sim.sync_dynamic_params(&self.world);
+                        for (eid, v) in self.script_host.take_body_changes() {
+                            sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                        }
+                        for (eid, h) in self.script_host.take_body_height_changes() {
+                            sim.set_body_height(eid, h);
+                        }
+                        sim.step_tick(self.game_tick.step, focus);
                     }
-                    for (eid, h) in self.script_host.take_body_height_changes() {
-                        sim.set_body_height(eid, h);
-                    }
-                    sim.step_tick(self.game_tick.step, focus);
+                    // Netcode rides the tick (docs/netcode-design.md §9): session
+                    // commands, server snapshot send, ghost-client apply, RPC/event
+                    // dispatch — all after physics, all on the deterministic clock.
+                    self.net_tick(self.game_tick_no);
                 }
-                // Render this frame partway into the current tick: smooth at any fps.
-                sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());
+                if let Some(sim) = self.sim.as_mut() {
+                    // Render this frame partway into the current tick: smooth at any fps.
+                    sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());
+                }
             }
             // Surface fixedUpdate errors alongside the frame pass's.
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
             }
             // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
-            // drained once here (drawn by the viewport overlay).
+            // drained once here (drawn by the viewport overlay), plus the multiplayer
+            // harness's ghost-client markers.
             self.script_gizmos = self.script_host.take_gizmos();
+            self.net_ghost_gizmos();
             // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.
@@ -2323,7 +2419,7 @@ impl Editor {
 
     /// GPU-load models a script swapped via `node.model` so they render this
     /// frame (rigged import first, static fallback).
-    fn load_script_swapped_models(&mut self) {
+    pub(crate) fn load_script_swapped_models(&mut self) {
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return;
         };
@@ -2509,6 +2605,15 @@ impl Editor {
         }
         if cmd.toggle_play {
             self.toggle_play();
+        }
+        if cmd.net_host_local {
+            self.net_start_hosting();
+        }
+        if cmd.net_join_local {
+            self.net_join_local();
+        }
+        if cmd.net_stop_session {
+            self.net_stop("panel");
         }
         if cmd.toggle_pause {
             self.toggle_pause();

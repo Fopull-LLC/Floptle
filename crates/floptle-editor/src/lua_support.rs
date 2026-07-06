@@ -134,6 +134,62 @@ function update(node, dt) end
 ---@param dt number The constant tick delta (1/60 s by default).
 function fixedUpdate(node, dt) end
 
+---Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
+---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/
+---write them as `synced.hp` — the server owns them), handle remote calls with
+---`onRpc = {}` + `function onRpc.name(args, sender) end`.
+---@class Net
+net = {}
+---Become the authoritative host of a session.
+---@param opts { maxPlayers: number }|nil
+function net.host(opts) end
+---Join a session. In-editor: `\"local://\"` joins the local test harness;
+---network addresses (quic:// / relay://) arrive with the transport phase.
+---@param addr string
+function net.join(addr) end
+---Leave / end the session.
+function net.leave() end
+---This endpoint's role.
+---@return \"offline\"|\"server\"|\"client\"
+function net.role() end
+---@return boolean
+function net.isServer() end
+---@return boolean
+function net.isClient() end
+---Connected client peer ids (server).
+---@return integer[]
+function net.peers() end
+---Round-trip time in milliseconds.
+---@param peer integer|nil
+---@return number
+function net.ping(peer) end
+---Send a named remote call. On the server it goes to clients (all, or `to`);
+---on a client it goes to the server. Args: scalars + tables (≤4 deep, ≤1KB).
+---Handle with `function onRpc.name(args, sender) end`.
+---@param name string
+---@param args any|nil
+---@param opts { to: integer }|nil
+function net.rpc(name, args, opts) end
+---Listen for session events: \"playerJoined\"|\"playerLeft\" (fn gets the peer id),
+---\"connected\", \"disconnected\" (fn gets a reason string).
+---@param event string
+---@param fn function
+function net.on(event, fn) end
+---SERVER ONLY: spawn a scene asset's first node as a replicated runtime object.
+---It appears on every client (and late joiners). Available next tick.
+---@param path string Scene asset, project-relative (e.g. \"scenes/arrow.ron\").
+---@param opts { x: number, y: number, z: number, owner: integer }|nil
+function net.spawn(path, opts) end
+---SERVER ONLY: despawn a replicated runtime object everywhere.
+---@param node Node
+function net.despawn(node) end
+
+---Per-script synced variables: declare `replicated = { hp = 100 }` at the top
+---level, then read/write `synced.hp`. The SERVER's writes replicate to every
+---client; client writes warn (the server will overwrite them).
+---@type table<string, any>
+synced = {}
+
 ---Player input (play mode) — poll the keyboard + mouse to make games interactive.
 ---@class Input
 input = {}
@@ -231,16 +287,28 @@ function gizmo.point(x, y, z, size, r, g, b) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+
+/// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
+/// matching one of these was never hand-edited, so it's safe to migrate to the
+/// current `LUARC_JSON` (a customized file is always left alone).
+const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\"]\n}\n",
+];
 
 /// Write the Lua language-server support files into a project (annotations always
-/// refreshed; `.luarc.json` only if absent, so a user's own config is preserved).
+/// refreshed; `.luarc.json` only if absent OR still an unmodified engine-generated
+/// version — a user's own config is preserved).
 pub(crate) fn write_lua_support(project_root: &Path) {
     let lib = project_root.join(".floptle").join("library");
     let _ = std::fs::create_dir_all(&lib);
     let _ = std::fs::write(lib.join("floptle.lua"), LUA_ANNOTATIONS);
     let luarc = project_root.join(".luarc.json");
-    if !luarc.exists() {
+    let migrate = match std::fs::read_to_string(&luarc) {
+        Ok(cur) => LUARC_JSON_OLD.contains(&cur.as_str()),
+        Err(_) => true, // absent
+    };
+    if migrate {
         let _ = std::fs::write(luarc, LUARC_JSON);
     }
 }

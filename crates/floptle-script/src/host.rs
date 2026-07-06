@@ -407,6 +407,12 @@ impl ScriptHost {
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
         }
+        // The `net.*` API (docs/netcode-design.md §8): command queue out,
+        // session state in, `net.on` handler registry.
+        let net = crate::net_api::SharedNet::new(logs.clone());
+        if let Err(e) = crate::net_api::install_net_api(&lua, &net) {
+            eprintln!("[lua] failed to install the net API: {e}");
+        }
 
         Self {
             lua,
@@ -435,6 +441,9 @@ impl ScriptHost {
             vfx_commands: shared.vfx_commands.clone(),
             gizmos,
             spawn_effects,
+            net,
+            synced_stores: HashMap::new(),
+            synced_warned: std::collections::HashSet::new(),
         }
     }
 
@@ -505,6 +514,172 @@ impl ScriptHost {
         if called {
             self.flush_scene(world);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // net.* bridge (docs/netcode-design.md §8)
+    // -------------------------------------------------------------------
+
+    /// Drain the session commands scripts queued (`net.host{}`, `net.rpc`, …).
+    pub fn take_net_commands(&self) -> Vec<crate::NetCmd> {
+        std::mem::take(&mut *self.net.cmds.borrow_mut())
+    }
+
+    /// Mirror the live session state in for `net.role()`/`peers()`/`ping()`.
+    pub fn set_net_state(&self, state: crate::NetState) {
+        *self.net.state.borrow_mut() = state;
+    }
+
+    /// Dispatch a received RPC to every script defining `onRpc.<name>` —
+    /// `function onRpc.explode(args, sender) ... end`. Mirrors the animation
+    /// clip-event dispatch; transform writes flush after the handlers.
+    pub fn dispatch_rpc(
+        &mut self,
+        world: &mut World,
+        name: &str,
+        args: &floptle_net::NetValue,
+        sender: u64,
+    ) {
+        let targets: Vec<((u32, String), Table)> =
+            self.envs.borrow().iter().map(|(k, env)| (k.clone(), env.clone())).collect();
+        let mut called = false;
+        for ((eid, kind), env) in targets {
+            // raw_get: never fall through the env metatable to globals.
+            let Ok(Some(handlers)) = env.raw_get::<Option<Table>>("onRpc") else { continue };
+            let Ok(Some(f)) = handlers.raw_get::<Option<mlua::Function>>(name) else { continue };
+            let arg = match crate::net_api::netvalue_to_lua(&self.lua, args) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            *self.net.current.borrow_mut() = Some((eid, kind.clone()));
+            let r = f.call::<()>((arg, sender));
+            *self.net.current.borrow_mut() = None;
+            called = true;
+            if let Err(err) = r {
+                self.record_error(&kind, format!("{kind}: onRpc.{name}: {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
+    /// Fire a `net.on(event, fn)` handler set — `playerJoined`/`playerLeft`
+    /// carry the peer id, `disconnected` a reason string, `connected` nothing.
+    pub fn fire_net_event(
+        &mut self,
+        world: &mut World,
+        event: &str,
+        peer: Option<u64>,
+        reason: Option<&str>,
+    ) {
+        let handlers: Vec<(u32, String, mlua::Function)> = {
+            let hs = self.net.handlers.borrow();
+            hs.iter()
+                .filter(|h| h.event == event)
+                .filter_map(|h| {
+                    self.lua
+                        .registry_value::<mlua::Function>(&h.key)
+                        .ok()
+                        .map(|f| (h.eid, h.kind.clone(), f))
+                })
+                .collect()
+        };
+        let mut called = false;
+        for (eid, kind, f) in handlers {
+            *self.net.current.borrow_mut() = Some((eid, kind.clone()));
+            let r = match (peer, reason) {
+                (Some(p), _) => f.call::<()>(p),
+                (None, Some(s)) => f.call::<()>(s.to_string()),
+                (None, None) => f.call::<()>(()),
+            };
+            *self.net.current.borrow_mut() = None;
+            called = true;
+            if let Err(err) = r {
+                self.record_error(&kind, format!("{kind}: net.on(\"{event}\"): {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
+    /// Server: collect every instance's current `synced` values for the
+    /// session to diff + send: (entity index, script kind, name→value).
+    /// Guardrail violations drop the var with a once-per-var Console warning.
+    #[allow(clippy::type_complexity)]
+    pub fn collect_synced(&mut self) -> Vec<(u32, String, Vec<(String, floptle_net::NetValue)>)> {
+        let mut out = Vec::new();
+        for ((eid, kind), store) in &self.synced_stores {
+            let mut vars = Vec::new();
+            for pair in store.clone().pairs::<mlua::Value, mlua::Value>() {
+                let Ok((k, v)) = pair else { continue };
+                let name = match &k {
+                    mlua::Value::String(s) => s.to_string_lossy().to_string(),
+                    other => format!("{other:?}"),
+                };
+                match crate::net_api::lua_to_netvalue(&v, 0)
+                    .and_then(|nv| nv.validate().map_err(|e| e.to_string()).map(|_| nv))
+                {
+                    Ok(nv) => vars.push((name, nv)),
+                    Err(e) => {
+                        let key = (*eid, kind.clone(), name.clone());
+                        if self.synced_warned.insert(key) {
+                            self.logs.borrow_mut().push(crate::ScriptLog {
+                                level: crate::LogLevel::Warn,
+                                msg: format!("{kind}: synced.{name}: {e} — not replicated"),
+                                source: None,
+                            });
+                        }
+                    }
+                }
+            }
+            if !vars.is_empty() {
+                vars.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic order
+                out.push((*eid, kind.clone(), vars));
+            }
+        }
+        out
+    }
+
+    /// Client: write received `synced` updates into the instance's store
+    /// (bypassing the client-write warning — this IS the server's word).
+    pub fn apply_synced(&self, eid: u32, kind: &str, vars: &[(String, floptle_net::NetValue)]) {
+        let Some(store) = self.synced_stores.get(&(eid, kind.to_string())) else { return };
+        for (k, v) in vars {
+            if let Ok(val) = crate::net_api::netvalue_to_lua(&self.lua, v) {
+                let _ = store.raw_set(k.as_str(), val);
+            }
+        }
+    }
+
+    /// Reset the net bridge at a play-session boundary (Stop): queued commands
+    /// and session state go; `net.on` handlers/synced stores belong to script
+    /// instances and clean up with them.
+    pub fn clear_net_state(&mut self) {
+        self.net.cmds.borrow_mut().clear();
+        *self.net.state.borrow_mut() = crate::NetState::default();
+        self.synced_warned.clear();
+    }
+
+    /// Build the `synced` proxy for an instance whose script declares
+    /// `replicated = { ... }` (called on every env (re)build).
+    fn setup_synced(&mut self, env: &Table, key: &(u32, String)) {
+        let Ok(Some(declared)) = env.raw_get::<Option<Table>>("replicated") else { return };
+        match crate::net_api::build_synced_proxy(&self.lua, &self.net, &declared, &key.1) {
+            Ok((proxy, store)) => {
+                let _ = env.set("synced", proxy);
+                self.synced_stores.insert(key.clone(), store);
+            }
+            Err(e) => self.record_error(&key.1, format!("{}: replicated/synced: {e}", key.1)),
+        }
+    }
+
+    /// Drop an instance's net registrations (env rebuild or instance death).
+    fn drop_net_instance(&mut self, key: &(u32, String)) {
+        self.synced_stores.remove(key);
+        let mut hs = self.net.handlers.borrow_mut();
+        hs.retain(|h| !(h.eid == key.0 && h.kind == key.1));
     }
 
     /// Reset the animator bridge at a play-session boundary: drop the state
@@ -663,6 +838,7 @@ impl ScriptHost {
                 let _ = self.lua.remove_registry_value(inst.env);
             }
             self.envs.borrow_mut().remove(&k);
+            self.drop_net_instance(&k);
         }
     }
 
@@ -852,11 +1028,20 @@ impl ScriptHost {
                     return false;
                 }
             };
-            match build_env(&self.lua, &src, name) {
+            // Mark the current instance while top-level code runs, so a
+            // `net.on(...)` at file scope knows its owner.
+            *self.net.current.borrow_mut() = Some((e.index(), name.to_string()));
+            let built = build_env(&self.lua, &src, name);
+            *self.net.current.borrow_mut() = None;
+            match built {
                 Ok(env) => {
                     if let Some(old) = self.instances.remove(&key) {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
+                    // A rebuild (hot reload) drops the old generation's net
+                    // handlers + synced store — the fresh run re-registers.
+                    self.drop_net_instance(&key);
+                    self.setup_synced(&env, &key);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {
                             self.instances.insert(
@@ -920,7 +1105,11 @@ impl ScriptHost {
         };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
-        if let Err(err) = self.tick(&env, params, tr, dt, time, first, eid, body, fixed) {
+        // Mark the current instance while its hooks run (`net.on` ownership).
+        *self.net.current.borrow_mut() = Some((eid, name.to_string()));
+        let result = self.tick(&env, params, tr, dt, time, first, eid, body, fixed);
+        *self.net.current.borrow_mut() = None;
+        if let Err(err) = result {
             self.fail(name, format!("{name}: {err}"));
         }
     }

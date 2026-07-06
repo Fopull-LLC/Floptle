@@ -45,6 +45,7 @@ mod ide;
 mod inspector;
 mod lua_support;
 mod matter_catalog;
+mod net;
 mod play;
 mod prefs;
 mod project;
@@ -107,6 +108,10 @@ struct EditorCmd {
     remove_rigidbody: Option<Entity>,
     /// Add a Networked (replication) component on this entity.
     add_networked: Option<Entity>,
+    /// Multiplayer harness intents (the 🌐 panel).
+    net_host_local: bool,
+    net_join_local: bool,
+    net_stop_session: bool,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -865,6 +870,21 @@ struct Editor {
     /// tick counter (the netcode timebase). Reset on Play.
     game_tick: floptle_core::FixedTimestep,
     game_tick_no: u64,
+    /// The in-editor multiplayer session (docs/netcode-design.md §12 2b): the play
+    /// world hosts, an optional ghost-client world joins over the in-process hub
+    /// with simulated latency/loss, and cyan gizmos show its view. Torn down on Stop.
+    net_hub: Option<floptle_net::MemoryHub>,
+    net_server: Option<floptle_net::NetSession>,
+    net_client: Option<(floptle_net::NetSession, floptle_core::World)>,
+    /// The scene doc captured at host time — the baseline any ghost client loads
+    /// (exactly what a remote client would load from disk).
+    net_scene_doc: Option<floptle_scene::SceneDoc>,
+    /// Harness link conditions: one-way latency in ticks + unreliable-drop chance.
+    net_latency_ticks: u64,
+    net_loss: f32,
+    /// Draw the ghost client's replicated positions as cyan gizmo spheres.
+    net_ghosts: bool,
+    show_net_panel: bool,
     /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
     /// free-look. While set, the RMB-release handler won't release the grab, and Stop
     /// releases it. Reset when play ends.

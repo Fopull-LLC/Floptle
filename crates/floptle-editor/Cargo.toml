@@ -39,3 +39,4 @@ egui-winit = { workspace = true }
 egui_dock = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
+floptle-net = { path = "../floptle-net" }
