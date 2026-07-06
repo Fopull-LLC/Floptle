@@ -56,9 +56,11 @@ type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
 mod api;
 mod env;
 mod host;
+mod net_api;
 mod preprocess;
 
 pub(crate) use api::install_handle_api;
+pub use net_api::{NetCmd, NetRoleState, NetState};
 
 /// Severity of a captured script log line (the engine Console colors by this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +192,16 @@ pub struct ScriptHost {
     /// `spawnEffect(key, x, y, z)`. The editor spawns a detached instance at each
     /// point; it plays once and auto-despawns.
     spawn_effects: Rc<RefCell<Vec<SpawnedEffect>>>,
+    /// The `net.*` bridge: queued session commands, mirrored session state,
+    /// `net.on` handlers, and the current-instance marker (docs/netcode-design.md §8).
+    net: net_api::SharedNet,
+    /// Per-(entity, script) `synced` STORE tables (the raw values behind the
+    /// proxy scripts see) — the host collects them for the server session and
+    /// writes received updates into them on clients.
+    synced_stores: HashMap<(u32, String), Table>,
+    /// (eid, script, var) combos already warned about failing the replication
+    /// guardrails — so a hot loop doesn't spam the Console every tick.
+    synced_warned: std::collections::HashSet<(u32, String, String)>,
 }
 
 /// One immediate-mode debug-draw command from a script's `gizmo.*` call.
@@ -452,6 +464,114 @@ mod tests {
         assert_eq!(t.translation.y, 1.0, "update must run only in the frame pass");
         let want = (1.0f32 / 60.0) as f64;
         assert!((t.translation.z - want).abs() < 1e-9, "fixed dt must be the constant tick delta");
+    }
+
+    #[test]
+    fn net_bridge_rpc_synced_events_round_trip() {
+        // The Lua net.* bridge (docs/netcode-design.md §8): rpc queueing with
+        // guardrails, replicated→synced declaration + collect/apply, onRpc
+        // dispatch with sender, and net.on event handlers.
+        let dir = std::env::temp_dir().join("floptle_script_test_net");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "netty",
+            "replicated = { hp = 100, name = \"flop\" }\n\
+             joined = 0\n\
+             function start(node)\n  net.on(\"playerJoined\", function(p) joined = p end)\nend\n\
+             function update(node, dt)\n\
+               if time < 0.02 then\n\
+                 net.rpc(\"hello\", { x = 1 })\n\
+                 net.rpc(\"too_big\", string.rep(\"x\", 2000))\n\
+               end\n\
+             end\n\
+             onRpc = {}\n\
+             function onRpc.hurt(args, sender)\n  synced.hp = synced.hp - args.dmg\n  node.x = sender\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "netty".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            peers: vec![1],
+            rtt_ms: 20.0,
+        });
+        host.run(&mut world, &dir, 0.01, 0.01);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        // rpc queue: "hello" queued; the oversized one dropped with a warning.
+        let cmds = host.take_net_commands();
+        let rpcs: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                NetCmd::Rpc { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rpcs, vec!["hello".to_string()], "guarded rpc must drop, got {cmds:?}");
+        assert!(
+            host.drain_logs().iter().any(|l| l.level == LogLevel::Warn && l.msg.contains("too_big")),
+            "oversized rpc must warn"
+        );
+
+        // synced: declared values collected (sorted), server-side.
+        let collected = host.collect_synced();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].1, "netty");
+        assert_eq!(
+            collected[0].2,
+            vec![
+                ("hp".to_string(), floptle_net::NetValue::Num(100.0)),
+                ("name".to_string(), floptle_net::NetValue::Str("flop".into())),
+            ]
+        );
+
+        // onRpc dispatch mutates synced + gets the stamped sender.
+        host.dispatch_rpc(
+            &mut world,
+            "hurt",
+            &floptle_net::NetValue::Table(vec![(
+                floptle_net::NetValue::Str("dmg".into()),
+                floptle_net::NetValue::Num(25.0),
+            )]),
+            7,
+        );
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let collected = host.collect_synced();
+        assert_eq!(collected[0].2[0], ("hp".to_string(), floptle_net::NetValue::Num(75.0)));
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 7.0, "sender reaches Lua");
+
+        // apply_synced (the client path) overwrites the store.
+        host.apply_synced(e.index(), "netty", &[("hp".into(), floptle_net::NetValue::Num(10.0))]);
+        let collected = host.collect_synced();
+        assert_eq!(collected[0].2[0], ("hp".to_string(), floptle_net::NetValue::Num(10.0)));
+
+        // net.on handler fires with the peer id.
+        host.fire_net_event(&mut world, "playerJoined", Some(42), None);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        // (joined lives in the env; verify indirectly — no error + no crash is
+        // the contract here; value-level checks ride the rpc/synced paths above.)
+
+        // Client-side writes to synced warn.
+        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0 });
+        host.dispatch_rpc(
+            &mut world,
+            "hurt",
+            &floptle_net::NetValue::Table(vec![(
+                floptle_net::NetValue::Str("dmg".into()),
+                floptle_net::NetValue::Num(1.0),
+            )]),
+            0,
+        );
+        assert!(
+            host.drain_logs().iter().any(|l| l.level == LogLevel::Warn && l.msg.contains("synced.hp")),
+            "client synced write must warn"
+        );
     }
 
     #[test]

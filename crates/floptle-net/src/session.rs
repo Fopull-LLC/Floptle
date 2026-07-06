@@ -159,11 +159,15 @@ impl NetSession {
     }
 
     /// Assign deterministic ids to the scene-authored `Replicated` nodes. Both
-    /// sides call this at session start on the SAME loaded scene — ECS
-    /// insertion order is load order, so the mapping agrees without any spawn
-    /// messages (`docs/netcode-design.md` §4.1).
+    /// sides call this at session start on the SAME scene (`docs/netcode-design.md`
+    /// §4.1). Iterates in NODE order (the `Transform` column — the order
+    /// `spawn_into`/`to_doc` write nodes), NOT `Replicated`-insertion order:
+    /// a Networked component added in the Inspector mid-session lands at an
+    /// arbitrary point in its own column, but node order round-trips the doc.
     pub fn register_scene(&mut self, world: &World) {
-        for (e, rep) in world.query::<Replicated>() {
+        let nodes: Vec<Entity> = world.query::<Transform>().map(|(e, _)| e).collect();
+        for e in nodes {
+            let Some(rep) = world.get::<Replicated>(e) else { continue };
             let id = self.next_id;
             self.next_id += 1;
             self.net_to_ent.insert(id, e);
