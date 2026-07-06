@@ -64,10 +64,24 @@ pub struct FixedTimestep {
     max_ticks: u32,
 }
 
+impl Default for FixedTimestep {
+    /// The engine's default GAMEPLAY tick rate: 60 Hz (`docs/netcode-design.md` §3 —
+    /// parry-tight input granularity; per-project configurable later).
+    fn default() -> Self {
+        Self::new(60.0)
+    }
+}
+
 impl FixedTimestep {
     /// `hz` is the simulation rate (ticks/second), e.g. `60.0`.
     pub fn new(hz: f32) -> Self {
         Self { step: 1.0 / hz, accumulator: 0.0, max_ticks: 8 }
+    }
+
+    /// Reset banked time (e.g. on Play start, so the first frame doesn't inherit
+    /// a stale accumulator).
+    pub fn reset(&mut self) {
+        self.accumulator = 0.0;
     }
 
     /// Bank a frame's worth of time. Then call [`Self::tick`] in a `while` loop.

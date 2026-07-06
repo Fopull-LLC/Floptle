@@ -2173,8 +2173,6 @@ impl Editor {
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
             // cursor for free-look, or release it). The state persists until changed/Stop.
-            // Script debug gizmos queued this frame (drawn by the viewport overlay).
-            self.script_gizmos = self.script_host.take_gizmos();
             if let Some(want) = self.script_host.take_mouse_lock() {
                 self.script_mouse_lock = want;
                 if let Some(window) = self.window.as_ref() {
@@ -2209,11 +2207,14 @@ impl Editor {
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
             }
-            // Apply script velocity writes, then advance physics (writes transforms back).
-            // Gravity field is rebuilt from the scene's GravityVolume node(s) every frame
-            // (cheap scan) so tweaking mode/strength/radius — or moving the volume — takes
-            // effect immediately instead of needing a Stop/Play. The active camera is the
-            // floating-origin focus: drift far enough and the sim recenters on it.
+            // Apply script velocity writes, then run the GAMEPLAY TICK loop (docs/
+            // netcode-design.md §3): each banked 60 Hz tick runs `fixedUpdate` with a
+            // per-tick input snapshot, applies its writes, and steps physics exactly one
+            // tick — the deterministic unit netcode snapshots/prediction share. Rendered
+            // transforms interpolate across the current tick (anti-stutter). Gravity is
+            // rebuilt from the scene's GravityVolume node(s) every frame (cheap scan) so
+            // tweaking mode/strength/radius takes effect immediately. The active camera
+            // is the floating-origin focus: drift far enough and the sim recenters on it.
             let focus = self.world.query::<Matter>().find_map(|(e, m)| {
                 matches!(m, Matter::Camera { active: true, .. })
                     .then(|| floptle_core::world_transform(&self.world, e).translation)
@@ -2225,14 +2226,82 @@ impl Editor {
                 // restitution, gravity, pos/rot locks) into the running bodies each frame —
                 // no teleport.
                 sim.sync_dynamic_params(&self.world);
+                // `update`'s velocity/height writes apply before the first tick, so
+                // frame-pass controllers (the pre-fixedUpdate style) behave as before.
                 for (eid, v) in self.script_host.take_body_changes() {
                     sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                 }
                 for (eid, h) in self.script_host.take_body_height_changes() {
                     sim.set_body_height(eid, h);
                 }
-                sim.advance(&mut self.world, sdt, focus);
+                self.game_tick.accumulate(sdt);
+                while self.game_tick.tick() {
+                    self.game_tick_no += 1;
+                    // Per-tick input: consume the tick accumulators (edges bank between
+                    // ticks so a between-tick press is never lost). Neutral when the
+                    // Game view isn't focused — but still consumed, so stale edges
+                    // don't fire on refocus.
+                    let snap = if game_focused {
+                        floptle_script::InputSnapshot {
+                            keys_down: self.input_keys.clone(),
+                            keys_pressed: std::mem::take(&mut self.tick_keys_pressed),
+                            keys_released: std::mem::take(&mut self.tick_keys_released),
+                            mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
+                            mouse_delta: std::mem::take(&mut self.tick_mouse_delta),
+                            scroll: std::mem::take(&mut self.tick_scroll),
+                            buttons_down: self.input_buttons,
+                            buttons_pressed: std::mem::take(&mut self.tick_buttons_pressed),
+                        }
+                    } else {
+                        self.tick_keys_pressed.clear();
+                        self.tick_keys_released.clear();
+                        self.tick_mouse_delta = (0.0, 0.0);
+                        self.tick_scroll = 0.0;
+                        self.tick_buttons_pressed = [false; 3];
+                        floptle_script::InputSnapshot::default()
+                    };
+                    self.script_host.set_input(snap);
+                    // Fresh body state for THIS tick (post previous tick's physics).
+                    let mut states = HashMap::new();
+                    for (e, vel, up, grounded, height) in sim.body_states() {
+                        states.insert(
+                            e.index(),
+                            floptle_script::BodyState {
+                                vel: [vel.x, vel.y, vel.z],
+                                up: [up.x, up.y, up.z],
+                                grounded,
+                                height,
+                            },
+                        );
+                    }
+                    self.script_host.set_bodies(states);
+                    // Lend colliders so `raycast(...)` works inside `fixedUpdate` too.
+                    self.script_host
+                        .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+                    // `time` on the fixed pass is the deterministic tick clock.
+                    let tick_time = self.game_tick_no as f32 * self.game_tick.step;
+                    self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
+                    sim.world.colliders = self.script_host.take_colliders(); // reclaim
+                    // Apply the tick's writes, then step physics exactly one tick.
+                    sim.sync_dynamic_params(&self.world);
+                    for (eid, v) in self.script_host.take_body_changes() {
+                        sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                    }
+                    for (eid, h) in self.script_host.take_body_height_changes() {
+                        sim.set_body_height(eid, h);
+                    }
+                    sim.step_tick(self.game_tick.step, focus);
+                }
+                // Render this frame partway into the current tick: smooth at any fps.
+                sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());
             }
+            // Surface fixedUpdate errors alongside the frame pass's.
+            if !self.script_host.errors().is_empty() {
+                self.script_errors = self.script_host.errors().to_vec();
+            }
+            // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
+            // drained once here (drawn by the viewport overlay).
+            self.script_gizmos = self.script_host.take_gizmos();
             // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.
@@ -2303,6 +2372,15 @@ impl Editor {
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
+        // The per-TICK accumulators are consumed by the gameplay-tick loop while
+        // playing; outside play they'd grow unbounded, so drain them here instead.
+        if !self.playing {
+            self.tick_keys_pressed.clear();
+            self.tick_keys_released.clear();
+            self.tick_buttons_pressed = [false; 3];
+            self.tick_mouse_delta = (0.0, 0.0);
+            self.tick_scroll = 0.0;
+        }
         // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
         // wander inside the window — pin it ourselves while a look/pan/lock/trap is
         // active. Look/pan read RAW device motion, so re-centering never pollutes
@@ -2501,6 +2579,10 @@ impl Editor {
             self.record();
             self.world.remove::<floptle_core::RigidBody>(e);
             self.rebuild_sim();
+        }
+        if let Some(e) = cmd.add_networked {
+            self.record();
+            self.world.insert(e, floptle_core::Replicated::default());
         }
         if let Some((e, key)) = cmd.add_particles {
             self.record();

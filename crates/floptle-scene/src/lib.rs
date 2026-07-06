@@ -98,6 +98,55 @@ pub struct NodeDoc {
     /// its live transform is a derived pose value re-computed on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<AttachmentDoc>,
+    /// The "Networked" component: how this node replicates in a multiplayer
+    /// session (`None` = local-only). See [`floptle_core::Replicated`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<ReplicatedDoc>,
+}
+
+/// Serializable replication settings, mirroring [`floptle_core::Replicated`].
+/// The runtime `owner`/`NetId` are session state, not authored — they are
+/// deliberately NOT serialized.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ReplicatedDoc {
+    /// true = the owner-client predicts this node (its own avatar);
+    /// false = plain server-authoritative replication (the default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub predicted: bool,
+    /// Sync position/rotation (default true).
+    #[serde(default = "true_bool")]
+    pub transform: bool,
+    /// Sync velocity too (default false).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub physics: bool,
+    /// Smooth remote entities between snapshots (default true).
+    #[serde(default = "true_bool")]
+    pub interp: bool,
+}
+
+impl ReplicatedDoc {
+    pub fn to_component(&self) -> floptle_core::Replicated {
+        floptle_core::Replicated {
+            mode: if self.predicted {
+                floptle_core::ReplicationMode::Predicted
+            } else {
+                floptle_core::ReplicationMode::Authority
+            },
+            owner: None, // session state, assigned at runtime
+            transform: self.transform,
+            physics: self.physics,
+            interp: self.interp,
+        }
+    }
+
+    pub fn from_component(r: &floptle_core::Replicated) -> Self {
+        Self {
+            predicted: r.mode == floptle_core::ReplicationMode::Predicted,
+            transform: r.transform,
+            physics: r.physics,
+            interp: r.interp,
+        }
+    }
 }
 
 /// Serializable particle-system component, mirroring [`floptle_core::ParticleSystem`].
@@ -977,6 +1026,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         if let Some(p) = &node.particles {
             world.insert(e, p.to_component());
         }
+        if let Some(n) = &node.net {
+            world.insert(e, n.to_component());
+        }
         ents.push(e);
     }
     // Second pass: link parents (skip out-of-range / self references).
@@ -1076,6 +1128,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let particles = world
             .get::<floptle_core::ParticleSystem>(e)
             .map(ParticleSystemDoc::from_component);
+        let net = world.get::<floptle_core::Replicated>(e).map(ReplicatedDoc::from_component);
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -1092,6 +1145,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             particles,
             parent,
             attachment,
+            net,
         });
     }
     let lighting =
@@ -1155,6 +1209,12 @@ mod tests {
                     }),
                     parent: None,
                     attachment: None,
+                    net: Some(ReplicatedDoc {
+                        predicted: true, // exercise the non-default round-trip
+                        transform: true,
+                        physics: true,
+                        interp: false,
+                    }),
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -1174,6 +1234,7 @@ mod tests {
                         bone: "Root".into(),
                         offset: TransformDoc::default(),
                     }), // exercise the bone-attachment round-trip
+                    net: None,
                 },
                 NodeDoc {
                     name: "lamp".into(),
@@ -1190,6 +1251,7 @@ mod tests {
                     particles: None,
                     parent: None,
                     attachment: None,
+                    net: None,
                 },
                 NodeDoc {
                     name: "eye".into(),
@@ -1206,6 +1268,7 @@ mod tests {
                     particles: None,
                     parent: None,
                     attachment: None,
+                    net: None,
                 },
             ],
         }

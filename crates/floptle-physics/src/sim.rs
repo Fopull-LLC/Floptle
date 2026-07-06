@@ -34,6 +34,22 @@ pub struct Sim {
     /// Rebase policy (ADR-0015): when the focus (active camera) drifts past the
     /// threshold, the sim's local frame recenters on it between fixed steps.
     fo: floptle_core::FloatingOrigin,
+    /// Each body's position at the START of the last gameplay tick (sim frame),
+    /// aligned with `world.bodies` — [`Self::writeback_interpolated`] lerps
+    /// `tick_prev → pos` so rendered motion spans the whole tick, not just the
+    /// final physics substep. Empty until [`Self::step_tick`] first runs.
+    tick_prev: Vec<Vec3>,
+}
+
+/// One body's full dynamic state, in ABSOLUTE world coordinates (f64 position,
+/// floating-origin safe) — the serializable capture the netcode snapshots and
+/// prediction rollback restore. See `docs/netcode-design.md` §2/§6.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodySnapshot {
+    /// World-space position (absolute — NOT sim-frame/origin-relative).
+    pub pos: DVec3,
+    pub vel: Vec3,
+    pub grounded: bool,
 }
 
 impl Sim {
@@ -88,7 +104,14 @@ impl Sim {
             let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
-        Self { world, map, accum: 0.0, fixed_dt: 1.0 / 120.0, fo: floptle_core::FloatingOrigin::default() }
+        Self {
+            world,
+            map,
+            accum: 0.0,
+            fixed_dt: 1.0 / 120.0,
+            fo: floptle_core::FloatingOrigin::default(),
+            tick_prev: Vec::new(),
+        }
     }
 
     /// Register a static triangle-mesh collider — e.g. an imported map model the player
@@ -160,6 +183,81 @@ impl Sim {
         // fraction of the way from each body's previous step position to its current.
         let alpha = (self.accum / self.fixed_dt).clamp(0.0, 1.0);
         self.writeback_transforms(ecs, alpha);
+    }
+
+    /// Advance exactly ONE gameplay tick (`tick_dt`, e.g. 1/60): rebase the floating
+    /// origin if the focus drifted, capture each body's tick-start position (the render
+    /// interpolation anchor), then run the whole number of internal physics substeps
+    /// that make up the tick (e.g. 2 × 1/120). NO transform writeback — the caller runs
+    /// every banked tick, then calls [`Self::writeback_interpolated`] once per frame.
+    ///
+    /// This is the netcode-era driver (`docs/netcode-design.md` §3): the gameplay tick
+    /// is the deterministic unit scripts' `fixedUpdate`, input commands, snapshots, and
+    /// prediction all share, so physics must advance in exact tick multiples.
+    pub fn step_tick(&mut self, tick_dt: f32, focus: Option<DVec3>) {
+        if let Some(f) = focus {
+            let local = f - self.world.origin;
+            if local.length_squared() >= self.fo.threshold * self.fo.threshold {
+                let new_origin = f.round(); // whole numbers → the shift is exact in f32
+                self.fo.total_shift += self.world.origin - new_origin;
+                self.world.rebase(new_origin);
+            }
+        }
+        // Anchor AFTER any rebase so tick_prev and pos share the same frame.
+        self.tick_prev.clear();
+        self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
+        let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
+        for _ in 0..n {
+            self.world.step(self.fixed_dt);
+        }
+    }
+
+    /// Write interpolated body transforms to the ECS: `alpha` in `[0,1)` is how far
+    /// render time has progressed into the CURRENT gameplay tick, so each body renders
+    /// `lerp(tick_start, tick_end, alpha)`. Pair with [`Self::step_tick`]; frames where
+    /// no tick ran keep interpolating along the same span (alpha keeps growing).
+    pub fn writeback_interpolated(&self, ecs: &mut World, alpha: f32) {
+        let alpha = alpha.clamp(0.0, 1.0);
+        for link in &self.map {
+            let b = &self.world.bodies[link.body];
+            let from = self.tick_prev.get(link.body).copied().unwrap_or(b.prev_pos);
+            let p = from.lerp(b.pos, alpha);
+            self.write_one_transform(ecs, link, p);
+        }
+    }
+
+    /// Capture a body's full dynamic state by entity index, in absolute world
+    /// coordinates — the serializable unit netcode snapshots (`docs/netcode-design.md`).
+    pub fn body_snapshot(&self, eid: u32) -> Option<BodySnapshot> {
+        self.map.iter().find(|l| l.entity.index() == eid).map(|l| {
+            let b = &self.world.bodies[l.body];
+            BodySnapshot {
+                pos: self.world.origin
+                    + DVec3::new(b.pos.x as f64, b.pos.y as f64, b.pos.z as f64),
+                vel: b.vel,
+                grounded: b.grounded,
+            }
+        })
+    }
+
+    /// Restore a body's dynamic state from a snapshot (prediction rollback / netcode
+    /// apply). Converts the absolute position back into the sim frame and resets the
+    /// interpolation anchors too, so a rollback never smears across the correction.
+    pub fn restore_body(&mut self, eid: u32, s: &BodySnapshot) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                let p = (s.pos - self.world.origin).as_vec3();
+                let b = &mut self.world.bodies[l.body];
+                b.pos = p;
+                b.prev_pos = p;
+                b.vel = s.vel;
+                b.grounded = s.grounded;
+                if let Some(tp) = self.tick_prev.get_mut(l.body) {
+                    *tp = p;
+                }
+                return;
+            }
+        }
     }
 
     /// Per body: (entity, velocity, up, grounded, height) — so the editor can expose it
@@ -251,19 +349,25 @@ impl Sim {
         for link in &self.map {
             let b = &self.world.bodies[link.body];
             let p = b.prev_pos.lerp(b.pos, alpha);
-            if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
-                t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
-                // Rotation constraints: keep the authored angle on each locked axis.
-                if link.lock_rot.iter().any(|&l| l) {
-                    let (ay, ax, az) = t.rotation.to_euler(EulerRot::YXZ);
-                    let (by, bx, bz) = link.rot0.to_euler(EulerRot::YXZ);
-                    t.rotation = Quat::from_euler(
-                        EulerRot::YXZ,
-                        if link.lock_rot[1] { by } else { ay }, // Y axis
-                        if link.lock_rot[0] { bx } else { ax }, // X axis
-                        if link.lock_rot[2] { bz } else { az }, // Z axis
-                    );
-                }
+            self.write_one_transform(ecs, link, p);
+        }
+    }
+
+    /// Write one body's (interpolated) sim-frame position to its entity's transform,
+    /// honoring the rotation-axis locks.
+    fn write_one_transform(&self, ecs: &mut World, link: &BodyLink, p: Vec3) {
+        if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
+            t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            // Rotation constraints: keep the authored angle on each locked axis.
+            if link.lock_rot.iter().any(|&l| l) {
+                let (ay, ax, az) = t.rotation.to_euler(EulerRot::YXZ);
+                let (by, bx, bz) = link.rot0.to_euler(EulerRot::YXZ);
+                t.rotation = Quat::from_euler(
+                    EulerRot::YXZ,
+                    if link.lock_rot[1] { by } else { ay }, // Y axis
+                    if link.lock_rot[0] { bx } else { ax }, // X axis
+                    if link.lock_rot[2] { bz } else { az }, // Z axis
+                );
             }
         }
     }

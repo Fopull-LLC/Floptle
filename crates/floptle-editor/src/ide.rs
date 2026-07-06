@@ -1783,6 +1783,10 @@ const LUA_SNIPPETS: &[(&str, &str)] = &[
         "\nfunction start(node)\n  \nend\n",
     ),
     (
+        "fixedUpdate",
+        "\nfunction fixedUpdate(node, dt)\n  \nend\n",
+    ),
+    (
         "spin (yaw)",
         "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
     ),
@@ -1826,7 +1830,7 @@ pub(crate) const LUA_KEYWORDS: &[&str] = &[
 
 /// Identifiers highlighted as engine/builtin API (teal).
 pub(crate) const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "defaults", "log", "start", "update", "input", "math",
+    "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets", "gizmo",
 ];
@@ -1881,6 +1885,7 @@ struct ApiEntry {
 /// page's reference). Lua stdlib highlights are included so completion is useful.
 const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "update", insert: "update", doc: "function update(node, dt) — runs every frame while playing." },
+    ApiEntry { label: "fixedUpdate", insert: "fixedUpdate", doc: "function fixedUpdate(node, dt) — runs every GAMEPLAY TICK (60 Hz, constant dt). Movement/gameplay/physics writes belong here; cameras & cosmetics in update. Same cadence physics steps at — frame-rate independent." },
     ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
     ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },

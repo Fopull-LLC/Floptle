@@ -105,6 +105,8 @@ struct EditorCmd {
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
+    /// Add a Networked (replication) component on this entity.
+    add_networked: Option<Entity>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -850,6 +852,19 @@ struct Editor {
     input_buttons_pressed: [bool; 3],
     input_mouse_delta: (f32, f32),
     input_scroll: f32,
+    /// Per-GAMEPLAY-TICK input accumulators (docs/netcode-design.md §3): edges and
+    /// deltas bank here in parallel with the per-frame sets above, and are consumed
+    /// by each `fixedUpdate` tick — so a key pressed between ticks is never lost,
+    /// and the per-tick snapshot is exactly what netcode input commands will carry.
+    tick_keys_pressed: std::collections::HashSet<String>,
+    tick_keys_released: std::collections::HashSet<String>,
+    tick_buttons_pressed: [bool; 3],
+    tick_mouse_delta: (f32, f32),
+    tick_scroll: f32,
+    /// The 60 Hz gameplay-tick accumulator driving `fixedUpdate` + physics, and the
+    /// tick counter (the netcode timebase). Reset on Play.
+    game_tick: floptle_core::FixedTimestep,
+    game_tick_no: u64,
     /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
     /// free-look. While set, the RMB-release handler won't release the grab, and Stop
     /// releases it. Reset when play ends.
@@ -1259,14 +1274,18 @@ impl ApplicationHandler for Editor {
                         _ => {}
                     }
                     // Track raw key state for the script `input` API (works in play
-                    // mode regardless of which panel has focus).
+                    // mode regardless of which panel has focus). Edges land in BOTH
+                    // the per-frame sets (for `update`) and the per-tick accumulators
+                    // (for `fixedUpdate` — consumed tick by tick, never lost).
                     if let Some(name) = key_name(code) {
                         if pressed {
                             if self.input_keys.insert(name.to_string()) {
                                 self.input_keys_pressed.insert(name.to_string());
+                                self.tick_keys_pressed.insert(name.to_string());
                             }
                         } else if self.input_keys.remove(name) {
                             self.input_keys_released.insert(name.to_string());
+                            self.tick_keys_released.insert(name.to_string());
                         }
                     }
                     // Discrete commands fire on press only.
@@ -1438,10 +1457,12 @@ impl ApplicationHandler for Editor {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                self.input_scroll += match delta {
+                let d = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
+                self.input_scroll += d;
+                self.tick_scroll += d;
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -1503,9 +1524,11 @@ impl ApplicationHandler for Editor {
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
-            // Accumulate raw mouse delta for the script `input` API.
+            // Accumulate raw mouse delta for the script `input` API (frame + tick).
             self.input_mouse_delta.0 += delta.0 as f32;
             self.input_mouse_delta.1 += delta.1 as f32;
+            self.tick_mouse_delta.0 += delta.0 as f32;
+            self.tick_mouse_delta.1 += delta.1 as f32;
             // Priority: RMB-look > MMB-pan > grabbed gizmo handle. (Free dragging an
             // object now requires the Move tool's center handle — no accidental moves.)
             if self.input.looking {

@@ -103,11 +103,14 @@ impl Editor {
         self.select_single(order[next]);
     }
 
-    /// Track a mouse button for the script `input` API (edge + held).
+    /// Track a mouse button for the script `input` API (edge + held) — the press
+    /// edge banks in both the per-frame set (`update`) and the per-tick accumulator
+    /// (`fixedUpdate`).
     pub(crate) fn track_mouse_button(&mut self, i: usize, pressed: bool) {
         if i < 3 {
             if pressed && !self.input_buttons[i] {
                 self.input_buttons_pressed[i] = true;
+                self.tick_buttons_pressed[i] = true;
             }
             self.input_buttons[i] = pressed;
         }

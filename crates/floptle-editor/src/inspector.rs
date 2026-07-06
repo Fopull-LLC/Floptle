@@ -1057,6 +1057,63 @@ impl EditorTabViewer<'_> {
                     }
                 }
 
+                // ===== Networked (replication; only when the node has one) =====
+                // The authored half of the netcode (docs/netcode-design.md §4.2): which
+                // props sync and whether the owner-client predicts it. Owner/NetId are
+                // session state, assigned at runtime — not edited here.
+                if world.get::<floptle_core::Replicated>(e).is_some() {
+                    ui.separator();
+                    let (_, _, remove) = component_header(ui, "🌐 Networked", false, true);
+                    if remove {
+                        world.remove::<floptle_core::Replicated>(e);
+                        cmd.inspector_changed = true;
+                    }
+                    ui.indent("net_props", |ui| {
+                        if let Some(rep) = world.get_mut::<floptle_core::Replicated>(e) {
+                            use floptle_core::ReplicationMode;
+                            ui.horizontal(|ui| {
+                                ui.label("mode");
+                                egui::ComboBox::from_id_salt("net-mode")
+                                    .selected_text(match rep.mode {
+                                        ReplicationMode::Authority => "Server authority",
+                                        ReplicationMode::Predicted => "Predicted (owner)",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        cmd.inspector_changed |= ui
+                                            .selectable_value(
+                                                &mut rep.mode,
+                                                ReplicationMode::Authority,
+                                                "Server authority",
+                                            )
+                                            .on_hover_text("the server simulates it; clients render interpolated snapshots — the default, cheat-proof mode")
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .selectable_value(
+                                                &mut rep.mode,
+                                                ReplicationMode::Predicted,
+                                                "Predicted (owner)",
+                                            )
+                                            .on_hover_text("the owning player's client ALSO simulates it locally, ahead of the server (their own avatar) — the server still has the final word")
+                                            .changed();
+                                    });
+                            });
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rep.transform, "sync transform")
+                                .on_hover_text("replicate position/rotation to clients")
+                                .changed();
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rep.physics, "sync physics")
+                                .on_hover_text("replicate velocity too — better extrapolation, required to predict a rigidbody")
+                                .changed();
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rep.interp, "interpolate")
+                                .on_hover_text("smooth remote copies between snapshots (off = snap, for teleporty things)")
+                                .changed();
+                        }
+                    });
+                    ui.small("only nodes with this component replicate — everything else stays local. Sessions start via Lua: net.host{} / net.join(...)");
+                }
+
                 // ===== Collider (static collision; only when the node has one) =====
                 // Auto-shaped from the node's geometry (Cube → box, Sphere → sphere,
                 // Capsule → capsule, Mesh → its triangles). A legacy MeshCollider counts.
@@ -1308,6 +1365,7 @@ impl EditorTabViewer<'_> {
                     let is_terrain = matches!(cur, Some(Matter::Terrain { .. }));
                     let has_mat = world.get::<Material>(e).is_some();
                     let has_rb = world.get::<floptle_core::RigidBody>(e).is_some();
+                    let has_net = world.get::<floptle_core::Replicated>(e).is_some();
                     let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
                         || world.get::<floptle_core::MeshCollider>(e).is_some();
                     let collider_kind = match cur {
@@ -1326,6 +1384,7 @@ impl EditorTabViewer<'_> {
                         Rb,
                         Coll,
                         Mat,
+                        Net,
                         Preset(String),
                         Script(String),
                         Type(Matter),
@@ -1337,6 +1396,9 @@ impl EditorTabViewer<'_> {
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
                         items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
+                    }
+                    if !has_net {
+                        items.push(("Networking", "🌐  Networked".into(), Add::Net));
                     }
                     if !has_collidable
                         && let Some(k) = collider_kind {
@@ -1431,6 +1493,7 @@ impl EditorTabViewer<'_> {
                         let mut shown = false;
                         for cat in [
                             "Physics",
+                            "Networking",
                             "Rendering",
                             "Effects",
                             "Animation",
@@ -1451,6 +1514,7 @@ impl EditorTabViewer<'_> {
                                 if ui.button(l).clicked() {
                                     match a {
                                         Add::Rb => cmd.add_rigidbody = Some(e),
+                                        Add::Net => cmd.add_networked = Some(e),
                                         Add::Coll => cmd.set_collidable = Some((e, true)),
                                         Add::Mat => cmd.add_material = Some(e),
                                         Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),

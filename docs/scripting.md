@@ -10,7 +10,7 @@ it up immediately.
 
 ## Contents
 1. [A first script](#1-a-first-script)
-2. [Lifecycle: `start` and `update`](#2-lifecycle-start-and-update)
+2. [Lifecycle: `start`, `update`, `fixedUpdate`](#2-lifecycle-start-update-fixedupdate)
 3. [`node` — the transform](#3-node--the-transform)
 4. [`node` — the physics body](#4-node--the-physics-body)
 5. [`input` — keyboard & mouse](#5-input--keyboard--mouse)
@@ -47,18 +47,37 @@ Compound assignment operators work: `+=  -=  *=  /=  %=  ^=  ..=`.
 node.yaw += math.rad(params.speed) * dt
 ```
 
-## 2. Lifecycle: `start` and `update`
+## 2. Lifecycle: `start`, `update`, `fixedUpdate`
 
 ```lua
-function start(node)        -- optional; runs once when Play begins
+function start(node)             -- optional; runs once when Play begins
 end
 
-function update(node, dt)   -- runs every frame while playing
+function update(node, dt)        -- runs every frame while playing
+end
+
+function fixedUpdate(node, dt)   -- runs every GAMEPLAY TICK (60 Hz, constant dt)
 end
 ```
 
 Each attached script keeps its **own state across frames** — assign a variable in
 `start` (or at the top level) and read it back in `update`.
+
+**Which one do I use?** The split is simple:
+
+| Hook | Cadence | Put here |
+|---|---|---|
+| `update` | every rendered frame (variable `dt`) | cameras, cosmetic motion, UI-ish logic |
+| `fixedUpdate` | every gameplay tick (constant `dt`, 60 Hz) | movement, gameplay rules, velocity/physics writes |
+
+`fixedUpdate` runs on the same fixed clock physics steps on, right before each
+physics tick — so gameplay code behaves identically at 30 fps and 240 fps, and
+`input.pressed(...)` edges are delivered **per tick** there (a press between two
+ticks is never lost). It's also the cadence multiplayer prediction will replay,
+so code you put in `fixedUpdate` today is already netcode-shaped.
+
+> Inside `fixedUpdate`, the `input` API reads the tick's input snapshot; inside
+> `update`, the frame's. Both work everywhere — only the timing window differs.
 
 ## 3. `node` — the transform
 

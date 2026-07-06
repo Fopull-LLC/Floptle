@@ -381,6 +381,71 @@ mod tests {
     }
 
     #[test]
+    fn step_tick_advances_in_exact_gameplay_ticks() {
+        // The netcode-era driver (docs/netcode-design.md §3): step_tick(1/60) must run
+        // exactly the substeps of one gameplay tick and be reproducible — two sims fed
+        // the same ticks land bit-identically (same build/machine determinism).
+        let build = || {
+            let mut ecs = World::default();
+            let e = ecs.spawn();
+            ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+            ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+            let sim = Sim::build(
+                &ecs,
+                &[],
+                GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+                DVec3::ZERO,
+            );
+            (ecs, e, sim)
+        };
+        let (mut a_ecs, ae, mut a) = build();
+        let (mut b_ecs, be, mut b) = build();
+        for _ in 0..60 {
+            a.step_tick(1.0 / 60.0, None);
+            b.step_tick(1.0 / 60.0, None);
+        }
+        a.writeback_interpolated(&mut a_ecs, 0.0);
+        b.writeback_interpolated(&mut b_ecs, 0.0);
+        let ya = a_ecs.get::<Transform>(ae).unwrap().translation.y;
+        let yb = b_ecs.get::<Transform>(be).unwrap().translation.y;
+        assert!(ya < 4.0, "body must fall under step_tick, got y={ya}");
+        assert_eq!(ya, yb, "same ticks must reproduce bit-identical state");
+        // Interpolation endpoints: alpha=1 must equal the body's current position.
+        a.writeback_interpolated(&mut a_ecs, 1.0);
+        let end = a_ecs.get::<Transform>(ae).unwrap().translation;
+        let body = a.body_snapshot(ae.index()).unwrap().pos;
+        assert!((end.y - body.y).abs() < 1e-6, "alpha=1 must land on the tick-end pos");
+    }
+
+    #[test]
+    fn body_snapshot_round_trips_absolute_world_state() {
+        // Capture → mutate → restore must return the body to the captured state, in
+        // ABSOLUTE world coordinates even with a far-out floating origin (rollback's
+        // core contract, docs/netcode-design.md §6).
+        let far = DVec3::new(1.0e6, 0.0, 1.0e6); // origin-relative sim, far from 0
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(far + DVec3::new(0.0, 5.0, 0.0)));
+        ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), far);
+        for _ in 0..30 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let snap = sim.body_snapshot(e.index()).expect("body must snapshot");
+        assert!((snap.pos.x - far.x).abs() < 1.0, "snapshot pos must be absolute world");
+        // Diverge, then roll back.
+        for _ in 0..30 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let diverged = sim.body_snapshot(e.index()).unwrap();
+        assert_ne!(diverged, snap, "the body should have kept falling");
+        sim.restore_body(e.index(), &snap);
+        let restored = sim.body_snapshot(e.index()).unwrap();
+        assert_eq!(restored, snap, "restore must return the exact captured state");
+    }
+
+    #[test]
     fn rigidbody_wins_over_collidable_so_it_still_falls() {
         // A node flagged BOTH RigidBody and Collidable is a DYNAMIC body — the RigidBody
         // wins, so build() makes it a body and it falls under gravity. (The editor skips
