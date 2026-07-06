@@ -60,6 +60,16 @@ pub struct Replicated {
     /// Smooth remote entities between snapshots (off = snap — for teleporty
     /// things where interpolation would look like motion).
     pub interp: bool,
+    /// How far behind the newest server tick remote copies render, in gameplay
+    /// ticks (default 6 ≈ 100 ms at 60 Hz). Lower = tighter tracking but
+    /// stutters under jitter/loss; higher = smoother on bad links. Ignored
+    /// when `interp` is off.
+    pub interp_delay: u8,
+}
+
+impl Replicated {
+    /// The default remote-render delay, gameplay ticks (~100 ms at 60 Hz).
+    pub const DEFAULT_INTERP_DELAY: u8 = 6;
 }
 
 impl Default for Replicated {
@@ -70,6 +80,7 @@ impl Default for Replicated {
             transform: true,
             physics: false,
             interp: true,
+            interp_delay: Self::DEFAULT_INTERP_DELAY,
         }
     }
 }

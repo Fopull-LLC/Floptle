@@ -68,6 +68,15 @@ pub type SyncedVars = Vec<(Entity, String, Vec<(String, NetValue)>)>;
 struct InterpBuf {
     samples: VecDeque<(u64, [f64; 3], [f32; 4])>,
     interp: bool,
+    /// Per-node render delay behind the newest server tick, in ticks
+    /// ([`Replicated::interp_delay`] — tweakable on the Networked component).
+    delay: u64,
+}
+
+impl InterpBuf {
+    fn new(rep: &Replicated) -> Self {
+        Self { samples: VecDeque::new(), interp: rep.interp, delay: rep.interp_delay as u64 }
+    }
 }
 
 const MAX_SAMPLES: usize = 32;
@@ -75,8 +84,6 @@ const MAX_SAMPLES: usize = 32;
 const SNAPSHOT_EVERY: u8 = 2;
 /// A keyframe (full state) every N snapshots — heals unreliable-channel loss.
 const KEYFRAME_EVERY: u32 = 30;
-/// Client render delay behind the newest server tick, in ticks (~100 ms at 60 Hz).
-const INTERP_DELAY: u64 = 6;
 
 pub struct NetSession {
     role: NetRole,
@@ -173,8 +180,7 @@ impl NetSession {
             self.net_to_ent.insert(id, e);
             self.ent_to_net.insert(e, id);
             if self.role == NetRole::Client {
-                self.interp
-                    .insert(id, InterpBuf { samples: VecDeque::new(), interp: rep.interp });
+                self.interp.insert(id, InterpBuf::new(rep));
             }
         }
     }
@@ -496,8 +502,7 @@ impl NetSession {
                 world.insert(e, rep);
                 self.net_to_ent.insert(id, e);
                 self.ent_to_net.insert(e, id);
-                self.interp
-                    .insert(id, InterpBuf { samples: VecDeque::new(), interp: rep.interp });
+                self.interp.insert(id, InterpBuf::new(&rep));
             }
             Msg::Despawn { id } => {
                 if let Some(e) = self.net_to_ent.remove(&id) {
@@ -516,10 +521,10 @@ impl NetSession {
                 }
                 self.latest_server_tick = self.latest_server_tick.max(tick);
                 for en in entries {
-                    let buf = self.interp.entry(en.id).or_insert(InterpBuf {
-                        samples: VecDeque::new(),
-                        interp: true,
-                    });
+                    let buf = self
+                        .interp
+                        .entry(en.id)
+                        .or_insert_with(|| InterpBuf::new(&Replicated::default()));
                     buf.samples.push_back((tick, en.pos, en.rot));
                     while buf.samples.len() > MAX_SAMPLES {
                         buf.samples.pop_front();
@@ -544,12 +549,13 @@ impl NetSession {
         }
     }
 
-    /// Write each replicated entity's transform at `latest - INTERP_DELAY`,
-    /// lerped between the two bracketing samples (`interp = false` snaps to
-    /// the newest instead).
+    /// Write each replicated entity's transform at `latest - its interp delay`
+    /// (per-node, from the Networked component), lerped between the two
+    /// bracketing samples (`interp = false` snaps to the newest instead).
     fn apply_interpolation(&mut self, world: &mut World) {
-        let target = self.latest_server_tick.saturating_sub(INTERP_DELAY);
+        let latest = self.latest_server_tick;
         for (id, buf) in &mut self.interp {
+            let target = latest.saturating_sub(buf.delay);
             let Some(&e) = self.net_to_ent.get(id) else { continue };
             let Some(last) = buf.samples.back().copied() else { continue };
             let (pos, rot) = if !buf.interp || buf.samples.len() == 1 {
@@ -589,7 +595,7 @@ impl NetSession {
             }
             // Trim samples far behind the target so the buffer stays small.
             while buf.samples.len() > 2
-                && buf.samples[1].0 < target.saturating_sub(INTERP_DELAY)
+                && buf.samples[1].0 < target.saturating_sub(buf.delay)
             {
                 buf.samples.pop_front();
             }

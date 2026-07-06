@@ -1109,6 +1109,17 @@ impl EditorTabViewer<'_> {
                                 .checkbox(&mut rep.interp, "interpolate")
                                 .on_hover_text("smooth remote copies between snapshots (off = snap, for teleporty things)")
                                 .changed();
+                            if rep.interp {
+                                let mut d = rep.interp_delay as i32;
+                                if ui
+                                    .add(egui::Slider::new(&mut d, 0..=30).text("interp delay (ticks)"))
+                                    .on_hover_text("how far behind the server remote copies render — 6 ticks ≈ 100 ms. Lower = tighter tracking (stutters under jitter/loss); higher = smoother on bad links")
+                                    .changed()
+                                {
+                                    rep.interp_delay = d as u8;
+                                    cmd.inspector_changed = true;
+                                }
+                            }
                         }
                     });
                     ui.small("only nodes with this component replicate — everything else stays local. Sessions start via Lua: net.host{} / net.join(...)");
