@@ -15,6 +15,10 @@
 //! function update(node, dt)              -- every frame while playing
 //!   node.yaw = node.yaw + math.rad(params.speed) * dt
 //! end
+//!
+//! function fixedUpdate(node, dt)         -- every GAMEPLAY TICK (constant dt)
+//!   -- movement / gameplay / physics writes belong here (netcode cadence)
+//! end
 //! ```
 //! The host hands each call a mutable `node` table (`x/y/z`, `scale`/`scale_x..z`,
 //! `yaw/pitch/roll` in radians) synced to the node's [`Transform`] before the call
@@ -38,6 +42,15 @@ use mlua::{Lua, RegistryKey, Table};
 
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
+///
+/// DETERMINISM INVARIANT (audited 2026-07-06, `docs/netcode-design.md` §3): the
+/// host's `HashMap`/`HashSet` state is only ever *iterated* where order cannot
+/// change simulation results — each queued write lands on a distinct key
+/// (entity/component/field), scripts themselves run in ECS insertion order
+/// (a `Vec` snapshot), and the `input` sets are lookup-only. Keep it that way:
+/// if a future queue's application order can affect the sim, use a `Vec` or
+/// sort before applying — netcode prediction replays depend on same-inputs →
+/// same-results.
 type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
 
 mod api;
@@ -398,6 +411,47 @@ mod tests {
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         let (yaw, _, _) = world.get::<Transform>(e).unwrap().rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "params.speed default not applied; yaw {yaw}");
+    }
+
+    #[test]
+    fn fixed_update_runs_per_tick_with_constant_dt() {
+        // The gameplay-tick hook (docs/netcode-design.md §3): `fixedUpdate(node, dt)`
+        // runs once per run_fixed call with the constant tick delta, only AFTER the
+        // frame pass has started the script, and `update` does NOT run in the fixed
+        // pass (nor fixedUpdate in the frame pass).
+        let dir = std::env::temp_dir().join("floptle_script_test_fixed_update");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "ticker",
+            "function update(node, dt)\n  node.y = node.y + 1\nend\n\
+             function fixedUpdate(node, dt)\n  node.x = node.x + 1\n  node.z = dt\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "ticker".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        // run_fixed BEFORE any frame pass: instance doesn't exist yet → no tick, no error.
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 0.0);
+
+        // One frame pass (start + update), then three fixed ticks.
+        host.run(&mut world, &dir, 0.016, 0.016);
+        for i in 0..3 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.016 + (i as f32) / 60.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let t = *world.get::<Transform>(e).unwrap();
+        // x counts fixedUpdate calls (self-moves write back per tick); y counts updates.
+        assert_eq!(t.translation.x, 3.0, "fixedUpdate must run once per run_fixed");
+        assert_eq!(t.translation.y, 1.0, "update must run only in the frame pass");
+        let want = (1.0f32 / 60.0) as f64;
+        assert!((t.translation.z - want).abs() < 1e-9, "fixed dt must be the constant tick delta");
     }
 
     #[test]

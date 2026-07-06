@@ -221,6 +221,15 @@ impl Editor {
             self.play_snapshot = Some(self.snapshot());
             self.play_t = 0.0;
             self.paused = false;
+            // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
+            // and no stale per-tick input edges from before Play.
+            self.game_tick.reset();
+            self.game_tick_no = 0;
+            self.tick_keys_pressed.clear();
+            self.tick_keys_released.clear();
+            self.tick_buttons_pressed = [false; 3];
+            self.tick_mouse_delta = (0.0, 0.0);
+            self.tick_scroll = 0.0;
             // Build the physics sim from the scene: RigidBody nodes + every terrain
             // volume (its own anchored SDF collider, native resolution) + the gravity
             // field from GravityVolume nodes.

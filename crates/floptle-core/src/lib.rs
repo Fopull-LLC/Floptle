@@ -28,6 +28,7 @@ pub mod event;
 pub mod material;
 pub mod math;
 pub mod matter;
+pub mod net;
 pub mod origin;
 pub mod script;
 pub mod time;
@@ -40,6 +41,7 @@ pub use matter::{
     GravityMode, Light, Matter, MeshCollider, Name, Parent, ParticleSystem, RigidBody, Shape, Spin,
     Visible,
 };
+pub use net::{NetId, Replicated, ReplicationMode};
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};

@@ -652,13 +652,49 @@ impl ScriptHost {
             }
         }
         // Pass 2: run each script's start/update.
-        for (e, scripts) in &work {
+        self.run_pass(world, &work, dt, time, false);
+        self.flush_writes(world);
+
+        // Drop environments whose (node, script) no longer exists.
+        let stale: Vec<(u32, String)> =
+            self.instances.iter().filter(|(_, i)| !i.seen).map(|(k, _)| k.clone()).collect();
+        for k in stale {
+            if let Some(inst) = self.instances.remove(&k) {
+                let _ = self.lua.remove_registry_value(inst.env);
+            }
+            self.envs.borrow_mut().remove(&k);
+        }
+    }
+
+    /// Run every script's `fixedUpdate(node, dt)` for ONE gameplay tick (the netcode-era
+    /// fixed step, `docs/netcode-design.md` §3). Called zero or more times per frame by
+    /// the play loop, between [`Self::run`] (which handles `start`/`update`, instance
+    /// lifecycle, and hot reload) and the physics tick — so `dt` here is the CONSTANT
+    /// tick delta and gameplay code sees the same cadence the sim steps at.
+    ///
+    /// Instances are the ones `run` built this frame; a not-yet-`start`ed script is
+    /// skipped (its `start` fires in the next frame pass first). Errors accumulate onto
+    /// the frame's list rather than clearing it.
+    pub fn run_fixed(&mut self, world: &mut World, dt: f32, time: f32) {
+        // Re-mirror the scene: earlier ticks this frame moved transforms/physics, and
+        // handles must read post-step state, not the frame-start snapshot.
+        self.sync_scene(world);
+        let work: Vec<(Entity, Scripts)> =
+            world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        self.run_pass(world, &work, dt, time, true);
+        self.flush_writes(world);
+    }
+
+    /// One lifecycle pass over `work`: the per-frame pass (`start`/`update`) or the
+    /// per-tick pass (`fixedUpdate`), with the same self-move write-back rules.
+    fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, fixed: bool) {
+        for (e, scripts) in work {
             let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
-            let tr0 = tr; // frame-start, to detect a self-move via the `node` argument
+            let tr0 = tr; // pass-start, to detect a self-move via the `node` argument
             let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
-                    self.tick_instance(*e, &inst.kind, &inst.params, &mut tr, dt, time);
+                    self.tick_instance(*e, &inst.kind, &inst.params, &mut tr, dt, time, fixed);
                     ran = true;
                 }
             }
@@ -675,6 +711,12 @@ impl ScriptHost {
                 s.dirty.remove(&e.index());
             }
         }
+    }
+
+    /// Flush a pass's queued writes to the ECS: cross-node handle transforms, model /
+    /// material / visibility swaps, and `node:getcomponent(...)` field writes. Runs
+    /// after every pass (frame or fixed) so a tick's writes land before physics steps.
+    fn flush_writes(&mut self, world: &mut World) {
         // Flush transforms that a handle wrote on OTHER nodes back to the ECS.
         self.flush_scene(world);
         // Apply script-driven component swaps: mesh model + material. (Model paths stay in
@@ -710,16 +752,6 @@ impl ScriptHost {
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
-
-        // Drop environments whose (node, script) no longer exists.
-        let stale: Vec<(u32, String)> =
-            self.instances.iter().filter(|(_, i)| !i.seen).map(|(k, _)| k.clone()).collect();
-        for k in stale {
-            if let Some(inst) = self.instances.remove(&k) {
-                let _ = self.lua.remove_registry_value(inst.env);
-            }
-            self.envs.borrow_mut().remove(&k);
-        }
     }
 
     /// Rebuild the scene-graph mirror the Lua handles read/write, from the live ECS.
@@ -857,7 +889,10 @@ impl ScriptHost {
         true
     }
 
-    /// Run one already-ensured `(entity, script)` instance's lifecycle for this frame.
+    /// Run one already-ensured `(entity, script)` instance's lifecycle for this pass —
+    /// `fixed = false` is the per-frame pass (`start`/`update`), `fixed = true` the
+    /// per-gameplay-tick pass (`fixedUpdate`).
+    #[allow(clippy::too_many_arguments)]
     fn tick_instance(
         &mut self,
         e: Entity,
@@ -866,18 +901,26 @@ impl ScriptHost {
         tr: &mut Transform,
         dt: f32,
         time: f32,
+        fixed: bool,
     ) {
         let key = (e.index(), name.to_string());
         let (first, env) = {
             let Some(inst) = self.instances.get_mut(&key) else { return };
-            let first = !inst.started;
-            inst.started = true;
+            // `fixedUpdate` never runs before `start` — a brand-new instance waits for
+            // the next frame pass to start it first.
+            if fixed && !inst.started {
+                return;
+            }
+            let first = !inst.started && !fixed;
+            if !fixed {
+                inst.started = true;
+            }
             let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
             (first, env)
         };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
-        if let Err(err) = self.tick(&env, params, tr, dt, time, first, eid, body) {
+        if let Err(err) = self.tick(&env, params, tr, dt, time, first, eid, body, fixed) {
             self.fail(name, format!("{name}: {err}"));
         }
     }
@@ -894,6 +937,7 @@ impl ScriptHost {
         first: bool,
         eid: u32,
         body: Option<BodyState>,
+        fixed: bool,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, env, params)?)?;
         env.set("time", time as f64)?;
@@ -901,14 +945,23 @@ impl ScriptHost {
 
         let node = node_table(&self.lua, eid, tr, body)?;
         let pre = node_pre(tr);
-        // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
-        // still work for older scripts.
-        if first
-            && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
-                f.call::<()>(node.clone())?;
+        if fixed {
+            // The per-gameplay-tick hook (constant dt — gameplay/netcode cadence).
+            if let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? {
+                f.call::<()>((node.clone(), dt as f64))?;
+            } else {
+                return Ok(()); // no hook: skip the body read-back (nothing ran)
             }
-        if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
-            f.call::<()>((node.clone(), dt as f64))?;
+        } else {
+            // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
+            // still work for older scripts.
+            if first
+                && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
+                    f.call::<()>(node.clone())?;
+                }
+            if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
+                f.call::<()>((node.clone(), dt as f64))?;
+            }
         }
         // Read back the (possibly script-modified) velocity + height for a physics body.
         if let Some(b) = body {

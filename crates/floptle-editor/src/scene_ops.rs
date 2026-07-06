@@ -115,6 +115,10 @@ impl Editor {
             .world
             .get::<floptle_core::ParticleSystem>(e)
             .map(floptle_scene::ParticleSystemDoc::from_component);
+        let net = self
+            .world
+            .get::<floptle_core::Replicated>(e)
+            .map(floptle_scene::ReplicatedDoc::from_component);
         Some(NodeDoc {
             name,
             transform,
@@ -130,6 +134,7 @@ impl Editor {
             particles,
             parent: None,
             attachment: None, // captured/restored by save-load (to_doc/from_doc), not the clipboard
+            net,
         })
     }
 
@@ -171,6 +176,9 @@ impl Editor {
         if let Some(p) = &node.particles {
             self.world.insert(e, p.to_component());
         }
+        if let Some(n) = &node.net {
+            self.world.insert(e, n.to_component());
+        }
         e
     }
 
@@ -197,6 +205,7 @@ impl Editor {
             particles: None,
             parent: None,
             attachment: None,
+            net: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -233,6 +242,7 @@ impl Editor {
                 particles: None,
                 parent: None,
                 attachment: None,
+                net: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

@@ -126,6 +126,14 @@ function start(node) end
 ---@param dt number Seconds since the last frame.
 function update(node, dt) end
 
+---Runs every GAMEPLAY TICK (60 Hz, constant dt) — put movement, gameplay, and
+---physics writes here; keep cameras/cosmetics in `update`. This is the fixed,
+---deterministic cadence physics steps at (and the one multiplayer prediction
+---will replay), so tick code behaves the same at any frame rate.
+---@param node Node
+---@param dt number The constant tick delta (1/60 s by default).
+function fixedUpdate(node, dt) end
+
 ---Player input (play mode) — poll the keyboard + mouse to make games interactive.
 ---@class Input
 input = {}

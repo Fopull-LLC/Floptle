@@ -633,6 +633,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         particles: None,
         parent: None,
         attachment: None,
+        net: None,
     }
 }
 
@@ -666,6 +667,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 particles: None,
                 parent: None,
                 attachment: None,
+                net: None,
             },
             NodeDoc {
                 name: "sphere".into(),
@@ -682,6 +684,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 particles: None,
                 parent: None,
                 attachment: None,
+                net: None,
             },
             NodeDoc {
                 name: "blob".into(),
@@ -698,6 +701,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 particles: None,
                 parent: None,
                 attachment: None,
+                net: None,
             },
             default_camera_node(),
         ],
