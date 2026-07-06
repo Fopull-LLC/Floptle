@@ -989,47 +989,53 @@ pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneErro
 
 /// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,
 /// then spawn the one mandatory Lighting node (`Name` + [`Light`]).
+/// Spawn ONE node's components into the world (no parent/attachment linking —
+/// those need the whole doc's index space; the caller links if it wants to).
+/// Used by the editor's node clipboard/spawners and by `floptle-net` to
+/// materialize a replicated runtime spawn.
+pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
+    let e = world.spawn();
+    world.insert(e, node.transform.to_transform());
+    world.insert(e, Name(node.name.clone()));
+    world.insert(e, node.matter.to_matter());
+    if !node.scripts.is_empty() {
+        world.insert(e, Scripts(node.scripts.iter().map(ScriptDoc::to_inst).collect()));
+    }
+    if let Some(m) = &node.material {
+        world.insert(e, m.to_material());
+    }
+    if let Some(rb) = &node.rigidbody {
+        world.insert(e, rb.to_rigidbody());
+    }
+    if node.mesh_collider {
+        world.insert(e, floptle_core::MeshCollider);
+    }
+    if node.collidable {
+        world.insert(e, floptle_core::Collidable);
+    }
+    if !node.visible {
+        world.insert(e, floptle_core::Visible(false));
+    }
+    if !node.cast_shadow {
+        world.insert(e, floptle_core::CastShadow(false));
+    }
+    if let Some(ctl) = &node.anim_controller {
+        world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
+    }
+    if let Some(p) = &node.particles {
+        world.insert(e, p.to_component());
+    }
+    if let Some(n) = &node.net {
+        world.insert(e, n.to_component());
+    }
+    e
+}
+
 pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     // First pass: spawn each node (keeping the index→entity map for parent links).
     let mut ents = Vec::with_capacity(doc.nodes.len());
     for node in &doc.nodes {
-        let e = world.spawn();
-        world.insert(e, node.transform.to_transform());
-        world.insert(e, Name(node.name.clone()));
-        world.insert(e, node.matter.to_matter());
-        if !node.scripts.is_empty() {
-            world.insert(e, Scripts(node.scripts.iter().map(ScriptDoc::to_inst).collect()));
-        }
-        if let Some(m) = &node.material {
-            world.insert(e, m.to_material());
-        }
-        if let Some(rb) = &node.rigidbody {
-            world.insert(e, rb.to_rigidbody());
-        }
-        if node.mesh_collider {
-            world.insert(e, floptle_core::MeshCollider);
-        }
-        if node.collidable {
-            world.insert(e, floptle_core::Collidable);
-        }
-        // Visible is the default; only attach the component for an explicitly hidden node.
-        if !node.visible {
-            world.insert(e, floptle_core::Visible(false));
-        }
-        // Casting is the default; only an opted-out node carries the component.
-        if !node.cast_shadow {
-            world.insert(e, floptle_core::CastShadow(false));
-        }
-        if let Some(ctl) = &node.anim_controller {
-            world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
-        }
-        if let Some(p) = &node.particles {
-            world.insert(e, p.to_component());
-        }
-        if let Some(n) = &node.net {
-            world.insert(e, n.to_component());
-        }
-        ents.push(e);
+        ents.push(spawn_node(node, world));
     }
     // Second pass: link parents (skip out-of-range / self references).
     for (i, node) in doc.nodes.iter().enumerate() {
