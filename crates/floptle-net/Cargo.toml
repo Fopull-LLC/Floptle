@@ -1,6 +1,6 @@
 [package]
 name = "floptle-net"
-description = "Networking (deferred): clean client/server boundary stub for future authoritative play."
+description = "Open, transport-agnostic netcode: replication, RPC, sessions (ADR-0022)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,3 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+floptle-scene = { path = "../floptle-scene" }
+serde = { workspace = true }
+postcard = { workspace = true }
+ron = { workspace = true }

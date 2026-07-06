@@ -54,6 +54,7 @@ env_logger = "0.11.11"                                    # logger backend (bina
 gltf = "1.4.1"                                            # Blender -> engine import — Phase 2, ADR-0006
 serde = { version = "1", features = ["derive"] }         # scene/project serialization — ADR-0005
 ron = "0.8"                                              # human-editable scene/material format
+postcard = { version = "1", features = ["use-std"] }     # compact binary wire format — netcode (ADR-0022)
 egui = "0.35.0"                                          # editor UI — ADR-0004 (egui-wgpu pins wgpu 29.0.3)
 egui-wgpu = "0.35.0"                                     # egui ↔ wgpu render backend
 egui-winit = "0.35.0"                                    # egui ↔ winit input/window
