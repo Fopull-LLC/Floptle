@@ -89,6 +89,14 @@ impl Editor {
                             .find(|e| e.index() == eid);
                         if let (Some(s), Some(e)) = (self.net_server.as_mut(), ent) {
                             s.despawn(&mut self.world, e);
+                            if let Some(sim) = self.sim.as_mut() {
+                                sim.remove_body(eid);
+                            }
+                            let n = self.net_remote_predicted.len();
+                            self.net_remote_predicted.retain(|(re, _)| *re != e);
+                            if self.net_remote_predicted.len() != n {
+                                self.net_apply_host_filters();
+                            }
                         }
                     }
                 }
@@ -143,6 +151,26 @@ impl Editor {
                         self.script_host.fire_net_event(&mut self.world, "playerJoined", Some(p), None)
                     }
                     NetEvent::PeerLeft(p) => {
+                        // Their avatar leaves with them: every runtime spawn
+                        // that peer owned despawns everywhere, automatically.
+                        let owned = self
+                            .net_server
+                            .as_ref()
+                            .map(|s| s.owned_runtime_spawns(p))
+                            .unwrap_or_default();
+                        let cleaned = !owned.is_empty();
+                        for e in owned {
+                            if let Some(s) = self.net_server.as_mut() {
+                                s.despawn(&mut self.world, e);
+                            }
+                            if let Some(sim) = self.sim.as_mut() {
+                                sim.remove_body(e.index());
+                            }
+                            self.net_remote_predicted.retain(|(re, _)| *re != e);
+                        }
+                        if cleaned {
+                            self.net_apply_host_filters();
+                        }
                         self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), None)
                     }
                     _ => {}
@@ -287,11 +315,23 @@ impl Editor {
             fskip.insert(pe.index());
             self.script_host.set_frame_filter(fskip);
         }
-        self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
+        // Keep an existing predictor when it's still the same node — this
+        // setup re-runs whenever a replicated spawn/despawn arrives, and that
+        // must not reset prediction state mid-flight.
+        let keep = matches!(
+            (&self.net_predictor, predicted),
+            (Some((e, _)), Some(pe)) if *e == pe
+        );
+        if !keep {
+            self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
+        }
         if predicted.is_none() && warn_if_none {
             self.console.push(
                 floptle_script::LogLevel::Warn,
-                "no Predicted node is yours — you're a spectator. The scene needs one Predicted node per player (node #1 = the host, #2+ = joiners in order)".into(),
+                "no Predicted node is yours (yet) — spectating. Either the scene needs a \
+                 Predicted slot per player (node #1 = host, #2+ = joiners), or the game spawns \
+                 avatars on join (net.spawn in a playerJoined handler) and yours is on its way"
+                    .into(),
                 None,
             );
         }
@@ -329,6 +369,20 @@ impl Editor {
     /// Networked nodes' owners, mirrored into Lua for `net.isMine(node)`.
     fn collect_net_owners(world: &World) -> HashMap<u32, Option<u64>> {
         world.query::<floptle_core::Replicated>().map(|(e, r)| (e.index(), r.owner)).collect()
+    }
+
+    /// (Re)apply the HOST's script filters from the remote-owned Predicted
+    /// set: those nodes leave the global passes (they run per tick with their
+    /// owner's replayed input) — everything else runs under the host normally.
+    fn net_apply_host_filters(&mut self) {
+        let mut skip = std::collections::HashSet::new();
+        let mut fskip = std::collections::HashSet::new();
+        for (e, _) in &self.net_remote_predicted {
+            skip.insert(e.index());
+            fskip.insert(e.index());
+        }
+        self.script_host.set_script_filter(skip);
+        self.script_host.set_frame_filter(fskip);
     }
 
     /// Offline play: only player slot #1 (the first Predicted node) takes
@@ -402,16 +456,9 @@ impl Editor {
             .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
             .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
             .collect();
-        let mut skip = std::collections::HashSet::new();
-        let mut fskip = std::collections::HashSet::new();
-        for (e, _) in &remote {
-            skip.insert(e.index());
-            fskip.insert(e.index());
-        }
-        self.script_host.set_script_filter(skip);
-        self.script_host.set_frame_filter(fskip);
         let slots = remote.len();
         self.net_remote_predicted = remote;
+        self.net_apply_host_filters();
         let mut s = NetSession::server(Box::new(transport));
         s.register_scene(&self.world);
         self.net_server = Some(s);
@@ -711,8 +758,17 @@ impl Editor {
                         hs.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == eid);
                     if let Some(e) = ent {
                         hs.session.despawn(&mut hs.world, e);
+                        hs.sim.remove_body(eid);
                     }
                 }
+                NetCmd::Spawn { path, .. } => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "net.spawn(\"{path}\"): not supported in the local test harness yet — \
+                         test avatar spawning over a real session (🌐 Host on LAN)"
+                    ),
+                    None,
+                ),
                 _ => {}
             }
         }
@@ -819,9 +875,52 @@ impl Editor {
         let updates = cs.take_predicted_updates();
         let rpcs = cs.take_rpcs();
         let events = cs.take_events();
+        let spawned = cs.take_spawned();
+        let despawned = cs.take_despawned();
         // On a real link the server ticks in ITS OWN clock domain; the stamp
         // offset maps its ticks back onto our prediction ring (harness: 0).
         let stamp_off = cs.input_stamp_offset();
+        let my_peer = cs.my_peer();
+        // Replicated spawns/despawns materialize live: bodies register or go,
+        // and ownership re-evaluates — a spawn owned by US becomes the
+        // predicted avatar (the net.spawn player-avatar flow), everyone
+        // else's becomes snapshot-driven.
+        if !spawned.is_empty() || !despawned.is_empty() {
+            for eid in &despawned {
+                if let Some(sim) = self.sim.as_mut() {
+                    sim.remove_body(*eid);
+                }
+            }
+            let mut mesh = false;
+            for (_, e, _) in &spawned {
+                if let Some(sim) = self.sim.as_mut() {
+                    sim.add_body_for(*e, &self.world);
+                }
+                mesh |= matches!(
+                    self.world.get::<floptle_core::Matter>(*e),
+                    Some(floptle_core::Matter::Mesh { .. })
+                );
+            }
+            if mesh {
+                self.load_script_swapped_models();
+            }
+            let was = self.net_predictor.as_ref().map(|(e, _)| *e);
+            let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
+            self.net_client_side_setup(owner, false);
+            let now = self.net_predictor.as_ref().map(|(e, _)| *e);
+            if now != was && let Some(pe) = now {
+                let name = self
+                    .world
+                    .get::<floptle_core::Name>(pe)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| "?".into());
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("🎮 your avatar spawned — predicting \"{name}\""),
+                    None,
+                );
+            }
+        }
         for (e, stick, state) in updates {
             let Some((pe, pred)) = self.net_predictor.as_mut() else { continue };
             if e != *pe {
@@ -1165,7 +1264,20 @@ impl Editor {
         if let floptle_scene::MatterDoc::Mesh { .. } = node.matter {
             self.load_script_swapped_models();
         }
-        let _ = e;
+        // Runtime spawns simulate immediately: register a live physics body.
+        if let Some(sim) = self.sim.as_mut() {
+            sim.add_body_for(e, &self.world);
+        }
+        // A remote player's avatar (`net.spawn(..., { owner = peer })` +
+        // Predicted): its scripts run with the OWNER's replayed input, not
+        // the host's keyboard.
+        if let Some(rep) = self.world.get::<floptle_core::Replicated>(e)
+            && rep.mode == ReplicationMode::Predicted
+            && let Some(p) = rep.owner
+        {
+            self.net_remote_predicted.push((e, p));
+            self.net_apply_host_filters();
+        }
     }
 
     /// Ghost gizmos: CYAN = where a ghost client believes every replicated

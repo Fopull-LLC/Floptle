@@ -414,9 +414,14 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   (welcome tick + RTT lead). Multi-slot ownership: scene Predicted nodes in node order — #1
   the host's, #2+ joiners'; the client binds its avatar when the Welcome names its peer id.
   `net.isMine(node)` + `findScripts(kind)` let shared cameras/HUDs pick the local player.)*
+  Per-player avatars work end-to-end: `net.spawn(..., {owner = peer})` in a `playerJoined`
+  handler registers a live physics body on every machine (`Sim::add_body_for`/`remove_body`),
+  the owning client re-binds prediction to its spawned node (stable rebind — an existing
+  predictor is never reset), remote players' avatars run server-side under their owner's
+  replayed input, and a disconnect auto-despawns everything that peer owned. Spawned scenes
+  contribute their first node only (child hierarchies later).
   Still to come: `floptle-relay` + lobby codes; headless `floptle-runtime` server loop;
-  per-player avatar spawning w/ dynamic client-side predictor binding; interest management +
-  byte budgets.
+  interest management + byte budgets; spawn support in the local harness.
 - **2f — Polish & docs:** scripting.md §"Networking", EmmyLua stubs + `.luarc.json` global +
   IDE completion/docs entries (all three doc surfaces), Console net-stats overlay, bandwidth
   profiler in the editor.
