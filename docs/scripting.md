@@ -624,8 +624,8 @@ end
 
 | Call | What it does |
 |---|---|
-| `net.host{ maxPlayers = 16 }` | become the authoritative host |
-| `net.join(addr)` | join a session (`"local://"` = the in-editor test harness) |
+| `net.host{ maxPlayers = 16, port = 7777 }` | become the authoritative host — with a `port`, a REAL session on UDP (QUIC) other machines can join; without one, the in-editor harness |
+| `net.join(addr)` | join a session (`"quic://host:port"` = a real server; `"local://"` = the in-editor test harness) |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
@@ -649,9 +649,16 @@ Args follow the same size/type rules as `synced`.
 > button → *Host + join a local client*. A hidden ghost client joins over a
 > simulated link — **cyan ghost spheres** show where *it* believes every
 > networked node is. Drag the latency/loss sliders and watch the ghosts lag
-> and stutter exactly as a real remote player would. (Real network transports
-> — QUIC + the relay — arrive with the transport phase; the API you write
-> against today doesn't change.)
+> and stutter exactly as a real remote player would.
+
+> **Play over a real network:** both machines open THIS project and press
+> Play. One hosts (🌐 → *Host on LAN*, or `net.host{ port = 7777 }`), the
+> other joins (`quic://<host's-LAN-ip>:7777`). The link is QUIC — encrypted,
+> zero-config (the trust model of a Minecraft server; verified identity comes
+> with the relay). v1 convention: **scene-authored Predicted nodes belong to
+> the first joiner** — the host is the authority (and can drive non-networked
+> nodes); per-player avatars come from `net.spawn` in a `playerJoined`
+> handler.
 
 **Prediction** (*🌐 → Test as remote player*): give your character's node a
 Networked component with mode **Predicted (owner)** and it responds instantly

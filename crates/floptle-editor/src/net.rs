@@ -46,13 +46,19 @@ impl Editor {
     pub(crate) fn net_tick(&mut self, tick: u64) {
         for cmd in self.script_host.take_net_commands() {
             match cmd {
+                NetCmd::Host { port: Some(p), .. } => self.net_host_quic(p),
                 NetCmd::Host { .. } => self.net_start_hosting(),
                 NetCmd::Join { addr } if addr.starts_with("local") => self.net_join_local(),
+                NetCmd::Join { addr } if addr.starts_with("quic://") => {
+                    let a = addr.trim_start_matches("quic://").to_string();
+                    self.net_join_quic(&a);
+                }
                 NetCmd::Join { addr } => self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
-                        "net.join(\"{addr}\"): only local:// works in-editor today — \
-                         network transports (QUIC + relay) land in phase 2e"
+                        "net.join(\"{addr}\"): use quic://host:port (a real server) or \
+                         local:// (the in-editor harness) — relay:// lobby codes land with \
+                         floptle-relay"
                     ),
                     None,
                 ),
@@ -222,6 +228,180 @@ impl Editor {
         );
     }
 
+    /// Client-side session setup shared by the 2c harness and a real
+    /// `quic://` join: every TRANSFORM/PHYSICS-synced authority node becomes
+    /// snapshot-driven (scripts skipped, body deactivated — snapshots own it);
+    /// var-only Networked nodes keep running everywhere (the door pattern).
+    /// The peer-1-owned Predicted node, if any, becomes the local player:
+    /// physics sync forced on (prediction needs vel+grounded on the wire),
+    /// its `update` moved to the tick clock, the Predictor armed. Returns it.
+    fn net_client_side_setup(&mut self) -> Option<Entity> {
+        let mut skip = std::collections::HashSet::new();
+        let mut predicted: Option<Entity> = None;
+        let reps: Vec<(Entity, floptle_core::Replicated)> = self
+            .world
+            .query::<floptle_core::Replicated>()
+            .map(|(e, r)| (e, *r))
+            .collect();
+        for (e, r) in reps {
+            let mine = r.mode == ReplicationMode::Predicted && r.owner == Some(1);
+            if mine && predicted.is_none() {
+                predicted = Some(e);
+                continue;
+            }
+            if !(r.transform || r.physics) {
+                continue; // var-only: scripts run on the client too
+            }
+            skip.insert(e.index());
+            if let Some(sim) = self.sim.as_mut() {
+                sim.set_body_active(e.index(), false);
+            }
+        }
+        self.script_host.set_script_filter(skip);
+        if let Some(pe) = predicted {
+            if let Some(r) = self.world.get_mut::<floptle_core::Replicated>(pe)
+                && !r.physics
+            {
+                r.physics = true;
+            }
+            // The predicted node's `update` moves to the TICK clock (the server
+            // integrates it per tick — the client must match or they fight).
+            let mut fskip = std::collections::HashSet::new();
+            fskip.insert(pe.index());
+            self.script_host.set_frame_filter(fskip);
+        }
+        self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
+        if predicted.is_none() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "no Predicted node found — you're a spectator. Give your character a Networked component with mode 'Predicted (owner)'".into(),
+                None,
+            );
+        }
+        predicted
+    }
+
+    /// Every scene-authored Predicted node belongs to peer 1 — the v1 session
+    /// convention the host and the (first) joining client both apply, so
+    /// registration, snapshot routing, and input routing agree without any
+    /// negotiation. Runtime avatars carry explicit owners via `net.spawn`.
+    fn net_assign_scene_owners(world: &mut World) {
+        let preds: Vec<Entity> = world
+            .query::<floptle_core::Replicated>()
+            .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+            .map(|(e, _)| e)
+            .collect();
+        for e in preds {
+            if let Some(r) = world.get_mut::<floptle_core::Replicated>(e) {
+                r.owner = Some(1);
+                // Prediction needs vel+grounded in snapshots on BOTH ends.
+                if !r.physics {
+                    r.physics = true;
+                }
+            }
+        }
+    }
+
+    /// Host a REAL session on a UDP port (QUIC): other machines running the
+    /// same project join with `net.join("quic://<ip>:port")`. The play world
+    /// is the authoritative server — and scene-authored Predicted nodes belong
+    /// to the FIRST joining peer, whose replayed inputs drive them in the tick
+    /// loop (the one-script model, server side).
+    pub(crate) fn net_host_quic(&mut self, port: u16) {
+        if !self.playing {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.host{port}: enter Play mode first".into(),
+                None,
+            );
+            return;
+        }
+        if self.net_server.is_some() || self.net_play_client.is_some() {
+            return;
+        }
+        let transport = match floptle_net::QuicServer::bind(port) {
+            Ok(t) => t,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.host{{port = {port}}}: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        let bound = transport.local_port();
+        Self::net_assign_scene_owners(&mut self.world);
+        // Remote-owned Predicted nodes: skipped in the global script passes,
+        // run per-tick with their owner's replayed input instead.
+        let remote: Vec<(Entity, u64)> = self
+            .world
+            .query::<floptle_core::Replicated>()
+            .filter(|(_, r)| r.mode == ReplicationMode::Predicted && r.owner == Some(1))
+            .map(|(e, _)| (e, 1u64))
+            .collect();
+        let mut skip = std::collections::HashSet::new();
+        let mut fskip = std::collections::HashSet::new();
+        for (e, _) in &remote {
+            skip.insert(e.index());
+            fskip.insert(e.index());
+        }
+        self.script_host.set_script_filter(skip);
+        self.script_host.set_frame_filter(fskip);
+        self.net_remote_predicted = remote;
+        let mut s = NetSession::server(Box::new(transport));
+        s.register_scene(&self.world);
+        self.net_server = Some(s);
+        self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "🌐 hosting on UDP port {bound} — a friend with this project joins via the 🌐 \
+                 panel or net.join(\"quic://<your-LAN-ip>:{bound}\"). Scene-authored Predicted \
+                 nodes belong to the FIRST joiner."
+            ),
+            None,
+        );
+    }
+
+    /// Join a REAL session at `host:port` (QUIC). The play world becomes a
+    /// predicting client of a server on another machine — same machinery as
+    /// "Test as remote player", minus the hidden server.
+    pub(crate) fn net_join_quic(&mut self, addr: &str) {
+        if !self.playing {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.join: enter Play mode first".into(),
+                None,
+            );
+            return;
+        }
+        if self.net_server.is_some() || self.net_play_client.is_some() {
+            return;
+        }
+        let transport = match floptle_net::QuicClient::connect(addr) {
+            Ok(t) => t,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.join(\"quic://{addr}\"): {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        Self::net_assign_scene_owners(&mut self.world);
+        let mut client = NetSession::client(Box::new(transport));
+        client.register_scene(&self.world);
+        self.net_client_side_setup();
+        self.net_play_client = Some(client);
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("🌐 joining quic://{addr} — the input clock syncs when the server welcomes us"),
+            None,
+        );
+    }
+
     /// "Test as remote player" (2c): the PLAY world becomes a predicted CLIENT
     /// and a hidden authoritative server (full second sim + Lua host) runs
     /// behind the simulated link. Your character predicts locally, the server
@@ -298,48 +478,11 @@ impl Editor {
         server.register_scene(&sworld);
         let mut client = NetSession::client(Box::new(hub.connect()));
         client.register_scene(&self.world);
-        // The client predicts ONLY its own node; every other TRANSFORM/PHYSICS-
-        // synced node is snapshot-driven: skip its scripts, deactivate its
-        // body. A Networked node that only syncs script VARS keeps running
-        // everywhere — that's the documented door pattern (its `update` is
-        // cosmetic; authoritative logic guards with `net.isServer()`).
-        let mut skip = std::collections::HashSet::new();
-        let mut predicted: Option<Entity> = None;
-        let reps: Vec<(Entity, floptle_core::Replicated)> = self
-            .world
-            .query::<floptle_core::Replicated>()
-            .map(|(e, r)| (e, *r))
-            .collect();
-        for (e, r) in reps {
-            let mine = r.mode == ReplicationMode::Predicted && r.owner == Some(1);
-            if mine && predicted.is_none() {
-                predicted = Some(e);
-                continue;
-            }
-            if !(r.transform || r.physics) {
-                continue; // var-only: scripts run on the client too
-            }
-            skip.insert(e.index());
-            if let Some(sim) = self.sim.as_mut() {
-                sim.set_body_active(e.index(), false);
-            }
-        }
-        self.script_host.set_script_filter(skip);
+        let predicted = self.net_client_side_setup();
         if let Some(pe) = predicted {
-            // Prediction NEEDS velocity+grounded on the wire — force-enable
-            // physics sync on the predicted node (both worlds; reconciliation
-            // restoring a zero velocity every snapshot reads as violent jitter).
-            let enable = |w: &mut World, e: Entity| {
-                if let Some(r) = w.get_mut::<floptle_core::Replicated>(e)
-                    && !r.physics
-                {
-                    r.physics = true;
-                }
-            };
-            enable(&mut self.world, pe);
-            // Same node in the server world = same position in node order; find
-            // it by matching net id via name-independent index: both worlds were
-            // registered in identical node order, so match by Replicated order.
+            // The harness's hidden server needs physics sync force-enabled on
+            // ITS copy of the predicted node too (the setup did the play
+            // world's). Same node = same position in Replicated node order.
             let spred: Option<Entity> = {
                 let mine: Vec<Entity> = self
                     .world
@@ -354,22 +497,12 @@ impl Editor {
                     .collect();
                 mine.iter().position(|e| *e == pe).and_then(|i| theirs.get(i).copied())
             };
-            if let Some(se) = spred {
-                enable(&mut sworld, se);
+            if let Some(se) = spred
+                && let Some(r) = sworld.get_mut::<floptle_core::Replicated>(se)
+                && !r.physics
+            {
+                r.physics = true;
             }
-            // The predicted node's `update` moves to the TICK clock (the server
-            // integrates it per tick — the client must match or they fight).
-            let mut fskip = std::collections::HashSet::new();
-            fskip.insert(pe.index());
-            self.script_host.set_frame_filter(fskip);
-        }
-        self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
-        if predicted.is_none() {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                "no Predicted node found — you're a spectator. Give your character a Networked component with mode 'Predicted (owner)'".into(),
-                None,
-            );
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
@@ -617,12 +750,16 @@ impl Editor {
         let updates = cs.take_predicted_updates();
         let rpcs = cs.take_rpcs();
         let events = cs.take_events();
+        // On a real link the server ticks in ITS OWN clock domain; the stamp
+        // offset maps its ticks back onto our prediction ring (harness: 0).
+        let stamp_off = cs.input_stamp_offset();
         for (e, stick, state) in updates {
             let Some((pe, pred)) = self.net_predictor.as_mut() else { continue };
             if e != *pe {
                 continue;
             }
             let eid = pe.index();
+            let stick = (stick as i64 - stamp_off).max(0) as u64;
             // A touch looser than the library default: absorbs camera-yaw
             // integration noise (per-frame vs per-tick smoothing) so only real
             // divergence triggers a correction. 5 mm is invisible.
@@ -744,6 +881,30 @@ impl Editor {
         for ev in events {
             match ev {
                 NetEvent::Connected => {
+                    // Real link (no hub = independent tick clocks): translate
+                    // our input stamps into the server's domain, leading it by
+                    // the RTT plus a small margin so inputs labeled T arrive
+                    // before the server simulates T. The harness's hidden
+                    // server slaves to OUR clock instead — offset stays 0.
+                    if self.net_hub.is_none()
+                        && let Some(cs) = self.net_play_client.as_mut()
+                        && let Some(wt) = cs.welcome_tick()
+                    {
+                        let rtt_ticks = (cs.stats(floptle_net::SERVER).rtt_ms / 1000.0 * 60.0)
+                            .ceil() as i64;
+                        let offset = wt as i64 + rtt_ticks + 3 - tick as i64;
+                        cs.set_input_stamp_offset(offset);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            format!(
+                                "🌐 connected — input clock leads the server by {} tick(s) \
+                                 (rtt {:.0} ms)",
+                                rtt_ticks + 3,
+                                cs.stats(floptle_net::SERVER).rtt_ms
+                            ),
+                            None,
+                        );
+                    }
                     self.script_host.fire_net_event(&mut self.world, "connected", None, None)
                 }
                 NetEvent::Disconnected(reason) => self.script_host.fire_net_event(
@@ -851,6 +1012,7 @@ impl Editor {
         self.net_play_client = None;
         self.net_hidden = None;
         self.net_predictor = None;
+        self.net_remote_predicted.clear();
         self.net_hub = None;
         self.net_scene_doc = None;
         self.script_host.set_script_filter(std::collections::HashSet::new());

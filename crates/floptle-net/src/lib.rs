@@ -370,6 +370,26 @@ mod tests {
     }
 
     #[test]
+    fn input_stamp_offset_translates_clock_domains() {
+        // A real link runs two independent tick clocks: the client stamps its
+        // inputs into the SERVER's domain via the offset (harness leaves it 0).
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let mid = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        assert!(client.welcome_tick().is_some(), "Welcome carries the server tick");
+
+        client.set_input_stamp_offset(100);
+        client.send_input(5, NetInput { keys_down: vec!["w".into()], ..Default::default() });
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, mid, 3, |_, _| {});
+        server.pump_server(&sw, 105);
+        let inp = server.input_for(1, 105);
+        assert_eq!(inp.keys_down, vec!["w".to_string()], "local tick 5 lands at server tick 105");
+        assert_eq!(server.late_inputs(), 0, "the stamped tick was an exact hit");
+    }
+
+    #[test]
     fn join_leave_events_fire() {
         let hub = MemoryHub::new();
         let (mut server, mut client) = connect_pair(&hub);

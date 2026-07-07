@@ -113,6 +113,10 @@ struct EditorCmd {
     net_join_local: bool,
     net_play_as_client: bool,
     net_stop_session: bool,
+    /// Host a REAL session on this UDP port (QUIC — the 🌐 panel / net.host{port}).
+    net_host_quic: Option<u16>,
+    /// Join a real session at this address (host:port).
+    net_join_quic: Option<String>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -892,6 +896,13 @@ struct Editor {
     net_hidden: Option<net::HiddenServer>,
     /// The play world's predicted node + its rewind-replay bookkeeping.
     net_predictor: Option<(Entity, floptle_net::Predictor)>,
+    /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
+    /// its scripts with its owner's replayed input in the tick loop (the
+    /// one-script model, server side). Empty on the loopback harness.
+    net_remote_predicted: Vec<(Entity, u64)>,
+    /// 🌐 panel text buffers: the LAN host port + the join address.
+    net_host_port: String,
+    net_join_addr: String,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
