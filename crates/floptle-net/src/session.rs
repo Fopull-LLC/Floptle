@@ -115,6 +115,10 @@ pub struct NetSession {
     /// Live body states fed by the driver each tick (velocity + grounded per
     /// physics-synced entity) — carried in snapshots for prediction.
     body_states: HashMap<Entity, ([f32; 3], bool)>,
+    /// Server diagnostics: ticks where a peer's exact input hadn't arrived and
+    /// repeat-last was used. Nonzero while moving = clock skew too tight
+    /// (mispredictions on the owner) — the harness surfaces it.
+    late_inputs: u64,
     /// Per-peer received input commands, keyed by tick (prediction §6: the
     /// server replays the OWNER's real input through the same script).
     peer_inputs: HashMap<PeerId, VecDeque<InputCmd>>,
@@ -165,6 +169,7 @@ impl NetSession {
             spawned_docs: HashMap::new(),
             snap_count: 0,
             body_states: HashMap::new(),
+            late_inputs: 0,
             peer_inputs: HashMap::new(),
             last_input: HashMap::new(),
             connected: false,
@@ -297,7 +302,14 @@ impl NetSession {
             self.last_input.insert(peer, cmd.input.clone());
             return cmd.input;
         }
+        self.late_inputs += 1;
         self.last_input.get(&peer).cloned().unwrap_or_default()
+    }
+
+    /// Server diagnostics: how many tick-inputs missed their tick (repeat-last
+    /// used). Should sit near zero with a healthy clock skew.
+    pub fn late_inputs(&self) -> u64 {
+        self.late_inputs
     }
 
     /// Client: authoritative states received for OUR OWN predicted node —
