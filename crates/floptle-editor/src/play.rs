@@ -262,6 +262,10 @@ impl Editor {
             // Spawn play-on-start particle effects on their nodes.
             self.vfx.start_play(&self.world);
             self.playing = true;
+            // Outside a session, only player slot #1 takes input: extra
+            // Predicted nodes (multiplayer slots) idle instead of mirroring
+            // the keyboard into every copy of the controller.
+            self.net_apply_offline_slots();
         }
     }
 
