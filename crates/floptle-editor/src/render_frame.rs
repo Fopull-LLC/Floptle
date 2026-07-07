@@ -1050,6 +1050,7 @@ impl Editor {
         let net_host_port = &mut self.net_host_port;
         let net_join_addr = &mut self.net_join_addr;
         let net_relay_addr = &mut self.net_relay_addr;
+        let net_join_code = &mut self.net_join_code;
         let net_lobby_code = self.net_lobby_code.clone();
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
@@ -1222,7 +1223,49 @@ impl Editor {
                                         cmd.net_play_as_client = true;
                                     }
                                     ui.separator();
-                                    ui.label("Real network (LAN)");
+                                    ui.label("Real network — via relay (lobby codes)");
+                                    ui.horizontal(|ui| {
+                                        ui.label("relay");
+                                        ui.add(
+                                            egui::TextEdit::singleline(net_relay_addr)
+                                                .desired_width(150.0)
+                                                .hint_text("relay host:port"),
+                                        );
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button("⏵ Host — get a lobby code")
+                                            .on_hover_text("registers a lobby on the relay above and shows a five-letter CODE for friends. Nobody port-forwards; run `floptle-relay` anywhere both machines can reach.")
+                                            .clicked()
+                                        {
+                                            cmd.net_host_relay = Some(net_relay_addr.clone());
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("code");
+                                        let r = ui.add(
+                                            egui::TextEdit::singleline(net_join_code)
+                                                .desired_width(70.0)
+                                                .hint_text("ABCDE"),
+                                        );
+                                        if r.changed() {
+                                            *net_join_code = net_join_code.to_uppercase();
+                                        }
+                                        let ok = !net_join_code.trim().is_empty();
+                                        if ui
+                                            .add_enabled(ok, egui::Button::new("⏵ Join by code"))
+                                            .on_hover_text("joins the lobby with this code, through the relay above")
+                                            .clicked()
+                                        {
+                                            cmd.net_join_quic = Some(format!(
+                                                "relay://{}/{}",
+                                                net_relay_addr.trim(),
+                                                net_join_code.trim()
+                                            ));
+                                        }
+                                    });
+                                    ui.separator();
+                                    ui.label("Real network — direct (LAN / self-host)");
                                     ui.horizontal(|ui| {
                                         ui.label("port");
                                         ui.add(
@@ -1237,32 +1280,18 @@ impl Editor {
                                     ui.horizontal(|ui| {
                                         ui.add(
                                             egui::TextEdit::singleline(net_join_addr)
-                                                .desired_width(170.0),
+                                                .desired_width(170.0)
+                                                .hint_text("quic://ip:port"),
                                         );
                                         if ui.button("⏵ Join").clicked() {
                                             cmd.net_join_quic = Some(net_join_addr.clone());
                                         }
                                     });
-                                    ui.horizontal(|ui| {
-                                        ui.label("relay");
-                                        ui.add(
-                                            egui::TextEdit::singleline(net_relay_addr)
-                                                .desired_width(120.0),
-                                        );
-                                        if ui
-                                            .button("⏵ Host via relay")
-                                            .on_hover_text("get a LOBBY CODE from a floptle-relay — friends join with the code, nobody port-forwards. Join field: relay://<relay-addr>/<CODE>")
-                                            .clicked()
-                                        {
-                                            cmd.net_host_relay = Some(net_relay_addr.clone());
-                                        }
-                                    });
                                     ui.small(
                                         "both machines run THIS project. Player slots = the \
-                                         scene's Predicted nodes in order: #1 the host, #2+ \
-                                         the joiners (duplicate your character to add slots). \
-                                         Or from a script: net.host{port=7777} / \
-                                         net.join(\"quic://ip:port\")",
+                                         scene's Predicted nodes in order (#1 the host, #2+ \
+                                         joiners) — or spawn one per joiner (player_spawner.lua). \
+                                         Scripts: net.host{relay=\"…\"} / net.join(\"relay://…/CODE\")",
                                     );
                                 }
                                 (true, false) if !net_is_real => {
