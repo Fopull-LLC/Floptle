@@ -117,6 +117,8 @@ struct EditorCmd {
     net_host_quic: Option<u16>,
     /// Join a real session at this address (host:port).
     net_join_quic: Option<String>,
+    /// Host through a rendezvous relay at this address.
+    net_host_relay: Option<String>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -903,9 +905,12 @@ struct Editor {
     /// Real hosting: the lag-comp history ring (the hidden harness server
     /// keeps its own inside `HiddenServer`).
     net_history: floptle_net::LagHistory,
-    /// 🌐 panel text buffers: the LAN host port + the join address.
+    /// 🌐 panel text buffers: the LAN host port, the join address, the relay.
     net_host_port: String,
     net_join_addr: String,
+    net_relay_addr: String,
+    /// The live lobby code while hosting via a relay.
+    net_lobby_code: Option<String>,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,

@@ -140,14 +140,15 @@ function fixedUpdate(node, dt) end
 ---`onRpc = {}` + `function onRpc.name(args, sender) end`.
 ---@class Net
 net = {}
----Become the authoritative host. With `port`, host a REAL session on UDP
----(QUIC) that other machines join with net.join(\"quic://ip:port\"); without
----one, the in-editor loopback harness.
----@param opts { maxPlayers: integer, port: integer }|nil
+---Become the authoritative host. `relay = \"addr\"` hosts through a
+---rendezvous relay: you get a LOBBY CODE, friends join with it, nobody
+---port-forwards. `port = n` hosts directly on UDP (QUIC) for LAN/self-host.
+---Neither: the in-editor loopback harness.
+---@param opts { maxPlayers: integer, port: integer, relay: string }|nil
 function net.host(opts) end
----Join a session: `\"quic://host:port\"` = a real server over the network,
----`\"local://\"` = the in-editor test harness. relay:// lobby codes arrive
----with floptle-relay.
+---Join a session: `\"relay://relayaddr/CODE\"` = a lobby code through a
+---relay (no port-forwarding), `\"quic://host:port\"` = a server directly,
+---`\"local://\"` = the in-editor test harness.
 ---@param addr string
 function net.join(addr) end
 ---Leave / end the session.

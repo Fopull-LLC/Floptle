@@ -1044,8 +1044,13 @@ impl Editor {
         if self.net_join_addr.is_empty() {
             self.net_join_addr = "quic://127.0.0.1:7777".into();
         }
+        if self.net_relay_addr.is_empty() {
+            self.net_relay_addr = "127.0.0.1:7788".into();
+        }
         let net_host_port = &mut self.net_host_port;
         let net_join_addr = &mut self.net_join_addr;
+        let net_relay_addr = &mut self.net_relay_addr;
+        let net_lobby_code = self.net_lobby_code.clone();
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1238,6 +1243,20 @@ impl Editor {
                                             cmd.net_join_quic = Some(net_join_addr.clone());
                                         }
                                     });
+                                    ui.horizontal(|ui| {
+                                        ui.label("relay");
+                                        ui.add(
+                                            egui::TextEdit::singleline(net_relay_addr)
+                                                .desired_width(120.0),
+                                        );
+                                        if ui
+                                            .button("⏵ Host via relay")
+                                            .on_hover_text("get a LOBBY CODE from a floptle-relay — friends join with the code, nobody port-forwards. Join field: relay://<relay-addr>/<CODE>")
+                                            .clicked()
+                                        {
+                                            cmd.net_host_relay = Some(net_relay_addr.clone());
+                                        }
+                                    });
                                     ui.small(
                                         "both machines run THIS project. Player slots = the \
                                          scene's Predicted nodes in order: #1 the host, #2+ \
@@ -1256,6 +1275,17 @@ impl Editor {
                                     ui.label(format!(
                                         "hosting · {net_peer_count} client(s) connected"
                                     ));
+                                    if let Some(code) = &net_lobby_code {
+                                        ui.horizontal(|ui| {
+                                            ui.label("lobby code:");
+                                            ui.add(egui::Label::new(
+                                                egui::RichText::new(code).strong().monospace(),
+                                            ).selectable(true));
+                                            if ui.small_button("copy").clicked() {
+                                                ui.ctx().copy_text(code.clone());
+                                            }
+                                        });
+                                    }
                                     if net_is_real && net_peer_count > 0 {
                                         ui.small(format!("late inputs {net_late_inputs} — near zero is healthy"));
                                     }
@@ -1294,6 +1324,36 @@ impl Editor {
                 if !open {
                     *show_net_panel = false;
                 }
+            }
+
+            // ---- net-stats overlay: one compact line while a session runs, so
+            // connection health is visible without the 🌐 panel open ----
+            if playing && (net_hosting || net_as_player) {
+                egui::Area::new(egui::Id::new("net_stats_overlay"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::RIGHT_TOP, [-10.0, 40.0])
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            let kind = if net_is_real { "net" } else { "sim" };
+                            let mut line = if net_as_player {
+                                format!("🌐 client ({kind}) · rtt {net_rtt:.0} ms")
+                            } else {
+                                format!(
+                                    "🌐 host ({kind}) · {net_peer_count} peer(s) · late in {net_late_inputs}"
+                                )
+                            };
+                            if let Some((corr, conf, last)) = net_pred_stats {
+                                let total = corr + conf;
+                                let clean =
+                                    if total > 0 { 100.0 * conf as f64 / total as f64 } else { 100.0 };
+                                line.push_str(&format!(
+                                    " · predict {clean:.0}% clean · err {:.0} mm",
+                                    last * 1000.0
+                                ));
+                            }
+                            ui.small(line);
+                        });
+                    });
             }
 
             // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
@@ -2797,8 +2857,22 @@ impl Editor {
             self.net_host_quic(port);
         }
         if let Some(addr) = cmd.net_join_quic {
-            let a = addr.trim().trim_start_matches("quic://").to_string();
-            self.net_join_quic(&a);
+            let a = addr.trim().to_string();
+            if let Some(rest) = a.strip_prefix("relay://") {
+                match rest.rsplit_once('/') {
+                    Some((raddr, code)) => self.net_join_relay(raddr, code),
+                    None => self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("join \"{a}\": expected relay://host:port/CODE"),
+                        None,
+                    ),
+                }
+            } else {
+                self.net_join_quic(a.trim_start_matches("quic://"));
+            }
+        }
+        if let Some(addr) = cmd.net_host_relay {
+            self.net_host_relay(addr.trim());
         }
         if cmd.toggle_pause {
             self.toggle_pause();

@@ -1220,6 +1220,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "floptle-relay"
+version = "0.0.0"
+dependencies = [
+ "floptle-net",
+]
+
+[[package]]
 name = "floptle-render"
 version = "0.0.0"
 dependencies = [
