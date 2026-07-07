@@ -37,7 +37,7 @@ use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_light
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
-use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
+use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, export_game, grab_cursor, scene_hit};
 
 impl Editor {
     pub(crate) fn render(&mut self) {
@@ -1059,6 +1059,21 @@ impl Editor {
         let net_join_code = &mut self.net_join_code;
         let net_lobby_code = self.net_lobby_code.clone();
         let show_net_panel = &mut self.show_net_panel;
+        // Player mode (an exported build / --play): no editor chrome at all —
+        // the Game view IS the window. F1 (handled at the winit layer) toggles
+        // the multiplayer window, which still works for LAN/relay sessions.
+        let player_mode = self.player_mode;
+        let show_export = &mut self.show_export;
+        let export_dir = &mut self.export_dir;
+        let export_title = &mut self.export_title;
+        let export_status = &self.export_status;
+        if export_title.is_empty() {
+            *export_title = self
+                .project_root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        }
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
         let net_ghosts = &mut self.net_ghosts;
@@ -1069,7 +1084,8 @@ impl Editor {
         let full_output = ctx.run_ui(raw_input, |ui| {
             let pointer_down = ui.input(|i| i.pointer.any_down());
             frame_pointer_down = pointer_down;
-            // ---- top menu bar ----
+            // ---- top menu bar (never in a build) ----
+            if !player_mode {
             egui::Panel::top("menu_bar").show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.menu_button("File", |ui| {
@@ -1088,6 +1104,18 @@ impl Editor {
                         }
                         if ui.button("Save Project").clicked() {
                             want_save_project = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("Export Game…")
+                            .on_hover_text(
+                                "stamp out a runnable build: this binary + the project \
+                                 (for THIS platform — export on each OS you target)",
+                            )
+                            .clicked()
+                        {
+                            *show_export = true;
                             ui.close();
                         }
                         ui.separator();
@@ -1171,6 +1199,7 @@ impl Editor {
                     // free-fly view vs the active-camera gameplay view), not a toggle here.
                 });
             });
+            }
 
             // ---- 🌐 multiplayer harness (Host & Join locally) ----
             if *show_net_panel {
@@ -1478,19 +1507,25 @@ impl Editor {
             // untouched underneath and comes back exactly as it was.
             if let Some(ft) = *viewer.fullscreen_tab {
                 let mut exit = false;
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(format!("⛶ Restore  ·  {}", ft.title()))
-                        .on_hover_text("double-click a tab to toggle fullscreen · Esc to restore")
-                        .clicked()
-                    {
+                // A build has nothing to restore TO — no header, and Escape
+                // belongs to the game (cursor release), not the layout.
+                if !player_mode {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(format!("⛶ Restore  ·  {}", ft.title()))
+                            .on_hover_text(
+                                "double-click a tab to toggle fullscreen · Esc to restore",
+                            )
+                            .clicked()
+                        {
+                            exit = true;
+                        }
+                        ui.small("fullscreen — double-click a tab or press Esc to restore");
+                    });
+                    ui.separator();
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         exit = true;
                     }
-                    ui.small("fullscreen — double-click a tab or press Esc to restore");
-                });
-                ui.separator();
-                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    exit = true;
                 }
                 // Scene/Game are transparent (the 3D shows through); every other tab
                 // needs an opaque fill so the surface render doesn't bleed behind it.
@@ -1521,6 +1556,47 @@ impl Editor {
                     && let Some(p) = egui::DragAndDrop::take_payload::<AssetPayload>(ui.ctx()) {
                         cmd.drop_asset = Some(p.path.clone());
                     }
+            }
+
+            // ---- Export Game… (File menu): binary + assets + manifest ----
+            if *show_export {
+                let mut open = true;
+                egui::Window::new("📦 Export Game")
+                    .open(&mut open)
+                    .resizable(false)
+                    .default_width(340.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            "A build = this engine binary + the project folder. It runs \
+                             the game directly (no editor) — F1 in-game opens the \
+                             multiplayer menu.",
+                        );
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Title");
+                            ui.text_edit_singleline(export_title);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Folder");
+                            ui.text_edit_singleline(export_dir)
+                                .on_hover_text("the build lands here (created if missing)");
+                        });
+                        ui.small(
+                            "builds target THIS platform — run the export from a Windows \
+                             editor for a Windows build, etc.",
+                        );
+                        ui.add_space(4.0);
+                        if ui.button("📦 Export").clicked() && !export_dir.trim().is_empty() {
+                            cmd.export_game = Some(export_dir.trim().to_string());
+                        }
+                        if let Some(status) = export_status {
+                            ui.add_space(4.0);
+                            ui.label(status.as_str());
+                        }
+                    });
+                if !open {
+                    *show_export = false;
+                }
             }
 
             // ---- project settings window (project-wide rendering) ----
@@ -2913,6 +2989,23 @@ impl Editor {
         }
         if let Some(addr) = cmd.net_host_relay {
             self.net_host_relay(addr.trim());
+        }
+        if let Some(dir) = cmd.export_game {
+            let title = if self.export_title.trim().is_empty() {
+                self.project_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "game".into())
+            } else {
+                self.export_title.trim().to_string()
+            };
+            let result = export_game(&self.project_root, std::path::Path::new(&dir), &title);
+            let (level, line) = match result {
+                Ok(msg) => (floptle_script::LogLevel::Debug, format!("📦 {msg}")),
+                Err(e) => (floptle_script::LogLevel::Error, format!("📦 export failed: {e}")),
+            };
+            self.console.push(level, line.clone(), None);
+            self.export_status = Some(line);
         }
         if cmd.toggle_pause {
             self.toggle_pause();

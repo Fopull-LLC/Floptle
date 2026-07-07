@@ -119,6 +119,8 @@ struct EditorCmd {
     net_join_quic: Option<String>,
     /// Host through a rendezvous relay at this address.
     net_host_relay: Option<String>,
+    /// Export the project as a runnable game build into this folder.
+    export_game: Option<String>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -527,6 +529,7 @@ fn main() {
         .cloned();
     let stamp = version_override.unwrap_or_else(distribution_version);
     let mut project_path: Option<PathBuf> = None;
+    let mut player_mode = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -536,7 +539,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit",
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
                     floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
@@ -560,6 +563,7 @@ fn main() {
                 };
                 std::process::exit(migrate_project(Path::new(p), &stamp));
             }
+            "--play" => player_mode = true,
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
                 eprintln!("unknown argument: {other} (try --help)");
@@ -569,15 +573,104 @@ fn main() {
         i += 1;
     }
 
+    // An exported build: a `floptle-game.ron` manifest next to the binary makes
+    // this process a GAME, not an editor — the project rides alongside it.
+    let mut game_title = String::new();
+    if !player_mode
+        && project_path.is_none()
+        && let Some((manifest, dir)) = load_game_manifest()
+    {
+        player_mode = true;
+        game_title = manifest.title;
+        project_path = Some(dir.join(manifest.project));
+    }
+
     println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    // Gizmos/overlays on by default (toggle in the viewport).
-    let mut editor = Editor { show_gizmos: true, ..Default::default() };
+    // Gizmos/overlays on by default (toggle in the viewport) — but never in a build.
+    let mut editor =
+        Editor { show_gizmos: !player_mode, player_mode, game_title, ..Default::default() };
     if let Some(p) = project_path {
         editor.project_root = p;
     }
     event_loop.run_app(&mut editor).expect("run editor");
+}
+
+/// The manifest File ⏵ Export Game… writes next to the binary. Its presence
+/// turns the binary into a game player; `project` is the assets folder
+/// relative to the manifest.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GameManifest {
+    title: String,
+    project: String,
+}
+
+/// A `floptle-game.ron` beside the running binary, if any → (manifest, its dir).
+fn load_game_manifest() -> Option<(GameManifest, PathBuf)> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let text = std::fs::read_to_string(dir.join("floptle-game.ron")).ok()?;
+    match ron::from_str::<GameManifest>(&text) {
+        Ok(m) => Some((m, dir)),
+        Err(e) => {
+            eprintln!("floptle-game.ron next to the binary is invalid ({e}); starting as editor");
+            None
+        }
+    }
+}
+
+/// File ⏵ Export Game…: stamp out a runnable build — THIS binary + the project's
+/// assets + the `floptle-game.ron` manifest that flips it into player mode. The
+/// build targets the platform the editor is running on (export from a Windows
+/// editor for a Windows build); cross-platform builds = run the export on each
+/// platform (CI templates are the Hub pipeline's job later).
+fn export_game(project_root: &Path, out: &Path, title: &str) -> Result<String, String> {
+    std::fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
+    let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
+    let out_c = out.canonicalize().map_err(|e| format!("export dir: {e}"))?;
+    if out_c.starts_with(&proj) {
+        return Err("the export folder can't be inside the project (it would copy itself)".into());
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("own binary: {e}"))?;
+    // Binary name from the title: filesystem-safe, platform suffix preserved.
+    let stem: String = title
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let stem = stem.trim_matches('_');
+    let stem = if stem.is_empty() { "game" } else { stem };
+    let exe_name = format!("{stem}{}", std::env::consts::EXE_SUFFIX);
+    std::fs::copy(&exe, out_c.join(&exe_name)).map_err(|e| format!("copy binary: {e}"))?;
+    let files = copy_tree(&proj, &out_c.join("assets")).map_err(|e| format!("copy assets: {e}"))?;
+    let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
+    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
+        .map_err(|e| format!("manifest: {e}"))?;
+    std::fs::write(out_c.join("floptle-game.ron"), text)
+        .map_err(|e| format!("write manifest: {e}"))?;
+    Ok(format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display()))
+}
+
+/// Recursive copy for the export: skips dot-entries (`.floptle` caches,
+/// `.luarc.json` — IDE/editor plumbing a build doesn't need). Returns the
+/// number of files copied.
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
+    std::fs::create_dir_all(dst)?;
+    let mut n = 0;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            n += copy_tree(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
@@ -913,6 +1006,18 @@ struct Editor {
     net_join_code: String,
     /// The live lobby code while hosting via a relay.
     net_lobby_code: Option<String>,
+    /// PLAYER MODE (`--play`, or a `floptle-game.ron` manifest next to the
+    /// binary — what File ⏵ Export Game… produces): boot straight into Play,
+    /// Game view fullscreen, no editor chrome. F1 = the multiplayer menu.
+    player_mode: bool,
+    /// The window title in player mode (the export manifest's `title`).
+    game_title: String,
+    /// File ⏵ Export Game… dialog state: visibility, target folder, the game
+    /// title to stamp, and the last result line.
+    show_export: bool,
+    export_dir: String,
+    export_title: String,
+    export_status: Option<String>,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
@@ -1156,8 +1261,21 @@ impl ApplicationHandler for Editor {
         self.preview_spinning = true;
         self.preview_zoom = 1.0;
         self.assets_grid_dir = self.project_root.clone();
+        let title = if self.player_mode {
+            if self.game_title.is_empty() {
+                // Fall back to the project folder's name.
+                self.project_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Floptle Game".into())
+            } else {
+                self.game_title.clone()
+            }
+        } else {
+            "Floptle Editor".into()
+        };
         let attrs = Window::default_attributes()
-            .with_title("Floptle Editor")
+            .with_title(&title)
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
         let gpu = Gpu::new(window.clone());
@@ -1241,6 +1359,17 @@ impl ApplicationHandler for Editor {
         self.last = Some(now);
         self.started = Some(now);
         self.window = Some(window);
+        // Player mode boots straight into the game: Game view fullscreen (no
+        // dock chrome renders around it) and Play running from frame one.
+        if self.player_mode {
+            self.fullscreen_tab = Some(EditorTab::Game);
+            self.toggle_play();
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                "🎮 player mode — F1 opens the multiplayer menu".into(),
+                None,
+            );
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -1257,7 +1386,7 @@ impl ApplicationHandler for Editor {
 
         match event {
             WindowEvent::CloseRequested => {
-                if self.scene_dirty && !self.quit_confirmed {
+                if self.scene_dirty && !self.quit_confirmed && !self.player_mode {
                     self.show_quit_confirm = true;
                 } else {
                     event_loop.exit();
@@ -1347,11 +1476,15 @@ impl ApplicationHandler for Editor {
                                 // Escape is a "cancel" gesture first: free a trapped Game
                                 // cursor, back out of an in-progress transition drag or the
                                 // graph window, and never silently discard unsaved work.
+                                // A BUILD (player mode) only ever frees the cursor — games
+                                // don't quit on Escape.
                                 if self.game_trap {
                                     self.game_trap = false;
                                     if let Some(window) = self.window.as_ref() {
                                         self.cursor_lock_soft = grab_cursor(window, false);
                                     }
+                                } else if self.player_mode {
+                                    // nothing else to cancel in a build
                                 } else if self.anim_ui.drag_from.is_some() {
                                     self.anim_ui.drag_from = None;
                                 } else if self.scene_dirty {
@@ -1360,7 +1493,13 @@ impl ApplicationHandler for Editor {
                                     event_loop.exit();
                                 }
                             }
+                            // In a build, Play IS the program — F1 opens the
+                            // multiplayer menu instead, and pause is editor-only.
+                            KeyCode::F1 if self.player_mode => {
+                                self.show_net_panel = !self.show_net_panel;
+                            }
                             KeyCode::F1 => self.toggle_play(),
+                            KeyCode::F2 if self.player_mode => {}
                             KeyCode::F2 => self.toggle_pause(),
                             // Everything else is an EDITOR shortcut — suppressed in the
                             // Game view so it behaves like a real build.
@@ -1621,6 +1760,54 @@ mod cli_tests {
         assert_eq!(json_string_field(r#"{ "target": "x" }"#, "version"), None);
         assert_eq!(json_string_field("{ \"version\": 3 }", "version"), None); // not a string
         assert_eq!(json_string_field("", "version"), None);
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::{export_game, GameManifest};
+    use std::path::PathBuf;
+
+    fn temp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("floptle-export-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Export = binary + assets (dot-entries skipped) + a manifest that parses
+    /// back and points at the copied project.
+    #[test]
+    fn export_stamps_a_runnable_build() {
+        let proj = temp("proj");
+        std::fs::create_dir_all(proj.join("scenes")).unwrap();
+        std::fs::write(proj.join("project.ron"), "()").unwrap();
+        std::fs::write(proj.join("scenes/first.ron"), "()").unwrap();
+        std::fs::create_dir_all(proj.join(".floptle")).unwrap();
+        std::fs::write(proj.join(".floptle/cache.bin"), "x").unwrap();
+        std::fs::write(proj.join(".luarc.json"), "{}").unwrap();
+        let out = temp("out");
+
+        let msg = export_game(&proj, &out, "My Cool Game!").expect("export succeeds");
+        assert!(msg.contains("2 asset file(s)"), "dot-entries must be skipped: {msg}");
+        assert!(out.join("assets/project.ron").is_file());
+        assert!(out.join("assets/scenes/first.ron").is_file());
+        assert!(!out.join("assets/.floptle").exists(), "editor cache must not ship");
+        // The binary landed under a filesystem-safe name (this test binary).
+        let exe = format!("My_Cool_Game{}", std::env::consts::EXE_SUFFIX);
+        assert!(out.join(&exe).is_file(), "missing {exe}");
+        let manifest: GameManifest =
+            ron::from_str(&std::fs::read_to_string(out.join("floptle-game.ron")).unwrap())
+                .expect("manifest parses");
+        assert_eq!(manifest.title, "My Cool Game!");
+        assert_eq!(manifest.project, "assets");
+
+        // Exporting INTO the project is refused (it would copy itself).
+        let inside = proj.join("build");
+        assert!(export_game(&proj, &inside, "x").is_err());
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&out);
     }
 }
 
