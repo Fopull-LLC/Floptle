@@ -160,6 +160,17 @@ impl Editor {
         // --- server: synced collection → tick → dispatch received RPC/events ---
         let hosting = self.net_server.is_some();
         let (rpcs, events) = if hosting {
+            // EXACT post-tick poses first: the frame-end writeback renders
+            // partway into a tick (alpha < 1), so the Transforms still hold
+            // LAST frame's render pose — 1–2 ticks stale. Snapshots and the
+            // lag-comp history read Transforms; shipping the stale pose makes
+            // every moving owner mispredict by ~a tick of motion and scoot at
+            // the snapshot cadence. The hidden-server harness always did this
+            // (writeback at alpha 1.0) — the real host must too. The frame's
+            // later interpolated writeback re-smooths what's rendered here.
+            if let Some(sim) = self.sim.as_ref() {
+                sim.writeback_interpolated(&mut self.world, 1.0);
+            }
             let raw = self.script_host.collect_synced();
             let ents: HashMap<u32, Entity> =
                 self.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
