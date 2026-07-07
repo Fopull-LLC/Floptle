@@ -1325,6 +1325,45 @@ mod tests {
     }
 
     #[test]
+    fn second_script_on_a_body_node_must_not_clobber_velocity_writes() {
+        // A movement controller sets the velocity; a weapon script on the SAME
+        // node never touches it. The weapon's pass must not write the stale
+        // seeded velocity back over the controller's (the sliding-player bug).
+        let dir = std::env::temp_dir().join("floptle_script_test_two_scripts");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "mover", "function update(node, dt)\n  node.vx = 5\n  node.vy = 7\nend\n");
+        write_script(&dir, "weapon", "function update(node, dt)\n  -- looks at the node, never writes velocity\n  local _ = node.vx\nend\n");
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![
+                floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![] },
+                floptle_core::ScriptInst { kind: "weapon".into(), enabled: true, params: vec![] },
+            ]),
+        );
+        let mut host = ScriptHost::new();
+        // The body's pre-hook state this frame (what node.vx is seeded with).
+        let mut bodies = HashMap::new();
+        bodies.insert(
+            e.index(),
+            BodyState { vel: [0.0, -2.0, 0.0], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0 },
+        );
+        host.set_bodies(bodies);
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let changes = host.take_body_changes();
+        assert_eq!(
+            changes.get(&e.index()),
+            Some(&[5.0, 7.0, 0.0f32]),
+            "the controller's write must survive the weapon's pass"
+        );
+        // And a script that touches nothing queues nothing.
+        assert!(host.take_body_height_changes().is_empty(), "untouched height must not queue");
+    }
+
+    #[test]
     fn net_rewind_swaps_poses_and_synced_vars_then_restores() {
         let dir = std::env::temp_dir().join("floptle_script_test_rewind");
         let _ = std::fs::create_dir_all(&dir);
