@@ -900,6 +900,9 @@ struct Editor {
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.
     net_remote_predicted: Vec<(Entity, u64)>,
+    /// Real hosting: the lag-comp history ring (the hidden harness server
+    /// keeps its own inside `HiddenServer`).
+    net_history: floptle_net::LagHistory,
     /// 🌐 panel text buffers: the LAN host port + the join address.
     net_host_port: String,
     net_join_addr: String,

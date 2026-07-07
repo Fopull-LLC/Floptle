@@ -15,6 +15,36 @@ use floptle_script::{NetCmd, NetRoleState, NetState};
 
 use crate::Editor;
 
+/// The rewound world for a stamped combat intent (`docs/netcode-design.md`
+/// §7): every networked node's pose (+ its scripts' `synced` vars) at the
+/// tick the SENDER perceived — their stamp minus each node's interp delay,
+/// clamped to the rewind window. Poses only exist for transform-synced nodes;
+/// synced vars rewind for every networked node.
+fn build_rewind_scope(
+    world: &World,
+    session: &NetSession,
+    history: &floptle_net::LagHistory,
+    now: u64,
+    sender: u64,
+    stamp: u64,
+) -> floptle_script::RewindScope {
+    let mut poses = Vec::new();
+    let mut synced = Vec::new();
+    for (nid, e) in session.net_entities() {
+        let Some(rep) = world.get::<floptle_core::Replicated>(e) else { continue };
+        let target =
+            floptle_net::LagHistory::clamp_rewind(now, stamp.saturating_sub(rep.interp_delay as u64));
+        let Some(h) = history.state_at(nid, target) else { continue };
+        if rep.transform {
+            poses.push((e.index(), h.pos));
+        }
+        for (kind, vars) in &h.synced {
+            synced.push((e.index(), kind.clone(), vars.clone()));
+        }
+    }
+    floptle_script::RewindScope { peer: sender, poses, synced }
+}
+
 /// The hidden authoritative SERVER behind "Test as remote player": a full
 /// second simulation (world + physics + its own Lua host) consuming the play
 /// world's replayed inputs, exactly like a dedicated server would
@@ -118,12 +148,47 @@ impl Editor {
             let raw = self.script_host.collect_synced();
             let ents: HashMap<u32, Entity> =
                 self.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
+            // Record this tick into the lag-comp history (post-physics poses +
+            // the synced values just collected) — what net.rewind rewinds to.
+            if let Some(s) = self.net_server.as_ref() {
+                let mut hist: Vec<(u64, floptle_net::HistEntry)> = Vec::new();
+                for (nid, e) in s.net_entities() {
+                    let Some(tr) = self.world.get::<Transform>(e) else { continue };
+                    let synced = raw
+                        .iter()
+                        .filter(|(eid, _, _)| *eid == e.index())
+                        .map(|(_, kind, vars)| (kind.clone(), vars.clone()))
+                        .collect();
+                    hist.push((
+                        nid,
+                        floptle_net::HistEntry {
+                            pos: [tr.translation.x, tr.translation.y, tr.translation.z],
+                            synced,
+                        },
+                    ));
+                }
+                self.net_history.record(tick, hist);
+            }
             let synced = raw
                 .into_iter()
                 .filter_map(|(eid, kind, vars)| ents.get(&eid).map(|e| (*e, kind, vars)))
                 .collect();
+            // Live body states ride the snapshots (velocity + grounded) — a
+            // predicted node's owner reconciles against them; without this,
+            // every correction restores ZERO velocity + airborne (dead jumps,
+            // ground-sticking stutter).
+            let bstates: floptle_net::BodyStates = self
+                .sim
+                .as_ref()
+                .map(|sim| {
+                    sim.body_states()
+                        .map(|(e, vel, _, grounded, _)| (e, [vel.x, vel.y, vel.z], grounded))
+                        .collect()
+                })
+                .unwrap_or_default();
             if let Some(s) = self.net_server.as_mut() {
                 s.update_synced(synced);
+                s.update_body_states(bstates);
                 s.tick_server(&self.world, tick);
                 (s.take_rpcs(), s.take_events())
             } else {
@@ -143,7 +208,21 @@ impl Editor {
                 self.script_host.set_hulls(sim.body_hulls(&self.world));
             }
             for r in rpcs {
+                // A stamped intent gets the lag-comp rewind scope (§7).
+                let scope = match (r.tick, self.net_server.as_ref()) {
+                    (Some(stamp), Some(s)) => Some(build_rewind_scope(
+                        &self.world,
+                        s,
+                        &self.net_history,
+                        tick,
+                        r.sender,
+                        stamp,
+                    )),
+                    _ => None,
+                };
+                self.script_host.set_rewind(scope);
                 self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender);
+                self.script_host.set_rewind(None);
             }
             for ev in events {
                 match ev {
@@ -704,28 +783,9 @@ impl Editor {
         // window). `net.rewind(peer, fn)` applies it around the handler's
         // queries (`docs/netcode-design.md` §7).
         for r in hs.session.take_rpcs() {
-            let scope = r.tick.map(|stamp| {
-                let mut poses = Vec::new();
-                let mut synced = Vec::new();
-                for (nid, e) in hs.session.net_entities() {
-                    let Some(rep) = hs.world.get::<floptle_core::Replicated>(e) else { continue };
-                    let target = floptle_net::LagHistory::clamp_rewind(
-                        st,
-                        stamp.saturating_sub(rep.interp_delay as u64),
-                    );
-                    let Some(h) = hs.history.state_at(nid, target) else { continue };
-                    // Poses only exist for transform-synced nodes; synced VARS
-                    // rewind for every networked node (a var-only node's parry
-                    // flag matters even though its transform never replicates).
-                    if rep.transform {
-                        poses.push((e.index(), h.pos));
-                    }
-                    for (kind, vars) in &h.synced {
-                        synced.push((e.index(), kind.clone(), vars.clone()));
-                    }
-                }
-                floptle_script::RewindScope { peer: r.sender, poses, synced }
-            });
+            let scope = r
+                .tick
+                .map(|stamp| build_rewind_scope(&hs.world, &hs.session, &hs.history, st, r.sender, stamp));
             hs.host.set_rewind(scope);
             hs.host.dispatch_rpc(&mut hs.world, &r.name, &r.args, r.sender);
             hs.host.set_rewind(None);
@@ -1207,6 +1267,7 @@ impl Editor {
         self.net_hidden = None;
         self.net_predictor = None;
         self.net_remote_predicted.clear();
+        self.net_history = floptle_net::LagHistory::new();
         self.net_hub = None;
         self.net_scene_doc = None;
         self.script_host.set_frame_filter(std::collections::HashSet::new());
