@@ -85,6 +85,42 @@ impl SharedNet {
     }
 }
 
+/// Convert a per-tick [`crate::InputSnapshot`] into the wire form (sorted for
+/// deterministic encoding) — what a predicted node's owner ships to the server.
+pub fn input_to_net(s: &crate::InputSnapshot) -> floptle_net::NetInput {
+    let sorted = |set: &std::collections::HashSet<String>| {
+        let mut v: Vec<String> = set.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    floptle_net::NetInput {
+        keys_down: sorted(&s.keys_down),
+        keys_pressed: sorted(&s.keys_pressed),
+        keys_released: sorted(&s.keys_released),
+        mouse: s.mouse,
+        mouse_delta: s.mouse_delta,
+        scroll: s.scroll,
+        buttons_down: s.buttons_down,
+        buttons_pressed: s.buttons_pressed,
+    }
+}
+
+/// The wire form back into a host input snapshot — what the server (and the
+/// client's replay) feed `fixedUpdate` so the SAME controller runs on both
+/// sides (`docs/netcode-design.md` §6, the one-script model).
+pub fn net_to_input(n: &floptle_net::NetInput) -> crate::InputSnapshot {
+    crate::InputSnapshot {
+        keys_down: n.keys_down.iter().cloned().collect(),
+        keys_pressed: n.keys_pressed.iter().cloned().collect(),
+        keys_released: n.keys_released.iter().cloned().collect(),
+        mouse: n.mouse,
+        mouse_delta: n.mouse_delta,
+        scroll: n.scroll,
+        buttons_down: n.buttons_down,
+        buttons_pressed: n.buttons_pressed,
+    }
+}
+
 /// Convert a Lua value to a [`NetValue`], enforcing the §13.2 guardrails at
 /// the boundary: functions/userdata/threads never replicate, depth ≤ 4, and
 /// the caller validates encoded size. Errors carry a script-friendly message.

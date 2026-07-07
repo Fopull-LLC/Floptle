@@ -60,7 +60,7 @@ mod net_api;
 mod preprocess;
 
 pub(crate) use api::install_handle_api;
-pub use net_api::{NetCmd, NetRoleState, NetState};
+pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState};
 
 /// Severity of a captured script log line (the engine Console colors by this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,6 +202,10 @@ pub struct ScriptHost {
     /// (eid, script, var) combos already warned about failing the replication
     /// guardrails — so a hot loop doesn't spam the Console every tick.
     synced_warned: std::collections::HashSet<(u32, String, String)>,
+    /// Entities whose scripts are SKIPPED this session (a networked CLIENT
+    /// doesn't run server-authoritative nodes' scripts — their state arrives
+    /// in snapshots; docs/netcode-design.md §6). Set by the driver.
+    script_skip: std::collections::HashSet<u32>,
 }
 
 /// One immediate-mode debug-draw command from a script's `gizmo.*` call.

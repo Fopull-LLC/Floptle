@@ -1014,6 +1014,16 @@ impl Editor {
         let net_hosting = self.net_server.is_some();
         let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
         let net_has_client = self.net_client.is_some();
+        let net_as_player = self.net_play_client.is_some();
+        let net_rtt = self
+            .net_play_client
+            .as_ref()
+            .map(|c| c.stats(floptle_net::SERVER).rtt_ms)
+            .unwrap_or(0.0);
+        let net_predicted_name = self
+            .net_predictor
+            .as_ref()
+            .and_then(|(e, _)| world.get::<Name>(*e).map(|n| n.0.clone()));
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1144,27 +1154,48 @@ impl Editor {
                             );
                             return;
                         }
-                        match (net_hosting, net_has_client) {
-                            (false, _) => {
-                                if ui.button("⏵ Host + join a local client").clicked() {
-                                    cmd.net_host_local = true;
-                                    cmd.net_join_local = true;
+                        if net_as_player {
+                            ui.label(format!(
+                                "🎮 you are a REMOTE PLAYER · rtt {net_rtt:.0} ms"
+                            ));
+                            match &net_predicted_name {
+                                Some(n) => ui.small(format!(
+                                    "predicting \"{n}\" locally — orange ghosts = the hidden server's truth. Raise latency/loss and feel it stay responsive."
+                                )),
+                                None => ui.small(
+                                    "spectating (no Predicted node) — give your character a Networked component with mode 'Predicted (owner)'",
+                                ),
+                            };
+                        } else {
+                            match (net_hosting, net_has_client) {
+                                (false, _) => {
+                                    if ui.button("⏵ Host + join a local client").clicked() {
+                                        cmd.net_host_local = true;
+                                        cmd.net_join_local = true;
+                                    }
+                                    if ui
+                                        .button("🎮 Test as remote player (predicted)")
+                                        .on_hover_text("the play world becomes a CLIENT predicting against a hidden authoritative server — your character stays responsive at any latency, the server keeps the truth")
+                                        .clicked()
+                                    {
+                                        cmd.net_play_as_client = true;
+                                    }
+                                    ui.small("or call net.host{} from a script");
                                 }
-                                ui.small("or call net.host{} from a script");
-                            }
-                            (true, false) => {
-                                ui.label("hosting · 0 ghost clients");
-                                if ui.button("➕ Join a local ghost client").clicked() {
-                                    cmd.net_join_local = true;
+                                (true, false) => {
+                                    ui.label("hosting · 0 ghost clients");
+                                    if ui.button("➕ Join a local ghost client").clicked() {
+                                        cmd.net_join_local = true;
+                                    }
                                 }
-                            }
-                            (true, true) => {
-                                ui.label(format!(
-                                    "hosting · {net_peer_count} client(s) connected"
-                                ));
+                                (true, true) => {
+                                    ui.label(format!(
+                                        "hosting · {net_peer_count} client(s) connected"
+                                    ));
+                                }
                             }
                         }
-                        if net_hosting {
+                        if net_hosting || net_as_player {
                             ui.separator();
                             ui.label("simulated link");
                             let mut lat = *net_latency_ticks as i32;
@@ -2342,6 +2373,8 @@ impl Editor {
                         self.tick_buttons_pressed = [false; 3];
                         floptle_script::InputSnapshot::default()
                     };
+                    // Keep what the scripts saw: prediction records + ships it.
+                    self.last_tick_input = snap.clone();
                     self.script_host.set_input(snap);
                     if let Some(sim) = self.sim.as_mut() {
                         // Fresh body state for THIS tick (post previous tick's physics).
@@ -2611,6 +2644,9 @@ impl Editor {
         }
         if cmd.net_join_local {
             self.net_join_local();
+        }
+        if cmd.net_play_as_client {
+            self.net_play_as_client();
         }
         if cmd.net_stop_session {
             self.net_stop("panel");
