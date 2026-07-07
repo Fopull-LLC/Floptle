@@ -161,16 +161,23 @@ impl Editor {
             let _ = c.take_events();
             let _ = c.take_synced();
         }
-        // --- mirror session state into Lua (net.role()/peers()/ping()) ---
+        // --- mirror session state into Lua (net.role()/peers()/ping()/isMine) ---
         let state = if let Some(s) = &self.net_server {
             NetState {
                 role: NetRoleState::Server,
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
+                my_peer: None,
             }
         } else {
             NetState::default()
         };
+        let owners = if self.net_server.is_some() {
+            Self::collect_net_owners(&self.world)
+        } else {
+            HashMap::new()
+        };
+        self.script_host.set_net_owners(owners);
         self.script_host.set_net_state(state);
     }
 
@@ -232,10 +239,13 @@ impl Editor {
     /// `quic://` join: every TRANSFORM/PHYSICS-synced authority node becomes
     /// snapshot-driven (scripts skipped, body deactivated — snapshots own it);
     /// var-only Networked nodes keep running everywhere (the door pattern).
-    /// The peer-1-owned Predicted node, if any, becomes the local player:
-    /// physics sync forced on (prediction needs vel+grounded on the wire),
-    /// its `update` moved to the tick clock, the Predictor armed. Returns it.
-    fn net_client_side_setup(&mut self) -> Option<Entity> {
+    /// The Predicted node owned by `my_owner` (if any) becomes the local
+    /// player: body re-activated, physics sync forced on (prediction needs
+    /// vel+grounded on the wire), its `update` moved to the tick clock, the
+    /// Predictor armed. A real join calls this twice: with `None` at join
+    /// time (my peer id is unknown — everything snapshot-driven), then with
+    /// `Some(my_peer)` when the Welcome lands.
+    fn net_client_side_setup(&mut self, my_owner: Option<u64>, warn_if_none: bool) -> Option<Entity> {
         let mut skip = std::collections::HashSet::new();
         let mut predicted: Option<Entity> = None;
         let reps: Vec<(Entity, floptle_core::Replicated)> = self
@@ -244,7 +254,9 @@ impl Editor {
             .map(|(e, r)| (e, *r))
             .collect();
         for (e, r) in reps {
-            let mine = r.mode == ReplicationMode::Predicted && r.owner == Some(1);
+            let mine = r.mode == ReplicationMode::Predicted
+                && r.owner.is_some()
+                && r.owner == my_owner;
             if mine && predicted.is_none() {
                 predicted = Some(e);
                 continue;
@@ -264,6 +276,11 @@ impl Editor {
             {
                 r.physics = true;
             }
+            // Deferred bind: the node was snapshot-driven until the Welcome
+            // told us it's ours — its body simulates locally again.
+            if let Some(sim) = self.sim.as_mut() {
+                sim.set_body_active(pe.index(), true);
+            }
             // The predicted node's `update` moves to the TICK clock (the server
             // integrates it per tick — the client must match or they fight).
             let mut fskip = std::collections::HashSet::new();
@@ -271,35 +288,47 @@ impl Editor {
             self.script_host.set_frame_filter(fskip);
         }
         self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
-        if predicted.is_none() {
+        if predicted.is_none() && warn_if_none {
             self.console.push(
                 floptle_script::LogLevel::Warn,
-                "no Predicted node found — you're a spectator. Give your character a Networked component with mode 'Predicted (owner)'".into(),
+                "no Predicted node is yours — you're a spectator. The scene needs one Predicted node per player (node #1 = the host, #2+ = joiners in order)".into(),
                 None,
             );
         }
         predicted
     }
 
-    /// Every scene-authored Predicted node belongs to peer 1 — the v1 session
-    /// convention the host and the (first) joining client both apply, so
-    /// registration, snapshot routing, and input routing agree without any
-    /// negotiation. Runtime avatars carry explicit owners via `net.spawn`.
+    /// The session ownership convention, applied identically on every machine
+    /// at session start: scene-authored Predicted nodes, in NODE order, belong
+    /// to — #1 the HOST (owner None: it runs under the host's live input),
+    /// #2 the first joiner (peer 1), #3 the second (peer 2), and so on. No
+    /// negotiation needed; registration, snapshot routing, and input routing
+    /// all agree. Runtime avatars carry explicit owners via `net.spawn`.
     fn net_assign_scene_owners(world: &mut World) {
         let preds: Vec<Entity> = world
-            .query::<floptle_core::Replicated>()
-            .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+            .query::<Transform>()
             .map(|(e, _)| e)
+            .filter(|e| {
+                world
+                    .get::<floptle_core::Replicated>(*e)
+                    .map(|r| r.mode == ReplicationMode::Predicted)
+                    .unwrap_or(false)
+            })
             .collect();
-        for e in preds {
-            if let Some(r) = world.get_mut::<floptle_core::Replicated>(e) {
-                r.owner = Some(1);
+        for (i, e) in preds.iter().enumerate() {
+            if let Some(r) = world.get_mut::<floptle_core::Replicated>(*e) {
+                r.owner = if i == 0 { None } else { Some(i as u64) };
                 // Prediction needs vel+grounded in snapshots on BOTH ends.
                 if !r.physics {
                     r.physics = true;
                 }
             }
         }
+    }
+
+    /// Networked nodes' owners, mirrored into Lua for `net.isMine(node)`.
+    fn collect_net_owners(world: &World) -> HashMap<u32, Option<u64>> {
+        world.query::<floptle_core::Replicated>().map(|(e, r)| (e.index(), r.owner)).collect()
     }
 
     /// Host a REAL session on a UDP port (QUIC): other machines running the
@@ -332,13 +361,15 @@ impl Editor {
         };
         let bound = transport.local_port();
         Self::net_assign_scene_owners(&mut self.world);
-        // Remote-owned Predicted nodes: skipped in the global script passes,
-        // run per-tick with their owner's replayed input instead.
+        // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
+        // global script passes, run per-tick with their owner's replayed
+        // input instead. Slot #1 (owner None) is the HOST's — it stays in the
+        // global passes under the host's live keyboard.
         let remote: Vec<(Entity, u64)> = self
             .world
             .query::<floptle_core::Replicated>()
-            .filter(|(_, r)| r.mode == ReplicationMode::Predicted && r.owner == Some(1))
-            .map(|(e, _)| (e, 1u64))
+            .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+            .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
             .collect();
         let mut skip = std::collections::HashSet::new();
         let mut fskip = std::collections::HashSet::new();
@@ -348,6 +379,7 @@ impl Editor {
         }
         self.script_host.set_script_filter(skip);
         self.script_host.set_frame_filter(fskip);
+        let slots = remote.len();
         self.net_remote_predicted = remote;
         let mut s = NetSession::server(Box::new(transport));
         s.register_scene(&self.world);
@@ -356,9 +388,9 @@ impl Editor {
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!(
-                "🌐 hosting on UDP port {bound} — a friend with this project joins via the 🌐 \
-                 panel or net.join(\"quic://<your-LAN-ip>:{bound}\"). Scene-authored Predicted \
-                 nodes belong to the FIRST joiner."
+                "🌐 hosting on UDP port {bound} — friends with this project join via the 🌐 \
+                 panel or net.join(\"quic://<your-LAN-ip>:{bound}\"). Predicted node #1 is \
+                 YOURS; {slots} joiner slot(s) follow in node order."
             ),
             None,
         );
@@ -393,11 +425,15 @@ impl Editor {
         Self::net_assign_scene_owners(&mut self.world);
         let mut client = NetSession::client(Box::new(transport));
         client.register_scene(&self.world);
-        self.net_client_side_setup();
+        // Which slot is ours depends on the peer id the server assigns —
+        // everything is snapshot-driven until the Welcome binds our avatar.
+        self.net_client_side_setup(None, false);
         self.net_play_client = Some(client);
         self.console.push(
             floptle_script::LogLevel::Debug,
-            format!("🌐 joining quic://{addr} — the input clock syncs when the server welcomes us"),
+            format!(
+                "🌐 joining quic://{addr} — your avatar binds when the server welcomes us"
+            ),
             None,
         );
     }
@@ -478,7 +514,7 @@ impl Editor {
         server.register_scene(&sworld);
         let mut client = NetSession::client(Box::new(hub.connect()));
         client.register_scene(&self.world);
-        let predicted = self.net_client_side_setup();
+        let predicted = self.net_client_side_setup(Some(1), true);
         if let Some(pe) = predicted {
             // The harness's hidden server needs physics sync force-enabled on
             // ITS copy of the predicted node too (the setup did the play
@@ -561,7 +597,9 @@ impl Editor {
             role: NetRoleState::Server,
             peers: hs.session.peers().to_vec(),
             rtt_ms: hs.session.stats(hs.peer).rtt_ms,
+            my_peer: None,
         });
+        hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
         let mut states = HashMap::new();
         for (e, vel, up, grounded, height) in hs.sim.body_states() {
@@ -886,24 +924,48 @@ impl Editor {
                     // the RTT plus a small margin so inputs labeled T arrive
                     // before the server simulates T. The harness's hidden
                     // server slaves to OUR clock instead — offset stays 0.
-                    if self.net_hub.is_none()
-                        && let Some(cs) = self.net_play_client.as_mut()
-                        && let Some(wt) = cs.welcome_tick()
-                    {
-                        let rtt_ticks = (cs.stats(floptle_net::SERVER).rtt_ms / 1000.0 * 60.0)
-                            .ceil() as i64;
-                        let offset = wt as i64 + rtt_ticks + 3 - tick as i64;
-                        cs.set_input_stamp_offset(offset);
-                        self.console.push(
-                            floptle_script::LogLevel::Debug,
-                            format!(
-                                "🌐 connected — input clock leads the server by {} tick(s) \
-                                 (rtt {:.0} ms)",
-                                rtt_ticks + 3,
-                                cs.stats(floptle_net::SERVER).rtt_ms
-                            ),
-                            None,
-                        );
+                    if self.net_hub.is_none() {
+                        let mut my_peer = None;
+                        if let Some(cs) = self.net_play_client.as_mut() {
+                            my_peer = cs.my_peer();
+                            if let Some(wt) = cs.welcome_tick() {
+                                let rtt_ticks = (cs.stats(floptle_net::SERVER).rtt_ms / 1000.0
+                                    * 60.0)
+                                    .ceil() as i64;
+                                let offset = wt as i64 + rtt_ticks + 3 - tick as i64;
+                                cs.set_input_stamp_offset(offset);
+                                self.console.push(
+                                    floptle_script::LogLevel::Debug,
+                                    format!(
+                                        "🌐 connected — input clock leads the server by {} \
+                                         tick(s) (rtt {:.0} ms)",
+                                        rtt_ticks + 3,
+                                        cs.stats(floptle_net::SERVER).rtt_ms
+                                    ),
+                                    None,
+                                );
+                            }
+                        }
+                        // Deferred avatar bind: the Welcome told us WHO we are
+                        // — claim the Predicted node in our slot (peer p owns
+                        // scene Predicted node #p+1; #1 is the host's).
+                        if let Some(p) = my_peer {
+                            let bound = self.net_client_side_setup(Some(p), true);
+                            if let Some(pe) = bound {
+                                let name = self
+                                    .world
+                                    .get::<floptle_core::Name>(pe)
+                                    .map(|n| n.0.clone())
+                                    .unwrap_or_else(|| "?".into());
+                                self.console.push(
+                                    floptle_script::LogLevel::Debug,
+                                    format!(
+                                        "🎮 you are peer {p} — predicting \"{name}\" locally"
+                                    ),
+                                    None,
+                                );
+                            }
+                        }
                     }
                     self.script_host.fire_net_event(&mut self.world, "connected", None, None)
                 }
@@ -929,16 +991,18 @@ impl Editor {
             pred.decay_error();
         }
         // Mirror client state into Lua.
-        let rtt = self
+        let (rtt, my_peer) = self
             .net_play_client
             .as_ref()
-            .map(|c| c.stats(floptle_net::SERVER).rtt_ms)
-            .unwrap_or(0.0);
+            .map(|c| (c.stats(floptle_net::SERVER).rtt_ms, c.my_peer()))
+            .unwrap_or((0.0, None));
         self.script_host.set_net_state(NetState {
             role: NetRoleState::Client,
             peers: Vec::new(),
             rtt_ms: rtt,
+            my_peer,
         });
+        self.script_host.set_net_owners(Self::collect_net_owners(&self.world));
     }
 
     /// Static colliders for an arbitrary world (the hidden server's) — same
@@ -1019,6 +1083,7 @@ impl Editor {
         self.script_host.set_frame_filter(std::collections::HashSet::new());
         self.script_host.clear_net_state();
         self.script_host.set_net_state(NetState::default());
+        self.script_host.set_net_owners(HashMap::new());
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!("🌐 session ended ({why})"),

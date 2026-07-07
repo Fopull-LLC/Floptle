@@ -521,6 +521,7 @@ mod tests {
             role: NetRoleState::Server,
             peers: vec![1],
             rtt_ms: 20.0,
+            my_peer: None,
         });
         host.run(&mut world, &dir, 0.01, 0.01);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -579,7 +580,7 @@ mod tests {
         // the contract here; value-level checks ride the rpc/synced paths above.)
 
         // Client-side writes to synced warn.
-        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0 });
+        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0, my_peer: Some(7) });
         host.dispatch_rpc(
             &mut world,
             "hurt",
@@ -1364,6 +1365,91 @@ mod tests {
     }
 
     #[test]
+    fn is_mine_and_find_scripts_pick_the_local_player() {
+        // Two identical avatars, one probe: findScripts enumerates every
+        // instance and net.isMine tells which one THIS machine controls —
+        // how a shared camera finds the local player among many avatars.
+        let dir = std::env::temp_dir().join("floptle_script_test_ismine");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "avatar", "function update(node, dt) end\n");
+        write_script(
+            &dir,
+            "probe",
+            "function update(node, dt)\n\
+               local list = findScripts(\"avatar\")\n\
+               node.z = #list\n\
+               for i, s in ipairs(list) do\n\
+                 if net.isMine(s.node) then node.x = i end\n\
+               end\n\
+               node.y = net.isMine(node) and 1 or 0\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let avatar = |w: &mut World, x: f64| {
+            let e = w.spawn();
+            w.insert(
+                e,
+                Transform::from_translation(floptle_core::math::DVec3::new(x, 0.0, 0.0)),
+            );
+            w.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: "avatar".into(),
+                    enabled: true,
+                    params: vec![],
+                }]),
+            );
+            e
+        };
+        let a1 = avatar(&mut world, 0.0);
+        let a2 = avatar(&mut world, 10.0);
+        let probe = world.spawn();
+        world.insert(probe, Transform::IDENTITY);
+        world.insert(
+            probe,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "probe".into(),
+                enabled: true,
+                params: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        let mut owners = HashMap::new();
+        owners.insert(a1.index(), None); // networked, host-owned
+        owners.insert(a2.index(), Some(2u64)); // networked, peer 2's avatar
+        host.set_net_owners(owners);
+
+        // On the SERVER: the unowned avatar is mine; peer 2's is not.
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            peers: vec![2],
+            rtt_ms: 0.0,
+            my_peer: None,
+        });
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(probe).unwrap();
+        assert_eq!(tr.translation.z, 2.0, "findScripts must list both avatars");
+        assert_eq!(tr.translation.x, 1.0, "server: the unowned avatar is mine");
+        assert_eq!(tr.translation.y, 1.0, "non-networked nodes are mine everywhere");
+
+        // As CLIENT peer 2: only my own avatar is mine.
+        host.set_net_state(NetState {
+            role: NetRoleState::Client,
+            peers: vec![],
+            rtt_ms: 0.0,
+            my_peer: Some(2),
+        });
+        host.run(&mut world, &dir, 0.016, 0.032);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(
+            world.get::<Transform>(probe).unwrap().translation.x,
+            2.0,
+            "client: peer 2 owns avatar 2"
+        );
+    }
+
+    #[test]
     fn net_rewind_swaps_poses_and_synced_vars_then_restores() {
         let dir = std::env::temp_dir().join("floptle_script_test_rewind");
         let _ = std::fs::create_dir_all(&dir);
@@ -1395,7 +1481,7 @@ mod tests {
             }]),
         );
         let mut host = ScriptHost::new();
-        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0 });
+        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0, my_peer: None });
         host.run(&mut world, &dir, 0.01, 0.01); // instantiate
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 

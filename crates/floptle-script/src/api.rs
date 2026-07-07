@@ -939,5 +939,31 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         lua.globals().set("findScript", f.clone())?;
         lua.globals().set("findScriptInScene", f)?;
     }
+    // findScripts(kind): EVERY node carrying that script, as script handles in
+    // scene order — for picking among several instances (e.g. a camera finding
+    // the one player controller that is net.isMine, out of many avatars).
+    {
+        let scene = shared.scene.clone();
+        lua.globals().set(
+            "findScripts",
+            lua.create_function(move |lua, kind: String| {
+                let ids: Vec<u32> = {
+                    let s = scene.borrow();
+                    s.order
+                        .iter()
+                        .copied()
+                        .filter(|e| {
+                            s.scripts.get(e).map(|v| v.iter().any(|k| k == &kind)).unwrap_or(false)
+                        })
+                        .collect()
+                };
+                let arr = lua.create_table()?;
+                for (i, e) in ids.iter().enumerate() {
+                    arr.set(i + 1, new_script_handle(lua, *e, &kind)?)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
     Ok(())
 }

@@ -45,12 +45,14 @@ pub enum NetRoleState {
 }
 
 /// Live session state fed by the editor each tick, read by `net.role()` /
-/// `net.peers()` / `net.ping()`.
+/// `net.peers()` / `net.ping()` / `net.isMine()`.
 #[derive(Clone, Debug, Default)]
 pub struct NetState {
     pub role: NetRoleState,
     pub peers: Vec<u64>,
     pub rtt_ms: f32,
+    /// Client: our peer id once welcomed (`net.isMine` needs it).
+    pub my_peer: Option<u64>,
 }
 
 /// One `net.on(event, fn)` registration; owned by an `(entity, script)`
@@ -92,6 +94,10 @@ pub(crate) struct SharedNet {
     pub current: Rc<RefCell<Option<(u32, String)>>>,
     /// Lag-comp context for the RPC being dispatched (see [`RewindScope`]).
     pub rewind: Rc<RefCell<Option<RewindScope>>>,
+    /// Networked nodes' owners (entity index → `Replicated::owner`), fed by
+    /// the driver each tick — what `net.isMine(node)` answers from. Nodes not
+    /// in the map aren't networked (local everywhere → always "mine").
+    pub owners: Rc<RefCell<std::collections::HashMap<u32, Option<u64>>>>,
     pub logs: Rc<RefCell<Vec<ScriptLog>>>,
 }
 
@@ -103,6 +109,7 @@ impl SharedNet {
             handlers: Rc::new(RefCell::new(Vec::new())),
             current: Rc::new(RefCell::new(None)),
             rewind: Rc::new(RefCell::new(None)),
+            owners: Rc::new(RefCell::new(std::collections::HashMap::new())),
             logs,
         }
     }
@@ -285,6 +292,29 @@ pub(crate) fn install_net_api(
         t.set(
             "isClient",
             lua.create_function(move |_, ()| Ok(n.state.borrow().role == NetRoleState::Client))?,
+        )?;
+    }
+    // net.isMine(node): is this node under MY control on this machine?
+    // Offline / non-networked → true. On the server: true unless a remote
+    // peer owns it. On a client: true only for my own predicted node(s).
+    // THE way for shared scripts (cameras, HUDs) to pick the local player
+    // out of many identical avatars.
+    {
+        let n = net.clone();
+        t.set(
+            "isMine",
+            lua.create_function(move |_, node: Table| {
+                let Ok(eid) = node.raw_get::<u32>("__id") else { return Ok(false) };
+                let owner = n.owners.borrow().get(&eid).copied();
+                Ok(match (n.state.borrow().role, owner) {
+                    (_, None) => true, // not networked: local everywhere
+                    (NetRoleState::Offline, _) => true,
+                    (NetRoleState::Server, Some(o)) => o.is_none_or(|p| p == 0),
+                    (NetRoleState::Client, Some(o)) => {
+                        o.is_some() && o == n.state.borrow().my_peer
+                    }
+                })
+            })?,
         )?;
     }
     {

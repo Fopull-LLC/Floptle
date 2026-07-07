@@ -353,6 +353,7 @@ Scene-wide lookups are globals:
 | `find("Player")` | the first node in the scene with that name, or `nil` |
 | `findAll("Coin")` | an array of every node with that name |
 | `findScript("GameManager")` | a **script handle** for the first node anywhere running that script (the manager pattern), or `nil` |
+| `findScripts("third_person")` | an array of script handles — EVERY node carrying that script, in scene order (pair with `net.isMine` to pick the local player among many avatars) |
 
 ```lua
 -- A door that opens when the player is near it.
@@ -634,6 +635,7 @@ end
 | `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene's first node, replicated everywhere |
 | `net.despawn(node)` | SERVER: remove it everywhere |
 | `net.rewind(peer, fn)` | SERVER: run `fn` against the world as `peer` perceived it (lag compensation) |
+| `net.isMine(node)` | is this node under MY control here? (cameras/HUDs pick the local player; pair with `findScripts`) |
 
 **`synced` rules.** Values can be numbers, booleans, strings, and tables
 (nested up to 4 levels, ≤ 1 KB encoded per var — an oversized write is dropped
@@ -653,12 +655,13 @@ Args follow the same size/type rules as `synced`.
 
 > **Play over a real network:** both machines open THIS project and press
 > Play. One hosts (🌐 → *Host on LAN*, or `net.host{ port = 7777 }`), the
-> other joins (`quic://<host's-LAN-ip>:7777`). The link is QUIC — encrypted,
+> others join (`quic://<host's-LAN-ip>:7777`). The link is QUIC — encrypted,
 > zero-config (the trust model of a Minecraft server; verified identity comes
-> with the relay). v1 convention: **scene-authored Predicted nodes belong to
-> the first joiner** — the host is the authority (and can drive non-networked
-> nodes); per-player avatars come from `net.spawn` in a `playerJoined`
-> handler.
+> with the relay). Player slots: **scene-authored Predicted nodes, in node
+> order — #1 is the HOST's, #2 the first joiner's, #3 the second's**, and so
+> on. Duplicate your character node to add a slot, and every camera/HUD picks
+> its own player via `net.isMine` (the stock camera already does). Runtime
+> per-player avatars via `net.spawn` come next.
 
 **Prediction** (*🌐 → Test as remote player*): give your character's node a
 Networked component with mode **Predicted (owner)** and it responds instantly

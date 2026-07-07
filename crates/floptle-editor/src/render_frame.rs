@@ -1239,10 +1239,11 @@ impl Editor {
                                         }
                                     });
                                     ui.small(
-                                        "both machines run THIS project. Scene-authored \
-                                         Predicted nodes belong to the FIRST joiner; spawn \
-                                         per-player avatars with net.spawn. Or from a script: \
-                                         net.host{port=7777} / net.join(\"quic://ip:port\")",
+                                        "both machines run THIS project. Player slots = the \
+                                         scene's Predicted nodes in order: #1 the host, #2+ \
+                                         the joiners (duplicate your character to add slots). \
+                                         Or from a script: net.host{port=7777} / \
+                                         net.join(\"quic://ip:port\")",
                                     );
                                 }
                                 (true, false) if !net_is_real => {

@@ -198,6 +198,14 @@ function net.spawn(path, opts) end
 ---SERVER ONLY: despawn a replicated runtime object everywhere.
 ---@param node Node
 function net.despawn(node) end
+---Is this node under MY control on this machine? Offline / non-networked →
+---true. Server → true unless a remote peer owns it. Client → true only for
+---your own predicted node(s). THE way for shared scripts (cameras, HUDs) to
+---pick the local player out of many identical avatars:
+---`for _, s in ipairs(findScripts(\"third_person\")) do if net.isMine(s.node) then ... end end`
+---@param node Node
+---@return boolean
+function net.isMine(node) end
 
 ---Per-script synced variables: declare `replicated = { hp = 100 }` at the top
 ---level, then read/write `synced.hp`. The SERVER's writes replicate to every
@@ -266,6 +274,13 @@ function input.clicked(i) end
 ---@return { x: number, y: number, z: number, nx: number, ny: number, nz: number, distance: number, node: Node|nil }|nil
 function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 
+---EVERY node carrying script `kind`, as script handles in scene order — for
+---picking among several instances (a camera finding the one third_person
+---that is `net.isMine`, out of many player avatars).
+---@param kind string
+---@return table[]
+function findScripts(kind) end
+
 ---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
 ---viewport, Scene AND Game views. Call every frame you want a shape visible.
 ---Colors are optional 0-1 floats (default green).
@@ -317,13 +332,14 @@ function gizmo.point(x, y, z, size, r, g, b) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
 ];
 
 /// Write the Lua language-server support files into a project (annotations always
