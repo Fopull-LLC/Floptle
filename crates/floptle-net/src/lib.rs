@@ -17,12 +17,14 @@
 
 pub mod lagcomp;
 pub mod predict;
+pub mod quic;
 pub mod session;
 pub mod transport;
 pub mod value;
 pub mod wire;
 
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
+pub use quic::{QuicClient, QuicServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use session::{BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget, SyncedVars};
 pub use wire::{InputCmd, NetInput};
