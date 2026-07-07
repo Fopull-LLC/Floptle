@@ -14,17 +14,41 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 1;
+pub const PROTO_VERSION: u16 = 2;
 
 /// One replicated entity's transform state in a snapshot. Position is absolute
-/// world f64 (floating-origin safe); rotation a quaternion; velocity present
-/// only when the node syncs physics.
+/// world f64 (floating-origin safe); rotation a quaternion; velocity/grounded
+/// present only when the node syncs physics (prediction needs both).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SnapEntry {
     pub id: u64, // NetId
     pub pos: [f64; 3],
     pub rot: [f32; 4],
     pub vel: Option<[f32; 3]>,
+    pub grounded: Option<bool>,
+}
+
+/// A serializable per-tick input snapshot — what a client's `fixedUpdate` saw,
+/// shipped to the server so the SAME controller script re-runs there with the
+/// SAME input (`docs/netcode-design.md` §6, the one-script model). Key/button
+/// sets are sorted Vecs so encoding is deterministic.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetInput {
+    pub keys_down: Vec<String>,
+    pub keys_pressed: Vec<String>,
+    pub keys_released: Vec<String>,
+    pub mouse: (f32, f32),
+    pub mouse_delta: (f32, f32),
+    pub scroll: f32,
+    pub buttons_down: [bool; 3],
+    pub buttons_pressed: [bool; 3],
+}
+
+/// One tick's input command (client → server).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InputCmd {
+    pub tick: u64,
+    pub input: NetInput,
 }
 
 /// Changed `synced` script vars for one replicated entity: per script kind, the
@@ -53,6 +77,9 @@ pub enum Msg {
     /// Server → clients, at the snapshot cadence: changed transforms + synced
     /// vars. `keyframe` marks a periodic full-state snapshot (loss healing).
     Snapshot { tick: u64, keyframe: bool, entries: Vec<SnapEntry>, synced: Vec<SyncedEntry> },
+    /// Client → server, every tick: the last few ticks' inputs (redundant
+    /// window, so one lost packet doesn't lose a tick's input).
+    Input { entries: Vec<InputCmd> },
     /// Either direction: a named remote call. `sender` is stamped by the
     /// SERVER when relaying/receiving (clients can't spoof it).
     Rpc { name: String, args: NetValue, sender: PeerId },
@@ -87,6 +114,7 @@ mod tests {
                 pos: [1.0e6, 2.5, -3.0],
                 rot: [0.0, std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2],
                 vel: Some([0.0, -9.8, 0.0]),
+                grounded: Some(true),
             }],
             synced: vec![SyncedEntry {
                 id: 7,

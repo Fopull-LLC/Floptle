@@ -18,9 +18,10 @@ use floptle_core::math::{DVec3, Quat};
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Replicated, World};
 
+use crate::predict::PredictedState;
 use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport, SERVER};
 use crate::value::NetValue;
-use crate::wire::{Msg, SnapEntry, SyncedEntry, PROTO_VERSION};
+use crate::wire::{InputCmd, Msg, NetInput, SnapEntry, SyncedEntry, PROTO_VERSION};
 
 /// Which side of the wire this session is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,16 @@ pub struct ReceivedRpc {
 /// Per-entity `synced` script vars: (entity, script kind, name→value pairs).
 pub type SyncedVars = Vec<(Entity, String, Vec<(String, NetValue)>)>;
 
+/// Per-entity live physics state fed by the driver each tick (velocity +
+/// grounded), so physics-synced snapshot entries carry what prediction needs.
+pub type BodyStates = Vec<(Entity, [f32; 3], bool)>;
+
+/// How many recent input ticks ride in every input packet (redundancy: one
+/// lost packet doesn't lose a tick's input — the next packet re-carries it).
+const INPUT_WINDOW: usize = 3;
+/// Server-side per-peer input backlog cap, ticks.
+const INPUT_BUFFER_CAP: usize = 64;
+
 /// Client-side per-entity snapshot history for interpolation.
 struct InterpBuf {
     samples: VecDeque<(u64, [f64; 3], [f32; 4])>,
@@ -101,10 +112,26 @@ pub struct NetSession {
     /// Runtime spawns alive right now, for late-joiner catch-up.
     spawned_docs: HashMap<u64, (String, Option<PeerId>)>,
     snap_count: u32,
+    /// Live body states fed by the driver each tick (velocity + grounded per
+    /// physics-synced entity) — carried in snapshots for prediction.
+    body_states: HashMap<Entity, ([f32; 3], bool)>,
+    /// Per-peer received input commands, keyed by tick (prediction §6: the
+    /// server replays the OWNER's real input through the same script).
+    peer_inputs: HashMap<PeerId, VecDeque<InputCmd>>,
+    /// Per-peer last input actually used — the repeat-last fallback when a
+    /// tick's command hasn't arrived (late/lost).
+    last_input: HashMap<PeerId, NetInput>,
     // --- client ---
     connected: bool,
+    /// Our peer id, from `Welcome` (None until connected).
+    my_peer: Option<PeerId>,
     interp: HashMap<u64, InterpBuf>,
     latest_server_tick: u64,
+    /// Outgoing input window (last few ticks, resent redundantly).
+    input_window: VecDeque<InputCmd>,
+    /// Authoritative states received for OUR OWN predicted node, for the
+    /// driver's reconcile step: (entity, server tick, state).
+    predicted_in: Vec<(Entity, u64, PredictedState)>,
     // --- both ---
     events: Vec<NetEvent>,
     rpcs_in: Vec<ReceivedRpc>,
@@ -137,9 +164,15 @@ impl NetSession {
             synced_now: Vec::new(),
             spawned_docs: HashMap::new(),
             snap_count: 0,
+            body_states: HashMap::new(),
+            peer_inputs: HashMap::new(),
+            last_input: HashMap::new(),
             connected: false,
+            my_peer: None,
             interp: HashMap::new(),
             latest_server_tick: 0,
+            input_window: VecDeque::new(),
+            predicted_in: Vec::new(),
             events: Vec::new(),
             rpcs_in: Vec::new(),
             rpcs_out: Vec::new(),
@@ -229,6 +262,50 @@ impl NetSession {
         self.synced_now = values;
     }
 
+    /// Server: refresh live body states (velocity + grounded per physics-synced
+    /// entity) — carried in snapshot entries so owners can reconcile predictions.
+    pub fn update_body_states(&mut self, states: BodyStates) {
+        self.body_states = states.into_iter().map(|(e, v, g)| (e, (v, g))).collect();
+    }
+
+    /// Client: our peer id, once welcomed.
+    pub fn my_peer(&self) -> Option<PeerId> {
+        self.my_peer
+    }
+
+    /// Client: queue this tick's input for the server (sent with the last few
+    /// ticks as a redundant window on the next [`Self::tick_client`]).
+    pub fn send_input(&mut self, tick: u64, input: NetInput) {
+        self.input_window.push_back(InputCmd { tick, input });
+        while self.input_window.len() > INPUT_WINDOW {
+            self.input_window.pop_front();
+        }
+    }
+
+    /// Server: the input to run `tick` with for `peer` — the exact command if
+    /// it arrived, else a repeat of the last known input (late/lost packets
+    /// must not freeze the character; the correction flows back as prediction
+    /// error on the owner, which is the standard, honest tradeoff).
+    pub fn input_for(&mut self, peer: PeerId, tick: u64) -> NetInput {
+        let buf = self.peer_inputs.entry(peer).or_default();
+        // Drop stale ticks; adopt an exact match if present.
+        while buf.front().is_some_and(|c| c.tick < tick) {
+            let old = buf.pop_front().unwrap();
+            self.last_input.insert(peer, old.input);
+        }
+        if let Some(cmd) = buf.pop_front_if(|c| c.tick == tick) {
+            self.last_input.insert(peer, cmd.input.clone());
+            return cmd.input;
+        }
+        self.last_input.get(&peer).cloned().unwrap_or_default()
+    }
+
+    /// Client: authoritative states received for OUR OWN predicted node —
+    /// (entity, server tick, state) — the driver's reconcile input.
+    pub fn take_predicted_updates(&mut self) -> Vec<(Entity, u64, PredictedState)> {
+        std::mem::take(&mut self.predicted_in)
+    }
+
     /// Server: spawn a replicated runtime node — locally now, on every client
     /// via a reliable `Spawn`, and re-sent to late joiners.
     pub fn spawn_doc(
@@ -275,9 +352,12 @@ impl NetSession {
     // Server tick
     // -----------------------------------------------------------------------
 
-    /// Server, once per gameplay tick AFTER physics: handle joins/leaves/RPCs,
-    /// then (at the snapshot cadence) send changed state.
-    pub fn tick_server(&mut self, world: &World, tick: u64) {
+    /// Server: poll + process incoming traffic (joins/leaves/RPCs/inputs).
+    /// The prediction-era driver calls this at TICK START — before scripts run
+    /// — so [`Self::input_for`] hands `fixedUpdate` this tick's freshest client
+    /// inputs. [`Self::tick_server`] also calls it, so a simple driver that
+    /// only ticks at the end still works.
+    pub fn pump_server(&mut self, world: &World, tick: u64) {
         for inc in self.transport.poll() {
             match inc {
                 Incoming::Connected(_) => { /* wait for Hello to admit */ }
@@ -288,6 +368,12 @@ impl NetSession {
                 }
             }
         }
+    }
+
+    /// Server, once per gameplay tick AFTER physics: handle joins/leaves/RPCs,
+    /// then (at the snapshot cadence) send changed state.
+    pub fn tick_server(&mut self, world: &World, tick: u64) {
+        self.pump_server(world, tick);
         // Flush queued RPCs (server → clients).
         for (target, name, args) in std::mem::take(&mut self.rpcs_out) {
             let msg = Msg::Rpc { name, args, sender: SERVER }.encode();
@@ -365,6 +451,19 @@ impl NetSession {
                 // Stamp the true sender — never trust the payload's claim.
                 self.rpcs_in.push(ReceivedRpc { name, args, sender: from });
             }
+            Msg::Input { entries } => {
+                let buf = self.peer_inputs.entry(from).or_default();
+                for cmd in entries {
+                    // The window re-carries recent ticks; keep each tick once,
+                    // in order (sequenced channel ⇒ arrivals are monotonic).
+                    if buf.back().is_none_or(|last| cmd.tick > last.tick) {
+                        buf.push_back(cmd);
+                    }
+                }
+                while buf.len() > INPUT_BUFFER_CAP {
+                    buf.pop_front();
+                }
+            }
             Msg::Bye => self.drop_peer(from),
             _ => { /* clients don't send anything else */ }
         }
@@ -395,7 +494,14 @@ impl NetSession {
             let changed = self.last_sent.get(&id).is_none_or(|(p, r)| *p != pos || *r != rot);
             if keyframe || changed {
                 self.last_sent.insert(id, (pos, rot));
-                entries.push(SnapEntry { id, pos, rot, vel: None });
+                let body = rep.physics.then(|| self.body_states.get(&e).copied()).flatten();
+                entries.push(SnapEntry {
+                    id,
+                    pos,
+                    rot,
+                    vel: body.map(|(v, _)| v),
+                    grounded: body.map(|(_, g)| g),
+                });
             }
         }
         let mut synced = Vec::new();
@@ -430,11 +536,13 @@ impl NetSession {
             else {
                 continue;
             };
+            let body = rep.physics.then(|| self.body_states.get(&e).copied()).flatten();
             entries.push(SnapEntry {
                 id,
                 pos: [tr.translation.x, tr.translation.y, tr.translation.z],
                 rot: tr.rotation.to_array(),
-                vel: None,
+                vel: body.map(|(v, _)| v),
+                grounded: body.map(|(_, g)| g),
             });
         }
         let synced = self
@@ -476,13 +584,19 @@ impl NetSession {
             let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */ };
             self.transport.send(SERVER, Channel::Reliable, &msg.encode());
         }
+        // Ship the input window (this tick + the last few, redundantly).
+        if self.connected && !self.input_window.is_empty() {
+            let msg = Msg::Input { entries: self.input_window.iter().cloned().collect() };
+            self.transport.send(SERVER, Channel::UnreliableSequenced, &msg.encode());
+        }
         self.apply_interpolation(world);
     }
 
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
-            Msg::Welcome { .. } => {
+            Msg::Welcome { peer, .. } => {
                 self.connected = true;
+                self.my_peer = Some(peer);
                 self.events.push(NetEvent::Connected);
             }
             Msg::Refused { reason } => {
@@ -521,6 +635,27 @@ impl NetSession {
                 }
                 self.latest_server_tick = self.latest_server_tick.max(tick);
                 for en in entries {
+                    // OUR OWN predicted node never interpolates — its
+                    // authoritative states go to the reconcile queue instead
+                    // (docs/netcode-design.md §6).
+                    if let Some(&e) = self.net_to_ent.get(&en.id)
+                        && let Some(rep) = world.get::<Replicated>(e)
+                        && rep.mode == floptle_core::ReplicationMode::Predicted
+                        && rep.owner.is_some()
+                        && rep.owner == self.my_peer
+                    {
+                        self.predicted_in.push((
+                            e,
+                            tick,
+                            PredictedState {
+                                pos: en.pos,
+                                rot: en.rot,
+                                vel: en.vel.unwrap_or([0.0; 3]),
+                                grounded: en.grounded.unwrap_or(false),
+                            },
+                        ));
+                        continue;
+                    }
                     let buf = self
                         .interp
                         .entry(en.id)

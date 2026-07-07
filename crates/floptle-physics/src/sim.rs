@@ -226,6 +226,21 @@ impl Sim {
         }
     }
 
+    /// Advance ONE body by one gameplay tick (the prediction-replay driver,
+    /// `docs/netcode-design.md` §6): runs the tick's physics substeps for just
+    /// that body — exact, because the solver has no body-vs-body pass. No
+    /// floating-origin rebase, no tick_prev capture, no transform writeback:
+    /// replay is invisible to rendering; the caller applies the final state.
+    pub fn step_body_tick(&mut self, eid: u32, tick_dt: f32) {
+        let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else {
+            return;
+        };
+        let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
+        for _ in 0..n {
+            self.world.step_body(bi, self.fixed_dt);
+        }
+    }
+
     /// Capture a body's full dynamic state by entity index, in absolute world
     /// coordinates — the serializable unit netcode snapshots (`docs/netcode-design.md`).
     pub fn body_snapshot(&self, eid: u32) -> Option<BodySnapshot> {

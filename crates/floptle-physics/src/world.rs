@@ -174,6 +174,19 @@ impl PhysicsWorld {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
         self.contacts.clear();
         for bi in 0..self.bodies.len() {
+            self.step_body(bi, dt);
+        }
+    }
+
+    /// Step ONE body by `dt`. Because the solver has no body-vs-body pass
+    /// (bodies collide only with static colliders), a single body's step is
+    /// EXACTLY the trajectory it takes inside a full [`Self::step`] — the
+    /// property prediction replay depends on (`docs/netcode-design.md` §6:
+    /// replay touches only the predicted body, and it's exact, not
+    /// approximate). Does NOT clear `contacts`; the frame driver owns that.
+    pub fn step_body(&mut self, bi: usize, dt: f32) {
+        let dt = dt.clamp(0.0, 0.1);
+        {
             self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
             // A body with `use_gravity = false` isn't pulled (and keeps its up vector).
@@ -235,5 +248,36 @@ impl PhysicsWorld {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod step_body_tests {
+    use super::*;
+    use crate::gravity::GravityField;
+    use crate::shapes::Plane;
+
+    #[test]
+    fn single_body_step_matches_full_step() {
+        // The prediction-replay contract: stepping body 0 alone must land it
+        // bit-identically to where a full-world step puts it (no body-vs-body
+        // coupling exists to break this).
+        let build = || {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(Plane::ground(0.0)));
+            w.add_body(Body::sphere(Vec3::new(0.0, 3.0, 0.0), 0.5));
+            w.add_body(Body::sphere(Vec3::new(5.0, 3.0, 0.0), 0.5));
+            w
+        };
+        let (mut full, mut solo) = (build(), build());
+        for _ in 0..240 {
+            full.step(1.0 / 120.0);
+            solo.step_body(0, 1.0 / 120.0); // only body 0 advances
+        }
+        assert_eq!(full.bodies[0].pos, solo.bodies[0].pos, "solo step must be exact");
+        assert_eq!(full.bodies[0].vel, solo.bodies[0].vel);
+        assert_eq!(full.bodies[0].grounded, solo.bodies[0].grounded);
+        // ...and body 1 was genuinely untouched in the solo world.
+        assert_eq!(solo.bodies[1].pos, Vec3::new(5.0, 3.0, 0.0));
     }
 }
