@@ -420,8 +420,14 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   predictor is never reset), remote players' avatars run server-side under their owner's
   replayed input, and a disconnect auto-despawns everything that peer owned. Spawned scenes
   contribute their first node only (child hierarchies later).
-  Still to come: `floptle-relay` + lobby codes; headless `floptle-runtime` server loop;
-  interest management + byte budgets; spawn support in the local harness.
+  `floptle-relay` ships: an open rendezvous relay (one binary, QUIC both legs) — hosts get a
+  five-letter lobby code, clients join with `relay://addr/CODE`, nobody port-forwards; the
+  relay is deliberately dumb (lobbies, peer ids, forwarding — no game state), sequenced-drop
+  is end-to-end so interleaved per-peer traffic can't false-drop, and lobbies die with their
+  host. `net.host{relay=…}` / the 🌐 panel (code display + copy). Editor host sessions also
+  gained the net-stats overlay + real-host body-state/lag-comp parity with the harness.
+  Still to come: headless `floptle-runtime` server loop; interest management + byte budgets;
+  spawn support in the local harness; per-player RTT through the relay.
 - **2f — Polish & docs:** scripting.md §"Networking", EmmyLua stubs + `.luarc.json` global +
   IDE completion/docs entries (all three doc surfaces), Console net-stats overlay, bandwidth
   profiler in the editor.

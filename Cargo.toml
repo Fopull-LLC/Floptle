@@ -25,6 +25,7 @@ members = [
     "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
     "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
     "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
+    "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-editor",   # egui + egui_dock authoring application (bin)
     "crates/floptle-hub",      # cross-platform launcher / version + project manager (bin)
     "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)

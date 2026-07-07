@@ -76,9 +76,24 @@ impl Editor {
     pub(crate) fn net_tick(&mut self, tick: u64) {
         for cmd in self.script_host.take_net_commands() {
             match cmd {
+                NetCmd::Host { relay: Some(addr), .. } => {
+                    let a = addr.clone();
+                    self.net_host_relay(&a);
+                }
                 NetCmd::Host { port: Some(p), .. } => self.net_host_quic(p),
                 NetCmd::Host { .. } => self.net_start_hosting(),
                 NetCmd::Join { addr } if addr.starts_with("local") => self.net_join_local(),
+                NetCmd::Join { addr } if addr.starts_with("relay://") => {
+                    let rest = addr.trim_start_matches("relay://").to_string();
+                    match rest.rsplit_once('/') {
+                        Some((raddr, code)) => self.net_join_relay(raddr, code),
+                        None => self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            format!("net.join(\"{addr}\"): expected relay://host:port/CODE"),
+                            None,
+                        ),
+                    }
+                }
                 NetCmd::Join { addr } if addr.starts_with("quic://") => {
                     let a = addr.trim_start_matches("quic://").to_string();
                     self.net_join_quic(&a);
@@ -86,9 +101,9 @@ impl Editor {
                 NetCmd::Join { addr } => self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
-                        "net.join(\"{addr}\"): use quic://host:port (a real server) or \
-                         local:// (the in-editor harness) — relay:// lobby codes land with \
-                         floptle-relay"
+                        "net.join(\"{addr}\"): use relay://relayaddr/CODE (a lobby code), \
+                         quic://host:port (a server directly), or local:// (the in-editor \
+                         harness)"
                     ),
                     None,
                 ),
@@ -524,6 +539,55 @@ impl Editor {
             }
         };
         let bound = transport.local_port();
+        self.net_host_with(
+            Box::new(transport),
+            &format!(
+                "on UDP port {bound} — friends with this project join via the 🌐 panel or \
+                 net.join(\"quic://<your-LAN-ip>:{bound}\")"
+            ),
+        );
+    }
+
+    /// Host a REAL session through a rendezvous RELAY: nobody port-forwards —
+    /// the relay hands out a lobby code and friends join with it from
+    /// anywhere that can reach the relay. Self-host `floptle-relay`, or use a
+    /// managed one (Floptle Cloud).
+    pub(crate) fn net_host_relay(&mut self, relay_addr: &str) {
+        if !self.playing {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.host{relay}: enter Play mode first".into(),
+                None,
+            );
+            return;
+        }
+        if self.net_server.is_some() || self.net_play_client.is_some() {
+            return;
+        }
+        let (transport, code) = match floptle_net::RelayHost::host(relay_addr) {
+            Ok(t) => t,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.host{{relay = \"{relay_addr}\"}}: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        self.net_lobby_code = Some(code.clone());
+        self.net_host_with(
+            Box::new(transport),
+            &format!(
+                "via relay {relay_addr} — LOBBY CODE {code}. Friends join with \
+                 net.join(\"relay://{relay_addr}/{code}\") or the 🌐 panel"
+            ),
+        );
+    }
+
+    /// The transport-agnostic tail of hosting a real session: the ownership
+    /// convention, per-owner routing filters, the session itself.
+    fn net_host_with(&mut self, transport: Box<dyn floptle_net::Transport>, how: &str) {
         Self::net_assign_scene_owners(&mut self.world);
         // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
         // global script passes, run per-tick with their owner's replayed
@@ -538,16 +602,15 @@ impl Editor {
         let slots = remote.len();
         self.net_remote_predicted = remote;
         self.net_apply_host_filters();
-        let mut s = NetSession::server(Box::new(transport));
+        let mut s = NetSession::server(transport);
         s.register_scene(&self.world);
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!(
-                "🌐 hosting on UDP port {bound} — friends with this project join via the 🌐 \
-                 panel or net.join(\"quic://<your-LAN-ip>:{bound}\"). Predicted node #1 is \
-                 YOURS; {slots} joiner slot(s) follow in node order."
+                "🌐 hosting {how}. Predicted node #1 is YOURS; {slots} joiner slot(s) follow \
+                 in node order (or spawn avatars per joiner — see player_spawner.lua)."
             ),
             None,
         );
@@ -579,8 +642,40 @@ impl Editor {
                 return;
             }
         };
+        self.net_join_with(Box::new(transport), &format!("quic://{addr}"));
+    }
+
+    /// Join a session through a relay by LOBBY CODE.
+    pub(crate) fn net_join_relay(&mut self, relay_addr: &str, code: &str) {
+        if !self.playing {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "net.join: enter Play mode first".into(),
+                None,
+            );
+            return;
+        }
+        if self.net_server.is_some() || self.net_play_client.is_some() {
+            return;
+        }
+        let transport = match floptle_net::RelayClient::join(relay_addr, code) {
+            Ok(t) => t,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("net.join(\"relay://{relay_addr}/{code}\"): {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        self.net_join_with(Box::new(transport), &format!("relay://{relay_addr}/{code}"));
+    }
+
+    /// The transport-agnostic tail of joining a real session.
+    fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
         Self::net_assign_scene_owners(&mut self.world);
-        let mut client = NetSession::client(Box::new(transport));
+        let mut client = NetSession::client(transport);
         client.register_scene(&self.world);
         // Which slot is ours depends on the peer id the server assigns —
         // everything is snapshot-driven until the Welcome binds our avatar.
@@ -588,9 +683,7 @@ impl Editor {
         self.net_play_client = Some(client);
         self.console.push(
             floptle_script::LogLevel::Debug,
-            format!(
-                "🌐 joining quic://{addr} — your avatar binds when the server welcomes us"
-            ),
+            format!("🌐 joining {what} — your avatar binds when the server welcomes us"),
             None,
         );
     }
@@ -1267,6 +1360,7 @@ impl Editor {
         self.net_hidden = None;
         self.net_predictor = None;
         self.net_remote_predicted.clear();
+        self.net_lobby_code = None;
         self.net_history = floptle_net::LagHistory::new();
         self.net_hub = None;
         self.net_scene_doc = None;

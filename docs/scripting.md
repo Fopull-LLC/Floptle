@@ -625,8 +625,8 @@ end
 
 | Call | What it does |
 |---|---|
-| `net.host{ maxPlayers = 16, port = 7777 }` | become the authoritative host — with a `port`, a REAL session on UDP (QUIC) other machines can join; without one, the in-editor harness |
-| `net.join(addr)` | join a session (`"quic://host:port"` = a real server; `"local://"` = the in-editor test harness) |
+| `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards); `port` = direct UDP (QUIC); neither = the in-editor harness |
+| `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness) |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
@@ -686,6 +686,22 @@ controller scripts, and a Networked component set to *Predicted* (see the
 stock `player.ron`). The scene's own Predicted node (if any) stays the host's
 avatar. Current limits: a spawned scene contributes its FIRST node only (no
 child hierarchies yet), and spawns are dynamic bodies — not static geometry.
+
+### Lobby codes: play without port-forwarding
+
+Run the open relay anywhere both machines can reach (`floptle-relay`, one
+binary, default port 7788 — or use a managed one), then:
+
+- **Host:** 🌐 → *Host via relay* (or `net.host{ relay = "relay.host:7788" }`)
+  → you get a five-letter **lobby code**.
+- **Friends:** 🌐 → Join with `relay://relay.host:7788/CODE`
+  (or `net.join("relay://…/CODE")`).
+
+The relay is dumb on purpose: lobbies, peer ids, forwarding — it never reads
+game state, and a session through it is byte-identical to a direct one. The
+lobby dies when its host leaves. Self-host it forever, no strings — the
+managed convenience (always-on relays near your players) is what Floptle
+Cloud sells.
 
 **Prediction** (*🌐 → Test as remote player*): give your character's node a
 Networked component with mode **Predicted (owner)** and it responds instantly
