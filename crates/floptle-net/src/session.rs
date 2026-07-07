@@ -153,6 +153,11 @@ pub struct NetSession {
     /// Authoritative states received for OUR OWN predicted node, for the
     /// driver's reconcile step: (entity, server tick, state).
     predicted_in: Vec<(Entity, u64, PredictedState)>,
+    /// Replicated spawns materialized since the last drain — (NetId, entity,
+    /// owner). The driver registers physics bodies / binds prediction.
+    spawned_in: Vec<(u64, Entity, Option<PeerId>)>,
+    /// Entities despawned since the last drain (their bodies must go too).
+    despawned_in: Vec<u32>,
     // --- both ---
     events: Vec<NetEvent>,
     rpcs_in: Vec<ReceivedRpc>,
@@ -200,6 +205,8 @@ impl NetSession {
             latest_server_tick: 0,
             input_window: VecDeque::new(),
             predicted_in: Vec::new(),
+            spawned_in: Vec::new(),
+            despawned_in: Vec::new(),
             events: Vec::new(),
             rpcs_in: Vec::new(),
             rpcs_out: Vec::new(),
@@ -384,6 +391,19 @@ impl NetSession {
         std::mem::take(&mut self.predicted_in)
     }
 
+    /// Client: replicated spawns materialized since the last drain — the
+    /// driver registers physics bodies and (for a spawn it owns) binds
+    /// prediction to it.
+    pub fn take_spawned(&mut self) -> Vec<(u64, Entity, Option<PeerId>)> {
+        std::mem::take(&mut self.spawned_in)
+    }
+
+    /// Client: entities despawned since the last drain (entity indices) — the
+    /// driver removes their physics bodies.
+    pub fn take_despawned(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.despawned_in)
+    }
+
     /// Server: spawn a replicated runtime node — locally now, on every client
     /// via a reliable `Spawn`, and re-sent to late joiners.
     pub fn spawn_doc(
@@ -410,6 +430,16 @@ impl NetSession {
             self.transport.send(p, Channel::Reliable, &msg);
         }
         e
+    }
+
+    /// Server: the runtime spawns owned by `peer` — what a disconnect should
+    /// clean up (their player left; their avatar goes with them).
+    pub fn owned_runtime_spawns(&self, peer: PeerId) -> Vec<Entity> {
+        self.spawned_docs
+            .iter()
+            .filter(|(_, (_, o))| *o == Some(peer))
+            .filter_map(|(id, _)| self.net_to_ent.get(id).copied())
+            .collect()
     }
 
     /// Server: despawn a replicated node everywhere.
@@ -698,11 +728,13 @@ impl NetSession {
                 self.net_to_ent.insert(id, e);
                 self.ent_to_net.insert(e, id);
                 self.interp.insert(id, InterpBuf::new(&rep));
+                self.spawned_in.push((id, e, owner));
             }
             Msg::Despawn { id } => {
                 if let Some(e) = self.net_to_ent.remove(&id) {
                     self.ent_to_net.remove(&e);
                     self.interp.remove(&id);
+                    self.despawned_in.push(e.index());
                     world.despawn(e);
                 }
             }

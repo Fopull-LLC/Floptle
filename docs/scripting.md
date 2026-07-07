@@ -660,8 +660,32 @@ Args follow the same size/type rules as `synced`.
 > with the relay). Player slots: **scene-authored Predicted nodes, in node
 > order — #1 is the HOST's, #2 the first joiner's, #3 the second's**, and so
 > on. Duplicate your character node to add a slot, and every camera/HUD picks
-> its own player via `net.isMine` (the stock camera already does). Runtime
-> per-player avatars via `net.spawn` come next.
+> its own player via `net.isMine` (the stock camera already does).
+
+### Per-player avatars: spawn one on join
+
+The scalable shape — no authored slot per player. The server spawns an avatar
+scene for each joiner; the engine registers its physics body live, the
+joiner's machine binds **prediction** to it (instant response at any latency),
+everyone else interpolates it, and it despawns automatically when its player
+disconnects:
+
+```lua
+-- player_spawner.lua — attach to any always-present node (the Map)
+function start(node)
+  net.on("playerJoined", function(peer)
+    if net.isServer() then
+      net.spawn("scenes/player.ron", { x = peer * 2, y = 2.5, z = 8, owner = peer })
+    end
+  end)
+end
+```
+
+`scenes/player.ron` is a one-node scene: a capsule with a RigidBody, your
+controller scripts, and a Networked component set to *Predicted* (see the
+stock `player.ron`). The scene's own Predicted node (if any) stays the host's
+avatar. Current limits: a spawned scene contributes its FIRST node only (no
+child hierarchies yet), and spawns are dynamic bodies — not static geometry.
 
 **Prediction** (*🌐 → Test as remote player*): give your character's node a
 Networked component with mode **Predicted (owner)** and it responds instantly

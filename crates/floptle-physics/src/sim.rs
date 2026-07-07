@@ -83,25 +83,7 @@ impl Sim {
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
-            let wt = world_transform(ecs, e);
-            // Sim frame: subtract the origin in f64 FIRST, then narrow — the residual
-            // is small and exact no matter how far out the node sits.
-            let pos = (wt.translation - world.origin).as_vec3();
-            let r = rb.radius.max(0.01);
-            let mut b = match rb.kind {
-                BodyKind::Sphere => Body::sphere(pos, r),
-                BodyKind::Capsule => Body::capsule(pos, r, rb.height),
-                BodyKind::Box => {
-                    let s = wt.scale;
-                    let h = rb.half_extents;
-                    Body::boxx(pos, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z))
-                }
-            };
-            b.restitution = rb.restitution;
-            b.friction = rb.friction;
-            b.use_gravity = rb.gravity;
-            b.lock_pos = rb.lock_pos;
-            let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+            let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
         Self {
@@ -112,6 +94,72 @@ impl Sim {
             fo: floptle_core::FloatingOrigin::default(),
             tick_prev: Vec::new(),
         }
+    }
+
+    /// Build one `RigidBody` entity's dynamic body (sim frame) — shared by
+    /// [`Self::build`] and runtime spawns ([`Self::add_body_for`]).
+    fn body_from(ecs: &World, e: Entity, rb: &RigidBody, origin: DVec3) -> (Body, Quat) {
+        let wt = world_transform(ecs, e);
+        // Sim frame: subtract the origin in f64 FIRST, then narrow — the residual
+        // is small and exact no matter how far out the node sits.
+        let pos = (wt.translation - origin).as_vec3();
+        let r = rb.radius.max(0.01);
+        let mut b = match rb.kind {
+            BodyKind::Sphere => Body::sphere(pos, r),
+            BodyKind::Capsule => Body::capsule(pos, r, rb.height),
+            BodyKind::Box => {
+                let s = wt.scale;
+                let h = rb.half_extents;
+                Body::boxx(pos, Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z))
+            }
+        };
+        b.restitution = rb.restitution;
+        b.friction = rb.friction;
+        b.use_gravity = rb.gravity;
+        b.lock_pos = rb.lock_pos;
+        let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
+        (b, rot0)
+    }
+
+    /// Register a body for a RUNTIME-SPAWNED `RigidBody` node (`net.spawn`, or
+    /// a replicated spawn arriving mid-play) — the live-session counterpart of
+    /// [`Self::build`]'s pass. No-op (false) if the entity has no RigidBody or
+    /// already has a body.
+    pub fn add_body_for(&mut self, e: Entity, ecs: &World) -> bool {
+        if self.map.iter().any(|l| l.entity == e) {
+            return false;
+        }
+        let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
+        let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin);
+        let pos = b.pos;
+        let bi = self.world.add_body(b);
+        self.map.push(BodyLink { entity: e, body: bi, lock_rot: rb.lock_rot, rot0 });
+        // Keep the render-interpolation anchors aligned mid-tick (they rebuild
+        // from scratch at the next `step_tick` anyway).
+        if self.tick_prev.len() == bi {
+            self.tick_prev.push(pos);
+        }
+        true
+    }
+
+    /// Remove a runtime-despawned entity's body. Swap-remove keeps the body
+    /// array dense; the displaced (last) body's link is re-pointed.
+    pub fn remove_body(&mut self, eid: u32) {
+        let Some(li) = self.map.iter().position(|l| l.entity.index() == eid) else { return };
+        let bi = self.map[li].body;
+        let last = self.world.bodies.len() - 1;
+        self.world.bodies.swap_remove(bi);
+        self.map.remove(li);
+        for l in &mut self.map {
+            if l.body == last {
+                l.body = bi;
+            }
+        }
+        // Both hold body indices from before the swap: contacts are transient
+        // (rebuilt every step) and the interpolation anchors rebuild next tick
+        // (writeback falls back to each body's own prev_pos meanwhile).
+        self.world.contacts.clear();
+        self.tick_prev.clear();
     }
 
     /// Register a static triangle-mesh collider — e.g. an imported map model the player
@@ -426,5 +474,55 @@ impl Sim {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_body_tests {
+    use super::*;
+
+    fn world_with_bodies(n: usize) -> (World, Vec<Entity>) {
+        let mut w = World::default();
+        let mut ents = Vec::new();
+        for i in 0..n {
+            let e = w.spawn();
+            w.insert(
+                e,
+                Transform::from_translation(DVec3::new(10.0 * i as f64, 5.0, 0.0)),
+            );
+            w.insert(e, RigidBody { gravity: true, ..Default::default() });
+            ents.push(e);
+        }
+        (w, ents)
+    }
+
+    #[test]
+    fn runtime_spawn_gets_a_live_body_and_despawn_removes_it() {
+        let (mut ecs, ents) = world_with_bodies(2);
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)), DVec3::ZERO);
+        sim.step_tick(1.0 / 60.0, None);
+
+        // A node spawns MID-PLAY (net.spawn): its body registers live.
+        let spawned = ecs.spawn();
+        ecs.insert(spawned, Transform::from_translation(DVec3::new(100.0, 5.0, 0.0)));
+        ecs.insert(spawned, RigidBody { gravity: true, ..Default::default() });
+        assert!(sim.add_body_for(spawned, &ecs), "spawned body must register");
+        assert!(!sim.add_body_for(spawned, &ecs), "double-register is a no-op");
+        let y0 = sim.body_snapshot(spawned.index()).unwrap().pos.y;
+        for _ in 0..30 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let after = sim.body_snapshot(spawned.index()).unwrap();
+        assert!(after.pos.y < y0, "the spawned body must FALL (it simulates)");
+
+        // Despawn the FIRST body: the swap-remove must not corrupt the others.
+        let survivor_before = sim.body_snapshot(ents[1].index()).unwrap();
+        sim.remove_body(ents[0].index());
+        assert!(sim.body_snapshot(ents[0].index()).is_none(), "removed body is gone");
+        let survivor = sim.body_snapshot(ents[1].index()).unwrap();
+        assert_eq!(survivor.pos, survivor_before.pos, "survivor keeps ITS state after the swap");
+        assert!(sim.body_snapshot(spawned.index()).is_some(), "the spawned one survives too");
+        sim.step_tick(1.0 / 60.0, None); // and stepping after removal is sound
+        sim.writeback_interpolated(&mut ecs, 0.5);
     }
 }
