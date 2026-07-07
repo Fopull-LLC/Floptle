@@ -15,12 +15,15 @@
 //! Prediction (2c), lag compensation (2d), and the QUIC transport + relay (2e)
 //! build on these seams without changing the game-facing API.
 
+pub mod predict;
 pub mod session;
 pub mod transport;
 pub mod value;
 pub mod wire;
 
-pub use session::{NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget, SyncedVars};
+pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
+pub use session::{BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget, SyncedVars};
+pub use wire::{InputCmd, NetInput};
 pub use transport::{
     Channel, Incoming, LinkStats, MemoryHub, MemoryTransport, PeerId, Transport, SERVER,
 };
@@ -262,6 +265,70 @@ mod tests {
         server.despawn(&mut sw, arrow);
         let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 11, 3, |_, _| {});
         assert_eq!(cw.query::<Replicated>().count(), before, "despawn must replicate");
+    }
+
+    #[test]
+    fn input_commands_flow_and_predicted_states_route_to_reconcile() {
+        use floptle_core::ReplicationMode;
+        // The 2c plumbing end-to-end over a LOSSY link: client inputs reach the
+        // server (redundant window healing 30% loss), physics-synced snapshot
+        // entries carry vel/grounded, and the client's OWN predicted node's
+        // authoritative states go to the reconcile queue — never interpolation.
+        let hub = MemoryHub::new();
+        hub.set_conditions(0, 0.3);
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, se) = world_with(1);
+        let (mut cw, ce) = world_with(1);
+        let rep = Replicated {
+            mode: ReplicationMode::Predicted,
+            owner: Some(1),
+            physics: true,
+            ..Default::default()
+        };
+        sw.insert(se[0], rep);
+        cw.insert(ce[0], rep);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        let mut exact_hits = 0u32;
+        for t in 1..=60u64 {
+            hub.set_now(t);
+            client.send_input(
+                t,
+                NetInput { keys_down: vec![format!("k{t}")], ..Default::default() },
+            );
+            client.tick_client(&mut cw); // ships the input window
+            server.pump_server(&sw, t); // tick START: consume inputs
+            let inp = server.input_for(1, t);
+            if inp.keys_down == vec![format!("k{t}")] {
+                exact_hits += 1;
+            }
+            // server "simulates": the node moves, body state refreshed
+            sw.get_mut::<Transform>(se[0]).unwrap().translation.x = t as f64;
+            server.update_body_states(vec![(se[0], [1.0, 0.0, 0.0], true)]);
+            server.tick_server(&sw, t);
+        }
+        hub.set_now(61);
+        client.tick_client(&mut cw);
+
+        // Same-tick consumption at 30% loss ⇒ exact rate ≈ 1 − loss (the
+        // redundant window pays off when consumption lags sends — the driver's
+        // clock-skew margin, 2c-ii). Misses fall back to repeat-last, so the
+        // character never freezes. Deterministic rng ⇒ a stable count.
+        assert!(exact_hits >= 40, "exact inputs must survive loss, got {exact_hits}/60");
+
+        let upd = client.take_predicted_updates();
+        assert!(!upd.is_empty(), "authoritative states must reach the reconcile queue");
+        assert!(upd.iter().all(|(e, _, _)| *e == ce[0]));
+        let (_, _, last) = upd.last().unwrap();
+        assert_eq!(last.vel, [1.0, 0.0, 0.0], "physics-synced entries carry velocity");
+        assert!(last.grounded, "…and grounded");
+        // The predicted node was NOT interpolated on its owner.
+        assert_eq!(
+            cw.get::<Transform>(ce[0]).unwrap().translation.x,
+            0.0,
+            "own predicted node must not be server-interpolated"
+        );
     }
 
     #[test]
