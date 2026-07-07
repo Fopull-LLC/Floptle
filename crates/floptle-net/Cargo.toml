@@ -14,3 +14,10 @@ floptle-scene = { path = "../floptle-scene" }
 serde = { workspace = true }
 postcard = { workspace = true }
 ron = { workspace = true }
+# The QUIC transport (phase 2e): quinn on a background tokio runtime, bridged
+# to the sync `Transport` trait. rcgen mints the dev self-signed cert.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
+bytes = "1"
