@@ -298,8 +298,11 @@ impl Editor {
         server.register_scene(&sworld);
         let mut client = NetSession::client(Box::new(hub.connect()));
         client.register_scene(&self.world);
-        // The client predicts ONLY its own node; every other replicated node is
-        // snapshot-driven: skip its scripts, deactivate its body.
+        // The client predicts ONLY its own node; every other TRANSFORM/PHYSICS-
+        // synced node is snapshot-driven: skip its scripts, deactivate its
+        // body. A Networked node that only syncs script VARS keeps running
+        // everywhere — that's the documented door pattern (its `update` is
+        // cosmetic; authoritative logic guards with `net.isServer()`).
         let mut skip = std::collections::HashSet::new();
         let mut predicted: Option<Entity> = None;
         let reps: Vec<(Entity, floptle_core::Replicated)> = self
@@ -312,6 +315,9 @@ impl Editor {
             if mine && predicted.is_none() {
                 predicted = Some(e);
                 continue;
+            }
+            if !(r.transform || r.physics) {
+                continue; // var-only: scripts run on the client too
             }
             skip.insert(e.index());
             if let Some(sim) = self.sim.as_mut() {
@@ -454,15 +460,17 @@ impl Editor {
                 let mut synced = Vec::new();
                 for (nid, e) in hs.session.net_entities() {
                     let Some(rep) = hs.world.get::<floptle_core::Replicated>(e) else { continue };
-                    if !rep.transform {
-                        continue;
-                    }
                     let target = floptle_net::LagHistory::clamp_rewind(
                         st,
                         stamp.saturating_sub(rep.interp_delay as u64),
                     );
                     let Some(h) = hs.history.state_at(nid, target) else { continue };
-                    poses.push((e.index(), h.pos));
+                    // Poses only exist for transform-synced nodes; synced VARS
+                    // rewind for every networked node (a var-only node's parry
+                    // flag matters even though its transform never replicates).
+                    if rep.transform {
+                        poses.push((e.index(), h.pos));
+                    }
                     for (kind, vars) in &h.synced {
                         synced.push((e.index(), kind.clone(), vars.clone()));
                     }

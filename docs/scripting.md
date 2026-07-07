@@ -663,6 +663,14 @@ controller identically. Your script doesn't change — but movement code belongs
 in `fixedUpdate` anyway, and cameras (per-frame `update`) belong on a separate,
 non-networked node.
 
+**Which scripts run where.** On a client, a node whose **transform/physics**
+the server owns is fully snapshot-driven — its scripts don't run there (its
+state arrives over the wire). A Networked node that only syncs script **vars**
+runs its scripts everywhere: that's the door above — `update` eases toward
+`synced.open` on every machine, and the authoritative flip guards with
+`net.isServer()`. Rule of thumb: sync the transform for things physics moves;
+sync only vars for things scripts animate.
+
 ### Lag-compensated combat: `withInput` + `net.rewind`
 
 On your screen, every *other* player is rendered a beat in the past (the
