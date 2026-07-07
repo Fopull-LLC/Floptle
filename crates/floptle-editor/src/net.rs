@@ -331,6 +331,37 @@ impl Editor {
         world.query::<floptle_core::Replicated>().map(|(e, r)| (e.index(), r.owner)).collect()
     }
 
+    /// Offline play: only player slot #1 (the first Predicted node) takes
+    /// input — the other slots exist for joiners, and running their identical
+    /// controllers against the same keyboard would move every copy at once.
+    /// Applied at Play start and again when a session ends.
+    pub(crate) fn net_apply_offline_slots(&mut self) {
+        let preds: Vec<Entity> = self
+            .world
+            .query::<Transform>()
+            .map(|(e, _)| e)
+            .filter(|e| {
+                self.world
+                    .get::<floptle_core::Replicated>(*e)
+                    .map(|r| r.mode == ReplicationMode::Predicted)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let skip: std::collections::HashSet<u32> =
+            preds.iter().skip(1).map(|e| e.index()).collect();
+        if !skip.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!(
+                    "{} extra player slot(s) idle offline — they come alive when peers join",
+                    skip.len()
+                ),
+                None,
+            );
+        }
+        self.script_host.set_script_filter(skip);
+    }
+
     /// Host a REAL session on a UDP port (QUIC): other machines running the
     /// same project join with `net.join("quic://<ip>:port")`. The play world
     /// is the authoritative server — and scene-authored Predicted nodes belong
@@ -1079,8 +1110,14 @@ impl Editor {
         self.net_remote_predicted.clear();
         self.net_hub = None;
         self.net_scene_doc = None;
-        self.script_host.set_script_filter(std::collections::HashSet::new());
         self.script_host.set_frame_filter(std::collections::HashSet::new());
+        // Back to offline rules: extra player slots idle again (this also
+        // clears the session's script filter for everything else).
+        if self.playing {
+            self.net_apply_offline_slots();
+        } else {
+            self.script_host.set_script_filter(std::collections::HashSet::new());
+        }
         self.script_host.clear_net_state();
         self.script_host.set_net_state(NetState::default());
         self.script_host.set_net_owners(HashMap::new());
