@@ -1024,16 +1024,34 @@ impl Editor {
         for (e, kind, vars) in cs.take_synced() {
             self.script_host.apply_synced(e.index(), &kind, &vars);
         }
-        // Reconcile our own node against authoritative states.
-        let updates = cs.take_predicted_updates();
+        // Reconcile our own node against authoritative states. On a real link
+        // the server ticks in ITS OWN clock domain: translate each state's
+        // tick back through the exact stamp→local map (correct even across
+        // auto-lead nudges), falling back to offset arithmetic (harness: 0).
+        let stamp_off = cs.input_stamp_offset();
+        let updates: Vec<_> = cs
+            .take_predicted_updates()
+            .into_iter()
+            .map(|(e, stick, state)| {
+                let local = cs
+                    .local_tick_for_stamp(stick)
+                    .unwrap_or(((stick as i64) - stamp_off).max(0) as u64);
+                (e, local, state)
+            })
+            .collect();
+        let lead_events = cs.take_lead_events();
         let rpcs = cs.take_rpcs();
         let events = cs.take_events();
         let spawned = cs.take_spawned();
         let despawned = cs.take_despawned();
-        // On a real link the server ticks in ITS OWN clock domain; the stamp
-        // offset maps its ticks back onto our prediction ring (harness: 0).
-        let stamp_off = cs.input_stamp_offset();
         let my_peer = cs.my_peer();
+        for (delta, margin) in lead_events {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("🌐 input lead retuned by {delta:+} tick(s) — server margin was {margin}"),
+                None,
+            );
+        }
         // Replicated spawns/despawns materialize live: bodies register or go,
         // and ownership re-evaluates — a spawn owned by US becomes the
         // predicted avatar (the net.spawn player-avatar flow), everyone
@@ -1080,7 +1098,6 @@ impl Editor {
                 continue;
             }
             let eid = pe.index();
-            let stick = (stick as i64 - stamp_off).max(0) as u64;
             // A touch looser than the library default: absorbs camera-yaw
             // integration noise (per-frame vs per-tick smoothing) so only real
             // divergence triggers a correction. 5 mm is invisible.
@@ -1217,6 +1234,11 @@ impl Editor {
                                     .ceil() as i64;
                                 let offset = wt as i64 + rtt_ticks + 3 - tick as i64;
                                 cs.set_input_stamp_offset(offset);
+                                // The Welcome-time RTT is a guess (often 0 —
+                                // no ping has completed yet): let the session
+                                // keep the lead tuned from server margin
+                                // feedback instead of trusting it forever.
+                                cs.set_auto_input_lead(true);
                                 self.console.push(
                                     floptle_script::LogLevel::Debug,
                                     format!(

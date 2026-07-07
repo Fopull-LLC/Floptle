@@ -392,6 +392,51 @@ mod tests {
     }
 
     #[test]
+    fn auto_lead_heals_a_late_input_clock() {
+        // A client whose lead is too small (Welcome-time RTT guess, a frame
+        // hitch, clock drift) stamps inputs that arrive AFTER the server
+        // simulated their tick — repeat-last forever, misprediction storms.
+        // The server's InputAck margins must steer the offset back into band.
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(0);
+        let (mut cw, _) = world_with(0);
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 3, |_, _| {});
+        let peer = server.peers()[0];
+
+        client.set_input_stamp_offset(-5); // inputs land 5 ticks in the past
+        client.set_auto_input_lead(true);
+        let mut drive = |server: &mut NetSession, client: &mut NetSession, from: u64, n: u64| {
+            for t in from..from + n {
+                hub.set_now(t);
+                client.send_input(t, NetInput::default());
+                client.tick_client(&mut cw); // ships window + applies acks
+                server.pump_server(&sw, t);
+                let _ = server.input_for(peer, t); // consume + measure margin
+                server.tick_server(&sw, t); // acks ride the tick
+            }
+            from + n
+        };
+        let mid = drive(&mut server, &mut client, 4, 300);
+        assert!(
+            client.input_stamp_offset() >= 1,
+            "auto-lead must have raised the offset out of the hole, got {}",
+            client.input_stamp_offset()
+        );
+        // Once retuned, inputs hit their tick exactly: no NEW late inputs.
+        let late_before = server.late_inputs();
+        let _ = drive(&mut server, &mut client, mid, 120);
+        assert_eq!(server.late_inputs(), late_before, "retuned clock must stop running late");
+        let (margin, _) = client.input_ack().expect("acks received");
+        assert!(margin >= 1, "server-side margin back in band, got {margin}");
+        // And reconcile's stamp→local map survives the nudges: the newest
+        // stamp maps back to the local tick that sent it.
+        let last_local = mid + 119;
+        let stamp = (last_local as i64 + client.input_stamp_offset()) as u64;
+        assert_eq!(client.local_tick_for_stamp(stamp), Some(last_local));
+    }
+
+    #[test]
     fn join_leave_events_fire() {
         let hub = MemoryHub::new();
         let (mut server, mut client) = connect_pair(&hub);

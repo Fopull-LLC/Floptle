@@ -280,12 +280,20 @@ impl Sim {
     /// Advance ONE body by one gameplay tick (the prediction-replay driver,
     /// `docs/netcode-design.md` §6): runs the tick's physics substeps for just
     /// that body — exact, because the solver has no body-vs-body pass. No
-    /// floating-origin rebase, no tick_prev capture, no transform writeback:
-    /// replay is invisible to rendering; the caller applies the final state.
+    /// floating-origin rebase, no transform writeback. The render anchor
+    /// (`tick_prev`) advances with each replayed tick: [`Self::restore_body`]
+    /// parked it at the (rtt-old) server pose, and leaving it there would make
+    /// [`Self::writeback_interpolated`] render the whole replay span backwards
+    /// for a frame after every correction — a visible blip scaled by rtt.
+    /// Capturing the pre-step pose per replayed tick leaves the anchor exactly
+    /// one tick behind the final state, same as a normal [`Self::step_tick`].
     pub fn step_body_tick(&mut self, eid: u32, tick_dt: f32) {
         let Some(bi) = self.map.iter().find(|l| l.entity.index() == eid).map(|l| l.body) else {
             return;
         };
+        if let Some(tp) = self.tick_prev.get_mut(bi) {
+            *tp = self.world.bodies[bi].pos;
+        }
         let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
         for _ in 0..n {
             self.world.step_body(bi, self.fixed_dt);
@@ -524,5 +532,47 @@ mod runtime_body_tests {
         assert!(sim.body_snapshot(spawned.index()).is_some(), "the spawned one survives too");
         sim.step_tick(1.0 / 60.0, None); // and stepping after removal is sound
         sim.writeback_interpolated(&mut ecs, 0.5);
+    }
+
+    /// A reconcile correction restores the body to the (old) server pose and
+    /// replays forward with `step_body_tick`. The render anchor must FOLLOW
+    /// the replay: if it stays at the restored pose, the next frame renders
+    /// the whole replay span backwards — the joiner-side while-moving jitter.
+    #[test]
+    fn replay_advances_the_render_anchor() {
+        let (mut ecs, ents) = world_with_bodies(1);
+        let e = ents[0];
+        let step = 1.0 / 60.0;
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)), DVec3::ZERO);
+        for _ in 0..5 {
+            sim.step_tick(step, None);
+        }
+        // Correction: rewind to a server pose FAR behind, then replay 6 ticks
+        // (a realistic rtt span) with a big horizontal velocity.
+        let server = BodySnapshot {
+            pos: DVec3::new(0.0, 5.0, 0.0),
+            vel: Vec3::new(30.0, 0.0, 0.0),
+            grounded: false,
+        };
+        sim.restore_body(e.index(), &server);
+        for _ in 0..6 {
+            sim.step_body_tick(e.index(), step);
+        }
+        let end = sim.body_snapshot(e.index()).unwrap().pos;
+        // Render at alpha 0 = the anchor itself. It must sit within ONE tick
+        // of travel behind the final pose, not back at the restored pose
+        // (6 ticks × 30 m/s = 3 m behind — the blip this guards against).
+        sim.writeback_interpolated(&mut ecs, 0.0);
+        let rendered = ecs.get::<Transform>(e).unwrap().translation;
+        let lag = (end - rendered).length();
+        assert!(
+            lag <= 30.0 * step as f64 + 1e-3,
+            "render anchor must trail by at most one tick after replay, lagged {lag} m"
+        );
+        assert!(
+            (rendered - server.pos).length() > 1.0,
+            "render anchor must have LEFT the restored server pose"
+        );
     }
 }
