@@ -37,7 +37,7 @@ use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_light
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
-use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, export_game, grab_cursor, scene_hit};
+use crate::{Editor, EditorCmd, EditorTabViewer, EXPORT_TARGETS, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
 impl Editor {
     pub(crate) fn render(&mut self) {
@@ -54,6 +54,8 @@ impl Editor {
 
         // Live Lua syntax check for the active IDE file (drives red squiggles).
         self.check_active_script_syntax();
+        // Reap a finished cross-target export build (Windows-from-Linux etc.).
+        self.poll_export_build();
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
@@ -1063,9 +1065,12 @@ impl Editor {
         // the Game view IS the window. F1 (handled at the winit layer) toggles
         // the multiplayer window, which still works for LAN/relay sessions.
         let player_mode = self.player_mode;
+        let play_t = self.play_t;
         let show_export = &mut self.show_export;
         let export_dir = &mut self.export_dir;
         let export_title = &mut self.export_title;
+        let export_target = &mut self.export_target;
+        let export_building = self.export_build.is_some();
         let export_status = &self.export_status;
         if export_title.is_empty() {
             *export_title = self
@@ -1245,20 +1250,29 @@ impl Editor {
                         } else {
                             match (net_hosting, net_has_client) {
                                 (false, _) => {
-                                    ui.label("Test alone (simulated link)");
-                                    if ui.button("⏵ Host + join a local client").clicked() {
-                                        cmd.net_host_local = true;
-                                        cmd.net_join_local = true;
+                                    // The simulated-link harness is an editor
+                                    // dev tool — a BUILD's menu is just the
+                                    // real hosting/joining flows.
+                                    if !player_mode {
+                                        ui.label("Test alone (simulated link)");
+                                        if ui.button("⏵ Host + join a local client").clicked() {
+                                            cmd.net_host_local = true;
+                                            cmd.net_join_local = true;
+                                        }
+                                        if ui
+                                            .button("🎮 Test as remote player (predicted)")
+                                            .on_hover_text("the play world becomes a CLIENT predicting against a hidden authoritative server — your character stays responsive at any latency, the server keeps the truth")
+                                            .clicked()
+                                        {
+                                            cmd.net_play_as_client = true;
+                                        }
+                                        ui.separator();
                                     }
-                                    if ui
-                                        .button("🎮 Test as remote player (predicted)")
-                                        .on_hover_text("the play world becomes a CLIENT predicting against a hidden authoritative server — your character stays responsive at any latency, the server keeps the truth")
-                                        .clicked()
-                                    {
-                                        cmd.net_play_as_client = true;
-                                    }
-                                    ui.separator();
-                                    ui.label("Real network — via relay (lobby codes)");
+                                    ui.label(if player_mode {
+                                        "Host — friends join with a lobby code"
+                                    } else {
+                                        "Real network — via relay (lobby codes)"
+                                    });
                                     ui.horizontal(|ui| {
                                         ui.label("relay");
                                         ui.add(
@@ -1425,6 +1439,19 @@ impl Editor {
                     });
             }
 
+            // ---- player-mode hint: the only chrome a build shows, and only
+            // for the first seconds (until the UI system gives games real menus) ----
+            if player_mode && play_t < 8.0 && !(net_hosting || net_as_player) {
+                egui::Area::new(egui::Id::new("player_hint"))
+                    .order(egui::Order::Foreground)
+                    .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -14.0])
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.small("F1 — multiplayer");
+                        });
+                    });
+            }
+
             // ---- dockable panels: Hierarchy / Inspector / Assets / Scene + Scripting ----
             // The Scene tab is transparent so the 3D render shows through; the others
             // paint opaque over it. Users can drag/re-dock/tab these freely.
@@ -1581,14 +1608,32 @@ impl Editor {
                             ui.text_edit_singleline(export_dir)
                                 .on_hover_text("the build lands here (created if missing)");
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Target");
+                            egui::ComboBox::from_id_salt("export_target")
+                                .selected_text(EXPORT_TARGETS[*export_target].label)
+                                .show_ui(ui, |ui| {
+                                    for (i, t) in EXPORT_TARGETS.iter().enumerate() {
+                                        ui.selectable_value(export_target, i, t.label);
+                                    }
+                                });
+                        });
                         ui.small(
-                            "builds target THIS platform — run the export from a Windows \
-                             editor for a Windows build, etc.",
+                            "cross-target builds compile the engine for that platform in \
+                             the background (first time takes minutes). macOS can't be \
+                             cross-built — export from an editor on a Mac.",
                         );
                         ui.add_space(4.0);
-                        if ui.button("📦 Export").clicked() && !export_dir.trim().is_empty() {
-                            cmd.export_game = Some(export_dir.trim().to_string());
-                        }
+                        ui.horizontal(|ui| {
+                            let can = !export_building && !export_dir.trim().is_empty();
+                            if ui.add_enabled(can, egui::Button::new("📦 Export")).clicked() {
+                                cmd.export_game =
+                                    Some((export_dir.trim().to_string(), *export_target));
+                            }
+                            if export_building {
+                                ui.spinner();
+                            }
+                        });
                         if let Some(status) = export_status {
                             ui.add_space(4.0);
                             ui.label(status.as_str());
@@ -2990,22 +3035,8 @@ impl Editor {
         if let Some(addr) = cmd.net_host_relay {
             self.net_host_relay(addr.trim());
         }
-        if let Some(dir) = cmd.export_game {
-            let title = if self.export_title.trim().is_empty() {
-                self.project_root
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "game".into())
-            } else {
-                self.export_title.trim().to_string()
-            };
-            let result = export_game(&self.project_root, std::path::Path::new(&dir), &title);
-            let (level, line) = match result {
-                Ok(msg) => (floptle_script::LogLevel::Debug, format!("📦 {msg}")),
-                Err(e) => (floptle_script::LogLevel::Error, format!("📦 export failed: {e}")),
-            };
-            self.console.push(level, line.clone(), None);
-            self.export_status = Some(line);
+        if let Some((dir, target)) = cmd.export_game {
+            self.begin_export(dir, target);
         }
         if cmd.toggle_pause {
             self.toggle_pause();
