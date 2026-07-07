@@ -1048,7 +1048,10 @@ impl Editor {
             self.net_join_addr = "quic://127.0.0.1:7777".into();
         }
         if self.net_relay_addr.is_empty() {
-            self.net_relay_addr = "127.0.0.1:7788".into();
+            // The Floptle Cloud rendezvous relay (task 0005): a DNS-only
+            // record straight to the host — the name is the stable contract
+            // even if the box moves. Self-hosters just type their own.
+            self.net_relay_addr = "relay.fopull.com:7788".into();
         }
         let net_host_port = &mut self.net_host_port;
         let net_join_addr = &mut self.net_join_addr;
