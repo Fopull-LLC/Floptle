@@ -201,6 +201,15 @@ function input.key(name) end
 ---@param name string
 ---@return boolean
 function input.pressed(name) end
+---The ACTIVE camera's world yaw (radians), captured with the input snapshot.
+---THE way to do camera-relative movement in multiplayer: the aim rides the
+---input command, so the server and prediction replay use exactly the angle
+---the player saw. nil when the scene has no active camera.
+---@return number|nil
+function input.aimYaw() end
+---The active camera's world pitch (radians), captured with the input snapshot.
+---@return number|nil
+function input.aimPitch() end
 ---A -1/0/1 axis from a negative/positive key pair, e.g. input.axis(\"a\", \"d\").
 ---@param neg string
 ---@param pos string

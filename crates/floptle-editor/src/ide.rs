@@ -1898,6 +1898,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "fixedUpdate", insert: "fixedUpdate", doc: "function fixedUpdate(node, dt) — runs every GAMEPLAY TICK (60 Hz, constant dt). Movement/gameplay/physics writes belong here; cameras & cosmetics in update. Same cadence physics steps at — frame-rate independent." },
     ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
+    ApiEntry { label: "input.aimYaw", insert: "input.aimYaw()", doc: "The ACTIVE camera's world yaw (radians), captured with the input snapshot — use it for camera-relative movement (in multiplayer it rides the input command, so server + prediction replay see exactly your view angle). nil without an active camera." },
+    ApiEntry { label: "input.aimPitch", insert: "input.aimPitch()", doc: "The active camera's world pitch (radians), captured with the input snapshot." },
     ApiEntry { label: "net.host", insert: "net.host{}", doc: "net.host{ maxPlayers = 16 } — become the authoritative host of a multiplayer session." },
     ApiEntry { label: "net.join", insert: "net.join(\"local://\")", doc: "net.join(addr) — join a session. In-editor \"local://\" joins the local test harness; network transports arrive in a later phase." },
     ApiEntry { label: "net.leave", insert: "net.leave()", doc: "net.leave() — end the session." },

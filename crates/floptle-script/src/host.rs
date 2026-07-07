@@ -133,6 +133,21 @@ impl ScriptHost {
                 "scroll",
                 lua.create_function(move |_, ()| Ok(sc.borrow().scroll)).ok(),
             );
+            // The active camera's view angles, captured WITH the input snapshot.
+            // THE way to do camera-relative movement in multiplayer: the aim
+            // rides the input command, so the server + prediction replay see
+            // exactly the angle the player did (a camera node can't replicate
+            // that). nil when the scene has no active camera.
+            let ay = input.clone();
+            let _ = t.set(
+                "aimYaw",
+                lua.create_function(move |_, ()| Ok(ay.borrow().aim.map(|a| a[0]))).ok(),
+            );
+            let ap = input.clone();
+            let _ = t.set(
+                "aimPitch",
+                lua.create_function(move |_, ()| Ok(ap.borrow().aim.map(|a| a[1]))).ok(),
+            );
             let bd = input.clone();
             let _ = t.set(
                 "button",

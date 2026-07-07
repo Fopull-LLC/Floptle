@@ -50,6 +50,12 @@ pub struct Predictor {
     pub error_offset: [f64; 3],
     /// Per-tick decay factor for `error_offset` (0.7 ≈ gone in ~6 ticks).
     pub error_decay: f64,
+    /// Diagnostics: how many reconciles diverged (needed a replay), how many
+    /// confirmed, and the last divergence distance in metres — the harness
+    /// shows these so "does prediction converge?" is a number, not a feel.
+    pub corrections: u64,
+    pub confirmations: u64,
+    pub last_error: f64,
 }
 
 impl Default for Predictor {
@@ -60,7 +66,14 @@ impl Default for Predictor {
 
 impl Predictor {
     pub fn new() -> Self {
-        Self { ring: VecDeque::new(), error_offset: [0.0; 3], error_decay: 0.7 }
+        Self {
+            ring: VecDeque::new(),
+            error_offset: [0.0; 3],
+            error_decay: 0.7,
+            corrections: 0,
+            confirmations: 0,
+            last_error: 0.0,
+        }
     }
 
     /// Record a locally-simulated tick.
@@ -109,8 +122,11 @@ impl Predictor {
         let d = [p.pos[0] - server.pos[0], p.pos[1] - server.pos[1], p.pos[2] - server.pos[2]];
         let dist2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         if dist2 <= eps * eps {
+            self.confirmations += 1;
             return None; // confirmed
         }
+        self.corrections += 1;
+        self.last_error = dist2.sqrt();
         // The renderer was showing the (wrong) predicted trajectory; keep the
         // visual difference as an offset to decay, so the correction is smooth.
         self.error_offset[0] += d[0];

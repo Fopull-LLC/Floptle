@@ -102,6 +102,7 @@ pub fn input_to_net(s: &crate::InputSnapshot) -> floptle_net::NetInput {
         scroll: s.scroll,
         buttons_down: s.buttons_down,
         buttons_pressed: s.buttons_pressed,
+        aim: s.aim,
     }
 }
 
@@ -118,6 +119,7 @@ pub fn net_to_input(n: &floptle_net::NetInput) -> crate::InputSnapshot {
         scroll: n.scroll,
         buttons_down: n.buttons_down,
         buttons_pressed: n.buttons_pressed,
+        aim: n.aim,
     }
 }
 

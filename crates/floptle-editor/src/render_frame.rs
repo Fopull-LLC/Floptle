@@ -1024,6 +1024,10 @@ impl Editor {
             .net_predictor
             .as_ref()
             .and_then(|(e, _)| world.get::<Name>(*e).map(|n| n.0.clone()));
+        let net_pred_stats = self
+            .net_predictor
+            .as_ref()
+            .map(|(_, p)| (p.corrections, p.confirmations, p.last_error));
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1166,6 +1170,19 @@ impl Editor {
                                     "spectating (no Predicted node) — give your character a Networked component with mode 'Predicted (owner)'",
                                 ),
                             };
+                            if let Some((corr, conf, last)) = net_pred_stats {
+                                let total = corr + conf;
+                                let pct = if total > 0 {
+                                    100.0 * corr as f64 / total as f64
+                                } else {
+                                    0.0
+                                };
+                                ui.small(format!(
+                                    "reconciles: {conf} confirmed · {corr} corrected ({pct:.0}%) · last error {:.0} mm",
+                                    last * 1000.0
+                                ))
+                                .on_hover_text("healthy prediction: corrections near 0% when idle/straight-line, small bursts while turning under latency. Constant high % = the sims disagree — report it");
+                            }
                         } else {
                             match (net_hosting, net_has_client) {
                                 (false, _) => {
@@ -2243,6 +2260,17 @@ impl Editor {
                 }
                 self.script_host.set_bodies(states);
             }
+            // The active camera's view angles ride every input snapshot
+            // (`input.aimYaw()`): camera-relative movement stays deterministic
+            // under prediction because the aim IS part of the input command.
+            let aim = self.world.query::<Matter>().find_map(|(e, m)| {
+                matches!(m, Matter::Camera { active: true, .. }).then(|| {
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    let (yaw, pitch, _) =
+                        wt.rotation.to_euler(floptle_core::math::EulerRot::YXZ);
+                    [yaw, pitch]
+                })
+            });
             // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
@@ -2257,9 +2285,10 @@ impl Editor {
                     scroll: self.input_scroll,
                     buttons_down: self.input_buttons,
                     buttons_pressed: self.input_buttons_pressed,
+                    aim,
                 }
             } else {
-                floptle_script::InputSnapshot::default()
+                floptle_script::InputSnapshot { aim, ..Default::default() }
             });
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
             // (physics doesn't step until after scripts, so this is safe). The sim
@@ -2364,6 +2393,7 @@ impl Editor {
                             scroll: std::mem::take(&mut self.tick_scroll),
                             buttons_down: self.input_buttons,
                             buttons_pressed: std::mem::take(&mut self.tick_buttons_pressed),
+                            aim,
                         }
                     } else {
                         self.tick_keys_pressed.clear();
@@ -2371,7 +2401,7 @@ impl Editor {
                         self.tick_mouse_delta = (0.0, 0.0);
                         self.tick_scroll = 0.0;
                         self.tick_buttons_pressed = [false; 3];
-                        floptle_script::InputSnapshot::default()
+                        floptle_script::InputSnapshot { aim, ..Default::default() }
                     };
                     // Keep what the scripts saw: prediction records + ships it.
                     self.last_tick_input = snap.clone();
