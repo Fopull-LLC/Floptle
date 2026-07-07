@@ -445,6 +445,7 @@ impl ScriptHost {
             synced_stores: HashMap::new(),
             synced_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
+            frame_skip: std::collections::HashSet::new(),
         }
     }
 
@@ -867,13 +868,34 @@ impl ScriptHost {
     /// controller re-runs its buffered inputs off the server state, touching
     /// only the predicted node's scripts.
     pub fn run_fixed_for(&mut self, world: &mut World, eid: u32, dt: f32, time: f32) {
+        self.run_one(world, eid, dt, time, true);
+    }
+
+    /// Run ONE entity's FRAME pass (`update`) at the gameplay-tick cadence —
+    /// how a predicted node's `update`-style controller stays deterministic in
+    /// a net session: the server integrates it per tick, so the owning client
+    /// must too, or every snapshot reads as a misprediction and the two sides
+    /// fight. Pair with the frame filter (skip it in the per-frame pass).
+    pub fn run_frame_for(&mut self, world: &mut World, eid: u32, dt: f32, time: f32) {
+        self.run_one(world, eid, dt, time, false);
+    }
+
+    fn run_one(&mut self, world: &mut World, eid: u32, dt: f32, time: f32, fixed: bool) {
         self.sync_scene(world);
         let work: Vec<(Entity, Scripts)> = world
             .query::<Scripts>()
             .filter(|(e, _)| e.index() == eid)
             .map(|(e, s)| (e, s.clone()))
             .collect();
-        self.run_pass(world, &work, dt, time, true);
+        // The targeted passes bypass the skip sets — they ARE the substitute
+        // execution for a filtered entity.
+        let (skip, fskip) = (
+            std::mem::take(&mut self.script_skip),
+            std::mem::take(&mut self.frame_skip),
+        );
+        self.run_pass(world, &work, dt, time, fixed);
+        self.script_skip = skip;
+        self.frame_skip = fskip;
         self.flush_writes(world);
     }
 
@@ -884,12 +906,22 @@ impl ScriptHost {
         self.script_skip = skip;
     }
 
+    /// Skip these entities in the PER-FRAME pass only (`update`) — the driver
+    /// re-runs them on the gameplay tick via [`Self::run_frame_for`] instead
+    /// (a predicted node in a net session). `fixedUpdate` is unaffected.
+    pub fn set_frame_filter(&mut self, skip: std::collections::HashSet<u32>) {
+        self.frame_skip = skip;
+    }
+
     /// One lifecycle pass over `work`: the per-frame pass (`start`/`update`) or the
     /// per-tick pass (`fixedUpdate`), with the same self-move write-back rules.
     fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, fixed: bool) {
         for (e, scripts) in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
+            }
+            if !fixed && self.frame_skip.contains(&e.index()) {
+                continue; // predicted: its `update` re-runs on the tick clock
             }
             let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
             let tr0 = tr; // pass-start, to detect a self-move via the `node` argument

@@ -274,6 +274,44 @@ impl Editor {
             }
         }
         self.script_host.set_script_filter(skip);
+        if let Some(pe) = predicted {
+            // Prediction NEEDS velocity+grounded on the wire — force-enable
+            // physics sync on the predicted node (both worlds; reconciliation
+            // restoring a zero velocity every snapshot reads as violent jitter).
+            let enable = |w: &mut World, e: Entity| {
+                if let Some(r) = w.get_mut::<floptle_core::Replicated>(e)
+                    && !r.physics
+                {
+                    r.physics = true;
+                }
+            };
+            enable(&mut self.world, pe);
+            // Same node in the server world = same position in node order; find
+            // it by matching net id via name-independent index: both worlds were
+            // registered in identical node order, so match by Replicated order.
+            let spred: Option<Entity> = {
+                let mine: Vec<Entity> = self
+                    .world
+                    .query::<Transform>()
+                    .map(|(e, _)| e)
+                    .filter(|e| self.world.get::<floptle_core::Replicated>(*e).is_some())
+                    .collect();
+                let theirs: Vec<Entity> = sworld
+                    .query::<Transform>()
+                    .map(|(e, _)| e)
+                    .filter(|e| sworld.get::<floptle_core::Replicated>(*e).is_some())
+                    .collect();
+                mine.iter().position(|e| *e == pe).and_then(|i| theirs.get(i).copied())
+            };
+            if let Some(se) = spred {
+                enable(&mut sworld, se);
+            }
+            // The predicted node's `update` moves to the TICK clock (the server
+            // integrates it per tick — the client must match or they fight).
+            let mut fskip = std::collections::HashSet::new();
+            fskip.insert(pe.index());
+            self.script_host.set_frame_filter(fskip);
+        }
         self.net_predictor = predicted.map(|e| (e, floptle_net::Predictor::new()));
         if predicted.is_none() {
             self.console.push(
@@ -451,8 +489,10 @@ impl Editor {
                 continue;
             }
             let eid = pe.index();
-            let Some(replay) = pred.reconcile(stick, &state, floptle_net::DEFAULT_EPSILON)
-            else {
+            // A touch looser than the library default: absorbs camera-yaw
+            // integration noise (per-frame vs per-tick smoothing) so only real
+            // divergence triggers a correction. 5 mm is invisible.
+            let Some(replay) = pred.reconcile(stick, &state, 5e-3) else {
                 continue; // prediction confirmed
             };
             // Rewind to the server's word…
@@ -470,10 +510,37 @@ impl Editor {
                 tr.translation = floptle_core::math::DVec3::from_array(state.pos);
                 tr.rotation = floptle_core::math::Quat::from_array(state.rot);
             }
-            // …and replay the unacknowledged inputs through the SAME script.
+            // …and replay the unacknowledged inputs through the SAME script —
+            // BOTH hooks, exactly as the tick originally ran (update rides the
+            // tick clock for a predicted node), including component writes
+            // (e.g. a controller's rig.friction toggle) reaching the body.
             for (rtick, rinput) in replay {
+                let rt = rtick as f32 * step;
                 self.script_host.set_input(floptle_script::net_to_input(&rinput));
-                self.script_host.run_fixed_for(&mut self.world, eid, step, rtick as f32 * step);
+                // Body state for the replayed tick: the body's CURRENT
+                // (being-replayed) state, so node.grounded/vx reads are right.
+                if let Some(sim) = self.sim.as_ref()
+                    && let Some(bs) = sim.body_snapshot(eid)
+                {
+                    let mut states = HashMap::new();
+                    // up/height: reuse the live values (not part of rollback).
+                    if let Some((_, _, up, _, height)) =
+                        sim.body_states().find(|(e, ..)| e.index() == eid)
+                    {
+                        states.insert(
+                            eid,
+                            floptle_script::BodyState {
+                                vel: bs.vel.to_array(),
+                                up: [up.x, up.y, up.z],
+                                grounded: bs.grounded,
+                                height,
+                            },
+                        );
+                    }
+                    self.script_host.set_bodies(states);
+                }
+                self.script_host.run_frame_for(&mut self.world, eid, step, rt);
+                self.script_host.run_fixed_for(&mut self.world, eid, step, rt);
                 for (id, v) in self.script_host.take_body_changes() {
                     if id == eid && let Some(sim) = self.sim.as_mut() {
                         sim.set_body_velocity(id, floptle_core::math::Vec3::new(v[0], v[1], v[2]));
@@ -485,6 +552,8 @@ impl Editor {
                     }
                 }
                 if let Some(sim) = self.sim.as_mut() {
+                    // Component writes (friction etc.) land on the body too.
+                    sim.sync_dynamic_params(&self.world);
                     sim.step_body_tick(eid, step);
                     if let Some(bs) = sim.body_snapshot(eid) {
                         let rot = self
@@ -619,6 +688,7 @@ impl Editor {
         self.net_hub = None;
         self.net_scene_doc = None;
         self.script_host.set_script_filter(std::collections::HashSet::new());
+        self.script_host.set_frame_filter(std::collections::HashSet::new());
         self.script_host.clear_net_state();
         self.script_host.set_net_state(NetState::default());
         self.console.push(
