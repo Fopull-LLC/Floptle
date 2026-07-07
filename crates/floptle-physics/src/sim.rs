@@ -10,7 +10,7 @@ use floptle_field::Terrain;
 use crate::body::{Body, BodyShape};
 use crate::gravity::GravityField;
 use crate::shapes::{BoxShape, CapsuleShape, SdfTerrain, SphereShape, TriMeshCollider};
-use crate::world::{PhysicsWorld, RayHit};
+use crate::world::{BodyHull, PhysicsWorld, RayHit};
 
 /// Drives a [`PhysicsWorld`] from the ECS each Play (Slice 3 bridge): builds bodies
 /// from `RigidBody` entities + an SDF terrain collider, advances on a fixed-timestep
@@ -286,6 +286,29 @@ impl Sim {
             let b = &self.world.bodies[l.body];
             (l.entity, b.vel, b.up, b.grounded, b.height())
         })
+    }
+
+    /// Raycastable hulls for every dynamic body, sim frame — lend to the script
+    /// host alongside the colliders so `raycast(...)` can hit players/crates.
+    /// Active bodies report the body's own position; INACTIVE bodies (networked
+    /// authority nodes on a client — snapshots drive their transforms, the body
+    /// is frozen) report the entity's interpolated transform instead, so rays
+    /// hit them where the player actually SEES them.
+    pub fn body_hulls(&self, ecs: &World) -> Vec<BodyHull> {
+        self.map
+            .iter()
+            .map(|l| {
+                let b = &self.world.bodies[l.body];
+                let pos = if b.active {
+                    b.pos
+                } else {
+                    ecs.get::<Transform>(l.entity)
+                        .map(|t| (t.translation - self.world.origin).as_vec3())
+                        .unwrap_or(b.pos)
+                };
+                BodyHull { eid: l.entity.index(), pos, radius: b.radius, shape: b.shape, up: b.up }
+            })
+            .collect()
     }
 
     /// Activate/deactivate a body by entity index. Inactive bodies neither

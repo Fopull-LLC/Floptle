@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 3;
+pub const PROTO_VERSION: u16 = 4;
 
 /// One replicated entity's transform state in a snapshot. Position is absolute
 /// world f64 (floating-origin safe); rotation a quaternion; velocity/grounded
@@ -85,8 +85,11 @@ pub enum Msg {
     /// window, so one lost packet doesn't lose a tick's input).
     Input { entries: Vec<InputCmd> },
     /// Either direction: a named remote call. `sender` is stamped by the
-    /// SERVER when relaying/receiving (clients can't spoof it).
-    Rpc { name: String, args: NetValue, sender: PeerId },
+    /// SERVER when relaying/receiving (clients can't spoof it). `tick` is the
+    /// sender's PERCEIVED server tick (`{withInput = true}`, client → server
+    /// only): the newest snapshot tick the client had applied when it fired —
+    /// what lag compensation rewinds to (`docs/netcode-design.md` §7).
+    Rpc { name: String, args: NetValue, sender: PeerId, tick: Option<u64> },
     /// Server → clients: another player joined/left (for `net.on` events).
     PeerJoined { peer: PeerId },
     PeerLeft { peer: PeerId },

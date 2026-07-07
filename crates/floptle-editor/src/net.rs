@@ -33,6 +33,10 @@ pub(crate) struct HiddenServer {
     /// simulates tick T, and mid-session slider drags don't cause repeat-last
     /// mispredictions (= jitter) on the owner. 0 = not yet started.
     pub next_tick: u64,
+    /// Lag-compensation history (`docs/netcode-design.md` §7): the last ~600 ms
+    /// of authoritative poses + synced vars, per networked node — what
+    /// `net.rewind` re-poses combat queries to.
+    pub history: floptle_net::LagHistory,
 }
 
 impl Editor {
@@ -53,15 +57,18 @@ impl Editor {
                     None,
                 ),
                 NetCmd::Leave => self.net_stop("left the session"),
-                NetCmd::Rpc { name, args, to } => {
+                NetCmd::Rpc { name, args, to, with_input } => {
                     if let Some(s) = self.net_server.as_mut() {
                         let target = to.map(RpcTarget::Peer).unwrap_or(RpcTarget::All);
                         if let Err(e) = s.send_rpc(&name, args, target) {
                             self.console.push(floptle_script::LogLevel::Warn, e, None);
                         }
                     } else if let Some(c) = self.net_play_client.as_mut() {
-                        // On a client, rpcs are intents for the server.
-                        if let Err(e) = c.send_rpc(&name, args, RpcTarget::Server) {
+                        // On a client, rpcs are intents for the server;
+                        // `{withInput = true}` stamps the perceived tick for
+                        // lag compensation (§7).
+                        if let Err(e) = c.send_rpc_stamped(&name, args, RpcTarget::Server, with_input)
+                        {
                             self.console.push(floptle_script::LogLevel::Warn, e, None);
                         }
                     }
@@ -111,7 +118,16 @@ impl Editor {
         } else {
             (Vec::new(), Vec::new())
         };
-        {
+        if !rpcs.is_empty() || !events.is_empty() {
+            // Lend colliders + hulls so onRpc / net.on handlers can raycast
+            // (physics already stepped this tick; reclaimed right after).
+            if let Some(sim) = self.sim.as_mut() {
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+            }
+            if let Some(sim) = self.sim.as_ref() {
+                self.script_host.set_hulls(sim.body_hulls(&self.world));
+            }
             for r in rpcs {
                 self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender);
             }
@@ -125,6 +141,9 @@ impl Editor {
                     }
                     _ => {}
                 }
+            }
+            if let Some(sim) = self.sim.as_mut() {
+                sim.world.colliders = self.script_host.take_colliders();
             }
         }
         // --- ghost client: apply snapshots into its hidden world ---
@@ -355,6 +374,7 @@ impl Editor {
             host,
             peer: 1,
             next_tick: 0,
+            history: floptle_net::LagHistory::new(),
         });
         self.net_play_client = Some(client);
         self.net_hub = Some(hub);
@@ -420,6 +440,39 @@ impl Editor {
         hs.host.set_project_root(self.project_root.clone());
         hs.host
             .set_colliders(std::mem::take(&mut hs.sim.world.colliders), hs.sim.world.origin);
+        hs.host.set_hulls(hs.sim.body_hulls(&hs.world));
+        // Dispatch the client intents that arrived by tick start (the pump
+        // above), BEFORE this tick's scripts — with lag compensation: an rpc
+        // stamped `{withInput = true}` gets a rewind scope holding every
+        // networked node's pose + synced vars at the tick its sender PERCEIVED
+        // (their stamp minus that node's interp delay, clamped to the rewind
+        // window). `net.rewind(peer, fn)` applies it around the handler's
+        // queries (`docs/netcode-design.md` §7).
+        for r in hs.session.take_rpcs() {
+            let scope = r.tick.map(|stamp| {
+                let mut poses = Vec::new();
+                let mut synced = Vec::new();
+                for (nid, e) in hs.session.net_entities() {
+                    let Some(rep) = hs.world.get::<floptle_core::Replicated>(e) else { continue };
+                    if !rep.transform {
+                        continue;
+                    }
+                    let target = floptle_net::LagHistory::clamp_rewind(
+                        st,
+                        stamp.saturating_sub(rep.interp_delay as u64),
+                    );
+                    let Some(h) = hs.history.state_at(nid, target) else { continue };
+                    poses.push((e.index(), h.pos));
+                    for (kind, vars) in &h.synced {
+                        synced.push((e.index(), kind.clone(), vars.clone()));
+                    }
+                }
+                floptle_script::RewindScope { peer: r.sender, poses, synced }
+            });
+            hs.host.set_rewind(scope);
+            hs.host.dispatch_rpc(&mut hs.world, &r.name, &r.args, r.sender);
+            hs.host.set_rewind(None);
+        }
         let dir = self.project_root.join("scripts");
         let t = st as f32 * step;
         hs.host.run(&mut hs.world, &dir, step, t);
@@ -439,7 +492,7 @@ impl Editor {
         // Server-side session commands from ITS scripts (rpc/spawn/despawn).
         for cmd in hs.host.take_net_commands() {
             match cmd {
-                NetCmd::Rpc { name, args, to } => {
+                NetCmd::Rpc { name, args, to, .. } => {
                     let target = to.map(RpcTarget::Peer).unwrap_or(RpcTarget::All);
                     let _ = hs.session.send_rpc(&name, args, target);
                 }
@@ -455,6 +508,28 @@ impl Editor {
         }
         // Synced vars + body states → snapshots out.
         let raw = hs.host.collect_synced();
+        // Record this tick into the lag-comp history: every networked node's
+        // post-tick pose plus its scripts' synced values — the world state
+        // `net.rewind` can later re-judge combat against.
+        {
+            let mut hist: Vec<(u64, floptle_net::HistEntry)> = Vec::new();
+            for (nid, e) in hs.session.net_entities() {
+                let Some(tr) = hs.world.get::<Transform>(e) else { continue };
+                let synced = raw
+                    .iter()
+                    .filter(|(eid, _, _)| *eid == e.index())
+                    .map(|(_, kind, vars)| (kind.clone(), vars.clone()))
+                    .collect();
+                hist.push((
+                    nid,
+                    floptle_net::HistEntry {
+                        pos: [tr.translation.x, tr.translation.y, tr.translation.z],
+                        synced,
+                    },
+                ));
+            }
+            hs.history.record(st, hist);
+        }
         let ents: HashMap<u32, Entity> =
             hs.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
         let synced = raw
@@ -469,12 +544,10 @@ impl Editor {
             .collect();
         hs.session.update_body_states(bstates);
         hs.session.tick_server(&hs.world, st);
-        // Received RPCs/events dispatch into the SERVER's scripts.
-        let rpcs = hs.session.take_rpcs();
+        // Received events dispatch into the SERVER's scripts. (RPCs are NOT
+        // dispatched here — they wait for the next tick's start, where the
+        // colliders are lent and the lag-comp rewind scope can be staged.)
         let events = hs.session.take_events();
-        for r in rpcs {
-            hs.host.dispatch_rpc(&mut hs.world, &r.name, &r.args, r.sender);
-        }
         for ev in events {
             match ev {
                 NetEvent::PeerJoined(p) => {
@@ -602,6 +675,11 @@ impl Editor {
                         sim.world.origin,
                     );
                 }
+                // Hulls too — the live tick saw them, so the replay must
+                // (other bodies at their CURRENT pose: the standard tradeoff).
+                if let Some(sim) = self.sim.as_ref() {
+                    self.script_host.set_hulls(sim.body_hulls(&self.world));
+                }
                 self.script_host.run_frame_for(&mut self.world, eid, step, rt);
                 self.script_host.run_fixed_for(&mut self.world, eid, step, rt);
                 if let Some(sim) = self.sim.as_mut() {
@@ -640,7 +718,18 @@ impl Editor {
                 }
             }
         }
-        // Client-side RPC/event dispatch (onRpc handlers, net.on).
+        // Client-side RPC/event dispatch (onRpc handlers, net.on) — with
+        // colliders + hulls lent so handlers can raycast (cosmetic hit FX).
+        let dispatching = !rpcs.is_empty() || !events.is_empty();
+        if dispatching {
+            if let Some(sim) = self.sim.as_mut() {
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+            }
+            if let Some(sim) = self.sim.as_ref() {
+                self.script_host.set_hulls(sim.body_hulls(&self.world));
+            }
+        }
         for r in rpcs {
             self.script_host.dispatch_rpc(&mut self.world, &r.name, &r.args, r.sender);
         }
@@ -662,6 +751,9 @@ impl Editor {
                     self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), None)
                 }
             }
+        }
+        if dispatching && let Some(sim) = self.sim.as_mut() {
+            sim.world.colliders = self.script_host.take_colliders();
         }
         // Smooth the visual correction.
         if let Some((_, pred)) = self.net_predictor.as_mut() {

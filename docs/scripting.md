@@ -150,8 +150,9 @@ the OS supports it, per-frame re-centering where it doesn't) — read motion wit
 
 ### Raycasting
 
-`raycast(ox,oy,oz, dx,dy,dz, max)` casts a ray against the world's colliders (the
-terrain **and** any walkable mesh colliders) and returns a hit table or `nil`:
+`raycast(ox,oy,oz, dx,dy,dz, max [, ignore])` casts a ray against the world's
+colliders (the terrain **and** any walkable mesh colliders) **and every physics
+body** (players, crates) and returns a hit table or `nil`:
 
 ```lua
 -- ground within 1.2 units below me?
@@ -160,8 +161,14 @@ if h then
   -- h.x, h.y, h.z   the hit point
   -- h.nx, h.ny, h.nz the surface normal there
   -- h.distance       how far the ray travelled
+  -- h.node           the node whose BODY was hit (nil for static geometry)
 end
 ```
+
+When the ray hits a body, `h.node` tells you whose: `h.node:getscript("combat")`
+reaches its scripts. Your own node's body never blocks your rays, and the
+optional `ignore` arg skips one more node's body — the orbit camera passes the
+character it follows, so it never reads as a wall.
 
 Use it for ground checks, line-of-sight, shooting, or dropping objects onto a surface.
 (The built-in `node.grounded` already does a robust contact check for the character;
@@ -622,10 +629,11 @@ end
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
-| `net.rpc(name, args, {to=peer})` | remote call — server→clients, or client→server |
+| `net.rpc(name, args, {to=peer, withInput=true})` | remote call — server→clients, or client→server; `withInput` stamps the tick you were seeing (for `net.rewind`) |
 | `net.on(event, fn)` | `"playerJoined"/"playerLeft"` (peer id), `"connected"`, `"disconnected"` |
 | `net.spawn(path, {x,y,z,owner})` | SERVER: spawn a scene's first node, replicated everywhere |
 | `net.despawn(node)` | SERVER: remove it everywhere |
+| `net.rewind(peer, fn)` | SERVER: run `fn` against the world as `peer` perceived it (lag compensation) |
 
 **`synced` rules.** Values can be numbers, booleans, strings, and tables
 (nested up to 4 levels, ≤ 1 KB encoded per var — an oversized write is dropped
@@ -654,3 +662,63 @@ constant `dt`) instead of per frame, so the client and server integrate your
 controller identically. Your script doesn't change — but movement code belongs
 in `fixedUpdate` anyway, and cameras (per-frame `update`) belong on a separate,
 non-networked node.
+
+### Lag-compensated combat: `withInput` + `net.rewind`
+
+On your screen, every *other* player is rendered a beat in the past (the
+interpolation delay) — so by the time your "I swung" intent reaches the server,
+the defender has moved on. Judged at server time, hits you clearly landed
+whiff, and parries that were up on your screen don't count. The fix is the
+genre's standard contract: **the server rewinds the world to what you saw and
+judges there.**
+
+Two pieces. The client stamps the intent with the tick it was seeing; the
+server wraps its hit-check in `net.rewind`:
+
+```lua
+-- sword.lua — on the attacker (a Predicted node)
+function update(node, dt)
+  if net.isClient() and input.clicked(0) then
+    local yaw = input.aimYaw() or node.yaw
+    net.rpc("swing", { dx = math.sin(yaw), dz = math.cos(yaw) },
+            { withInput = true })                 -- ← stamp what I was seeing
+  end
+end
+
+onRpc = {}
+function onRpc.swing(args, peer)                  -- runs on the SERVER
+  net.rewind(peer, function()                     -- ← the world as PEER saw it
+    local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)
+    if hit and hit.node then
+      local combat = hit.node:getscript("combat")
+      if combat and combat.synced.parrying then   -- their flag AT THAT TICK
+        net.rpc("parried", { by = hit.node.id }, { to = peer })
+      elseif combat then
+        combat.hurt(25, peer)
+      end
+    end
+  end)
+end
+```
+
+Inside the `net.rewind` closure, **raycasts see every networked body where
+that player saw it**, and **other scripts' `synced` vars read the values from
+that same tick** — so a parry window that was open on the attacker's screen
+counts, even if it just closed at server time. Everything snaps back to the
+present when the closure returns (it also passes through return values, so
+`local hit = net.rewind(peer, function() return raycast(...) end)` works).
+
+The fine print, so you can reason about fairness:
+
+- `raycast` hits **physics bodies** (players, crates) as well as static
+  geometry, and tells you who: `hit.node` is the body's node handle (nil for
+  terrain/walls). Your own body is always excluded from your rays, and an
+  optional trailing arg skips one more node: `raycast(…, max, someNode)` —
+  what the orbit camera does so the character it follows never reads as a
+  wall.
+- Rewind depth is **clamped to ~250 ms** — a very-high-ping attacker can't
+  shoot everyone else in the distant past. Beyond the clamp, their disadvantage
+  is real (that's the honest tradeoff every game in the genre makes).
+- `net.rewind` outside a server-side `onRpc` handler for a `withInput` rpc
+  (or with the wrong peer) warns and runs the closure at server time — your
+  logic still works, it's just not compensated.

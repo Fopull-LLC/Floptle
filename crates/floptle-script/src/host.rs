@@ -213,40 +213,74 @@ impl ScriptHost {
             );
             let _ = lua.globals().set("input", t);
         }
+        // The `net.*` bridge state — created early so the raycast closure can
+        // read the current-instance marker (self-hit exclusion) and `net.rewind`
+        // can re-pose the hulls (the API itself installs further down).
+        let net = crate::net_api::SharedNet::new(logs.clone());
+
         // `raycast(ox,oy,oz, dx,dy,dz, max)` against the world's colliders (terrain +
-        // mesh): returns a hit table {x,y,z, nx,ny,nz, distance} or nil. Use it for ground
-        // checks, line-of-sight, shooting. Scripts speak WORLD coordinates; the sim runs
-        // origin-relative (ADR-0015), so convert in f64 on the way in and out.
+        // mesh + static primitives) AND every dynamic body's hull (players, crates):
+        // returns a hit table {x,y,z, nx,ny,nz, distance, node} or nil — `node` is the
+        // hit body's node handle (nil for static geometry), so combat code can do
+        // `hit.node:getscript("combat")`. The caster's OWN body is excluded (a ray from
+        // your center must not hit you). Use it for ground checks, line-of-sight,
+        // shooting. Scripts speak WORLD coordinates; the sim runs origin-relative
+        // (ADR-0015), so convert in f64 on the way in and out.
         let colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>> =
             Rc::new(RefCell::new(Vec::new()));
         let sim_origin: Rc<RefCell<glam::DVec3>> = Rc::new(RefCell::new(glam::DVec3::ZERO));
         {
             let cols = colliders.clone();
+            let hus = hulls.clone();
             let so = sim_origin.clone();
-            type Args = (f64, f64, f64, f64, f64, f64, f64);
-            if let Ok(f) = lua.create_function(move |lua, (ox, oy, oz, dx, dy, dz, max): Args| {
+            let cur = net.current.clone();
+            type Args = (f64, f64, f64, f64, f64, f64, f64, Option<Value>);
+            if let Ok(f) = lua.create_function(move |lua,
+                (ox, oy, oz, dx, dy, dz, max, ignore): Args| {
                 let origin = *so.borrow();
                 let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
-                let hit = floptle_physics::raycast_colliders(
-                    &cols.borrow(),
-                    o,
-                    glam::Vec3::new(dx as f32, dy as f32, dz as f32),
-                    max as f32,
-                );
-                match hit {
-                    Some(h) => {
-                        let t = lua.create_table()?;
-                        t.set("x", origin.x + h.point[0] as f64)?;
-                        t.set("y", origin.y + h.point[1] as f64)?;
-                        t.set("z", origin.z + h.point[2] as f64)?;
-                        t.set("nx", h.normal[0] as f64)?;
-                        t.set("ny", h.normal[1] as f64)?;
-                        t.set("nz", h.normal[2] as f64)?;
-                        t.set("distance", h.distance as f64)?;
-                        Ok(Value::Table(t))
-                    }
-                    None => Ok(Value::Nil),
+                let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
+                let solid = floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32);
+                // Bodies the ray passes through: the caster's own, plus an
+                // optional explicit ignore (a node handle or entity id) — e.g.
+                // an orbit camera skipping the character it follows.
+                let mut exclude: Vec<u32> = Vec::with_capacity(2);
+                if let Some((eid, _)) = cur.borrow().as_ref() {
+                    exclude.push(*eid);
                 }
+                match &ignore {
+                    Some(Value::Table(t)) => {
+                        if let Ok(eid) = t.raw_get::<u32>("__id") {
+                            exclude.push(eid);
+                        }
+                    }
+                    Some(Value::Integer(id)) => exclude.push(*id as u32),
+                    Some(Value::Number(id)) => exclude.push(*id as u32),
+                    _ => {}
+                }
+                let body =
+                    floptle_physics::raycast_hulls(&hus.borrow(), o, dir, max as f32, &exclude);
+                // Nearest surface wins between static geometry and body hulls.
+                let (h, eid) = match (solid, body) {
+                    (Some(s), Some((be, b))) if b.distance < s.distance => (b, Some(be)),
+                    (Some(s), _) => (s, None),
+                    (None, Some((be, b))) => (b, Some(be)),
+                    (None, None) => return Ok(Value::Nil),
+                };
+                let t = lua.create_table()?;
+                t.set("x", origin.x + h.point[0] as f64)?;
+                t.set("y", origin.y + h.point[1] as f64)?;
+                t.set("z", origin.z + h.point[2] as f64)?;
+                t.set("nx", h.normal[0] as f64)?;
+                t.set("ny", h.normal[1] as f64)?;
+                t.set("nz", h.normal[2] as f64)?;
+                t.set("distance", h.distance as f64)?;
+                if let Some(be) = eid {
+                    t.set("node", new_node_handle(lua, be)?)?;
+                }
+                Ok(Value::Table(t))
             }) {
                 let _ = lua.globals().set("raycast", f);
             }
@@ -423,9 +457,12 @@ impl ScriptHost {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
         }
         // The `net.*` API (docs/netcode-design.md §8): command queue out,
-        // session state in, `net.on` handler registry.
-        let net = crate::net_api::SharedNet::new(logs.clone());
-        if let Err(e) = crate::net_api::install_net_api(&lua, &net) {
+        // session state in, `net.on` handler registry, `net.rewind` (§7).
+        let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        if let Err(e) =
+            crate::net_api::install_net_api(&lua, &net, &hulls, &sim_origin, &synced_stores)
+        {
             eprintln!("[lua] failed to install the net API: {e}");
         }
 
@@ -440,6 +477,7 @@ impl ScriptHost {
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             colliders,
+            hulls,
             sim_origin,
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
@@ -457,7 +495,7 @@ impl ScriptHost {
             gizmos,
             spawn_effects,
             net,
-            synced_stores: HashMap::new(),
+            synced_stores,
             synced_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
@@ -627,7 +665,8 @@ impl ScriptHost {
     #[allow(clippy::type_complexity)]
     pub fn collect_synced(&mut self) -> Vec<(u32, String, Vec<(String, floptle_net::NetValue)>)> {
         let mut out = Vec::new();
-        for ((eid, kind), store) in &self.synced_stores {
+        let stores = self.synced_stores.borrow();
+        for ((eid, kind), store) in stores.iter() {
             let mut vars = Vec::new();
             for pair in store.clone().pairs::<mlua::Value, mlua::Value>() {
                 let Ok((k, v)) = pair else { continue };
@@ -662,7 +701,8 @@ impl ScriptHost {
     /// Client: write received `synced` updates into the instance's store
     /// (bypassing the client-write warning — this IS the server's word).
     pub fn apply_synced(&self, eid: u32, kind: &str, vars: &[(String, floptle_net::NetValue)]) {
-        let Some(store) = self.synced_stores.get(&(eid, kind.to_string())) else { return };
+        let stores = self.synced_stores.borrow();
+        let Some(store) = stores.get(&(eid, kind.to_string())) else { return };
         for (k, v) in vars {
             if let Ok(val) = crate::net_api::netvalue_to_lua(&self.lua, v) {
                 let _ = store.raw_set(k.as_str(), val);
@@ -676,6 +716,7 @@ impl ScriptHost {
     pub fn clear_net_state(&mut self) {
         self.net.cmds.borrow_mut().clear();
         *self.net.state.borrow_mut() = crate::NetState::default();
+        *self.net.rewind.borrow_mut() = None;
         self.synced_warned.clear();
     }
 
@@ -686,7 +727,7 @@ impl ScriptHost {
         match crate::net_api::build_synced_proxy(&self.lua, &self.net, &declared, &key.1) {
             Ok((proxy, store)) => {
                 let _ = env.set("synced", proxy);
-                self.synced_stores.insert(key.clone(), store);
+                self.synced_stores.borrow_mut().insert(key.clone(), store);
             }
             Err(e) => self.record_error(&key.1, format!("{}: replicated/synced: {e}", key.1)),
         }
@@ -694,7 +735,7 @@ impl ScriptHost {
 
     /// Drop an instance's net registrations (env rebuild or instance death).
     fn drop_net_instance(&mut self, key: &(u32, String)) {
-        self.synced_stores.remove(key);
+        self.synced_stores.borrow_mut().remove(key);
         let mut hs = self.net.handlers.borrow_mut();
         hs.retain(|h| !(h.eid == key.0 && h.kind == key.1));
     }
@@ -731,6 +772,22 @@ impl ScriptHost {
     /// [`run`](Self::run), before stepping the sim.
     pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
         std::mem::take(&mut self.colliders.borrow_mut())
+    }
+
+    /// Feed this frame's dynamic-body hulls ([`Sim::body_hulls`] copies) so
+    /// `raycast(...)` can hit players/crates and name the node it hit. Copies,
+    /// not a loan — nothing to take back. Call next to [`Self::set_colliders`].
+    pub fn set_hulls(&self, hulls: Vec<floptle_physics::BodyHull>) {
+        *self.hulls.borrow_mut() = hulls;
+    }
+
+    /// Stage (or clear) the lag-compensation context for the RPC about to be
+    /// dispatched (`docs/netcode-design.md` §7): the rewound world as the
+    /// sender perceived it, precomputed by the driver from its history ring.
+    /// `net.rewind(peer, fn)` applies it for the duration of `fn`. Clear after
+    /// the dispatch — a stale scope must never leak into the next handler.
+    pub fn set_rewind(&self, scope: Option<crate::RewindScope>) {
+        *self.net.rewind.borrow_mut() = scope;
     }
 
     /// Set the player input for the frame's scripts (call before [`run`](Self::run)).

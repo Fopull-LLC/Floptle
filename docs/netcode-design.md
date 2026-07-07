@@ -401,8 +401,12 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   loopback, latency/loss sliders) so every later stage is one-click testable.
 - **2c — Prediction:** input commands, prediction ring, rewind-replay reconciliation, error
   smoothing; `third_person.lua` walks predicted with artificial 100 ms latency and feels local.
-- **2d — Combat netcode:** lag-comp history + `net.rewind`; tick-stamped intents; the parry
-  duel sample scene (two clients, induced asymmetric latency, parries judged fair).
+- **2d — Combat netcode** *(done)*: lag-comp history + `net.rewind` (poses AND `synced` vars
+  rewound together, ~250 ms clamp); tick-stamped intents (`{withInput = true}`); body-hull
+  raycasts with `hit.node` identity + caster self-exclusion (the missing substrate — rays
+  couldn't hit players before); the parry recipe testable solo in the 2c harness (swing at a
+  parrying dummy with the latency slider up). The two-client asymmetric-latency duel scene
+  waits for 2e's real transport — the judgment path it would exercise is in and unit-tested.
 - **2e — Transport & relay:** `QuicTransport`; `floptle-relay` + lobby codes; headless
   `floptle-runtime` server loop; interest management + byte budgets.
 - **2f — Polish & docs:** scripting.md §"Networking", EmmyLua stubs + `.luarc.json` global +

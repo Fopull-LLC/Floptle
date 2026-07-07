@@ -2299,6 +2299,11 @@ impl Editor {
                 self.script_host
                     .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
             }
+            // …and the dynamic bodies' hulls (copies), so rays can hit
+            // players/crates and identify the node (`hit.node`).
+            if let Some(sim) = self.sim.as_ref() {
+                self.script_host.set_hulls(sim.body_hulls(&self.world));
+            }
             // Lend the asset root (for `assets.getFile/getContents`) and the material
             // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
             self.script_host.set_project_root(self.project_root.clone());
@@ -2428,6 +2433,7 @@ impl Editor {
                             std::mem::take(&mut sim.world.colliders),
                             sim.world.origin,
                         );
+                        self.script_host.set_hulls(sim.body_hulls(&self.world));
                     }
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
