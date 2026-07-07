@@ -1028,6 +1028,8 @@ impl Editor {
             .net_predictor
             .as_ref()
             .map(|(_, p)| (p.corrections, p.confirmations, p.last_error));
+        let net_late_inputs =
+            self.net_hidden.as_ref().map(|h| h.session.late_inputs()).unwrap_or(0);
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1178,10 +1180,10 @@ impl Editor {
                                     0.0
                                 };
                                 ui.small(format!(
-                                    "reconciles: {conf} confirmed · {corr} corrected ({pct:.0}%) · last error {:.0} mm",
+                                    "reconciles: {conf} confirmed · {corr} corrected ({pct:.0}%) · last error {:.0} mm · late inputs {net_late_inputs}",
                                     last * 1000.0
                                 ))
-                                .on_hover_text("healthy prediction: corrections near 0% when idle/straight-line, small bursts while turning under latency. Constant high % = the sims disagree — report it");
+                                .on_hover_text("healthy prediction: corrections near 0%, late inputs near 0 (a brief burst right after dragging the latency slider is normal — the server pauses to refill the input pipeline). Constant growth = the sims disagree — report it");
                             }
                         } else {
                             match (net_hosting, net_has_client) {

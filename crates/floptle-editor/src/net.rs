@@ -26,10 +26,13 @@ pub(crate) struct HiddenServer {
     pub host: floptle_script::ScriptHost,
     /// The play-world client's peer id on this server.
     pub peer: floptle_net::PeerId,
-    /// Client tick − server tick: frozen at session start to
-    /// `latency_ticks + 1`, so inputs labeled T arrive before the server
-    /// simulates its tick T (the clock-skew margin).
-    pub offset: u64,
+    /// The next server tick to simulate. The server chases a target of
+    /// `client_tick − (latency + 1)` computed LIVE from the slider: raising
+    /// latency makes it pause while the input pipeline refills; lowering makes
+    /// it catch up — so inputs labeled T always arrive before the server
+    /// simulates tick T, and mid-session slider drags don't cause repeat-last
+    /// mispredictions (= jitter) on the owner. 0 = not yet started.
+    pub next_tick: u64,
 }
 
 impl Editor {
@@ -276,7 +279,6 @@ impl Editor {
         server.register_scene(&sworld);
         let mut client = NetSession::client(Box::new(hub.connect()));
         client.register_scene(&self.world);
-        let offset = self.net_latency_ticks + 1;
         // The client predicts ONLY its own node; every other replicated node is
         // snapshot-driven: skip its scripts, deactivate its body.
         let mut skip = std::collections::HashSet::new();
@@ -346,31 +348,50 @@ impl Editor {
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
-        self.net_hidden =
-            Some(HiddenServer { session: server, world: sworld, sim: ssim, host, peer: 1, offset });
+        self.net_hidden = Some(HiddenServer {
+            session: server,
+            world: sworld,
+            sim: ssim,
+            host,
+            peer: 1,
+            next_tick: 0,
+        });
         self.net_play_client = Some(client);
         self.net_hub = Some(hub);
         self.net_ghosts = true;
         self.console.push(
             floptle_script::LogLevel::Debug,
-            format!(
-                "🎮 you are now a REMOTE PLAYER: predicting locally against a hidden server \
-                 ({} tick skew). Orange ghosts = the server's truth.",
-                offset
-            ),
+            "🎮 you are now a REMOTE PLAYER: predicting locally against a hidden server \
+             (clock skew tracks the latency slider live). Orange ghosts = the server's truth."
+                .into(),
             None,
         );
     }
 
-    /// One hidden-server tick (runs `offset` ticks behind the client's clock):
-    /// consume the client's replayed input, run the full authoritative sim
-    /// (scripts + physics), snapshot back.
+    /// Run the hidden server up to its target tick (`client_tick − latency − 1`,
+    /// tracked LIVE from the slider): consume the client's replayed input, run
+    /// the full authoritative sim (scripts + physics), snapshot back. Raising
+    /// the latency slider pauses the server briefly (pipeline refill); lowering
+    /// it catches up (≤ 4 ticks per editor tick).
     fn net_hidden_tick(&mut self, client_tick: u64) {
-        let Some(hs) = self.net_hidden.as_mut() else { return };
-        if client_tick <= hs.offset {
-            return; // skew warm-up
+        let target = client_tick.saturating_sub(self.net_latency_ticks + 1);
+        for _ in 0..4 {
+            let Some(hs) = self.net_hidden.as_mut() else { return };
+            if hs.next_tick == 0 {
+                hs.next_tick = target.max(1); // first run: start at the skewed clock
+            }
+            if hs.next_tick > target {
+                return; // caught up (or pausing while the pipeline refills)
+            }
+            let st = hs.next_tick;
+            hs.next_tick += 1;
+            self.net_hidden_run_one(st);
         }
-        let st = client_tick - hs.offset;
+    }
+
+    /// One authoritative server tick at server-tick `st`.
+    fn net_hidden_run_one(&mut self, st: u64) {
+        let Some(hs) = self.net_hidden.as_mut() else { return };
         let step = self.game_tick.step;
         hs.session.pump_server(&hs.world, st);
         // The one-script model: the server's `input.*` IS the client's
