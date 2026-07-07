@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 4;
+pub const PROTO_VERSION: u16 = 5;
 
 /// One replicated entity's transform state in a snapshot. Position is absolute
 /// world f64 (floating-origin safe); rotation a quaternion; velocity/grounded
@@ -95,6 +95,14 @@ pub enum Msg {
     PeerLeft { peer: PeerId },
     /// Either direction: clean goodbye.
     Bye,
+    /// Server → one client, periodically: input-timing feedback. `margin` is
+    /// the smoothed number of ticks of that client's input still buffered
+    /// ahead when the server consumes one (negative = arriving LATE,
+    /// repeat-last in use — mispredictions on the owner); `late` is the
+    /// running repeat-last count for that peer. The client auto-tunes its
+    /// input lead from this, so clock hitches and drift self-heal instead of
+    /// turning into permanent correction storms (`docs/netcode-design.md` §6).
+    InputAck { margin: i32, late: u64 },
 }
 
 impl Msg {

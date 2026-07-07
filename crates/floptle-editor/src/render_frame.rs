@@ -1034,6 +1034,9 @@ impl Editor {
             .map(|h| h.session.late_inputs())
             .or_else(|| self.net_server.as_ref().map(|s| s.late_inputs()))
             .unwrap_or(0);
+        // Client-side input timing, from the server's InputAck feedback —
+        // the only place a JOINER can see whether its inputs run late.
+        let net_input_ack = self.net_play_client.as_ref().and_then(|c| c.input_ack());
         // A REAL session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -1365,7 +1368,12 @@ impl Editor {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             let kind = if net_is_real { "net" } else { "sim" };
                             let mut line = if net_as_player {
-                                format!("🌐 client ({kind}) · rtt {net_rtt:.0} ms")
+                                let timing = net_input_ack
+                                    .map(|(margin, late)| {
+                                        format!(" · input margin {margin:+} · late in {late}")
+                                    })
+                                    .unwrap_or_default();
+                                format!("🌐 client ({kind}) · rtt {net_rtt:.0} ms{timing}")
                             } else {
                                 format!(
                                     "🌐 host ({kind}) · {net_peer_count} peer(s) · late in {net_late_inputs}"

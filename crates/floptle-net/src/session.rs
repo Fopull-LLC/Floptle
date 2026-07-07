@@ -103,6 +103,9 @@ const SNAPSHOT_EVERY: u8 = 2;
 /// A keyframe (full state) every N snapshots — heals unreliable-channel loss.
 const KEYFRAME_EVERY: u32 = 30;
 
+/// Ticks between per-peer [`Msg::InputAck`] sends (4 Hz at the 60 Hz tick).
+const INPUT_ACK_EVERY: u64 = 15;
+
 pub struct NetSession {
     role: NetRole,
     transport: Box<dyn Transport>,
@@ -132,6 +135,12 @@ pub struct NetSession {
     /// Per-peer last input actually used — the repeat-last fallback when a
     /// tick's command hasn't arrived (late/lost).
     last_input: HashMap<PeerId, NetInput>,
+    /// Per-peer input-buffer margin, EWMA over [`Self::input_for`] calls:
+    /// newest buffered stamp − the tick being consumed. Shipped back in
+    /// [`Msg::InputAck`] so the owner can auto-tune its lead.
+    peer_margin: HashMap<PeerId, f32>,
+    /// Per-peer repeat-last count (the per-peer breakdown of `late_inputs`).
+    peer_late: HashMap<PeerId, u64>,
     // --- client ---
     connected: bool,
     /// Our peer id, from `Welcome` (None until connected).
@@ -146,6 +155,21 @@ pub struct NetSession {
     /// link's RTT is known; authoritative states translate back via
     /// [`Self::input_stamp_offset`].
     stamp_offset: i64,
+    /// Auto-tune the stamp offset from [`Msg::InputAck`] margins (real links
+    /// only — the in-editor harness shares one clock and must stay at 0).
+    auto_lead: bool,
+    /// Recent (stamp, local tick) pairs from [`Self::send_input`] — the exact
+    /// translation reconcile needs, valid even across auto-lead nudges (the
+    /// arithmetic `− stamp_offset` is only right for the CURRENT offset).
+    sent_stamps: VecDeque<(u64, u64)>,
+    /// The local tick of the newest [`Self::send_input`] (auto-tune cooldown).
+    last_local_tick: u64,
+    /// Local tick of the last auto-lead nudge.
+    last_lead_change: u64,
+    /// Latest [`Msg::InputAck`] payload from the server, if any.
+    ack: Option<(i32, u64)>,
+    /// Auto-lead adjustments since the last drain: (new offset, margin seen).
+    lead_events: Vec<(i64, i32)>,
     interp: HashMap<u64, InterpBuf>,
     latest_server_tick: u64,
     /// Outgoing input window (last few ticks, resent redundantly).
@@ -197,10 +221,18 @@ impl NetSession {
             late_inputs: 0,
             peer_inputs: HashMap::new(),
             last_input: HashMap::new(),
+            peer_margin: HashMap::new(),
+            peer_late: HashMap::new(),
             connected: false,
             my_peer: None,
             welcome_tick: None,
             stamp_offset: 0,
+            auto_lead: false,
+            sent_stamps: VecDeque::new(),
+            last_local_tick: 0,
+            last_lead_change: 0,
+            ack: None,
+            lead_events: Vec::new(),
             interp: HashMap::new(),
             latest_server_tick: 0,
             input_window: VecDeque::new(),
@@ -349,11 +381,71 @@ impl NetSession {
         self.stamp_offset
     }
 
+    /// Client: let the session retune its own input lead from the server's
+    /// [`Msg::InputAck`] margins. Real links only — the in-editor harness
+    /// shares one clock with its hidden server and must stay at offset 0.
+    pub fn set_auto_input_lead(&mut self, on: bool) {
+        self.auto_lead = on;
+    }
+
+    /// Client: the exact local tick whose input the server consumed at
+    /// `stamp` (from the recent-sends map — see [`Self::send_input`]).
+    /// Oldest match wins: after a −1 nudge two locals carry the same stamp
+    /// and the server's monotonic ingest kept the FIRST.
+    pub fn local_tick_for_stamp(&self, stamp: u64) -> Option<u64> {
+        self.sent_stamps.iter().find(|(s, _)| *s == stamp).map(|(_, t)| *t)
+    }
+
+    /// Client: the latest server-reported input margin (ticks of runway our
+    /// inputs have when consumed; negative = arriving late) and the server's
+    /// repeat-last count for us. `None` until the first ack lands.
+    pub fn input_ack(&self) -> Option<(i32, u64)> {
+        self.ack
+    }
+
+    /// Auto-lead adjustments since the last drain: (ticks added to the lead —
+    /// negative trims it, margin seen). The driver surfaces them (console).
+    pub fn take_lead_events(&mut self) -> Vec<(i64, i32)> {
+        std::mem::take(&mut self.lead_events)
+    }
+
+    /// One auto-lead step, if due: keep the server-side margin inside [1, 6].
+    /// Too little runway → raise the lead fast (late inputs are misprediction
+    /// storms); too much → shave one tick at a time (extra lead is only added
+    /// latency). Cooldown one second so the server's EWMA can settle between
+    /// nudges. A +N nudge skips N stamps (the server repeats-last once); a −1
+    /// nudge duplicates one stamp (the server's monotonic ingest drops it) —
+    /// both self-heal through the redundant input window.
+    fn auto_tune_lead(&mut self) {
+        let Some((margin, _)) = self.ack else { return };
+        if !self.auto_lead || self.last_local_tick.saturating_sub(self.last_lead_change) < 60 {
+            return;
+        }
+        let delta: i64 = match margin {
+            m if m < 1 => i64::from(1 - m).min(10),
+            m if m > 6 => -1,
+            _ => 0,
+        };
+        if delta != 0 {
+            self.stamp_offset += delta;
+            self.last_lead_change = self.last_local_tick;
+            self.lead_events.push((delta, margin));
+        }
+    }
+
     /// Client: queue this tick's input for the server (sent with the last few
     /// ticks as a redundant window on the next [`Self::tick_client`]). `tick`
     /// is LOCAL; the stamp offset translates it to the server's clock.
     pub fn send_input(&mut self, tick: u64, input: NetInput) {
         let stamped = (tick as i64 + self.stamp_offset).max(0) as u64;
+        self.last_local_tick = tick;
+        // Remember the exact stamp→local pairing: reconcile translates the
+        // server's authoritative tick back through THIS map, so auto-lead
+        // nudges (which change the offset mid-flight) can't skew it.
+        self.sent_stamps.push_back((stamped, tick));
+        while self.sent_stamps.len() > 128 {
+            self.sent_stamps.pop_front();
+        }
         self.input_window.push_back(InputCmd { tick: stamped, input });
         while self.input_window.len() > INPUT_WINDOW {
             self.input_window.pop_front();
@@ -366,6 +458,13 @@ impl NetSession {
     /// error on the owner, which is the standard, honest tradeoff).
     pub fn input_for(&mut self, peer: PeerId, tick: u64) -> NetInput {
         let buf = self.peer_inputs.entry(peer).or_default();
+        // Timing margin BEFORE consuming: how many ticks of runway the newest
+        // buffered stamp still has past this tick. Negative = this peer's
+        // inputs run late. Smoothed (EWMA) and shipped back via `InputAck` so
+        // the owner can retune its lead.
+        let now = buf.back().map(|c| c.tick as i64 - tick as i64).unwrap_or(-1) as f32;
+        let m = self.peer_margin.entry(peer).or_insert(now);
+        *m += 0.1 * (now - *m);
         // Drop stale ticks; adopt an exact match if present.
         while buf.front().is_some_and(|c| c.tick < tick) {
             let old = buf.pop_front().unwrap();
@@ -376,6 +475,7 @@ impl NetSession {
             return cmd.input;
         }
         self.late_inputs += 1;
+        *self.peer_late.entry(peer).or_default() += 1;
         self.last_input.get(&peer).cloned().unwrap_or_default()
     }
 
@@ -500,6 +600,17 @@ impl NetSession {
                 }
             }
         }
+        // Input-timing feedback, a few times a second: each peer learns how
+        // much runway its inputs have (auto-lead reads this client-side).
+        if !self.peers.is_empty() && tick.is_multiple_of(INPUT_ACK_EVERY) {
+            for i in 0..self.peers.len() {
+                let p = self.peers[i];
+                let margin = self.peer_margin.get(&p).map(|m| m.round() as i32).unwrap_or(0);
+                let late = self.peer_late.get(&p).copied().unwrap_or(0);
+                let ack = Msg::InputAck { margin, late }.encode();
+                self.transport.send(p, Channel::UnreliableSequenced, &ack);
+            }
+        }
         if self.peers.is_empty() || !tick.is_multiple_of(SNAPSHOT_EVERY as u64) {
             return;
         }
@@ -582,6 +693,10 @@ impl NetSession {
     fn drop_peer(&mut self, p: PeerId) {
         if let Some(i) = self.peers.iter().position(|&x| x == p) {
             self.peers.remove(i);
+            self.peer_inputs.remove(&p);
+            self.last_input.remove(&p);
+            self.peer_margin.remove(&p);
+            self.peer_late.remove(&p);
             self.events.push(NetEvent::PeerLeft(p));
             let left = Msg::PeerLeft { peer: p }.encode();
             for &q in &self.peers {
@@ -694,6 +809,10 @@ impl NetSession {
             let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */, tick: stamp };
             self.transport.send(SERVER, Channel::Reliable, &msg.encode());
         }
+        // Retune the input lead from the server's latest margin feedback
+        // (window entries are already stamped — a nudge takes effect on the
+        // next `send_input`).
+        self.auto_tune_lead();
         // Ship the input window (this tick + the last few, redundantly).
         if self.connected && !self.input_window.is_empty() {
             let msg = Msg::Input { entries: self.input_window.iter().cloned().collect() };
@@ -789,6 +908,7 @@ impl NetSession {
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
             Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer)),
+            Msg::InputAck { margin, late } => self.ack = Some((margin, late)),
             Msg::Bye => {
                 self.connected = false;
                 self.events.push(NetEvent::Disconnected("server said bye".into()));

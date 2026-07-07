@@ -426,6 +426,13 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   is end-to-end so interleaved per-peer traffic can't false-drop, and lobbies die with their
   host. `net.host{relay=…}` / the 🌐 panel (code display + copy). Editor host sessions also
   gained the net-stats overlay + real-host body-state/lag-comp parity with the harness.
+  Input timing self-heals on real links: replay advances the render anchor (`tick_prev`) so
+  corrections stop rendering a backward blip scaled by rtt, the server ships per-peer
+  `InputAck` margins (how many ticks of runway a client's inputs have — negative = late,
+  repeat-last in use) and the client auto-tunes its input lead from them (the Welcome-time
+  RTT is only the first guess; hitches and drift retune within ~1 s). Reconcile translates
+  server ticks back through the exact stamp→local map, so lead nudges can't skew it. The
+  client overlay shows its own margin + late count — a joiner can finally SEE its timing.
   Still to come: headless `floptle-runtime` server loop; interest management + byte budgets;
   spawn support in the local harness; per-player RTT through the relay.
 - **2f — Polish & docs:** scripting.md §"Networking", EmmyLua stubs + `.luarc.json` global +
