@@ -1282,14 +1282,25 @@ impl ScriptHost {
                 f.call::<()>((node.clone(), dt as f64))?;
             }
         }
-        // Read back the (possibly script-modified) velocity + height for a physics body.
+        // Read back the velocity + height for a physics body — but only when
+        // THIS script actually changed them from the seeded values. The node
+        // table was seeded from the body's pre-hook state (f32→f64→f32 is
+        // exact, so untouched fields compare bit-equal); writing back
+        // unconditionally would let a second script on the same node clobber
+        // an earlier script's writes with the stale seed (e.g. a weapon
+        // script silently canceling the movement controller every frame).
         if let Some(b) = body {
             let vx: f64 = node.get("vx").unwrap_or(0.0);
             let vy: f64 = node.get("vy").unwrap_or(0.0);
             let vz: f64 = node.get("vz").unwrap_or(0.0);
-            self.body_changes.borrow_mut().insert(eid, [vx as f32, vy as f32, vz as f32]);
+            let vel = [vx as f32, vy as f32, vz as f32];
+            if vel != b.vel {
+                self.body_changes.borrow_mut().insert(eid, vel);
+            }
             let h: f64 = node.get("height").unwrap_or(b.height as f64);
-            self.body_height_changes.borrow_mut().insert(eid, h as f32);
+            if h as f32 != b.height {
+                self.body_height_changes.borrow_mut().insert(eid, h as f32);
+            }
         }
         apply_node(&node, tr, &pre)
     }
