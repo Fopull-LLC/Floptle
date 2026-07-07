@@ -41,14 +41,20 @@ const RING_CAP: usize = 128;
 /// this count as "prediction confirmed" (f32 physics wobble, not divergence).
 pub const DEFAULT_EPSILON: f64 = 1e-3;
 
+/// Corrections larger than this (metres) SNAP instead of smoothing — gliding
+/// the character several metres reads worse than one honest cut (and usually
+/// means a teleport/major desync, where smoothing lies about position).
+pub const SNAP_LIMIT: f64 = 3.0;
+
 pub struct Predictor {
     /// (tick, the input that produced it, the state at END of that tick).
     ring: VecDeque<(u64, NetInput, PredictedState)>,
     /// Rendered-position error introduced by the last correction (world
     /// metres), decayed toward zero each tick and ADDED to the rendered
-    /// transform so the correction is smoothed over ~100 ms.
+    /// transform so the correction is smoothed instead of snapping.
     pub error_offset: [f64; 3],
-    /// Per-tick decay factor for `error_offset` (0.7 ≈ gone in ~6 ticks).
+    /// Per-tick decay factor for `error_offset` (0.85 ≈ 86% absorbed in
+    /// ~200 ms — big enough corrections read as a firm glide, not a pop).
     pub error_decay: f64,
     /// Diagnostics: how many reconciles diverged (needed a replay), how many
     /// confirmed, and the last divergence distance in metres — the harness
@@ -69,7 +75,7 @@ impl Predictor {
         Self {
             ring: VecDeque::new(),
             error_offset: [0.0; 3],
-            error_decay: 0.7,
+            error_decay: 0.85,
             corrections: 0,
             confirmations: 0,
             last_error: 0.0,
@@ -128,10 +134,15 @@ impl Predictor {
         self.corrections += 1;
         self.last_error = dist2.sqrt();
         // The renderer was showing the (wrong) predicted trajectory; keep the
-        // visual difference as an offset to decay, so the correction is smooth.
-        self.error_offset[0] += d[0];
-        self.error_offset[1] += d[1];
-        self.error_offset[2] += d[2];
+        // visual difference as an offset to decay, so the correction is smooth
+        // — unless it's huge (a teleport/major desync): then snap honestly.
+        if self.last_error <= SNAP_LIMIT {
+            self.error_offset[0] += d[0];
+            self.error_offset[1] += d[1];
+            self.error_offset[2] += d[2];
+        } else {
+            self.error_offset = [0.0; 3];
+        }
         Some(self.ring.iter().map(|(t, i, _)| (*t, i.clone())).collect())
     }
 
@@ -202,10 +213,21 @@ mod tests {
     fn error_offset_decays_to_zero() {
         let mut p = Predictor::new();
         p.error_offset = [3.0, 0.0, -1.5];
-        for _ in 0..40 {
+        for _ in 0..120 {
             p.decay_error();
         }
         assert_eq!(p.error_offset, [0.0; 3], "offset must fully decay (snap-to-zero floor)");
+    }
+
+    #[test]
+    fn huge_corrections_snap_instead_of_gliding() {
+        let mut p = Predictor::new();
+        p.record(1, input("w"), state(100.0));
+        // Server says we're actually at 0 — a 100 m desync: snap (no offset).
+        let replay = p.reconcile(1, &state(0.0), DEFAULT_EPSILON);
+        assert!(replay.is_some());
+        assert_eq!(p.error_offset, [0.0; 3], "beyond SNAP_LIMIT must not glide");
+        assert!((p.last_error - 100.0).abs() < 1e-9);
     }
 
     #[test]
