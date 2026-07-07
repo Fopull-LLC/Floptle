@@ -1840,7 +1840,7 @@ pub(crate) const LUA_KEYWORDS: &[&str] = &[
 pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
-    "raycast", "find", "findAll", "findScript", "findScriptInScene", "assets", "gizmo",
+    "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "assets", "gizmo",
     "net", "synced", "replicated", "onRpc",
 ];
 
@@ -1881,7 +1881,7 @@ fn api_category(label: &str) -> &'static str {
         "animation — node:animator"
     } else if label.starts_with("math") || label.starts_with("string") {
         "lua stdlib"
-    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "raycast") {
+    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "findScripts" | "raycast") {
         "scene lookups & raycast"
     } else {
         "script basics — lifecycle, params, log"
@@ -1917,6 +1917,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "net.on", insert: "net.on(\"playerJoined\", function(peer) end)", doc: "net.on(event, fn) — session events: playerJoined/playerLeft (peer id), connected, disconnected (reason)." },
     ApiEntry { label: "net.spawn", insert: "net.spawn(\"scenes/thing.ron\", { x = 0, y = 0, z = 0 })", doc: "SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a replicated runtime object on every client (available next tick)." },
     ApiEntry { label: "net.despawn", insert: "net.despawn(node)", doc: "SERVER ONLY: net.despawn(node) — remove a replicated runtime object everywhere." },
+    ApiEntry { label: "net.isMine", insert: "net.isMine(node)", doc: "net.isMine(node) — is this node under MY control on this machine? Offline/non-networked → true; server → true unless a remote peer owns it; client → only your own predicted node(s). Cameras/HUDs use it to pick the local player out of many avatars (pair with findScripts)." },
     ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
     ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
     ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
@@ -1972,6 +1973,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "findAll", insert: "findAll(", doc: "findAll(\"Coin\") — an array of every node with that name." },
     ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state." },
     ApiEntry { label: "findScriptInScene", insert: "findScriptInScene(", doc: "Alias of findScript(kind)." },
+    ApiEntry { label: "findScripts", insert: "findScripts(", doc: "findScripts(kind) — EVERY node carrying that script, as script handles in scene order. Pair with net.isMine to pick the local player out of many avatars: for _, s in ipairs(findScripts(\"third_person\")) do if net.isMine(s.node) then ... end end" },
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },

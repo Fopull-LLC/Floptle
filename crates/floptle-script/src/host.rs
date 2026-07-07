@@ -585,6 +585,12 @@ impl ScriptHost {
         *self.net.state.borrow_mut() = state;
     }
 
+    /// Mirror networked nodes' owners in (entity index → `Replicated::owner`)
+    /// for `net.isMine(node)`. Feed each tick during a session; empty offline.
+    pub fn set_net_owners(&self, owners: HashMap<u32, Option<u64>>) {
+        *self.net.owners.borrow_mut() = owners;
+    }
+
     /// Dispatch a received RPC to every script defining `onRpc.<name>` —
     /// `function onRpc.explode(args, sender) ... end`. Mirrors the animation
     /// clip-event dispatch; transform writes flush after the handlers.

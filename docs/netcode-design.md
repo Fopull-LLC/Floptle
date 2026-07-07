@@ -411,7 +411,9 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   reliable = framed uni streams, unreliable = tagged datagrams w/ receiver-side sequencing +
   over-MTU reliable fallback; dev-trust self-signed TLS; editor `net.host{port}` /
   `net.join("quic://…")` with per-owner input routing on the host + client input-clock sync
-  (welcome tick + RTT lead). v1 convention: scene-authored Predicted nodes belong to peer 1.)*
+  (welcome tick + RTT lead). Multi-slot ownership: scene Predicted nodes in node order — #1
+  the host's, #2+ joiners'; the client binds its avatar when the Welcome names its peer id.
+  `net.isMine(node)` + `findScripts(kind)` let shared cameras/HUDs pick the local player.)*
   Still to come: `floptle-relay` + lobby codes; headless `floptle-runtime` server loop;
   per-player avatar spawning w/ dynamic client-side predictor binding; interest management +
   byte budgets.
