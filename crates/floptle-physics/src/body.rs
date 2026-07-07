@@ -48,6 +48,11 @@ pub struct Body {
     /// The position restored on locked axes: captured at spawn, re-captured per
     /// axis at the moment its lock engages (so locking mid-play freezes in place).
     pub(crate) home: Vec3,
+    /// Inactive bodies are skipped by the step AND the transform writeback —
+    /// a networked CLIENT deactivates server-authoritative bodies so local
+    /// physics never fights the interpolated snapshots driving their
+    /// transforms (`docs/netcode-design.md` §6). Default true.
+    pub active: bool,
 }
 
 impl Body {
@@ -66,6 +71,7 @@ impl Body {
             grounded: false,
             contact: None,
             home: pos,
+            active: true,
         }
     }
 

@@ -220,6 +220,9 @@ impl Sim {
         let alpha = alpha.clamp(0.0, 1.0);
         for link in &self.map {
             let b = &self.world.bodies[link.body];
+            if !b.active {
+                continue; // snapshot-driven: interpolation owns its transform
+            }
             let from = self.tick_prev.get(link.body).copied().unwrap_or(b.prev_pos);
             let p = from.lerp(b.pos, alpha);
             self.write_one_transform(ecs, link, p);
@@ -283,6 +286,18 @@ impl Sim {
             let b = &self.world.bodies[l.body];
             (l.entity, b.vel, b.up, b.grounded, b.height())
         })
+    }
+
+    /// Activate/deactivate a body by entity index. Inactive bodies neither
+    /// step nor write back transforms — a networked client deactivates
+    /// server-authoritative bodies so snapshots own their transforms.
+    pub fn set_body_active(&mut self, eid: u32, active: bool) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                self.world.bodies[l.body].active = active;
+                return;
+            }
+        }
     }
 
     /// Set a body's velocity by its entity index (scripts write velocity each frame).
@@ -363,6 +378,9 @@ impl Sim {
     fn writeback_transforms(&self, ecs: &mut World, alpha: f32) {
         for link in &self.map {
             let b = &self.world.bodies[link.body];
+            if !b.active {
+                continue;
+            }
             let p = b.prev_pos.lerp(b.pos, alpha);
             self.write_one_transform(ecs, link, p);
         }

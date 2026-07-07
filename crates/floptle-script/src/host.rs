@@ -444,6 +444,7 @@ impl ScriptHost {
             net,
             synced_stores: HashMap::new(),
             synced_warned: std::collections::HashSet::new(),
+            script_skip: std::collections::HashSet::new(),
         }
     }
 
@@ -861,10 +862,35 @@ impl ScriptHost {
         self.flush_writes(world);
     }
 
+    /// Run ONE entity's `fixedUpdate` for one tick — the prediction-replay
+    /// driver (`docs/netcode-design.md` §6): after a correction, the owner's
+    /// controller re-runs its buffered inputs off the server state, touching
+    /// only the predicted node's scripts.
+    pub fn run_fixed_for(&mut self, world: &mut World, eid: u32, dt: f32, time: f32) {
+        self.sync_scene(world);
+        let work: Vec<(Entity, Scripts)> = world
+            .query::<Scripts>()
+            .filter(|(e, _)| e.index() == eid)
+            .map(|(e, s)| (e, s.clone()))
+            .collect();
+        self.run_pass(world, &work, dt, time, true);
+        self.flush_writes(world);
+    }
+
+    /// Skip these entities' scripts in every pass — a networked CLIENT doesn't
+    /// run server-authoritative nodes' scripts (their state arrives in
+    /// snapshots). Pass an empty set to clear (Stop / role change).
+    pub fn set_script_filter(&mut self, skip: std::collections::HashSet<u32>) {
+        self.script_skip = skip;
+    }
+
     /// One lifecycle pass over `work`: the per-frame pass (`start`/`update`) or the
     /// per-tick pass (`fixedUpdate`), with the same self-move write-back rules.
     fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, fixed: bool) {
         for (e, scripts) in work {
+            if self.script_skip.contains(&e.index()) {
+                continue; // networked: this node's state arrives in snapshots
+            }
             let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
             let tr0 = tr; // pass-start, to detect a self-move via the `node` argument
             let mut ran = false;

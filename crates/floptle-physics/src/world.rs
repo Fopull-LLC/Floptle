@@ -186,6 +186,9 @@ impl PhysicsWorld {
     /// approximate). Does NOT clear `contacts`; the frame driver owns that.
     pub fn step_body(&mut self, bi: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
+        if !self.bodies[bi].active {
+            return; // snapshot-driven (networked authority on a client)
+        }
         {
             self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.

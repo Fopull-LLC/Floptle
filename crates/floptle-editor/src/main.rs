@@ -111,6 +111,7 @@ struct EditorCmd {
     /// Multiplayer harness intents (the 🌐 panel).
     net_host_local: bool,
     net_join_local: bool,
+    net_play_as_client: bool,
     net_stop_session: bool,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
@@ -885,6 +886,15 @@ struct Editor {
     /// Draw the ghost client's replicated positions as cyan gizmo spheres.
     net_ghosts: bool,
     show_net_panel: bool,
+    /// "Test as remote player" (2c): the play world's CLIENT session (the play
+    /// world predicts) + the hidden authoritative server behind the link.
+    net_play_client: Option<floptle_net::NetSession>,
+    net_hidden: Option<net::HiddenServer>,
+    /// The play world's predicted node + its rewind-replay bookkeeping.
+    net_predictor: Option<(Entity, floptle_net::Predictor)>,
+    /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
+    /// prediction can record + ship exactly what the scripts saw.
+    last_tick_input: floptle_script::InputSnapshot,
     /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
     /// free-look. While set, the RMB-release handler won't release the grab, and Stop
     /// releases it. Reset when play ends.
