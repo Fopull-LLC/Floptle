@@ -1028,8 +1028,24 @@ impl Editor {
             .net_predictor
             .as_ref()
             .map(|(_, p)| (p.corrections, p.confirmations, p.last_error));
-        let net_late_inputs =
-            self.net_hidden.as_ref().map(|h| h.session.late_inputs()).unwrap_or(0);
+        let net_late_inputs = self
+            .net_hidden
+            .as_ref()
+            .map(|h| h.session.late_inputs())
+            .or_else(|| self.net_server.as_ref().map(|s| s.late_inputs()))
+            .unwrap_or(0);
+        // A REAL session (QUIC) has no hub: the link is the actual network, so
+        // the simulated latency/loss sliders and ghost worlds don't apply.
+        let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
+            && self.net_hub.is_none();
+        if self.net_host_port.is_empty() {
+            self.net_host_port = "7777".into();
+        }
+        if self.net_join_addr.is_empty() {
+            self.net_join_addr = "quic://127.0.0.1:7777".into();
+        }
+        let net_host_port = &mut self.net_host_port;
+        let net_join_addr = &mut self.net_join_addr;
         let show_net_panel = &mut self.show_net_panel;
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1147,16 +1163,16 @@ impl Editor {
             // ---- 🌐 multiplayer harness (Host & Join locally) ----
             if *show_net_panel {
                 let mut open = true;
-                egui::Window::new("🌐 Multiplayer (local test)")
+                egui::Window::new("🌐 Multiplayer")
                     .open(&mut open)
                     .default_width(280.0)
                     .show(ui, |ui| {
                         if !playing {
-                            ui.label("Enter Play mode, then host a local session here.");
+                            ui.label("Enter Play mode, then host or join a session here.");
                             ui.small(
-                                "The play world becomes the SERVER; a hidden ghost client \
-                                 joins over a simulated link — cyan ghosts show exactly what \
-                                 a remote player would see.",
+                                "Test alone (a hidden ghost client over a simulated link), \
+                                 or for real: host on a UDP port and a friend with this \
+                                 project joins over the network.",
                             );
                             return;
                         }
@@ -1188,6 +1204,7 @@ impl Editor {
                         } else {
                             match (net_hosting, net_has_client) {
                                 (false, _) => {
+                                    ui.label("Test alone (simulated link)");
                                     if ui.button("⏵ Host + join a local client").clicked() {
                                         cmd.net_host_local = true;
                                         cmd.net_join_local = true;
@@ -1199,39 +1216,74 @@ impl Editor {
                                     {
                                         cmd.net_play_as_client = true;
                                     }
-                                    ui.small("or call net.host{} from a script");
+                                    ui.separator();
+                                    ui.label("Real network (LAN)");
+                                    ui.horizontal(|ui| {
+                                        ui.label("port");
+                                        ui.add(
+                                            egui::TextEdit::singleline(net_host_port)
+                                                .desired_width(60.0),
+                                        );
+                                        if ui.button("⏵ Host on LAN").clicked() {
+                                            cmd.net_host_quic =
+                                                Some(net_host_port.trim().parse().unwrap_or(7777));
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(net_join_addr)
+                                                .desired_width(170.0),
+                                        );
+                                        if ui.button("⏵ Join").clicked() {
+                                            cmd.net_join_quic = Some(net_join_addr.clone());
+                                        }
+                                    });
+                                    ui.small(
+                                        "both machines run THIS project. Scene-authored \
+                                         Predicted nodes belong to the FIRST joiner; spawn \
+                                         per-player avatars with net.spawn. Or from a script: \
+                                         net.host{port=7777} / net.join(\"quic://ip:port\")",
+                                    );
                                 }
-                                (true, false) => {
+                                (true, false) if !net_is_real => {
                                     ui.label("hosting · 0 ghost clients");
                                     if ui.button("➕ Join a local ghost client").clicked() {
                                         cmd.net_join_local = true;
                                     }
                                 }
-                                (true, true) => {
+                                _ => {
                                     ui.label(format!(
                                         "hosting · {net_peer_count} client(s) connected"
                                     ));
+                                    if net_is_real && net_peer_count > 0 {
+                                        ui.small(format!("late inputs {net_late_inputs} — near zero is healthy"));
+                                    }
                                 }
                             }
                         }
                         if net_hosting || net_as_player {
                             ui.separator();
-                            ui.label("simulated link");
-                            let mut lat = *net_latency_ticks as i32;
-                            if ui
-                                .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
-                                .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
-                                .changed()
-                            {
-                                *net_latency_ticks = lat as u64;
+                            if net_is_real {
+                                ui.label("real link (QUIC)");
+                                ui.small("latency and loss are whatever the network gives you — the sliders only shape the simulated harness");
+                            } else {
+                                ui.label("simulated link");
+                                let mut lat = *net_latency_ticks as i32;
+                                if ui
+                                    .add(egui::Slider::new(&mut lat, 0..=30).text("latency (ticks)"))
+                                    .on_hover_text("one-way, in gameplay ticks — 6 ticks ≈ 100 ms round trip")
+                                    .changed()
+                                {
+                                    *net_latency_ticks = lat as u64;
+                                }
+                                ui.add(
+                                    egui::Slider::new(net_loss, 0.0..=0.9)
+                                        .text("packet loss")
+                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                                );
+                                ui.checkbox(net_ghosts, "show client ghosts (cyan)")
+                                    .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
                             }
-                            ui.add(
-                                egui::Slider::new(net_loss, 0.0..=0.9)
-                                    .text("packet loss")
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
-                            ui.checkbox(net_ghosts, "show client ghosts (cyan)")
-                                .on_hover_text("where the ghost client believes every networked node is — the gap to the real object is the interp delay");
                             ui.separator();
                             if ui.button("⏹ End session").clicked() {
                                 cmd.net_stop_session = true;
@@ -2437,6 +2489,36 @@ impl Editor {
                     }
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
+                    // Real hosting: each REMOTE player's Predicted node runs
+                    // with ITS OWNER's replayed input for this tick — the
+                    // one-script model (§6), server side. Those nodes are
+                    // filtered out of the global passes; run_*_for bypasses
+                    // the filters. The host's own input is restored after.
+                    if !self.net_remote_predicted.is_empty() && self.net_server.is_some() {
+                        if let Some(s) = self.net_server.as_mut() {
+                            // Tick-start pump so this tick's freshest client
+                            // inputs are in the buffer before scripts consume.
+                            s.pump_server(&self.world, self.game_tick_no);
+                        }
+                        for (e, owner) in self.net_remote_predicted.clone() {
+                            let Some(s) = self.net_server.as_mut() else { break };
+                            let inp = s.input_for(owner, self.game_tick_no);
+                            self.script_host.set_input(floptle_script::net_to_input(&inp));
+                            self.script_host.run_frame_for(
+                                &mut self.world,
+                                e.index(),
+                                self.game_tick.step,
+                                tick_time,
+                            );
+                            self.script_host.run_fixed_for(
+                                &mut self.world,
+                                e.index(),
+                                self.game_tick.step,
+                                tick_time,
+                            );
+                        }
+                        self.script_host.set_input(self.last_tick_input.clone());
+                    }
                     // A predicted node's `update` rides the tick clock (its
                     // frame pass is filtered) so client + server integrate the
                     // same controller identically — see net.rs.
@@ -2709,6 +2791,13 @@ impl Editor {
         }
         if cmd.net_stop_session {
             self.net_stop("panel");
+        }
+        if let Some(port) = cmd.net_host_quic {
+            self.net_host_quic(port);
+        }
+        if let Some(addr) = cmd.net_join_quic {
+            let a = addr.trim().trim_start_matches("quic://").to_string();
+            self.net_join_quic(&a);
         }
         if cmd.toggle_pause {
             self.toggle_pause();

@@ -16,8 +16,11 @@ use crate::{LogLevel, ScriptLog};
 /// A queued session command from Lua, drained by the editor each tick.
 #[derive(Clone, Debug)]
 pub enum NetCmd {
-    /// `net.host{ maxPlayers = n }` — become the authoritative host.
-    Host { max_players: u32 },
+    /// `net.host{ maxPlayers = n, port = p }` — become the authoritative host.
+    /// With a `port`, host a REAL session on UDP (QUIC) that other machines
+    /// join with `net.join("quic://ip:port")`; without one, the in-editor
+    /// loopback harness.
+    Host { max_players: u32, port: Option<u16> },
     /// `net.join(addr)` — join a session (2b: `local://` only; real transports 2e).
     Join { addr: String },
     /// `net.leave()` — tear the session down.
@@ -224,10 +227,13 @@ pub(crate) fn install_net_api(
         t.set(
             "host",
             lua.create_function(move |_, opts: Option<Table>| {
-                let max_players = opts
-                    .and_then(|o| o.get::<Option<u32>>("maxPlayers").ok().flatten())
-                    .unwrap_or(16);
-                n.cmds.borrow_mut().push(NetCmd::Host { max_players });
+                let (mut max_players, mut port) = (16, None);
+                if let Some(o) = opts {
+                    max_players =
+                        o.get::<Option<u32>>("maxPlayers").ok().flatten().unwrap_or(16);
+                    port = o.get::<Option<u16>>("port").ok().flatten();
+                }
+                n.cmds.borrow_mut().push(NetCmd::Host { max_players, port });
                 Ok(())
             })?,
         )?;

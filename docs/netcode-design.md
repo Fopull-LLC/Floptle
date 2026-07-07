@@ -407,8 +407,14 @@ Small headless Rust binary (workspace crate, MIT/Apache like the engine):
   couldn't hit players before); the parry recipe testable solo in the 2c harness (swing at a
   parrying dummy with the latency slider up). The two-client asymmetric-latency duel scene
   waits for 2e's real transport — the judgment path it would exercise is in and unit-tested.
-- **2e — Transport & relay:** `QuicTransport`; `floptle-relay` + lobby codes; headless
-  `floptle-runtime` server loop; interest management + byte budgets.
+- **2e — Transport & relay:** ~~`QuicTransport`~~ *(done: quinn behind the Transport seam —
+  reliable = framed uni streams, unreliable = tagged datagrams w/ receiver-side sequencing +
+  over-MTU reliable fallback; dev-trust self-signed TLS; editor `net.host{port}` /
+  `net.join("quic://…")` with per-owner input routing on the host + client input-clock sync
+  (welcome tick + RTT lead). v1 convention: scene-authored Predicted nodes belong to peer 1.)*
+  Still to come: `floptle-relay` + lobby codes; headless `floptle-runtime` server loop;
+  per-player avatar spawning w/ dynamic client-side predictor binding; interest management +
+  byte budgets.
 - **2f — Polish & docs:** scripting.md §"Networking", EmmyLua stubs + `.luarc.json` global +
   IDE completion/docs entries (all three doc surfaces), Console net-stats overlay, bandwidth
   profiler in the editor.

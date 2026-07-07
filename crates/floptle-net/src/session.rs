@@ -136,6 +136,16 @@ pub struct NetSession {
     connected: bool,
     /// Our peer id, from `Welcome` (None until connected).
     my_peer: Option<PeerId>,
+    /// The server tick stamped in `Welcome` — the client's first fix on the
+    /// server's clock (real links run two independent tick clocks).
+    welcome_tick: Option<u64>,
+    /// Added to every outgoing input tick stamp: translates the client's LOCAL
+    /// tick numbering into the server's, plus a lead margin so inputs arrive
+    /// before the server simulates their tick. 0 on the in-editor harness
+    /// (client and hidden server share one clock). Set by the driver once the
+    /// link's RTT is known; authoritative states translate back via
+    /// [`Self::input_stamp_offset`].
+    stamp_offset: i64,
     interp: HashMap<u64, InterpBuf>,
     latest_server_tick: u64,
     /// Outgoing input window (last few ticks, resent redundantly).
@@ -184,6 +194,8 @@ impl NetSession {
             last_input: HashMap::new(),
             connected: false,
             my_peer: None,
+            welcome_tick: None,
+            stamp_offset: 0,
             interp: HashMap::new(),
             latest_server_tick: 0,
             input_window: VecDeque::new(),
@@ -311,10 +323,31 @@ impl NetSession {
         self.my_peer
     }
 
+    /// Client: the server tick carried by `Welcome` (the first fix on the
+    /// server's clock — real links run independent tick clocks).
+    pub fn welcome_tick(&self) -> Option<u64> {
+        self.welcome_tick
+    }
+
+    /// Client: translate outgoing input stamps into the SERVER's tick domain
+    /// (local tick + offset). The driver sets it once on a real link (welcome
+    /// tick + RTT + a lead margin − the local tick); the harness leaves it 0.
+    pub fn set_input_stamp_offset(&mut self, offset: i64) {
+        self.stamp_offset = offset;
+    }
+
+    /// The active stamp offset — subtract it from an authoritative state's
+    /// tick to get back into the local (prediction-ring) tick domain.
+    pub fn input_stamp_offset(&self) -> i64 {
+        self.stamp_offset
+    }
+
     /// Client: queue this tick's input for the server (sent with the last few
-    /// ticks as a redundant window on the next [`Self::tick_client`]).
+    /// ticks as a redundant window on the next [`Self::tick_client`]). `tick`
+    /// is LOCAL; the stamp offset translates it to the server's clock.
     pub fn send_input(&mut self, tick: u64, input: NetInput) {
-        self.input_window.push_back(InputCmd { tick, input });
+        let stamped = (tick as i64 + self.stamp_offset).max(0) as u64;
+        self.input_window.push_back(InputCmd { tick: stamped, input });
         while self.input_window.len() > INPUT_WINDOW {
             self.input_window.pop_front();
         }
@@ -641,9 +674,10 @@ impl NetSession {
 
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
-            Msg::Welcome { peer, .. } => {
+            Msg::Welcome { peer, tick, .. } => {
                 self.connected = true;
                 self.my_peer = Some(peer);
+                self.welcome_tick = Some(tick);
                 self.events.push(NetEvent::Connected);
             }
             Msg::Refused { reason } => {
