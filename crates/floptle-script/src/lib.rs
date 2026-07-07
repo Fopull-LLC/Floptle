@@ -60,7 +60,7 @@ mod net_api;
 mod preprocess;
 
 pub(crate) use api::install_handle_api;
-pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState};
+pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
 
 /// Severity of a captured script log line (the engine Console colors by this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +151,11 @@ pub struct ScriptHost {
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
+    /// Raycastable dynamic-body hulls for this frame ([`Sim::body_hulls`] copies —
+    /// players, crates), fed alongside the colliders so `raycast(...)` can hit
+    /// bodies AND name the node it hit (`hit.node`). `net.rewind` re-poses these
+    /// for lag-compensated combat queries (`docs/netcode-design.md` §7).
+    hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
     /// World position of the sim's local origin (ADR-0015). Scripts speak world
     /// coordinates; `raycast` converts to the sim frame in f64 at this boundary.
     sim_origin: Rc<RefCell<glam::DVec3>>,
@@ -203,8 +208,10 @@ pub struct ScriptHost {
     net: net_api::SharedNet,
     /// Per-(entity, script) `synced` STORE tables (the raw values behind the
     /// proxy scripts see) — the host collects them for the server session and
-    /// writes received updates into them on clients.
-    synced_stores: HashMap<(u32, String), Table>,
+    /// writes received updates into them on clients. Shared (Rc) with the
+    /// `net.rewind` closure, which swaps historical values in around a
+    /// lag-compensated handler and restores after.
+    synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>>,
     /// (eid, script, var) combos already warned about failing the replication
     /// guardrails — so a hot loop doesn't spam the Console every tick.
     synced_warned: std::collections::HashSet<(u32, String, String)>,
@@ -1249,5 +1256,152 @@ mod tests {
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 111.0);
+    }
+
+    fn hull(eid: u32, x: f32) -> floptle_physics::BodyHull {
+        floptle_physics::BodyHull {
+            eid,
+            pos: glam::Vec3::new(x, 0.0, 0.0),
+            radius: 0.4,
+            shape: floptle_physics::BodyShape::Capsule { half_height: 0.6 },
+            up: glam::Vec3::Y,
+        }
+    }
+
+    #[test]
+    fn raycast_hits_body_hulls_with_node_identity_and_self_exclusion() {
+        let dir = std::env::temp_dir().join("floptle_script_test_hulls");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "caster",
+            "function update(node, dt)\n\
+               -- the explicit ignore makes the only other hull invisible too\n\
+               if raycast(0, 0, 0, 1, 0, 0, 50, params.targetid) == nil then\n\
+                 node.scale = 3\n\
+               end\n\
+               local hit = raycast(node.x, node.y, node.z, 1, 0, 0, 50)\n\
+               if hit then\n\
+                 node.y = hit.distance\n\
+                 if hit.node then node.z = 42 end\n\
+               end\n\
+               net.rpc(\"swing\", { dir = 1 }, { withInput = true })\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "caster".into(),
+                enabled: true,
+                params: vec![("targetid".into(), (e.index() + 1000) as f32)],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        // The caster's OWN hull sits at its position — without self-exclusion
+        // the ray would hit it at distance 0.
+        host.set_hulls(vec![hull(e.index(), 0.0), hull(e.index() + 1000, 5.0)]);
+        host.run(&mut world, &dir, 0.01, 0.01);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(e).unwrap();
+        assert!(
+            (tr.translation.y - 4.6).abs() < 0.05,
+            "must hit the OTHER hull's surface (5 − 0.4), not itself: {}",
+            tr.translation.y
+        );
+        assert_eq!(tr.translation.z, 42.0, "a body hit must carry hit.node");
+        assert_eq!(tr.scale.x, 3.0, "the explicit `ignore` arg must skip that body");
+        // `{withInput = true}` reaches the command queue.
+        let cmds = host.take_net_commands();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                NetCmd::Rpc { name, with_input: true, .. } if name == "swing"
+            )),
+            "withInput must ride the rpc command: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn net_rewind_swaps_poses_and_synced_vars_then_restores() {
+        let dir = std::env::temp_dir().join("floptle_script_test_rewind");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "judge",
+            "replicated = { parrying = false }\n\
+             onRpc = {}\n\
+             function onRpc.swing(args, sender)\n\
+               net.rewind(sender, function()\n\
+                 local hit = raycast(0, 0, 0, 1, 0, 0, 50)\n\
+                 node.x = hit and hit.distance or -1\n\
+                 node.y = synced.parrying and 1 or 0\n\
+               end)\n\
+               local live = raycast(0, 0, 0, 1, 0, 0, 50)\n\
+               node.z = live and live.distance or -1\n\
+             end\n\
+             function update(node, dt) end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "judge".into(),
+                enabled: true,
+                params: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0 });
+        host.run(&mut world, &dir, 0.01, 0.01); // instantiate
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        // A target LIVE at x = 10; the sender perceived it at x = 5, parrying.
+        host.set_hulls(vec![hull(999, 10.0)]);
+        host.set_rewind(Some(RewindScope {
+            peer: 7,
+            poses: vec![(999, [5.0, 0.0, 0.0])],
+            synced: vec![(
+                e.index(),
+                "judge".into(),
+                vec![("parrying".into(), floptle_net::NetValue::Bool(true))],
+            )],
+        }));
+        host.dispatch_rpc(&mut world, "swing", &floptle_net::NetValue::Nil, 7);
+        host.set_rewind(None);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(e).unwrap();
+        assert!(
+            (tr.translation.x - 4.6).abs() < 0.05,
+            "inside rewind the hull sits at the PERCEIVED x=5: {}",
+            tr.translation.x
+        );
+        assert_eq!(tr.translation.y, 1.0, "synced.parrying reads the rewound tick's value");
+        assert!(
+            (tr.translation.z - 9.6).abs() < 0.05,
+            "after rewind the live pose is back (x=10): {}",
+            tr.translation.z
+        );
+        // The live synced store was restored too.
+        let collected = host.collect_synced();
+        assert_eq!(
+            collected[0].2[0],
+            ("parrying".to_string(), floptle_net::NetValue::Bool(false)),
+            "rewind must not leak historical values into the present"
+        );
+
+        // Without a staged scope, rewind warns and runs at server time.
+        host.drain_logs();
+        host.dispatch_rpc(&mut world, "swing", &floptle_net::NetValue::Nil, 7);
+        let tr = world.get::<Transform>(e).unwrap();
+        assert!((tr.translation.x - 9.6).abs() < 0.05, "no scope ⇒ live pose");
+        assert!(
+            host.drain_logs().iter().any(|l| l.msg.contains("no lag-comp context")),
+            "the fallback must be loud"
+        );
     }
 }

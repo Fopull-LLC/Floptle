@@ -166,10 +166,22 @@ function net.ping(peer) end
 ---Send a named remote call. On the server it goes to clients (all, or `to`);
 ---on a client it goes to the server. Args: scalars + tables (≤4 deep, ≤1KB).
 ---Handle with `function onRpc.name(args, sender) end`.
+---`withInput = true` (client → server) stamps the call with the tick you were
+---SEEING when you fired — the server can then judge it with `net.rewind`.
 ---@param name string
 ---@param args any|nil
----@param opts { to: integer }|nil
+---@param opts { to: integer, withInput: boolean }|nil
 function net.rpc(name, args, opts) end
+---SERVER ONLY, inside an `onRpc` handler for an rpc sent `{withInput = true}`:
+---run `fn` against the world as `peer` PERCEIVED it — raycasts see every
+---networked body where that player saw it (their interp-delayed view), and
+---other scripts' `synced` vars read the values from that same tick. A parry
+---that was up on the attacker's screen counts. Restores the present after
+---`fn`; returns whatever `fn` returns. Rewind depth is clamped to ~250 ms.
+---@param peer integer The rpc's sender.
+---@param fn function
+---@return any ...
+function net.rewind(peer, fn) end
 ---Listen for session events: \"playerJoined\"|\"playerLeft\" (fn gets the peer id),
 ---\"connected\", \"disconnected\" (fn gets a reason string).
 ---@param event string
@@ -233,8 +245,13 @@ function input.button(i) end
 ---@return boolean
 function input.clicked(i) end
 
----Cast a ray against the world's colliders (terrain + meshes).
----Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
+---Cast a ray against the world's colliders (terrain + meshes + primitives)
+---AND every physics body (players, crates). Returns a hit table
+---{x,y,z, nx,ny,nz, distance, node} or nil — `node` is the hit body's node
+---handle (nil for static geometry), so `hit.node:getscript(\"combat\")` works.
+---Your OWN node's body is excluded (a ray from your center never hits you);
+---pass another node as `ignore` to skip its body too (e.g. an orbit camera
+---ignoring the character it follows).
 ---@param ox number
 ---@param oy number
 ---@param oz number
@@ -242,8 +259,9 @@ function input.clicked(i) end
 ---@param dy number
 ---@param dz number
 ---@param max number
----@return table|nil
-function raycast(ox, oy, oz, dx, dy, dz, max) end
+---@param ignore Node|nil A node whose body the ray passes through.
+---@return { x: number, y: number, z: number, nx: number, ny: number, nz: number, distance: number, node: Node|nil }|nil
+function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 
 ---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
 ---viewport, Scene AND Game views. Call every frame you want a shape visible.

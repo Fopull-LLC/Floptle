@@ -1791,6 +1791,10 @@ const LUA_SNIPPETS: &[(&str, &str)] = &[
         "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
     ),
     (
+        "lag-compensated swing (net.rewind)",
+        "\n-- client: fire the intent stamped with the tick you were SEEING\nfunction update(node, dt)\n  if net.isClient() and input.clicked(0) then\n    local yaw = input.aimYaw() or node.yaw\n    net.rpc(\"swing\", { dx = math.sin(yaw), dz = math.cos(yaw) }, { withInput = true })\n  end\nend\n\n-- server: judge it against the world as that player perceived it\nonRpc = {}\nfunction onRpc.swing(args, peer)\n  if not net.isServer() then return end\n  net.rewind(peer, function()\n    local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)\n    if hit and hit.node then\n      local combat = hit.node:getscript(\"combat\")\n      if combat and combat.synced.parrying then\n        net.rpc(\"parried\", {}, { to = peer })\n      else\n        log(\"hit \" .. hit.node.name)\n      end\n    end\n  end)\nend\n",
+    ),
+    (
         "spin (yaw)",
         "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
     ),
@@ -1908,7 +1912,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "net.isClient", insert: "net.isClient()", doc: "net.isClient() — true on a connected client." },
     ApiEntry { label: "net.peers", insert: "net.peers()", doc: "net.peers() — connected client peer ids (server)." },
     ApiEntry { label: "net.ping", insert: "net.ping()", doc: "net.ping(peer?) — round-trip time in ms." },
-    ApiEntry { label: "net.rpc", insert: "net.rpc(\"name\", {})", doc: "net.rpc(name, args, {to=peer}) — remote call: server→clients or client→server. Handle with function onRpc.name(args, sender). Args: scalars + tables (≤4 deep, ≤1KB)." },
+    ApiEntry { label: "net.rpc", insert: "net.rpc(\"name\", {})", doc: "net.rpc(name, args, {to=peer, withInput=true}) — remote call: server→clients or client→server. withInput stamps a client intent with the tick it was seeing (for net.rewind). Handle with function onRpc.name(args, sender). Args: scalars + tables (≤4 deep, ≤1KB)." },
+    ApiEntry { label: "net.rewind", insert: "net.rewind(peer, function()\n  \nend)", doc: "SERVER ONLY, inside onRpc for an rpc sent {withInput=true}: run the closure against the world as that peer PERCEIVED it — raycasts and other scripts' synced vars read the rewound tick (clamped ~250 ms). A parry that was up on the attacker's screen counts." },
     ApiEntry { label: "net.on", insert: "net.on(\"playerJoined\", function(peer) end)", doc: "net.on(event, fn) — session events: playerJoined/playerLeft (peer id), connected, disconnected (reason)." },
     ApiEntry { label: "net.spawn", insert: "net.spawn(\"scenes/thing.ron\", { x = 0, y = 0, z = 0 })", doc: "SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a replicated runtime object on every client (available next tick)." },
     ApiEntry { label: "net.despawn", insert: "net.despawn(node)", doc: "SERVER ONLY: net.despawn(node) — remove a replicated runtime object everywhere." },
@@ -1954,7 +1959,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — pin the cursor to the window center and hide it (FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
     ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
     ApiEntry { label: "input.setMouseLocked", insert: "input.setMouseLocked(", doc: "input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle)." },
-    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max) — cast a ray against the terrain + mesh colliders. Returns a hit {x,y,z, nx,ny,nz, distance} or nil. Use for ground checks, line-of-sight, shooting." },
+    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max [, ignore]) — cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. Use for ground checks, line-of-sight, shooting." },
     ApiEntry { label: "gizmo", insert: "gizmo", doc: "Immediate-mode debug drawing (play mode): gizmo.line/ray/sphere/point show for ONE frame in the Scene view (never the Game view; the viewport gizmos toggle hides them). Call every frame you want a shape visible." },
     ApiEntry { label: "gizmo.line", insert: "gizmo.line(", doc: "gizmo.line(x1,y1,z1, x2,y2,z2 [, r,g,b]) — a world-space debug line for one frame. Color is 0–1 floats (default green)." },
     ApiEntry { label: "gizmo.ray", insert: "gizmo.ray(", doc: "gizmo.ray(ox,oy,oz, dx,dy,dz [, len [, r,g,b]]) — a debug ray: origin + direction. With `len` the direction is normalized and the ray is that long — mirrors raycast(...), perfect for visualizing ground checks / line-of-sight." },
@@ -2107,8 +2112,14 @@ Handles work cross-node too:
     (
         "raycast — ground checks, line-of-sight, shooting",
         "\
-  • raycast(ox,oy,oz, dx,dy,dz, max)  cast a ray against the terrain + mesh
-    colliders. Returns a hit table {x,y,z, nx,ny,nz, distance} or nil.
+  • raycast(ox,oy,oz, dx,dy,dz, max [, ignore])  cast a ray against the
+    terrain + mesh colliders AND every physics body (players, crates).
+    Returns a hit table {x,y,z, nx,ny,nz, distance, node} or nil. `hit.node`
+    is the hit BODY's node handle (nil when the ray hit static geometry) — so
+    you can tell WHO you hit: hit.node:getscript(\"combat\"). Your own node's
+    body is excluded, so a ray from your center never hits you; pass another
+    node as `ignore` to skip its body too (an orbit camera ignores the
+    character it follows — see third_person_camera.lua).
 
     -- is there ground within 1.2 units below me?
     local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2)

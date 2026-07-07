@@ -54,12 +54,15 @@ pub enum RpcTarget {
 }
 
 /// A received remote call, ready for `onRpc` dispatch. `sender` is stamped by
-/// the receiving side's transport identity — a client can't spoof it.
+/// the receiving side's transport identity — a client can't spoof it. `tick`
+/// (client → server, `{withInput = true}`) is the server tick the sender
+/// PERCEIVED when firing — what `net.rewind` rewinds combat queries to (§7).
 #[derive(Clone, Debug)]
 pub struct ReceivedRpc {
     pub name: String,
     pub args: NetValue,
     pub sender: PeerId,
+    pub tick: Option<u64>,
 }
 
 /// Per-entity `synced` script vars: (entity, script kind, name→value pairs).
@@ -143,7 +146,10 @@ pub struct NetSession {
     // --- both ---
     events: Vec<NetEvent>,
     rpcs_in: Vec<ReceivedRpc>,
-    rpcs_out: Vec<(RpcTarget, String, NetValue)>,
+    /// Queued outgoing RPCs; the `Option<u64>` is the perceived-tick stamp
+    /// (`withInput` on a client — captured at queue time, when the caller's
+    /// view of the world is exactly what it acted on).
+    rpcs_out: Vec<(RpcTarget, String, NetValue, Option<u64>)>,
     synced_in: SyncedVars,
 }
 
@@ -237,6 +243,12 @@ impl NetSession {
         self.ent_to_net.get(&e).copied()
     }
 
+    /// Every registered `(NetId, entity)` pair — what the lag-comp history
+    /// records each server tick.
+    pub fn net_entities(&self) -> impl Iterator<Item = (u64, Entity)> + '_ {
+        self.net_to_ent.iter().map(|(&id, &e)| (id, e))
+    }
+
     /// Queue an outgoing RPC. Guardrails apply: an over-limit value is dropped
     /// whole with an error string returned (surface it in the Console).
     pub fn send_rpc(
@@ -245,8 +257,25 @@ impl NetSession {
         args: NetValue,
         target: RpcTarget,
     ) -> Result<(), String> {
+        self.send_rpc_stamped(name, args, target, false)
+    }
+
+    /// [`Self::send_rpc`] with the `{withInput = true}` option: on a CLIENT the
+    /// call is stamped with the newest server tick this session had applied —
+    /// the tick whose (interp-delayed) world the player was looking at when
+    /// they acted. The server hands it to lag compensation (§7). On a server
+    /// the flag is a no-op (its view IS the authority).
+    pub fn send_rpc_stamped(
+        &mut self,
+        name: &str,
+        args: NetValue,
+        target: RpcTarget,
+        with_input: bool,
+    ) -> Result<(), String> {
         args.validate().map_err(|e| format!("net.rpc(\"{name}\"): {e}"))?;
-        self.rpcs_out.push((target, name.to_string(), args));
+        let stamp = (with_input && self.role == NetRole::Client && self.latest_server_tick > 0)
+            .then_some(self.latest_server_tick);
+        self.rpcs_out.push((target, name.to_string(), args, stamp));
         Ok(())
     }
 
@@ -390,9 +419,10 @@ impl NetSession {
     /// then (at the snapshot cadence) send changed state.
     pub fn tick_server(&mut self, world: &World, tick: u64) {
         self.pump_server(world, tick);
-        // Flush queued RPCs (server → clients).
-        for (target, name, args) in std::mem::take(&mut self.rpcs_out) {
-            let msg = Msg::Rpc { name, args, sender: SERVER }.encode();
+        // Flush queued RPCs (server → clients; no perceived-tick stamp — the
+        // server's view is the authority).
+        for (target, name, args, _) in std::mem::take(&mut self.rpcs_out) {
+            let msg = Msg::Rpc { name, args, sender: SERVER, tick: None }.encode();
             match target {
                 RpcTarget::All => {
                     for &p in &self.peers {
@@ -402,7 +432,7 @@ impl NetSession {
                 RpcTarget::Peer(p) => self.transport.send(p, Channel::Reliable, &msg),
                 RpcTarget::Server => { /* server → server: loop back locally */
                     if let Some(Msg::Rpc { name, args, .. }) = Msg::decode(&msg) {
-                        self.rpcs_in.push(ReceivedRpc { name, args, sender: SERVER });
+                        self.rpcs_in.push(ReceivedRpc { name, args, sender: SERVER, tick: None });
                     }
                 }
             }
@@ -463,9 +493,10 @@ impl NetSession {
                     self.transport.send(from, Channel::Reliable, &kf.encode());
                 }
             }
-            Msg::Rpc { name, args, .. } => {
-                // Stamp the true sender — never trust the payload's claim.
-                self.rpcs_in.push(ReceivedRpc { name, args, sender: from });
+            Msg::Rpc { name, args, tick: perceived, .. } => {
+                // Stamp the true sender — never trust the payload's claim. The
+                // perceived tick is clamped at rewind time, not here.
+                self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived });
             }
             Msg::Input { entries } => {
                 let buf = self.peer_inputs.entry(from).or_default();
@@ -595,9 +626,9 @@ impl NetSession {
                 Incoming::Connected(_) => {}
             }
         }
-        // Flush queued client → server RPCs.
-        for (_, name, args) in std::mem::take(&mut self.rpcs_out) {
-            let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */ };
+        // Flush queued client → server RPCs (perceived-tick stamps ride along).
+        for (_, name, args, stamp) in std::mem::take(&mut self.rpcs_out) {
+            let msg = Msg::Rpc { name, args, sender: SERVER /* stamped by server */, tick: stamp };
             self.transport.send(SERVER, Channel::Reliable, &msg.encode());
         }
         // Ship the input window (this tick + the last few, redundantly).
@@ -687,8 +718,8 @@ impl NetSession {
                     }
                 }
             }
-            Msg::Rpc { name, args, sender } => {
-                self.rpcs_in.push(ReceivedRpc { name, args, sender });
+            Msg::Rpc { name, args, sender, tick } => {
+                self.rpcs_in.push(ReceivedRpc { name, args, sender, tick });
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
             Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer)),

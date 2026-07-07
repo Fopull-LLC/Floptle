@@ -22,8 +22,10 @@ pub enum NetCmd {
     Join { addr: String },
     /// `net.leave()` — tear the session down.
     Leave,
-    /// `net.rpc(name, args, { to = peer })` — a remote call (role decides direction).
-    Rpc { name: String, args: NetValue, to: Option<u64> },
+    /// `net.rpc(name, args, { to = peer, withInput = bool })` — a remote call
+    /// (role decides direction). `with_input` stamps the sender's perceived
+    /// tick for lag compensation (§7) — client → server intents only.
+    Rpc { name: String, args: NetValue, to: Option<u64>, with_input: bool },
     /// `net.spawn(path, { x, y, z, owner })` — server-only replicated spawn.
     Spawn { path: String, pos: Option<[f64; 3]>, owner: Option<u64> },
     /// `net.despawn(node)` — server-only replicated despawn (entity index).
@@ -57,6 +59,25 @@ pub(crate) struct NetHandler {
     pub key: RegistryKey,
 }
 
+/// The lag-compensation context for the RPC currently being dispatched on the
+/// server (`docs/netcode-design.md` §7): the world state at the tick the
+/// SENDER perceived, precomputed by the driver from its history ring. Staged
+/// via `ScriptHost::set_rewind` around `dispatch_rpc`; `net.rewind(peer, fn)`
+/// applies it for the duration of `fn`.
+#[derive(Clone, Debug, Default)]
+pub struct RewindScope {
+    /// The peer whose perceived time this is (the RPC's sender).
+    pub peer: u64,
+    /// (entity index, world position) per networked body at the rewound tick.
+    pub poses: Vec<(u32, [f64; 3])>,
+    /// (entity index, script kind, vars) — `synced` values at the rewound tick,
+    /// so combat flags (parrying!) are judged at the SAME instant as the poses.
+    pub synced: RewoundVars,
+}
+
+/// Per-entity rewound `synced` values: (entity index, script kind, name→value).
+pub type RewoundVars = Vec<(u32, String, Vec<(String, NetValue)>)>;
+
 /// Interior-mutable net state shared between the host and the `net.*` closures.
 #[derive(Clone)]
 pub(crate) struct SharedNet {
@@ -66,6 +87,8 @@ pub(crate) struct SharedNet {
     /// The `(entity, script)` currently executing (set around top-level exec +
     /// lifecycle calls) — how `net.on` knows who is registering.
     pub current: Rc<RefCell<Option<(u32, String)>>>,
+    /// Lag-comp context for the RPC being dispatched (see [`RewindScope`]).
+    pub rewind: Rc<RefCell<Option<RewindScope>>>,
     pub logs: Rc<RefCell<Vec<ScriptLog>>>,
 }
 
@@ -76,6 +99,7 @@ impl SharedNet {
             state: Rc::new(RefCell::new(NetState::default())),
             handlers: Rc::new(RefCell::new(Vec::new())),
             current: Rc::new(RefCell::new(None)),
+            rewind: Rc::new(RefCell::new(None)),
             logs,
         }
     }
@@ -182,8 +206,16 @@ fn checked_netvalue(net: &SharedNet, ctx: &str, v: &Value) -> Option<NetValue> {
     }
 }
 
-/// Install the `net` global table.
-pub(crate) fn install_net_api(lua: &Lua, net: &SharedNet) -> mlua::Result<()> {
+/// Install the `net` global table. `hulls`/`sim_origin`/`synced_stores` are
+/// the host's shared frame state — `net.rewind` re-poses the hulls and swaps
+/// historical `synced` values in around a lag-compensated handler.
+pub(crate) fn install_net_api(
+    lua: &Lua,
+    net: &SharedNet,
+    hulls: &Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
+    sim_origin: &Rc<RefCell<glam::DVec3>>,
+    synced_stores: &Rc<RefCell<std::collections::HashMap<(u32, String), Table>>>,
+) -> mlua::Result<()> {
     let t = lua.create_table()?;
 
     // --- session control -------------------------------------------------
@@ -281,9 +313,94 @@ pub(crate) fn install_net_api(lua: &Lua, net: &SharedNet) -> mlua::Result<()> {
                 else {
                     return Ok(());
                 };
-                let to = opts.and_then(|o| o.get::<Option<u64>>("to").ok().flatten());
-                n.cmds.borrow_mut().push(NetCmd::Rpc { name, args: nv, to });
+                let (mut to, mut with_input) = (None, false);
+                if let Some(o) = opts {
+                    to = o.get::<Option<u64>>("to").ok().flatten();
+                    with_input =
+                        o.get::<Option<bool>>("withInput").ok().flatten().unwrap_or(false);
+                }
+                n.cmds.borrow_mut().push(NetCmd::Rpc { name, args: nv, to, with_input });
                 Ok(())
+            })?,
+        )?;
+    }
+
+    // --- lag-compensated queries (§7) --------------------------------------
+    // net.rewind(peer, fn): inside `fn`, raycasts see the networked bodies
+    // where `peer` PERCEIVED them (their interp-delayed view at the tick their
+    // rpc was stamped with), and other scripts' `synced` vars read the values
+    // from that same tick. Only meaningful on the server, inside an `onRpc`
+    // handler for an rpc sent `{withInput = true}` — anywhere else it warns
+    // and runs `fn` at server time (the honest fallback).
+    {
+        let n = net.clone();
+        let hulls = hulls.clone();
+        let so = sim_origin.clone();
+        let stores = synced_stores.clone();
+        t.set(
+            "rewind",
+            lua.create_function(move |lua, (peer, f): (u64, mlua::Function)| {
+                let scope = n.rewind.borrow().clone();
+                let scope = match scope {
+                    Some(s) if s.peer == peer => s,
+                    Some(s) => {
+                        n.warn(format!(
+                            "net.rewind({peer}): the current rpc was sent by peer {} — \
+                             rewinding to ITS view; queries run at server time instead",
+                            s.peer
+                        ));
+                        return f.call::<mlua::MultiValue>(());
+                    }
+                    None => {
+                        n.warn(
+                            "net.rewind: no lag-comp context — call it on the SERVER inside an \
+                             onRpc handler for an rpc sent {withInput = true}; queries run at \
+                             server time instead"
+                                .into(),
+                        );
+                        return f.call::<mlua::MultiValue>(());
+                    }
+                };
+                // Re-pose the hulls to the rewound tick (world → sim frame).
+                let origin = *so.borrow();
+                let mut saved_poses = Vec::new();
+                {
+                    let mut hs = hulls.borrow_mut();
+                    for (eid, wpos) in &scope.poses {
+                        for h in hs.iter_mut().filter(|h| h.eid == *eid) {
+                            saved_poses.push((*eid, h.pos));
+                            h.pos = (glam::DVec3::from_array(*wpos) - origin).as_vec3();
+                        }
+                    }
+                }
+                // Swap the rewound synced values in (saving the live ones).
+                let mut saved_vars: Vec<(Table, String, Value)> = Vec::new();
+                {
+                    let stores = stores.borrow();
+                    for (eid, kind, vars) in &scope.synced {
+                        let Some(store) = stores.get(&(*eid, kind.clone())) else { continue };
+                        for (k, v) in vars {
+                            let Ok(hist) = netvalue_to_lua(lua, v) else { continue };
+                            let cur = store.raw_get::<Value>(k.as_str()).unwrap_or(Value::Nil);
+                            saved_vars.push((store.clone(), k.clone(), cur));
+                            let _ = store.raw_set(k.as_str(), hist);
+                        }
+                    }
+                }
+                let result = f.call::<mlua::MultiValue>(());
+                // Restore the present — even when the handler errored.
+                for (store, k, v) in saved_vars {
+                    let _ = store.raw_set(k.as_str(), v);
+                }
+                {
+                    let mut hs = hulls.borrow_mut();
+                    for (eid, pos) in saved_poses {
+                        if let Some(h) = hs.iter_mut().find(|h| h.eid == eid) {
+                            h.pos = pos;
+                        }
+                    }
+                }
+                result
             })?,
         )?;
     }

@@ -15,12 +15,14 @@
 //! Prediction (2c), lag compensation (2d), and the QUIC transport + relay (2e)
 //! build on these seams without changing the game-facing API.
 
+pub mod lagcomp;
 pub mod predict;
 pub mod session;
 pub mod transport;
 pub mod value;
 pub mod wire;
 
+pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
 pub use session::{BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget, SyncedVars};
 pub use wire::{InputCmd, NetInput};
@@ -329,6 +331,40 @@ mod tests {
             0.0,
             "own predicted node must not be server-interpolated"
         );
+    }
+
+    #[test]
+    fn with_input_rpcs_carry_the_perceived_tick() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, se) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        // Run until snapshots have flowed, so the client HAS a perceived tick.
+        let mid = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 10, |w, t| {
+            w.get_mut::<Transform>(se[0]).unwrap().translation.x = t as f64;
+        });
+        server.take_rpcs();
+        client
+            .send_rpc_stamped("swing", NetValue::Num(1.0), RpcTarget::Server, true)
+            .unwrap();
+        client
+            .send_rpc_stamped("chat", NetValue::Num(2.0), RpcTarget::Server, false)
+            .unwrap();
+        let end = run(&hub, &mut server, &mut sw, &mut client, &mut cw, mid, 3, |_, _| {});
+        let got = server.take_rpcs();
+        assert_eq!(got.len(), 2);
+        let swing = got.iter().find(|r| r.name == "swing").unwrap();
+        let stamp = swing.tick.expect("withInput must stamp the perceived tick");
+        assert!(stamp < end && stamp >= mid.saturating_sub(4), "a recent server tick: {stamp}");
+        assert_eq!(got.iter().find(|r| r.name == "chat").unwrap().tick, None);
+
+        // Server → client RPCs never stamp.
+        server.send_rpc_stamped("boom", NetValue::Nil, RpcTarget::All, true).unwrap();
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, end, 3, |_, _| {});
+        assert_eq!(client.take_rpcs()[0].tick, None);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use floptle_core::math::{DVec3, Vec3};
 
-use crate::body::{axis, set_axis, Body, Contact};
+use crate::body::{axis, set_axis, Body, BodyShape, Contact};
 use crate::gravity::{GravityField, GravitySource};
 use crate::shapes::CollisionShape;
 
@@ -104,6 +104,101 @@ pub fn raycast_colliders(
             return Some(RayHit { point: p.into(), normal: n.into(), distance: t });
         }
         t += dmin.clamp(0.02, 1.0); // cap so an unsigned mesh distance can't overshoot
+    }
+    None
+}
+
+/// A raycastable snapshot of a dynamic body, in the sim frame. Lent to the
+/// script layer alongside the colliders so rays can hit players/crates AND
+/// identify which node they hit — and the thing `net.rewind` re-poses for
+/// lag-compensated combat queries (`docs/netcode-design.md` §7): rewinding
+/// moves these copies, never the bodies themselves.
+#[derive(Clone, Copy, Debug)]
+pub struct BodyHull {
+    /// ECS entity index of the body's node.
+    pub eid: u32,
+    /// Body center, sim frame.
+    pub pos: Vec3,
+    pub radius: f32,
+    pub shape: BodyShape,
+    /// Capsule axis (kept along −gravity by the solver).
+    pub up: Vec3,
+}
+
+impl BodyHull {
+    /// Signed distance from sim-frame `p` to the hull surface.
+    pub fn distance(&self, p: Vec3) -> f32 {
+        let d = p - self.pos;
+        match self.shape {
+            BodyShape::Sphere => d.length() - self.radius,
+            BodyShape::Capsule { half_height } => {
+                let t = d.dot(self.up).clamp(-half_height, half_height);
+                (d - self.up * t).length() - self.radius
+            }
+            BodyShape::Box { half } => {
+                let q = d.abs() - half;
+                q.max(Vec3::ZERO).length() + q.max_element().min(0.0)
+            }
+        }
+    }
+
+    /// Outward unit normal at sim-frame `p` (central differences — rays only
+    /// need it at the hit point).
+    pub fn normal(&self, p: Vec3) -> Vec3 {
+        const E: f32 = 1e-3;
+        let n = Vec3::new(
+            self.distance(p + Vec3::X * E) - self.distance(p - Vec3::X * E),
+            self.distance(p + Vec3::Y * E) - self.distance(p - Vec3::Y * E),
+            self.distance(p + Vec3::Z * E) - self.distance(p - Vec3::Z * E),
+        );
+        if n.length_squared() > 1e-12 {
+            n.normalize()
+        } else {
+            Vec3::Y
+        }
+    }
+}
+
+/// Sphere-trace a ray against a set of body hulls; the first surface within
+/// `max_dist` as `(entity index, hit)`, or None. `exclude` lists entities the
+/// ray passes through — the caster's own body (a swing traced from a
+/// character's center must not hit the character), plus any explicit ignores
+/// (a camera ray skipping the character it orbits). Hull distances are exact
+/// analytic SDFs, so the march takes full-distance steps.
+pub fn raycast_hulls(
+    hulls: &[BodyHull],
+    origin: Vec3,
+    dir: Vec3,
+    max_dist: f32,
+    exclude: &[u32],
+) -> Option<(u32, RayHit)> {
+    let rd = dir.try_normalize()?;
+    let mut t = 0.0f32;
+    for _ in 0..512 {
+        if t > max_dist {
+            return None;
+        }
+        let p = origin + rd * t;
+        let mut dmin = f32::MAX;
+        let mut hit: Option<&BodyHull> = None;
+        for h in hulls {
+            if exclude.contains(&h.eid) {
+                continue;
+            }
+            let d = h.distance(p);
+            if d < dmin {
+                dmin = d;
+                hit = Some(h);
+            }
+        }
+        let h = hit?; // no (testable) hulls at all
+        if dmin < 0.02 {
+            return Some((
+                h.eid,
+                RayHit { point: p.into(), normal: h.normal(p).into(), distance: t },
+            ));
+        }
+        t += dmin.max(0.02);
     }
     None
 }
@@ -282,5 +377,62 @@ mod step_body_tests {
         assert_eq!(full.bodies[0].grounded, solo.bodies[0].grounded);
         // ...and body 1 was genuinely untouched in the solo world.
         assert_eq!(solo.bodies[1].pos, Vec3::new(5.0, 3.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod hull_tests {
+    use super::*;
+
+    fn capsule_at(eid: u32, x: f32) -> BodyHull {
+        BodyHull {
+            eid,
+            pos: Vec3::new(x, 1.0, 0.0),
+            radius: 0.4,
+            shape: BodyShape::Capsule { half_height: 0.6 },
+            up: Vec3::Y,
+        }
+    }
+
+    #[test]
+    fn ray_hits_the_nearest_hull_and_identifies_it() {
+        let hulls = [capsule_at(7, 5.0), capsule_at(9, 10.0)];
+        let (eid, hit) =
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[]).expect("hit");
+        assert_eq!(eid, 7, "the nearer capsule wins");
+        assert!((hit.distance - 4.6).abs() < 0.05, "surface at x = 5 − 0.4, got {}", hit.distance);
+        assert!(hit.normal[0] < -0.9, "normal faces the ray");
+    }
+
+    #[test]
+    fn exclusion_skips_the_caster_own_body() {
+        // The ray STARTS INSIDE hull 7 (a swing from the character's center).
+        let hulls = [capsule_at(7, 0.0), capsule_at(9, 10.0)];
+        let (eid, _) = raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[7])
+            .expect("must hit the other hull");
+        assert_eq!(eid, 9);
+        // Without exclusion it self-hits immediately.
+        let (eid, hit) =
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[]).unwrap();
+        assert_eq!(eid, 7);
+        assert_eq!(hit.distance, 0.0);
+    }
+
+    #[test]
+    fn capsule_side_and_cap_distances() {
+        let h = capsule_at(1, 0.0);
+        // Side: radial distance minus radius.
+        assert!((h.distance(Vec3::new(2.0, 1.0, 0.0)) - 1.6).abs() < 1e-5);
+        // Above the top cap: center + half_height + radius = y 2.0.
+        assert!(h.distance(Vec3::new(0.0, 2.0, 0.0)).abs() < 1e-5);
+        // Inside is negative.
+        assert!(h.distance(Vec3::new(0.0, 1.0, 0.0)) < 0.0);
+    }
+
+    #[test]
+    fn ray_misses_within_range_returns_none() {
+        let hulls = [capsule_at(1, 5.0)];
+        assert!(raycast_hulls(&hulls, Vec3::ZERO, Vec3::Y, 100.0, &[]).is_none());
+        assert!(raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 2.0, &[]).is_none());
     }
 }
