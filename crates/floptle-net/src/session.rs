@@ -69,9 +69,13 @@ pub type SyncedVars = Vec<(Entity, String, Vec<(String, NetValue)>)>;
 /// grounded), so physics-synced snapshot entries carry what prediction needs.
 pub type BodyStates = Vec<(Entity, [f32; 3], bool)>;
 
-/// How many recent input ticks ride in every input packet (redundancy: one
-/// lost packet doesn't lose a tick's input — the next packet re-carries it).
-const INPUT_WINDOW: usize = 3;
+/// How many recent input ticks ride in every input packet (redundancy: a lost
+/// packet doesn't lose a tick's input — later packets re-carry it). Inputs are
+/// tiny, so the window is deep: an input only goes missing if this many
+/// CONSECUTIVE packets all drop (0.5^10 ≈ 0.1% per tick at 50% loss) — and a
+/// missing input is a guaranteed visible correction, so depth is cheap
+/// insurance.
+const INPUT_WINDOW: usize = 10;
 /// Server-side per-peer input backlog cap, ticks.
 const INPUT_BUFFER_CAP: usize = 64;
 
