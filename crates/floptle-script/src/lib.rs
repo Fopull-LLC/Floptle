@@ -102,6 +102,12 @@ pub struct InputSnapshot {
     pub scroll: f32,
     pub buttons_down: [bool; 3],
     pub buttons_pressed: [bool; 3],
+    /// The ACTIVE camera's world (yaw, pitch), captured with the snapshot —
+    /// `input.aimYaw()`/`aimPitch()`. This makes camera-relative movement
+    /// deterministic under prediction: the view direction rides the input
+    /// command, so the server and any replay use EXACTLY the angle the player
+    /// saw (a local camera node can never match across machines).
+    pub aim: Option<[f32; 2]>,
 }
 
 /// A script source file's reload state: a generation that bumps whenever the file

@@ -238,13 +238,37 @@ impl Editor {
         assign_owner(&mut sworld);
         assign_owner(&mut self.world);
         // The hidden server's physics: same terrain anchors (identical scene),
-        // its own bodies/static colliders from ITS world.
-        let origin = self.sim_origin_hint();
+        // its own bodies/static colliders from ITS world. SAME sim origin as
+        // the client's — different origins mean different f32 quantization and
+        // the two sims drift apart at the bit level.
+        let origin = self.sim.as_ref().map(|s| s.world.origin).unwrap_or_else(|| self.sim_origin_hint());
         let gravity = Self::build_gravity_field(&sworld, origin);
         let terrain_vols = self.terrain_volumes();
         let mut ssim = floptle_physics::Sim::build(&sworld, &terrain_vols, gravity, origin);
         drop(terrain_vols);
         self.add_static_colliders_for_world(&sworld, &mut ssim);
+        // Seed the server bodies with the client's LIVE dynamic state (the doc
+        // only carries transforms): the session starts mid-play, and a
+        // vel-zero server character instantly disagrees with a moving client.
+        if let Some(csim) = self.sim.as_ref() {
+            let mine: Vec<Entity> = self
+                .world
+                .query::<Transform>()
+                .map(|(e, _)| e)
+                .filter(|e| self.world.get::<floptle_core::RigidBody>(*e).is_some())
+                .collect();
+            let theirs: Vec<Entity> = sworld
+                .query::<Transform>()
+                .map(|(e, _)| e)
+                .filter(|e| sworld.get::<floptle_core::RigidBody>(*e).is_some())
+                .collect();
+            for (me, them) in mine.iter().zip(theirs.iter()) {
+                if let Some(bs) = csim.body_snapshot(me.index()) {
+                    ssim.restore_body(them.index(), &bs);
+                }
+            }
+            ssim.writeback_interpolated(&mut sworld, 1.0);
+        }
         // Sessions over the simulated link; skew frozen from the CURRENT slider.
         let hub = floptle_net::MemoryHub::new();
         hub.set_conditions(self.net_latency_ticks, self.net_loss);
@@ -441,6 +465,14 @@ impl Editor {
                 _ => {}
             }
         }
+        // The hidden server renders nothing: drain its cosmetic queues so
+        // they don't grow unboundedly (anim:play per tick, gizmos, effects).
+        let _ = hs.host.take_anim_commands();
+        let _ = hs.host.take_vfx_commands();
+        let _ = hs.host.take_gizmos();
+        let _ = hs.host.take_spawn_effects();
+        let _ = hs.host.take_model_changes();
+        let _ = hs.host.take_mouse_lock();
         // Surface server-side script output in the Console, tagged.
         for log in hs.host.drain_logs() {
             self.console.push(log.level, format!("[server] {}", log.msg), log.source);
@@ -539,8 +571,21 @@ impl Editor {
                     }
                     self.script_host.set_bodies(states);
                 }
+                // Lend colliders so the replayed hooks can raycast (ground
+                // probes!) — a nil raycast mid-replay corrupts grounded /
+                // friction logic and the correction never converges. Reclaimed
+                // before the body steps.
+                if let Some(sim) = self.sim.as_mut() {
+                    self.script_host.set_colliders(
+                        std::mem::take(&mut sim.world.colliders),
+                        sim.world.origin,
+                    );
+                }
                 self.script_host.run_frame_for(&mut self.world, eid, step, rt);
                 self.script_host.run_fixed_for(&mut self.world, eid, step, rt);
+                if let Some(sim) = self.sim.as_mut() {
+                    sim.world.colliders = self.script_host.take_colliders();
+                }
                 for (id, v) in self.script_host.take_body_changes() {
                     if id == eid && let Some(sim) = self.sim.as_mut() {
                         sim.set_body_velocity(id, floptle_core::math::Vec3::new(v[0], v[1], v[2]));

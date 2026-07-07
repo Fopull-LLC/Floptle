@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
 
 /// One replicated entity's transform state in a snapshot. Position is absolute
 /// world f64 (floating-origin safe); rotation a quaternion; velocity/grounded
@@ -42,6 +42,10 @@ pub struct NetInput {
     pub scroll: f32,
     pub buttons_down: [bool; 3],
     pub buttons_pressed: [bool; 3],
+    /// The owner's view direction — active-camera (yaw, pitch) at the tick.
+    /// Camera-relative controllers read it via `input.aimYaw()` so movement is
+    /// IDENTICAL on client, server, and replay (a local camera node can't be).
+    pub aim: Option<[f32; 2]>,
 }
 
 /// One tick's input command (client → server).
