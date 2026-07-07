@@ -206,6 +206,10 @@ pub struct ScriptHost {
     /// doesn't run server-authoritative nodes' scripts — their state arrives
     /// in snapshots; docs/netcode-design.md §6). Set by the driver.
     script_skip: std::collections::HashSet<u32>,
+    /// Entities skipped in the PER-FRAME pass only: a predicted node's
+    /// `update` re-runs on the gameplay tick (`run_frame_for`) so client and
+    /// server integrate identically.
+    frame_skip: std::collections::HashSet<u32>,
 }
 
 /// One immediate-mode debug-draw command from a script's `gizmo.*` call.
@@ -576,6 +580,40 @@ mod tests {
             host.drain_logs().iter().any(|l| l.level == LogLevel::Warn && l.msg.contains("synced.hp")),
             "client synced write must warn"
         );
+    }
+
+    #[test]
+    fn predicted_node_update_rides_the_tick_clock() {
+        // The anti-jitter contract (net play-as-client): a frame-filtered
+        // entity's `update` is skipped in the per-frame pass and re-run at the
+        // tick cadence via run_frame_for — so client and server integrate an
+        // update-style controller identically. run_fixed_for also bypasses the
+        // filters (it IS the substitute execution).
+        let dir = std::env::temp_dir().join("floptle_script_test_frame_filter");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "mover", "function update(node, dt)\n  node.x = node.x + 1\nend\n");
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![] }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.016); // start + first update
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0);
+
+        let mut fskip = std::collections::HashSet::new();
+        fskip.insert(e.index());
+        host.set_frame_filter(fskip);
+        host.run(&mut world, &dir, 0.016, 0.032); // frame pass: filtered → no move
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 1.0);
+        host.run_frame_for(&mut world, e.index(), 1.0 / 60.0, 0.048); // tick-cadence update
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 2.0);
+
+        host.set_frame_filter(std::collections::HashSet::new());
+        host.run(&mut world, &dir, 0.016, 0.064); // cleared → frame pass runs again
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0);
     }
 
     #[test]

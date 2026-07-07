@@ -644,3 +644,13 @@ Args follow the same size/type rules as `synced`.
 > and stutter exactly as a real remote player would. (Real network transports
 > — QUIC + the relay — arrive with the transport phase; the API you write
 > against today doesn't change.)
+
+**Prediction** (*🌐 → Test as remote player*): give your character's node a
+Networked component with mode **Predicted (owner)** and it responds instantly
+at any latency — the engine records your inputs, the server re-runs the same
+script with them, and divergences rewind-replay invisibly. One thing to know:
+**in a session, a predicted node's `update` runs on the gameplay tick** (60 Hz,
+constant `dt`) instead of per frame, so the client and server integrate your
+controller identically. Your script doesn't change — but movement code belongs
+in `fixedUpdate` anyway, and cameras (per-frame `update`) belong on a separate,
+non-networked node.

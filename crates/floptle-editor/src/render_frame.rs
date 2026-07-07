@@ -2399,6 +2399,18 @@ impl Editor {
                     }
                     // `time` on the fixed pass is the deterministic tick clock.
                     let tick_time = self.game_tick_no as f32 * self.game_tick.step;
+                    // A predicted node's `update` rides the tick clock (its
+                    // frame pass is filtered) so client + server integrate the
+                    // same controller identically — see net.rs.
+                    if let Some((pe, _)) = &self.net_predictor {
+                        let pe = pe.index();
+                        self.script_host.run_frame_for(
+                            &mut self.world,
+                            pe,
+                            self.game_tick.step,
+                            tick_time,
+                        );
+                    }
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
                     if let Some(sim) = self.sim.as_mut() {
                         sim.world.colliders = self.script_host.take_colliders(); // reclaim
@@ -2420,6 +2432,15 @@ impl Editor {
                 if let Some(sim) = self.sim.as_mut() {
                     // Render this frame partway into the current tick: smooth at any fps.
                     sim.writeback_interpolated(&mut self.world, self.game_tick.alpha());
+                }
+                // Prediction corrections render as a decaying nudge, not a snap:
+                // the rendered transform carries the (shrinking) error offset.
+                if let Some((pe, pred)) = &self.net_predictor
+                    && pred.error_offset != [0.0; 3]
+                    && let Some(tr) = self.world.get_mut::<Transform>(*pe)
+                {
+                    tr.translation +=
+                        floptle_core::math::DVec3::from_array(pred.error_offset);
                 }
             }
             // Surface fixedUpdate errors alongside the frame pass's.
