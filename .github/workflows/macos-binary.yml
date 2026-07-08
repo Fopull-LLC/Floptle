@@ -1,0 +1,59 @@
+# On-demand macOS engine binary for File ⏵ Export Game… (docs/export-builds.md).
+# macOS can't be cross-compiled from Linux (Apple SDK licensing), so a real Mac
+# runner builds it natively; the editor's export stamps Mac game builds from the
+# downloaded binary at `prebuilt/floptle-macos` in the source checkout.
+#
+# workflow_dispatch only — macOS runner minutes bill at 10× on private repos, so
+# this runs when you ask (Actions tab ⏵ macos-binary ⏵ Run workflow), not per push.
+# `arm64` (default) covers Apple Silicon; `universal` also runs on old Intel Macs
+# at roughly double the build minutes.
+name: macos-binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Which Macs to support"
+        type: choice
+        default: arm64
+        options: [arm64, universal]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (Apple Silicon)
+        run: cargo build --release -p floptle-editor --target aarch64-apple-darwin
+
+      - name: Build (Intel)
+        if: inputs.arch == 'universal'
+        run: cargo build --release -p floptle-editor --target x86_64-apple-darwin
+
+      # tar (not a bare file) so the executable bit survives the artifact zip.
+      - name: Assemble floptle-macos
+        run: |
+          if [ "${{ inputs.arch }}" = "universal" ]; then
+            lipo -create -output floptle-macos \
+              target/aarch64-apple-darwin/release/floptle \
+              target/x86_64-apple-darwin/release/floptle
+          else
+            cp target/aarch64-apple-darwin/release/floptle floptle-macos
+          fi
+          chmod +x floptle-macos
+          tar czf floptle-macos.tar.gz floptle-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: floptle-macos
+          path: floptle-macos.tar.gz

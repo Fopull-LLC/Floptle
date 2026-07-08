@@ -18,6 +18,10 @@ Thumbs.db
 # Throwaway dev screenshots / capture shares (not engine content).
 /Screenshots/
 
+# CI-built engine binaries consumed by File ⏵ Export Game… (macOS — see
+# .github/workflows/macos-binary.yml + docs/export-builds.md). Machine-local.
+/prebuilt/
+
 # --- TEMPORARY / LEGALLY-SENSITIVE TEST ASSETS --------------------------------
 # Ocarina of Time textures are used ONLY as local placeholder test assets during
 # development. They MUST NOT enter git history (we plan to open-source later, and
