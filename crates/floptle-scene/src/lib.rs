@@ -1250,7 +1250,7 @@ mod tests {
                         interp: false,
                         interp_delay: 12, // exercise the non-default round-trip
                     }),
-                    ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2 }),
+                    ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2, enabled: true, canvas_scale: 0.02 }),
                     ui: Some(floptle_ui::ElementSpec {
                         place: floptle_ui::Place::Pin {
                             anchor: floptle_ui::Anchor::BottomRight,

@@ -20,9 +20,7 @@ use floptle_ui::{
 
 use crate::Editor;
 
-/// World units per design unit for the Scene-view canvas (720 design units —
-/// a default layer's height — spans 7.2 world units).
-pub(crate) const UI_WORLD_SCALE: f32 = 0.01;
+
 
 /// What Add ⏵ UI creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +62,9 @@ impl Editor {
         let mut layers: Vec<(i32, Vec<floptle_ui::Node>, f32)> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
+            if !layer.enabled {
+                continue;
+            }
             let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
             let roots: Vec<_> = kids
                 .get(&e.index())
@@ -107,7 +108,8 @@ impl Editor {
     pub(crate) fn gather_ui_world(
         &mut self,
         window_aspect: f32,
-    ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3])> {
+    ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3], [f32; 2])>
+    {
         let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
         let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
         for e in &order {
@@ -132,6 +134,9 @@ impl Editor {
         let mut textures: Vec<String> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
+            if !layer.enabled {
+                continue;
+            }
             let roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
@@ -150,14 +155,16 @@ impl Editor {
                 }
             }
             let wt = floptle_core::world_transform(&self.world, *e);
-            let right = wt.rotation * floptle_core::math::Vec3::X * UI_WORLD_SCALE;
-            let down = wt.rotation * (-floptle_core::math::Vec3::Y) * UI_WORLD_SCALE;
+            let ws = layer.canvas_scale.max(0.0001);
+            let right = wt.rotation * floptle_core::math::Vec3::X * ws;
+            let down = wt.rotation * (-floptle_core::math::Vec3::Y) * ws;
             out.push((
                 dl,
                 placed,
                 [wt.translation.x, wt.translation.y, wt.translation.z],
                 [right.x, right.y, right.z],
                 [down.x, down.y, down.z],
+                design_vp,
             ));
         }
         for t in textures {
@@ -225,14 +232,38 @@ impl Editor {
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
             ui.separator();
             ui.label("🖼 UI Layer");
+            ui.small("screen-space canvas — in game it always fills the window");
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut layer.enabled, "enabled")
+                    .on_hover_text("master switch: an off layer draws nothing")
+                    .changed();
+                ui.label("z");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut layer.z))
+                    .on_hover_text("layers draw lowest z first")
+                    .changed();
+            });
             ui.horizontal(|ui| {
                 ui.label("design height");
                 changed |= ui
                     .add(egui::DragValue::new(&mut layer.design_height).range(100.0..=4320.0))
-                    .on_hover_text("this many design units always span the window height")
+                    .on_hover_text(
+                        "resolution independence: this many design units ALWAYS span the                          window height, on any monitor — bigger number = smaller-looking                          UI. Width follows the window's aspect. Element positions/sizes                          are in these units.",
+                    )
                     .changed();
-                ui.label("z");
-                changed |= ui.add(egui::DragValue::new(&mut layer.z)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("canvas size");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut layer.canvas_scale, 0.001..=0.1)
+                            .logarithmic(true),
+                    )
+                    .on_hover_text(
+                        "Scene-view only: how big the authoring canvas stands in the                          world (world units per design unit). Gameplay rendering is                          unaffected. Move/rotate this node to place the canvas.",
+                    )
+                    .changed();
             });
             if changed {
                 world.insert(e, layer);
