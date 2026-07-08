@@ -367,6 +367,11 @@ fn fs(in: VOut) -> FsOut {
     }
     var t = span.x;
     var prev_t = span.x;
+    // The field value at `prev_t` / at the coarse hit — carried out of the loop so
+    // the refine below starts from an already-sampled bracket instead of paying
+    // fresh evaluations for values the march just computed.
+    var prev_d = 1e9;
+    var hit_d = 0.0;
     var hit = false;
     // Closest approach to a real surface, so a grazing ray that never quite trips the
     // coarse threshold — the silhouette of a hill/ravine, where the step shrinks and
@@ -376,6 +381,7 @@ fn fs(in: VOut) -> FsOut {
     var min_d = 1e9;
     var min_t = 0.0;
     var min_prev = 0.0;
+    var min_prev_d = 1e9;
     for (var i = 0; i < 256; i = i + 1) {
         if (t > span.y) {
             break;
@@ -385,7 +391,7 @@ fn fs(in: VOut) -> FsOut {
         // atlas is read once, at the refined hit, not per step.
         let d = map_d(p);
         // Distance-relaxed threshold for the COARSE hit (the precise surface is then
-        // found by bisection below). A gentle t-growth still helps grazing rays
+        // found by the refine below). A gentle t-growth still helps grazing rays
         // converge without exhausting the step budget, but it's kept small so the far
         // silhouette stays sharp (the old larger growth left a fuzzy wispy horizon).
         let thr = 0.0006 * t + 0.002;
@@ -393,48 +399,77 @@ fn fs(in: VOut) -> FsOut {
             min_d = d;
             min_t = t;
             min_prev = prev_t;
+            min_prev_d = prev_d;
         }
         if (d < thr && real_surface(p, thr)) {
+            hit_d = d;
             hit = true;
             break;
         }
         prev_t = t;
+        prev_d = d;
         // Conservative step (0.85): the smin-blended + trilinear-sampled field is
         // not a perfectly exact SDF, so understep to avoid overshoot cracks when
         // the camera is close to the surface.
         t = t + max(d, 0.003) * 0.85;
     }
     // Grazing-silhouette fill: no clean hit, but the ray passed within ~a voxel of a
-    // real surface → accept that closest approach (refined by the bisection below).
+    // real surface → accept that closest approach (refined below).
     if (!hit && min_d < 0.06 + 0.0015 * min_t) {
         hit = true;
         t = min_t;
+        hit_d = min_d;
         prev_t = min_prev;
+        prev_d = min_prev_d;
     }
 
     // Refine the loose threshold hit to the TRUE surface (where the field crosses
-    // zero) by bisection. The relaxed threshold above hits at a t that varies with
-    // distance, which on a grazing surface produced visible depth BANDING; bisecting
-    // to d≈0 gives a consistent surface depth + cleaner normals (no banding/grain).
+    // zero). The relaxed threshold above hits at a t that varies with distance,
+    // which on a grazing surface produced visible depth BANDING; refining to d≈0
+    // gives a consistent surface depth + cleaner normals (no banding/grain).
     if (hit) {
         var a = prev_t; // outside (d > 0)
+        var da = prev_d;
         var b = t;      // at/just inside the threshold
+        var db = hit_d;
         // Walk `b` until it's truly inside (d < 0) so [a,b] brackets the crossing.
-        var bracketed = false;
+        var bracketed = db < 0.0;
         for (var k = 0; k < 10; k = k + 1) {
-            if (map_d(ro + rd * b) < 0.0) { bracketed = true; break; }
+            if (bracketed) { break; }
             a = b;
+            da = db;
             b = b + 0.02;
+            db = map_d(ro + rd * b);
+            bracketed = db < 0.0;
         }
         // Only refine when we actually bracket a zero crossing. A grazing silhouette
         // ray that never goes inside keeps its (smooth) threshold hit instead of a
-        // bogus bisection result — that was the wispy far-horizon edge.
+        // bogus refined result — that was the wispy far-horizon edge.
         if (bracketed) {
-            for (var j = 0; j < 14; j = j + 1) {
-                let tm = 0.5 * (a + b);
-                if (map_d(ro + rd * tm) < 0.0) { b = tm; } else { a = tm; }
+            // Bracketed secant (regula falsi, Illinois-damped) instead of plain
+            // bisection: the field is close to linear across the tiny bracket, so
+            // a couple of evaluations land within ~1e-4 — the consistency the old
+            // 14-step bisection bought with 14 evaluations. This refine runs for
+            // EVERY hit pixel (it was ~a third of the terrain frame); it must
+            // stay cheap.
+            var tm = b;
+            for (var j = 0; j < 5; j = j + 1) {
+                tm = a + da * (b - a) / max(da - db, 1e-9);
+                let dm = map_d(ro + rd * tm);
+                if (abs(dm) < 3e-4) {
+                    break;
+                }
+                if (dm < 0.0) {
+                    b = tm;
+                    db = dm;
+                    da = da * 0.5; // damp the kept side so the secant keeps moving
+                } else {
+                    a = tm;
+                    da = dm;
+                    db = db * 0.5;
+                }
             }
-            t = 0.5 * (a + b);
+            t = tm;
         }
     }
 
