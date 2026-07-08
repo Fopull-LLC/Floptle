@@ -26,6 +26,7 @@ pub(crate) enum ComponentClip {
     Material(Box<Material>),
     RigidBody(floptle_core::RigidBody),
     Particles(floptle_core::ParticleSystem),
+    Audio(floptle_audio::AudioSource),
     /// A single attached script (its kind, enabled flag, and tuned params).
     Script(floptle_core::ScriptInst),
 }
@@ -39,6 +40,7 @@ impl ComponentClip {
             ComponentClip::Material(_) => "Material".into(),
             ComponentClip::RigidBody(_) => "Rigidbody".into(),
             ComponentClip::Particles(_) => "Particle System".into(),
+            ComponentClip::Audio(_) => "Audio Source".into(),
             ComponentClip::Script(s) => format!("Script: {}", s.kind),
         }
     }
@@ -958,6 +960,187 @@ impl EditorTabViewer<'_> {
                     });
                 }
 
+                // ===== Audio Source (only when the node has one) =====
+                if world.get::<floptle_audio::AudioSource>(e).is_some() {
+                    ui.separator();
+                    let (copy, paste, remove) = component_header(
+                        ui,
+                        "♪ Audio Source",
+                        matches!(clip, Some(ComponentClip::Audio(_))),
+                        true,
+                    );
+                    if copy
+                        && let Some(a) = world.get::<floptle_audio::AudioSource>(e) {
+                            cmd.copy_component = Some(ComponentClip::Audio(a.clone()));
+                        }
+                    if paste {
+                        cmd.paste_component = Some(e);
+                    }
+                    if remove {
+                        cmd.remove_audio = Some(e);
+                    }
+                    // Clip candidates: every audio file, as project-relative keys.
+                    let mut audio_paths = Vec::new();
+                    crate::assets::collect_audio_paths(self.asset_tree, &mut audio_paths);
+                    let clips: Vec<String> = audio_paths
+                        .iter()
+                        .map(|p| {
+                            crate::assets::asset_rel_path(p, self.project_root).replace('\\', "/")
+                        })
+                        .collect();
+                    let track_names: Vec<String> =
+                        std::iter::once(floptle_audio::MASTER.to_string())
+                            .chain(self.mixer.tracks.iter().map(|t| t.name.clone()))
+                            .collect();
+                    ui.indent("audio_props", |ui| {
+                        if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(e) {
+                            ui.horizontal(|ui| {
+                                ui.label("Clip");
+                                let sel =
+                                    if src.clip.is_empty() { "(none)" } else { src.clip.as_str() };
+                                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                                    ui,
+                                    egui::Id::new(("audio_clip_pick", e)),
+                                    sel,
+                                    Some("(none)"),
+                                    &clips,
+                                    200.0,
+                                ) {
+                                    src.clip = pick.unwrap_or_default();
+                                    cmd.inspector_changed = true;
+                                }
+                                if !src.clip.is_empty()
+                                    && ui
+                                        .button("▶")
+                                        .on_hover_text("Preview the clip (flat, through Master)")
+                                        .clicked()
+                                {
+                                    cmd.preview_audio = Some(src.clip.clone());
+                                }
+                            });
+                            let p = &mut src.params;
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut p.volume, 0.0..=2.0).text("Volume"),
+                                )
+                                .changed();
+                            cmd.inspector_changed |= ui
+                                .add(egui::Slider::new(&mut p.pitch, 0.25..=4.0).text("Pitch").logarithmic(true))
+                                .changed();
+                            egui::ComboBox::from_label("Spatial")
+                                .selected_text(p.mode.name())
+                                .show_ui(ui, |ui| {
+                                    for m in [
+                                        floptle_audio::SpatialMode::Spatial,
+                                        floptle_audio::SpatialMode::Distance,
+                                        floptle_audio::SpatialMode::Flat,
+                                    ] {
+                                        if ui.selectable_label(p.mode == m, m.name()).clicked() {
+                                            p.mode = m;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            match p.mode {
+                                floptle_audio::SpatialMode::Flat => {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(&mut p.pan, -1.0..=1.0).text("Pan"))
+                                        .changed();
+                                }
+                                _ => {
+                                    egui::ComboBox::from_label("Falloff")
+                                        .selected_text(p.falloff.name())
+                                        .show_ui(ui, |ui| {
+                                            for f in [
+                                                floptle_audio::Falloff::Inverse,
+                                                floptle_audio::Falloff::Linear,
+                                                floptle_audio::Falloff::Exponential,
+                                            ] {
+                                                if ui
+                                                    .selectable_label(p.falloff == f, f.name())
+                                                    .clicked()
+                                                {
+                                                    p.falloff = f;
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Distance");
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut p.min_distance)
+                                                    .speed(0.1)
+                                                    .range(0.01..=10_000.0)
+                                                    .prefix("min "),
+                                            )
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut p.max_distance)
+                                                    .speed(0.5)
+                                                    .range(0.02..=100_000.0)
+                                                    .prefix("max "),
+                                            )
+                                            .on_hover_text(
+                                                "Full volume inside min; silent past max",
+                                            )
+                                            .changed();
+                                    });
+                                }
+                            }
+                            egui::ComboBox::from_label("Mixer track")
+                                .selected_text(if p.track.is_empty() {
+                                    floptle_audio::MASTER
+                                } else {
+                                    p.track.as_str()
+                                })
+                                .show_ui(ui, |ui| {
+                                    for t in &track_names {
+                                        let cur = if p.track.is_empty() {
+                                            floptle_audio::MASTER
+                                        } else {
+                                            p.track.as_str()
+                                        };
+                                        if ui.selectable_label(cur == t, t).clicked() {
+                                            p.track = if t == floptle_audio::MASTER {
+                                                String::new()
+                                            } else {
+                                                t.clone()
+                                            };
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            egui::ComboBox::from_label("On end")
+                                .selected_text(p.end.name())
+                                .show_ui(ui, |ui| {
+                                    for (b, hint) in [
+                                        (floptle_audio::EndBehavior::Stop, "The node stays; replayable from scripts"),
+                                        (floptle_audio::EndBehavior::Destroy, "Despawn the node when the sound finishes"),
+                                        (floptle_audio::EndBehavior::Loop, "Restart seamlessly forever"),
+                                    ] {
+                                        if ui
+                                            .selectable_label(p.end == b, b.name())
+                                            .on_hover_text(hint)
+                                            .clicked()
+                                        {
+                                            p.end = b;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut src.play_on_start, "Play on start")
+                                .on_hover_text(
+                                    "Start playing the moment Play begins \
+                                     (off = a script triggers it via node:sound():play())",
+                                )
+                                .changed();
+                        }
+                    });
+                }
+
                 // ===== Rigidbody (only when the node has one) =====
                 if world.get::<floptle_core::RigidBody>(e).is_some() {
                     ui.separator();
@@ -1525,6 +1708,7 @@ impl EditorTabViewer<'_> {
                         AnimNew,
                         Particles(String),
                         ParticlesNew,
+                        Audio,
                     }
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
@@ -1551,6 +1735,9 @@ impl EditorTabViewer<'_> {
                         for (k, _) in self.anim.controllers.iter() {
                             items.push(("Animation", format!("▶  {k}"), Add::AnimCtl(k.clone())));
                         }
+                    }
+                    if world.get::<floptle_audio::AudioSource>(e).is_none() {
+                        items.push(("Effects", "♪  Audio Source".into(), Add::Audio));
                     }
                     // Particle System: attach an existing effect asset, or create a
                     // starter effect (a small looping fountain to shape from).
@@ -1611,6 +1798,9 @@ impl EditorTabViewer<'_> {
                                 ComponentClip::Particles(_) => {
                                     world.get::<floptle_core::ParticleSystem>(e).is_none()
                                 }
+                                ComponentClip::Audio(_) => {
+                                    world.get::<floptle_audio::AudioSource>(e).is_none()
+                                }
                                 ComponentClip::Script(_) => true,
                                 ComponentClip::Transform(_) | ComponentClip::Matter(_) => false,
                             };
@@ -1661,6 +1851,7 @@ impl EditorTabViewer<'_> {
                                             cmd.add_particles = Some((e, k.clone()))
                                         }
                                         Add::ParticlesNew => cmd.new_particles = Some(e),
+                                        Add::Audio => cmd.add_audio = Some(e),
                                     }
                                     picked = true;
                                     ui.close();

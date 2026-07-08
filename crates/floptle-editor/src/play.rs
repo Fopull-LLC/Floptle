@@ -195,6 +195,9 @@ impl Editor {
         if self.playing {
             self.playing = false;
             self.paused = false;
+            // Silence the play session's sounds and revert Lua mixer tweaks.
+            let mixer = self.project.mixer.clone();
+            self.audio.stop_play(&mixer);
             self.sim = None; // drop the physics sim; restore reverts moved transforms
             // Multiplayer sessions live inside a play session — never across Stop.
             self.net_stop("play stopped");
@@ -261,6 +264,10 @@ impl Editor {
                 }
             // Spawn play-on-start particle effects on their nodes.
             self.vfx.start_play(&self.world);
+            // Fire play-on-start sounds through the project mixer.
+            let mixer = self.project.mixer.clone();
+            let root = self.project_root.clone();
+            self.audio.start_play(&self.world, &root, &mixer);
             self.playing = true;
             // Outside a session, only player slot #1 takes input: extra
             // Predicted nodes (multiplayer slots) idle instead of mirroring

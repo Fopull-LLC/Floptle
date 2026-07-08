@@ -61,6 +61,9 @@ impl Editor {
             ComponentClip::Particles(p) => {
                 self.world.insert(e, p);
             }
+            ComponentClip::Audio(a) => {
+                self.world.insert(e, a);
+            }
             ComponentClip::Script(si) => {
                 let scripts = match self.world.get_mut::<Scripts>(e) {
                     Some(s) => s,
@@ -122,6 +125,7 @@ impl Editor {
             .map(floptle_scene::ReplicatedDoc::from_component);
         let ui_layer = self.world.get::<floptle_ui::UiLayer>(e).copied();
         let ui = self.world.get::<floptle_ui::ElementSpec>(e).cloned();
+        let audio = self.world.get::<floptle_audio::AudioSource>(e).cloned();
         Some(NodeDoc {
             name,
             transform,
@@ -140,6 +144,7 @@ impl Editor {
             net,
             ui_layer,
             ui,
+            audio,
         })
     }
 
@@ -191,6 +196,9 @@ impl Editor {
         if let Some(u) = &node.ui {
             self.world.insert(e, u.clone());
         }
+        if let Some(a) = &node.audio {
+            self.world.insert(e, a.clone());
+        }
         e
     }
 
@@ -220,6 +228,7 @@ impl Editor {
             net: None,
             ui_layer: None,
             ui: None,
+            audio: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -259,6 +268,7 @@ impl Editor {
                 net: None,
                 ui_layer: None,
                 ui: None,
+                audio: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

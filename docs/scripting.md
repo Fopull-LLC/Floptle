@@ -19,11 +19,12 @@ it up immediately.
 8. [Referencing other nodes & scripts](#8-referencing-other-nodes--scripts)
 9. [Animation: `node:animator()`](#9-animation-nodeanimator)
 10. [Particles: `node:particles()`](#10-particles-nodeparticles)
-11. [Recipe: a walkable first-person character](#11-recipe-a-walkable-first-person-character)
-12. [Bundled example scripts](#12-bundled-example-scripts)
-13. [The in-engine IDE](#13-the-in-engine-ide)
-14. [Tips & gotchas](#14-tips--gotchas)
-15. [Networking: `net.*`, `synced`, `onRpc`](#15-networking-net-synced-onrpc)
+11. [Audio: `audio.play`, `node:sound()` & the mixer](#11-audio-audioplay-nodesound--the-mixer)
+12. [Recipe: a walkable first-person character](#12-recipe-a-walkable-first-person-character)
+13. [Bundled example scripts](#13-bundled-example-scripts)
+14. [The in-engine IDE](#14-the-in-engine-ide)
+15. [Tips & gotchas](#15-tips--gotchas)
+16. [Networking: `net.*`, `synced`, `onRpc`](#16-networking-net-synced-onrpc)
 
 ---
 
@@ -607,7 +608,106 @@ end
 the ❋ Particles timeline so it ends cleanly. That's the whole loop: design it on
 the timeline → `spawnEffect` it from gameplay.
 
-## 11. Recipe: a walkable first-person character
+## 11. Audio: `audio.play`, `node:sound()` & the mixer
+
+Playing a sound needs nothing but a clip path — no prefab, no source node, no
+spawn-then-get-component dance:
+
+```lua
+audio.play("audio/ding.ogg")                          -- flat 2D (UI, stingers)
+audio.play("audio/hit.ogg", h.x, h.y, h.z)            -- 3D at a world point
+audio.play("audio/engine.ogg", carNode, {loop = true}) -- follows the node
+```
+
+Sounds default to **spatial**: they attenuate with distance and pan toward
+where they are relative to the active camera. Every knob rides in the options
+table (all optional):
+
+```lua
+local s = audio.play("audio/roar.ogg", bossNode, {
+  volume = 0.8,             -- linear, 1 = as authored
+  pitch = 1.1,              -- playback rate (also shifts pitch)
+  mode = "Spatial",         -- "Distance" = attenuate only · "Flat" = plain 2D
+  falloff = "Inverse",      -- "Linear" · "Exponential"
+  minDistance = 2,          -- full volume inside this range
+  maxDistance = 50,         -- silent past this range
+  track = "SFX",            -- mixer track to route through (default Master)
+  endBehavior = "Destroy",  -- "Stop" (default) · "Destroy" · "Loop"
+})
+```
+
+`audio.play` returns a **sound handle**, live until the sound ends:
+
+| Call | What it does |
+|---|---|
+| `s:stop()` | fade out (a few ms — never clicks) and end |
+| `s:pause()` / `s:resume()` | freeze / continue playback |
+| `s:setVolume(v)` / `s:setPitch(v)` / `s:setPan(v)` | live tweaks |
+| `s:setTrack("Music")` | re-route through another mixer track |
+| `s:setPosition(x, y, z)` | move the emitter (stops following a node) |
+| `s:seek(secs)` | jump the playhead |
+| `s:isPlaying()` / `s:position()` | playback state |
+
+`endBehavior = "Destroy"` on a node-following sound despawns that node when
+the sound finishes — spawn a node, hang a sound on it, and it cleans itself up.
+
+### The Audio Source component
+
+For authored emitters (ambient loops, music zones, alarm props), add an
+**Audio Source** in the Inspector (➕ Add Component): pick the clip, spatial
+mode, falloff, distances, mixer track, end behavior, and **Play on start**.
+Scripts drive it through `node:sound()`:
+
+```lua
+local alarm = find("Alarm"):sound()
+alarm:play()                     -- restart its clip
+alarm:setClip("audio/alarm2.ogg")
+alarm:pause()  alarm:resume()  alarm:stop()
+if alarm:isPlaying() then log(alarm:position()) end
+```
+
+Its tunables mirror live through `getcomponent` (numbers only, like every
+component):
+
+| field | Meaning (Inspector: ♪ Audio Source) |
+|---|---|
+| `volume` | linear volume 0..2 |
+| `pitch` | playback rate (0.5 = octave down) |
+| `pan` | stereo pan −1..1 (Flat mode) |
+| `minDistance` / `maxDistance` | the falloff range |
+| `playOnStart` | 1/0 — play when Play starts |
+| `mode` | 0 = Spatial · 1 = Distance · 2 = Flat |
+| `falloff` | 0 = Inverse · 1 = Linear · 2 = Exponential |
+| `endBehavior` | 0 = Stop · 1 = Destroy · 2 = Loop |
+
+```lua
+node:getcomponent("AudioSource").volume = 0.3   -- live while playing
+```
+
+### The mixer
+
+Everything audible routes through the **🎚 Mixer** tab: named tracks with a
+fader, pan, mute/solo, an effect chain (parametric EQ with a draggable curve,
+delay, reverb, chorus, flanger, phaser, pitch shift, compressor, limiter,
+distortion, utility), and routing — tracks can output into other tracks
+(e.g. `Footsteps → SFX → Master`). The graph saves with the project
+(`project.ron`); anything that doesn't name a track plays on **Master**.
+
+Scripts get live control that reverts when Play stops:
+
+```lua
+audio.track("Music"):setVolume(-12)   -- duck music (fader dB)
+audio.track("SFX"):setPan(0.2)
+audio.track("Master"):setMuted(true)
+audio.stopAll()                       -- silence everything
+```
+
+Clips are plain files under `assets/audio/` (`.wav`, `.ogg`, `.mp3`,
+`.flac`) — double-click one in the Assets browser to preview it. Clip
+references are project-relative paths (`"audio/hit.ogg"`; the extension may
+be omitted).
+
+## 12. Recipe: a walkable first-person character
 
 No glue code required:
 
@@ -642,7 +742,7 @@ function update(node, dt)
 end
 ```
 
-## 12. Bundled example scripts
+## 13. Bundled example scripts
 
 Every project ships these under `scripts/` — open one for a working start:
 
@@ -656,7 +756,7 @@ Every project ships these under `scripts/` — open one for a working start:
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |
 
-## 13. The in-engine IDE
+## 14. The in-engine IDE
 
 Double-click a `.lua` in Assets (or use the Inspector's Scripting section) to
 open it in the **Scripting** tab — a small but real code editor:
@@ -688,7 +788,7 @@ open it in the **Scripting** tab — a small but real code editor:
 
 The full shortcut list lives on the tab's **§ Docs** page.
 
-## 14. Tips & gotchas
+## 15. Tips & gotchas
 
 - **Run, then Play:** scripts only execute while the game is playing (F1). Stop
   restores the scene to its pre-Play state.
@@ -701,7 +801,7 @@ The full shortcut list lives on the tab's **§ Docs** page.
 - **Hot-reload:** just save. The script re-runs in a fresh environment, so avoid
   relying on state surviving a reload mid-Play.
 
-## 15. Networking: `net.*`, `synced`, `onRpc`
+## 16. Networking: `net.*`, `synced`, `onRpc`
 
 Multiplayer in Floptle is **server-authoritative**: the host simulates the
 truth, clients receive smoothed snapshots, and clients send *intents* (RPCs),

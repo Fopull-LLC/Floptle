@@ -19,6 +19,8 @@ pub(crate) enum EditorTab {
     AnimGraph,
     /// The particle-effect timeline: tracks, clips, bursts, live preview.
     Particles,
+    /// The audio mixer: tracks, faders, effect chains, routing, meters.
+    Mixer,
 }
 
 impl EditorTab {
@@ -35,6 +37,7 @@ impl EditorTab {
             EditorTab::Animation => "✏ Animating",
             EditorTab::AnimGraph => "◎ Controller",
             EditorTab::Particles => "✨ Particles",
+            EditorTab::Mixer => "🎚 Mixer",
         }
     }
 }
@@ -83,6 +86,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
             EditorTab::Animation,
             EditorTab::AnimGraph,
             EditorTab::Particles,
+            EditorTab::Mixer,
         ],
     );
     dock

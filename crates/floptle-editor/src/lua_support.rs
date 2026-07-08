@@ -49,8 +49,9 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / UiElement / UiSlider / UiLayer), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
+---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.
@@ -132,6 +133,61 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field isPlaying fun(self: ParticleSystemHandle): boolean Is an instance emitting/ageing right now?
 ---@field alive fun(self: ParticleSystemHandle): number Live particle count across the effect's tracks.
 ---@field asset fun(self: ParticleSystemHandle): string|nil The effect asset key this node references.
+
+---A node's Audio Source, controlled from a script via `node:sound()`.
+---@class AudioSourceHandle
+---@field play fun(self: AudioSourceHandle) Play the source's clip from the start (restarts if already playing).
+---@field stop fun(self: AudioSourceHandle) Fade the sound out (a few ms — no click).
+---@field pause fun(self: AudioSourceHandle) Freeze playback (resume continues from here).
+---@field resume fun(self: AudioSourceHandle) Continue a paused sound.
+---@field setClip fun(self: AudioSourceHandle, clip: string) Swap the clip (project-relative path like \"audio/steps.ogg\"); restarts playback if playing.
+---@field seek fun(self: AudioSourceHandle, secs: number) Jump the playhead to a time in seconds.
+---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
+---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
+
+---A playing sound returned by `audio.play(...)`. Handles stay valid until the
+---sound finishes; calls on a finished sound are ignored.
+---@class SoundHandle
+---@field stop fun(self: SoundHandle) Fade the sound out and end it.
+---@field pause fun(self: SoundHandle) Freeze playback.
+---@field resume fun(self: SoundHandle) Continue a paused sound.
+---@field setVolume fun(self: SoundHandle, volume: number) Linear volume (1 = as authored).
+---@field setPitch fun(self: SoundHandle, pitch: number) Playback-rate pitch (0.5 = octave down, 2 = octave up).
+---@field setPan fun(self: SoundHandle, pan: number) Stereo pan −1..1 (non-spatial sounds).
+---@field setTrack fun(self: SoundHandle, track: string) Re-route through a mixer track (\"Master\" or a track name).
+---@field setPosition fun(self: SoundHandle, x: number, y: number, z: number) Move the emitter (stops following a node).
+---@field seek fun(self: SoundHandle, secs: number) Jump the playhead to a time in seconds.
+---@field isPlaying fun(self: SoundHandle): boolean Still audible (false once finished)?
+---@field position fun(self: SoundHandle): number Playhead in seconds.
+
+---A mixer track handle from `audio.track(name)` — live control of the
+---project mixer (reverts to the saved mixer when Play stops).
+---@class AudioTrackHandle
+---@field setVolume fun(self: AudioTrackHandle, db: number) Fader gain in dB (0 = unity, −60 = silent).
+---@field setPan fun(self: AudioTrackHandle, pan: number) Stereo pan −1..1.
+---@field setMuted fun(self: AudioTrackHandle, muted: boolean) Mute / unmute the track.
+---@field setSoloed fun(self: AudioTrackHandle, soloed: boolean) Solo the track (mutes everything else).
+
+---Options for `audio.play`. All fields optional.
+---@class AudioPlayOpts
+---@field volume number? Linear volume (default 1).
+---@field pitch number? Playback rate (default 1; also shifts pitch).
+---@field pan number? Stereo pan −1..1 (non-spatial sounds).
+---@field mode string? \"Spatial\" (default) | \"Distance\" (no panning) | \"Flat\" (2D).
+---@field falloff string? \"Inverse\" (default) | \"Linear\" | \"Exponential\".
+---@field minDistance number? Full volume inside this range (default 2).
+---@field maxDistance number? Silent past this range (default 50).
+---@field track string? Mixer track to route through (default Master).
+---@field endBehavior string? \"Stop\" (default) | \"Destroy\" (despawn the followed node) | \"Loop\".
+---@field loop boolean? Shorthand for endBehavior = \"Loop\".
+
+---The sound system: fire-and-forget playback + mixer control. Positions and
+---following make it spatial; pass no position for flat 2D (UI, music).
+---@class audio
+---@field play fun(clip: string, a?: Node|number, b?: number|AudioPlayOpts, c?: number, opts?: AudioPlayOpts): SoundHandle Play a clip: `audio.play(\"audio/ding.ogg\")` (flat) · `audio.play(\"audio/hit.ogg\", x, y, z, opts)` (at a point) · `audio.play(\"audio/engine.ogg\", carNode, {loop=true})` (follows the node).
+---@field stopAll fun() Stop every playing sound (sources and one-shots).
+---@field track fun(name: string): AudioTrackHandle A mixer track handle (\"Master\" or a track name from the Mixer tab).
+audio = {}
 
 ---This instance's tunables, seeded from the script's `defaults` table.
 ---@type table<string, number>
@@ -409,12 +465,13 @@ function gizmo.point(x, y, z, size, r, g, b) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
 ];

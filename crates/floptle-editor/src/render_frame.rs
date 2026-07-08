@@ -1047,6 +1047,8 @@ impl Editor {
         let anim_sys = &mut self.anim;
         let vfx_sys = &mut self.vfx;
         let vfx_ui_state = &mut self.vfx_ui;
+        let audio_sys = &mut self.audio;
+        let mixer_ui_state = &mut self.mixer_ui;
         let anim_ui_state = &mut self.anim_ui;
         let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
@@ -1565,6 +1567,9 @@ impl Editor {
                 anim: anim_sys,
                 vfx: vfx_sys,
                 vfx_ui: vfx_ui_state,
+                audio: audio_sys,
+                mixer_ui: mixer_ui_state,
+                mixer: &mut project.mixer,
                 particles_active,
                 anim_ui: anim_ui_state,
                 mesh_registry,
@@ -2778,6 +2783,9 @@ impl Editor {
             // Feed each particle node's state so scripts can read
             // node:particles():isPlaying()/:alive() this frame.
             self.script_host.set_vfx_info(self.vfx.script_info(&self.world));
+            // Feed sound playback state so scripts can read sound:isPlaying()/
+            // :position() this frame.
+            self.script_host.set_audio_info(self.audio.script_info());
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             // UI hook events (clicked / hoverStart / …) fire against the run's
             // fresh scene mirror, with their own write flush.
@@ -3000,6 +3008,49 @@ impl Editor {
                 self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p));
             }
             self.vfx.advance(&self.world, sdt);
+            // Audio: apply queued Lua commands, then tick voices against the
+            // final node transforms (same ordering rationale as particles).
+            let audio_cmds = self.script_host.take_audio_commands();
+            let root = self.project_root.clone();
+            if !audio_cmds.is_empty() {
+                // `node:sound():setClip(...)` mutates the component (a string —
+                // outside the numeric mirror); the diff in advance() restarts
+                // the voice on the new clip.
+                for cmd in &audio_cmds {
+                    if let floptle_script::AudioCmd::SourceSetClip { ent, clip } = cmd {
+                        let target = self
+                            .world
+                            .query::<floptle_audio::AudioSource>()
+                            .find(|(e, _)| e.index() == *ent)
+                            .map(|(e, _)| e);
+                        if let Some(e) = target
+                            && let Some(src) = self.world.get_mut::<floptle_audio::AudioSource>(e)
+                        {
+                            src.clip = clip.clone();
+                        }
+                    }
+                }
+                self.audio.apply_script_commands(&self.world, &root, audio_cmds);
+            }
+            // Listener = the active camera's ears.
+            let listener = self
+                .world
+                .query::<Matter>()
+                .find(|(_, m)| matches!(m, Matter::Camera { active: true, .. }))
+                .map(|(e, _)| {
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    floptle_audio::Listener {
+                        position: wt.translation,
+                        forward: (wt.rotation * floptle_core::math::Vec3::NEG_Z).as_dvec3(),
+                        right: (wt.rotation * floptle_core::math::Vec3::X).as_dvec3(),
+                    }
+                })
+                .unwrap_or_default();
+            for e in self.audio.advance(&self.world, &root, listener) {
+                // EndBehavior::Destroy — the sound finished, its node goes too.
+                self.world.despawn(e);
+                self.selection.retain(|s| *s != e);
+            }
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }
@@ -3412,6 +3463,28 @@ impl Editor {
         if let Some(e) = cmd.remove_particles {
             self.record();
             self.world.remove::<floptle_core::ParticleSystem>(e);
+        }
+        if let Some(e) = cmd.add_audio {
+            self.record();
+            self.world.insert(e, floptle_audio::AudioSource::default());
+        }
+        if let Some(e) = cmd.remove_audio {
+            self.record();
+            self.world.remove::<floptle_audio::AudioSource>(e);
+        }
+        if let Some(key) = cmd.preview_audio.take() {
+            let rel = crate::assets::asset_rel_path(&key, &self.project_root).replace('\\', "/");
+            let root = self.project_root.clone();
+            self.audio.preview(&root, &rel);
+        }
+        if cmd.mixer_changed {
+            // Live-apply: the running play session tracks the edit too (its
+            // runtime overlay restarts from the edited graph).
+            if self.playing {
+                self.audio.runtime_mixer = Some(self.project.mixer.clone());
+            }
+            let mixer = self.project.mixer.clone();
+            self.audio.apply_mixer(&mixer);
         }
         if let Some((e, on)) = cmd.set_mesh_collider {
             self.record();

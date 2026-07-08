@@ -54,6 +54,7 @@ use mlua::{Lua, RegistryKey, Table};
 type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
 
 mod api;
+mod audio_api;
 mod env;
 mod host;
 mod net_api;
@@ -198,6 +199,12 @@ pub struct ScriptHost {
     /// Particle commands scripts queued this frame (`node:particles():play()` etc.),
     /// drained by the editor and applied before the effects advance.
     vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
+    /// Audio commands scripts queued this frame (`audio.play(...)`, sound and
+    /// mixer-track handles), drained by the editor and applied to the engine.
+    audio_commands: Rc<RefCell<Vec<AudioCmd>>>,
+    /// Audio playback mirror (script sounds + node AudioSources), fed by the
+    /// editor before `run` so `sound:isPlaying()` / `:position()` read live state.
+    audio_info: Rc<RefCell<AudioInfo>>,
     /// Debug-draw commands scripts queued this frame (`gizmo.line(...)` etc.) —
     /// immediate mode: drained by the editor each frame and drawn for one frame.
     gizmos: Rc<RefCell<Vec<GizmoCmd>>>,
@@ -294,6 +301,57 @@ pub enum VfxCmd {
     Stop,
     /// Restart from t = 0 (re-spawns a fresh instance) — re-fire a one-shot burst.
     Restart,
+}
+
+/// Where a script-spawned sound sits: nowhere (flat), a fixed world point, or
+/// following a node (entity index).
+#[derive(Clone, Copy, Debug)]
+pub enum AudioAt {
+    Flat,
+    Pos([f64; 3]),
+    Node(u32),
+}
+
+/// One queued `audio` command, drained by the editor after `run` and applied
+/// to the audio engine (`handle` = script-side sound id; `ent` = entity index
+/// of a node's AudioSource).
+#[derive(Clone, Debug)]
+pub enum AudioCmd {
+    Play { handle: u32, clip: String, at: AudioAt, params: Box<floptle_audio::PlayParams> },
+    Stop { handle: u32 },
+    Pause { handle: u32, paused: bool },
+    /// Set a numeric knob on a playing sound ("volume" | "pitch" | "pan").
+    SetParam { handle: u32, field: String, value: f64 },
+    SetTrack { handle: u32, track: String },
+    Move { handle: u32, pos: [f64; 3] },
+    Seek { handle: u32, secs: f64 },
+    StopAll,
+    SourcePlay { ent: u32 },
+    SourceStop { ent: u32 },
+    SourcePause { ent: u32, paused: bool },
+    SourceSetClip { ent: u32, clip: String },
+    SourceSeek { ent: u32, secs: f64 },
+    TrackVolume { track: String, db: f64 },
+    TrackPan { track: String, pan: f64 },
+    TrackMuted { track: String, muted: bool },
+    TrackSoloed { track: String, soloed: bool },
+}
+
+/// Live playback state of one sound / source, mirrored for script reads.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AudioPlayState {
+    pub playing: bool,
+    pub paused: bool,
+    /// Playhead in seconds.
+    pub position: f64,
+}
+
+/// The audio mirror the editor feeds before each `run`: script one-shots by
+/// handle, node AudioSources by entity index.
+#[derive(Clone, Debug, Default)]
+pub struct AudioInfo {
+    pub sounds: HashMap<u32, AudioPlayState>,
+    pub sources: HashMap<u32, AudioPlayState>,
 }
 
 /// A mirror of the scene graph the Lua node/script handles read and write, synced from
@@ -916,6 +974,80 @@ mod tests {
             "alive() must read the fed count"
         );
         assert!(host.take_vfx_commands().is_empty(), "no play() when already playing");
+    }
+
+    #[test]
+    fn audio_play_queues_and_handle_controls() {
+        let dir = std::env::temp_dir().join("floptle_script_test_audio");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "sfx",
+            "function update(node, dt)\n  local s = audio.play('audio/hit.ogg', 1.0, 2.0, 3.0, { maxDistance = 35, track = 'SFX', endBehavior = 'Destroy' })\n  s:setVolume(0.5)\n  audio.play('audio/music.ogg', { loop = true })\n  audio.track('Music'):setVolume(-6)\nend\n",
+        );
+        let (mut world, _e) = world_with_script("sfx");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let cmds = host.take_audio_commands();
+        assert_eq!(cmds.len(), 4, "expected play+setVolume+play+trackVolume: {cmds:?}");
+        let AudioCmd::Play { handle, clip, at, params } = &cmds[0] else {
+            panic!("first cmd must be Play: {cmds:?}")
+        };
+        assert_eq!(clip, "audio/hit.ogg");
+        assert!(matches!(at, AudioAt::Pos([1.0, 2.0, 3.0])), "positional play: {at:?}");
+        assert_eq!(params.max_distance, 35.0);
+        assert_eq!(params.track, "SFX");
+        assert_eq!(params.end, floptle_audio::EndBehavior::Destroy);
+        assert!(
+            matches!(&cmds[1], AudioCmd::SetParam { handle: h, field, value }
+                if h == handle && field == "volume" && *value == 0.5),
+            "handle setter must target the played sound: {cmds:?}"
+        );
+        let AudioCmd::Play { at: at2, params: p2, .. } = &cmds[2] else {
+            panic!("third cmd must be the flat play: {cmds:?}")
+        };
+        assert!(matches!(at2, AudioAt::Flat), "opts-only play is flat: {at2:?}");
+        assert_eq!(p2.end, floptle_audio::EndBehavior::Loop, "loop = true shorthand");
+        assert!(
+            matches!(&cmds[3], AudioCmd::TrackVolume { track, db } if track == "Music" && *db == -6.0),
+            "mixer track handle: {cmds:?}"
+        );
+        assert!(host.take_audio_commands().is_empty(), "drained");
+    }
+
+    #[test]
+    fn node_sound_handle_and_component_mirror() {
+        let dir = std::env::temp_dir().join("floptle_script_test_audio_src");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "alarm",
+            "function update(node, dt)\n  if not node:sound():isPlaying() then node:sound():play() end\n  node:getcomponent('AudioSource').volume = 0.25\nend\n",
+        );
+        let (mut world, e) = world_with_script("alarm");
+        world.insert(e, floptle_audio::AudioSource { clip: "audio/alarm.ogg".into(), ..Default::default() });
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let cmds = host.take_audio_commands();
+        assert!(
+            matches!(cmds.as_slice(), [AudioCmd::SourcePlay { ent }] if *ent == e.index()),
+            "not playing -> one SourcePlay: {cmds:?}"
+        );
+        assert_eq!(
+            world.get::<floptle_audio::AudioSource>(e).unwrap().params.volume,
+            0.25,
+            "component mirror write must land on the ECS"
+        );
+
+        // Once the mirror says it's playing, no more play commands.
+        let mut info = AudioInfo::default();
+        info.sources.insert(
+            e.index(),
+            AudioPlayState { playing: true, paused: false, position: 0.5 },
+        );
+        host.set_audio_info(info);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.take_audio_commands().is_empty(), "no play() when already playing");
     }
 
     #[test]

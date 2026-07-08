@@ -21,6 +21,7 @@ on the [`../decisions/`](../decisions/) ADRs and the top-level
 - [large-world-space.md](large-world-space.md) — default-on floating-origin / camera-relative space: simulate a galaxy with no jitter.
 - [time.md](time.md) — time as a rate field `r(p)`: per-entity local clocks; slow/freeze/dilation regions.
 - [particles-vfx.md](particles-vfx.md) — the timeline particle editor (groups, emit events, per-property curves).
+- [audio.md](audio.md) — spatial sound + the project mixer (tracks, effects, routing) and the one-line `audio.play` API.
 - [scene-and-nodes.md](scene-and-nodes.md) — Node/Component authoring facade over the archetype ECS.
 - [animation.md](animation.md) — glTF skeletal clips + a lightweight state machine + notify events.
 

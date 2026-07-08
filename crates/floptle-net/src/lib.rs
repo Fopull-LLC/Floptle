@@ -243,6 +243,7 @@ mod tests {
             net: None,
             ui_layer: None,
             ui: None,
+            audio: None,
         };
         let arrow = server.spawn_doc(&mut sw, &node, Some(1));
         // Tick the empty-peers server a few times.

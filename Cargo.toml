@@ -16,6 +16,7 @@ members = [
     "crates/floptle-render",   # wgpu render graph, materials, the signature SDF/raymarch look
     "crates/floptle-shader",   # shader IR: graph <-> text, transpile to WGSL via naga
     "crates/floptle-vfx",      # timeline-based particle system + runtime
+    "crates/floptle-audio",    # sound: clips, spatial voices, mixer graph + effects
     "crates/floptle-anim",     # skeletal + state-machine animation
     "crates/floptle-physics",  # SDF-first collision + character/vehicle movement
     "crates/floptle-matter",   # deformable matter: morph, soft-body, stick, fracture

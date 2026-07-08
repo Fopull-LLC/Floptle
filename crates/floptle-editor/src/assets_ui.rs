@@ -168,6 +168,8 @@ impl<'a> EditorTabViewer<'a> {
                     self.project_root,
                     floptle_scene::VFX_EXT,
                 ));
+            } else if crate::assets::is_audio(path) {
+                self.cmd.preview_audio = Some(path.to_string());
             } else if openable {
                 self.cmd.open_script_pref = Some(path.to_string());
             }
@@ -334,6 +336,8 @@ impl<'a> EditorTabViewer<'a> {
                                 self.project_root,
                                 floptle_scene::VFX_EXT,
                             ));
+                        } else if crate::assets::is_audio(path) {
+                            self.cmd.preview_audio = Some(path.clone());
                         } else if openable {
                             self.cmd.open_script_pref = Some(path.clone());
                         }
