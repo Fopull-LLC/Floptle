@@ -1220,11 +1220,45 @@ impl EditorTabViewer<'_> {
                     });
                     let mut remove: Option<usize> = None;
                     let mut copy_idx: Option<usize> = None;
-                    // Candidates for node-reference params (any named node).
+                    // Candidates for reference params, filtered by declared kind:
+                    // noderef → any named node; scriptref(k) → nodes carrying that
+                    // script; componentref(c) → nodes carrying that component.
                     let mut node_names: Vec<String> =
                         world.query::<floptle_core::Name>().map(|(_, n)| n.0.clone()).collect();
                     node_names.sort();
                     node_names.dedup();
+                    let mut script_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    for (oe, sc) in world.query::<Scripts>() {
+                        if let Some(n) = world.get::<floptle_core::Name>(oe) {
+                            for si in &sc.0 {
+                                script_nodes.entry(si.kind.clone()).or_default().push(n.0.clone());
+                            }
+                        }
+                    }
+                    for v in script_nodes.values_mut() {
+                        v.sort();
+                        v.dedup();
+                    }
+                    let mut comp_nodes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                    for kind in self.ref_kinds.values() {
+                        if let floptle_script::RefKind::Component(c) = kind
+                            && !comp_nodes.contains_key(c)
+                        {
+                            let mut v: Vec<String> = world
+                                .query::<floptle_core::Name>()
+                                .filter(|(oe, _)| node_has_component(world, *oe, c))
+                                .map(|(_, n)| n.0.clone())
+                                .collect();
+                            v.sort();
+                            v.dedup();
+                            comp_nodes.insert(c.clone(), v);
+                        }
+                    }
+                    // Entity → name, for dropped hierarchy nodes.
+                    let name_of: std::collections::HashMap<floptle_core::Entity, String> = world
+                        .query::<floptle_core::Name>()
+                        .map(|(oe, n)| (oe, n.0.clone()))
+                        .collect();
                     ui.indent("script_list", |ui| {
                         if let Some(scr) = world.get_mut::<Scripts>(e) {
                             for (i, inst) in scr.0.iter_mut().enumerate() {
@@ -1258,24 +1292,79 @@ impl EditorTabViewer<'_> {
                                         .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
                                         .changed();
                                 }
-                                // Node-reference params (`name = noderef()` in the
-                                // script's defaults): wire a scene node by name — the
-                                // script gets a handle directly, no find() scans.
+                                // Reference params (`name = noderef() / scriptref(k) /
+                                // componentref(c)` in the script's defaults): wire a
+                                // scene node — the script gets a node / script /
+                                // component handle directly, no find() scans. Pick
+                                // from the (kind-filtered) list, or DRAG a node from
+                                // the Hierarchy onto the row.
                                 for (ri, (k, target)) in inst.refs.iter_mut().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(format!("{k}  "));
+                                    let kind = self.ref_kinds.get(&(inst.kind.clone(), k.clone()));
+                                    let empty: Vec<String> = Vec::new();
+                                    let (cands, hint) = match kind {
+                                        Some(floptle_script::RefKind::Script(sk)) => (
+                                            script_nodes.get(sk).unwrap_or(&empty),
+                                            format!("→ the '{sk}' SCRIPT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
+                                        ),
+                                        Some(floptle_script::RefKind::Component(c)) => (
+                                            comp_nodes.get(c).unwrap_or(&empty),
+                                            format!("→ the {c} COMPONENT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
+                                        ),
+                                        _ => (
+                                            &node_names,
+                                            "→ a node handle; drag a node from the Hierarchy to wire".to_string(),
+                                        ),
+                                    };
+                                    let row = ui.horizontal(|ui| {
+                                        ui.label(format!("{k}  ")).on_hover_text(&hint);
                                         if let Some(pick) = crate::ui_widgets::searchable_picker(
                                             ui,
                                             egui::Id::new(("script_ref", e.index(), i, ri)),
                                             if target.is_empty() { "(pick node)" } else { target },
                                             Some("(none)"),
-                                            &node_names,
+                                            cands,
                                             150.0,
                                         ) {
                                             *target = pick.unwrap_or_default();
                                             cmd.inspector_changed = true;
                                         }
-                                    });
+                                        match kind {
+                                            Some(floptle_script::RefKind::Script(sk)) => {
+                                                ui.weak(format!("⚙{sk}"));
+                                            }
+                                            Some(floptle_script::RefKind::Component(c)) => {
+                                                ui.weak(format!("◆{c}"));
+                                            }
+                                            _ => {}
+                                        }
+                                    })
+                                    .response;
+                                    // Drag-and-drop wiring: drop a Hierarchy node here.
+                                    if let Some(p) = row.dnd_hover_payload::<crate::hierarchy::NodePayload>() {
+                                        let ok = name_of
+                                            .get(&p.0)
+                                            .is_some_and(|n| cands.contains(n));
+                                        ui.painter().rect_stroke(
+                                            row.rect.expand(2.0),
+                                            3.0,
+                                            egui::Stroke::new(
+                                                1.5,
+                                                if ok {
+                                                    egui::Color32::from_rgb(120, 220, 120)
+                                                } else {
+                                                    egui::Color32::from_rgb(220, 120, 120)
+                                                },
+                                            ),
+                                            egui::StrokeKind::Outside,
+                                        );
+                                    }
+                                    if let Some(p) = row.dnd_release_payload::<crate::hierarchy::NodePayload>()
+                                        && let Some(n) = name_of.get(&p.0)
+                                        && cands.contains(n)
+                                    {
+                                        *target = n.clone();
+                                        cmd.inspector_changed = true;
+                                    }
                                 }
                                 ui.add_space(4.0);
                             }
@@ -1641,5 +1730,28 @@ impl EditorTabViewer<'_> {
                 *self.show_material_editor = false;
             }
         }
+    }
+}
+
+/// Whether a node carries the named component (mirrors the script-side
+/// `getcomponent` names) — the candidate filter for `componentref` pickers.
+fn node_has_component(
+    world: &floptle_core::World,
+    e: floptle_core::Entity,
+    comp: &str,
+) -> bool {
+    match comp {
+        "RigidBody" => world.get::<floptle_core::RigidBody>(e).is_some(),
+        "PointLight" => {
+            matches!(world.get::<Matter>(e), Some(Matter::PointLight { .. }))
+        }
+        "Camera" => matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })),
+        "ParticleSystem" => world.get::<floptle_core::ParticleSystem>(e).is_some(),
+        "UiElement" => world.get::<floptle_ui::ElementSpec>(e).is_some(),
+        "UiSlider" => world
+            .get::<floptle_ui::ElementSpec>(e)
+            .is_some_and(|s| s.slider.is_some()),
+        "UiLayer" => world.get::<floptle_ui::UiLayer>(e).is_some(),
+        _ => false,
     }
 }

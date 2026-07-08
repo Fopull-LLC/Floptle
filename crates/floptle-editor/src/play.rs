@@ -312,11 +312,18 @@ impl Editor {
         // Resolve each script's current defaults first (needs &mut self for the cache).
         let defaults: Vec<crate::ScriptDefaults> =
             names.iter().map(|n| self.cached_script_defaults(n)).collect();
+        // Refresh the Inspector's ref-kind map for this selection.
+        self.ref_kinds.clear();
+        for (name, (_, refs)) in names.iter().zip(&defaults) {
+            for (param, kind) in refs {
+                self.ref_kinds.insert((name.clone(), param.clone()), kind.clone());
+            }
+        }
         let Some(scr) = self.world.get_mut::<Scripts>(e) else { return };
-        for (inst, (defs, ref_names)) in scr.0.iter_mut().zip(defaults) {
+        for (inst, (defs, ref_decls)) in scr.0.iter_mut().zip(defaults) {
             // An empty result means "no defaults declared" OR a transient parse error
             // (e.g. mid-edit) — never wipe the user's overrides in that case.
-            if defs.is_empty() && ref_names.is_empty() {
+            if defs.is_empty() && ref_decls.is_empty() {
                 continue;
             }
             // Drop params no longer declared in defaults.
@@ -327,9 +334,9 @@ impl Editor {
                     inst.params.push((dk.clone(), *dv));
                 }
             }
-            // Same for node-ref params (wired targets survive; stale keys drop).
-            inst.refs.retain(|(k, _)| ref_names.contains(k));
-            for rk in &ref_names {
+            // Same for reference params (wired targets survive; stale keys drop).
+            inst.refs.retain(|(k, _)| ref_decls.iter().any(|(rk, _)| rk == k));
+            for (rk, _) in &ref_decls {
                 if !inst.refs.iter().any(|(k, _)| k == rk) {
                     inst.refs.push((rk.clone(), String::new()));
                 }
@@ -349,9 +356,9 @@ impl Editor {
             return;
         }
         let name = script_name_of(path);
-        let (params, ref_names) = self.script_host.script_defaults(Path::new(path));
+        let (params, ref_decls) = self.script_host.script_defaults(Path::new(path));
         self.record();
-        let refs = ref_names.into_iter().map(|k| (k, String::new())).collect();
+        let refs = ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
         let inst = ScriptInst { kind: name, enabled: true, params, refs };
         if let Some(scr) = self.world.get_mut::<Scripts>(e) {
             scr.0.push(inst);

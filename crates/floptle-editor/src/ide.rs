@@ -408,9 +408,73 @@ fn auto_indent_newline(text: &mut String, a: usize, b: usize) -> usize {
         || t.ends_with('{')
         || t.ends_with('(')
         || (t.ends_with(')') && t.contains("function"));
-    let ins = if opener { format!("\n{indent}  ") } else { format!("\n{indent}") };
+    // Auto-close: pressing Enter on an UNCLOSED block header (function/if/for/
+    // while) also inserts its matching `end` on the next line — the caret lands
+    // on the indented body line between them (Roblox-Studio style). Only when
+    // the buffer actually has more openers than `end`s, so retyping inside a
+    // complete block never doubles the close.
+    let closes = (ends_with_word(t, "then")
+        || ends_with_word(t, "do")
+        || (t.ends_with(')') && t.contains("function")))
+        && block_balance(text) > 0;
+    let ins = if closes {
+        format!("\n{indent}  \n{indent}end")
+    } else if opener {
+        format!("\n{indent}  ")
+    } else {
+        format!("\n{indent}")
+    };
     text.replace_range(ba..bb, &ins);
-    line_edit::char_of_byte(text, ba + ins.len())
+    // Caret on the body line (before the auto-inserted end, when present).
+    let caret_bytes = if closes { ba + 1 + indent.len() + 2 } else { ba + ins.len() };
+    line_edit::char_of_byte(text, caret_bytes)
+}
+
+/// Net count of open Lua blocks in `text`: `function`/`if`/`for`/`while`/
+/// `repeat` open one, `end`/`until` close one (`elseif`/`else` are neutral —
+/// they share their `if`'s end). Strings and comments are skipped, so keywords
+/// in text don't count. Positive = more openers than closers.
+fn block_balance(text: &str) -> i32 {
+    let b = text.as_bytes();
+    let mut i = 0;
+    let mut bal = 0i32;
+    while i < b.len() {
+        match b[i] {
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                // Comment: long `--[[ ]]` or to end of line.
+                if b.get(i + 2) == Some(&b'[') && b.get(i + 3) == Some(&b'[') {
+                    i = text[i + 4..].find("]]").map(|p| i + 4 + p + 2).unwrap_or(b.len());
+                } else {
+                    i = text[i..].find('\n').map(|p| i + p + 1).unwrap_or(b.len());
+                }
+            }
+            b'[' if b.get(i + 1) == Some(&b'[') => {
+                // Long string.
+                i = text[i + 2..].find("]]").map(|p| i + 2 + p + 2).unwrap_or(b.len());
+            }
+            q @ (b'"' | b'\'') => {
+                // Quoted string (with escapes).
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            c if is_ident_byte(c) && !c.is_ascii_digit() => {
+                let s0 = i;
+                while i < b.len() && is_ident_byte(b[i]) {
+                    i += 1;
+                }
+                match &text[s0..i] {
+                    "function" | "if" | "for" | "while" | "repeat" => bal += 1,
+                    "end" | "until" => bal -= 1,
+                    _ => {}
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    bal
 }
 
 /// Move the in-engine editor's caret to a char index (collapsed selection).
@@ -454,30 +518,175 @@ fn defaults_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Fields of the live component handles (`node:getcomponent(…)`), offered when
-/// completing after a `.` on any variable — `rb.fri` → `friction`.
-const HANDLE_FIELDS: &[(&str, &str)] = &[
-    ("friction", "RigidBody handle: surface friction 0..1 (0 = frictionless — ice)."),
-    ("restitution", "RigidBody handle: bounciness 0..1 (0 = no bounce)."),
-    ("gravity", "RigidBody handle: gravity pull on this body — assign true/false (reads back 1/0)."),
-    ("shape", "RigidBody handle: body shape — 0 sphere, 1 capsule, 2 box."),
-    ("radius", "RigidBody handle: sphere/capsule radius."),
-    ("height", "RigidBody handle: capsule total height."),
-    ("half_x", "RigidBody handle: box half-extent X."),
-    ("half_y", "RigidBody handle: box half-extent Y."),
-    ("half_z", "RigidBody handle: box half-extent Z."),
-    ("lock_x", "RigidBody handle: freeze world X translation (assign true/false)."),
-    ("lock_y", "RigidBody handle: freeze world Y translation."),
-    ("lock_z", "RigidBody handle: freeze world Z translation (e.g. for 2.5D)."),
-    ("lock_rot_x", "RigidBody handle: freeze rotation about X (keeps a body upright)."),
-    ("lock_rot_y", "RigidBody handle: freeze rotation about Y."),
-    ("lock_rot_z", "RigidBody handle: freeze rotation about Z."),
-    ("intensity", "PointLight handle: brightness multiplier."),
-    ("range", "PointLight handle: reach in world units."),
-    ("r", "PointLight handle: color red 0..1."),
-    ("g", "PointLight handle: color green 0..1."),
-    ("b", "PointLight handle: color blue 0..1."),
+/// Fields of the live component handles (`node:getcomponent(…)`), keyed by
+/// component. A variable whose type is INFERRED (see [`infer_var_types`]) only
+/// offers its own component's fields; unknown variables offer all of them.
+const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
+    ("RigidBody", "friction", "Surface friction 0..1 (0 = frictionless — ice)."),
+    ("RigidBody", "restitution", "Bounciness 0..1 (0 = no bounce)."),
+    ("RigidBody", "gravity", "Gravity pull on this body — assign true/false (reads back 1/0)."),
+    ("RigidBody", "shape", "Body shape — 0 sphere, 1 capsule, 2 box."),
+    ("RigidBody", "radius", "Sphere/capsule radius."),
+    ("RigidBody", "height", "Capsule total height."),
+    ("RigidBody", "half_x", "Box half-extent X."),
+    ("RigidBody", "half_y", "Box half-extent Y."),
+    ("RigidBody", "half_z", "Box half-extent Z."),
+    ("RigidBody", "lock_x", "Freeze world X translation (assign true/false)."),
+    ("RigidBody", "lock_y", "Freeze world Y translation."),
+    ("RigidBody", "lock_z", "Freeze world Z translation (e.g. for 2.5D)."),
+    ("RigidBody", "lock_rot_x", "Freeze rotation about X (keeps a body upright)."),
+    ("RigidBody", "lock_rot_y", "Freeze rotation about Y."),
+    ("RigidBody", "lock_rot_z", "Freeze rotation about Z."),
+    ("PointLight", "intensity", "Brightness multiplier."),
+    ("PointLight", "range", "Reach in world units."),
+    ("PointLight", "r", "Color red 0..1."),
+    ("PointLight", "g", "Color green 0..1."),
+    ("PointLight", "b", "Color blue 0..1."),
+    ("Camera", "fovY", "Vertical field of view, radians."),
+    ("Camera", "active", "The play-mode view camera — assign true to switch to it (reads 1/0)."),
+    ("ParticleSystem", "play_on_start", "Auto-play when play begins (1/0)."),
+    ("UiElement", "visible", "Shown (assign true/false; reads 1/0)."),
+    ("UiElement", "opacity", "Multiplies every color the element draws, 0..1."),
+    ("UiElement", "posX", "Free position X / Pin offset X (design units)."),
+    ("UiElement", "posY", "Free position Y / Pin offset Y (design units)."),
+    ("UiElement", "width", "Width in the axis's sizing mode (px / % fraction / grow weight); nil on a fit axis."),
+    ("UiElement", "height", "Height (same rules as width)."),
+    ("UiElement", "radius", "Shape corner radius (design units)."),
+    ("UiElement", "border", "Shape border thickness (design units)."),
+    ("UiElement", "fillR", "Shape fill red 0..1."),
+    ("UiElement", "fillG", "Shape fill green 0..1."),
+    ("UiElement", "fillB", "Shape fill blue 0..1."),
+    ("UiElement", "fillA", "Shape fill alpha 0..1."),
+    ("UiElement", "textSize", "Text glyph size (design units; ignored while fit is on)."),
+    ("UiElement", "textR", "Text color red 0..1."),
+    ("UiElement", "textG", "Text color green 0..1."),
+    ("UiElement", "textB", "Text color blue 0..1."),
+    ("UiElement", "textA", "Text color alpha 0..1."),
+    ("UiElement", "tintR", "Image tint red 0..1."),
+    ("UiElement", "tintG", "Image tint green 0..1."),
+    ("UiElement", "tintB", "Image tint blue 0..1."),
+    ("UiElement", "tintA", "Image tint alpha 0..1."),
+    ("UiSlider", "value", "Current value (health-bar hook: bar.value = hp)."),
+    ("UiSlider", "min", "Range start."),
+    ("UiSlider", "max", "Range end."),
+    ("UiLayer", "enabled", "Master switch — an off layer draws nothing (assign true/false)."),
+    ("UiLayer", "z", "Draw order: lowest z first."),
+    ("UiLayer", "designHeight", "Design units that span the window height."),
 ];
+
+/// What a variable (or `params.<key>`) is known to hold, inferred from this
+/// file's assignments + `defaults` declarations — the Visual-Studio-style
+/// context that keeps member completion to fields that actually exist.
+#[derive(Clone, Debug, PartialEq)]
+enum VarType {
+    Node,
+    Script,
+    Animator,
+    Particles,
+    Component(String),
+}
+
+/// Extract the first double-quoted string in `s`, if any.
+fn first_quoted(s: &str) -> Option<&str> {
+    let a = s.find('"')? + 1;
+    let b = a + s[a..].find('"')?;
+    Some(&s[a..b])
+}
+
+/// Infer variable types from this file's assignments (`local rb =
+/// node:getcomponent("RigidBody")` → `rb` completes RigidBody fields only) and
+/// from `defaults` reference declarations (`hp = componentref("UiSlider")` →
+/// `params.hp` completes slider fields). Line-based and deliberately simple —
+/// wrong inferences only cost a fallback to the generic list.
+fn infer_var_types(text: &str) -> Vec<(String, VarType)> {
+    let mut out: Vec<(String, VarType)> = Vec::new();
+    let set = |out: &mut Vec<(String, VarType)>, k: String, v: VarType| {
+        if let Some(slot) = out.iter_mut().find(|(ek, _)| *ek == k) {
+            slot.1 = v; // later assignment wins
+        } else {
+            out.push((k, v));
+        }
+    };
+    for line in text.lines() {
+        let line = line.split("--").next().unwrap_or(line);
+        let Some(eq) = line.find('=') else { continue };
+        // Skip ==, <=, >=, ~= comparisons.
+        if line.as_bytes().get(eq + 1) == Some(&b'=')
+            || (eq > 0 && matches!(line.as_bytes()[eq - 1], b'<' | b'>' | b'~' | b'='))
+        {
+            continue;
+        }
+        let lhs = line[..eq].trim().trim_start_matches("local").trim();
+        if lhs.is_empty() || !lhs.bytes().all(|b| is_ident_byte(b) || b == b'.') {
+            continue;
+        }
+        let rhs = &line[eq + 1..];
+        let ty = if rhs.contains(":getcomponent(") {
+            first_quoted(rhs).map(|c| VarType::Component(c.to_string()))
+        } else if rhs.contains("componentref(") {
+            first_quoted(rhs).map(|c| VarType::Component(c.to_string()))
+        } else if rhs.contains(":animator()") {
+            Some(VarType::Animator)
+        } else if rhs.contains(":particles()") {
+            Some(VarType::Particles)
+        } else if rhs.contains(":getscript(")
+            || rhs.contains("findScript(")
+            || rhs.contains("scriptref(")
+        {
+            Some(VarType::Script)
+        } else if rhs.contains("noderef(")
+            || rhs.contains("find(")
+            || rhs.contains(":getchild(")
+            || rhs.contains(":find(")
+            || rhs.contains(".parent")
+            || rhs.contains(":getparent()")
+        {
+            Some(VarType::Node)
+        } else {
+            None
+        };
+        if let Some(ty) = ty {
+            // Ref-sentinel declarations are handled by the defaults pass below
+            // (a one-line defaults table would mis-parse here).
+            if rhs.contains("noderef(")
+                || rhs.contains("scriptref(")
+                || rhs.contains("componentref(")
+            {
+                continue;
+            }
+            set(&mut out, lhs.to_string(), ty);
+        }
+    }
+    // `defaults` reference declarations type the PARAM: hp = componentref("X")
+    // → `params.hp` completes X's fields.
+    if let Some(start) = text.find("defaults")
+        && let Some(open) = text[start..].find('{')
+    {
+        let body_start = start + open + 1;
+        if let Some(close) = text[body_start..].find('}') {
+            for part in text[body_start..body_start + close].split(',') {
+                let Some((k, v)) = part.split_once('=') else { continue };
+                let k = k.trim();
+                if k.is_empty() || !k.bytes().all(is_ident_byte) {
+                    continue;
+                }
+                let ty = if v.contains("componentref(") {
+                    first_quoted(v).map(|c| VarType::Component(c.to_string()))
+                } else if v.contains("scriptref(") {
+                    Some(VarType::Script)
+                } else if v.contains("noderef(") {
+                    Some(VarType::Node)
+                } else {
+                    None
+                };
+                if let Some(ty) = ty {
+                    set(&mut out, format!("params.{k}"), ty);
+                }
+            }
+        }
+    }
+    out
+}
 
 /// One ranked completion candidate. `keep` is how many chars of the typed token
 /// to keep (the insert replaces the rest) — 0 replaces the whole token, while a
@@ -535,12 +744,67 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
         let sepc = token.as_bytes()[s] as char;
         let base = &lower[..s];
         let member = &lower[s + 1..];
+        // Inferred type for this base (case-sensitive, so use the raw token):
+        // a KNOWN type completes exactly its own members and suppresses the
+        // generic guesses — misnamed fields never make the list.
+        let raw_base = &token[..s];
+        let types = infer_var_types(file_text);
+        let typed = types.iter().find(|(k, _)| k == raw_base).map(|(_, t)| t.clone());
+        match &typed {
+            Some(VarType::Component(comp)) if sepc == '.' => {
+                for (c, fld, d) in COMPONENT_FIELDS {
+                    if c == comp && fld.starts_with(member) && *fld != member {
+                        push(&mut items, AcItem {
+                            label: format!("{raw_base}.{fld}"),
+                            insert: (*fld).into(),
+                            keep: s + 1,
+                            doc: Some(format!("{c} handle: {d}")),
+                            score: 0,
+                        });
+                    }
+                }
+            }
+            Some(VarType::Script) if sepc == '.' => {
+                for (fld, d) in [
+                    ("node", "The node the script is attached to (a node handle)."),
+                    ("params", "The script's tunables table."),
+                    ("kind", "The script's name (its .lua file stem)."),
+                    ("valid", "False once the script/node is gone."),
+                ] {
+                    if fld.starts_with(member) && fld != member {
+                        push(&mut items, AcItem {
+                            label: format!("{raw_base}.{fld}"),
+                            insert: fld.into(),
+                            keep: s + 1,
+                            doc: Some(d.into()),
+                            score: 0,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        // For typed bases, restrict the generic API-member matching to entries
+        // of the matching kind (node fields for Node vars, anim methods for
+        // animators, …) — nothing that wouldn't run.
+        let api_prefix: Option<&[&str]> = match &typed {
+            Some(VarType::Node) => Some(&["node.", "node:"]),
+            Some(VarType::Animator) => Some(&["anim:"]),
+            Some(VarType::Particles) => Some(&["particles:"]),
+            Some(VarType::Component(_)) | Some(VarType::Script) => Some(&[]),
+            None => None,
+        };
         for e in LUA_API {
             let Some(es) = e.label.find(['.', ':']) else { continue };
             if e.label.as_bytes()[es] as char != sepc {
                 continue;
             }
             let (ebase, emember) = (&e.label[..es], &e.label[es + 1..]);
+            if let Some(allowed) = api_prefix
+                && !allowed.iter().any(|p| e.label.starts_with(p))
+            {
+                continue;
+            }
             let eml = emember.to_ascii_lowercase();
             if eml.starts_with(member) && eml != member {
                 let insert =
@@ -569,16 +833,19 @@ fn ac_matches(token: &str, file_text: &str) -> Vec<AcItem> {
                     }
                 }
             }
-            // Component-handle fields on any variable: rb.fri → friction.
-            for (f, d) in HANDLE_FIELDS {
-                if f.starts_with(member) && *f != member {
-                    push(&mut items, AcItem {
-                        label: (*f).into(),
-                        insert: (*f).into(),
-                        keep: s + 1,
-                        doc: Some((*d).into()),
-                        score: 2,
-                    });
+            if typed.is_none() {
+                // Untyped variable: offer every component-handle field (rb.fri
+                // → friction). Typed variables got exact fields above instead.
+                for (comp, f, d) in COMPONENT_FIELDS {
+                    if f.starts_with(member) && *f != member {
+                        push(&mut items, AcItem {
+                            label: (*f).into(),
+                            insert: (*f).into(),
+                            keep: s + 1,
+                            doc: Some(format!("{comp} handle: {d}")),
+                            score: 2,
+                        });
+                    }
                 }
             }
         }
@@ -1863,6 +2130,13 @@ const API_CATEGORIES: &[&str] = &[
 fn api_category(label: &str) -> &'static str {
     if label == "node:getcomponent" {
         "components — getcomponent"
+    } else if matches!(
+        label,
+        "node.text" | "clicked" | "hoverStart" | "hoverEnd" | "pressed" | "released"
+    ) {
+        "game UI — text, buttons & hooks"
+    } else if matches!(label, "noderef" | "scriptref" | "componentref") {
+        "references — wire nodes in the Inspector"
     } else if label.starts_with("node:") {
         "node — methods & handles"
     } else if label.starts_with("node.") {
@@ -1982,7 +2256,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(\"RigidBody\" | \"PointLight\") — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. RigidBody (every Inspector tunable): friction, restitution, gravity (true/false, reads 1/0), shape (0 sphere / 1 capsule / 2 box), radius, height, half_x/y/z (box half-extents), lock_x/y/z + lock_rot_x/y/z (axis freezes). PointLight: intensity, range, r, g, b. ParticleSystem: play_on_start (1/0). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice. (To play/stop effects at runtime use node:particles().)" },
+    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
     ApiEntry { label: "anim:restart", insert: ":restart(", doc: "anim:restart(\"Attack\" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot)." },
@@ -2018,6 +2292,15 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "string.format", insert: "string.format(", doc: "string.format(fmt, …) — printf-style formatting." },
     ApiEntry { label: "function", insert: "function ", doc: "Define a function." },
     ApiEntry { label: "local", insert: "local ", doc: "Declare a local variable." },
+    ApiEntry { label: "noderef", insert: "noderef()", doc: "defaults = { target = noderef() } — a NODE REFERENCE param: the Inspector shows a node picker (or drag a node from the Hierarchy onto it) and the script reads params.target as a node handle (nil while unwired). The preferred way to point a script at a specific node — no find() calls." },
+    ApiEntry { label: "scriptref", insert: "scriptref(\"\")", doc: "defaults = { hp = scriptref(\"health\") } — the param binds to that SCRIPT on the wired node: params.hp is a script handle directly (call its functions, read its state). The Inspector only lists nodes carrying the script. nil while unwired/invalid." },
+    ApiEntry { label: "componentref", insert: "componentref(\"\")", doc: "defaults = { body = componentref(\"RigidBody\") } — the param binds to that COMPONENT on the wired node: params.body is a component handle directly (params.body.friction = 0.05). Components: RigidBody, PointLight, Camera, ParticleSystem, UiElement, UiSlider, UiLayer. nil while unwired/invalid." },
+    ApiEntry { label: "node.text", insert: "node.text", doc: "A UI element's label text — read/write; numbers coerce (hpLabel.text = 42). nil on nodes without UI text; writing to a UI element without a text spec creates one." },
+    ApiEntry { label: "clicked", insert: "clicked", doc: "function clicked(node) — UI button hook: fires when this node's element (with 'button' on) is pressed AND released on it. Style states in Lua; no imposed look." },
+    ApiEntry { label: "hoverStart", insert: "hoverStart", doc: "function hoverStart(node) — UI hook: the pointer entered this node's clickable element. Pair with hoverEnd." },
+    ApiEntry { label: "hoverEnd", insert: "hoverEnd", doc: "function hoverEnd(node) — UI hook: the pointer left this node's clickable element." },
+    ApiEntry { label: "pressed", insert: "pressed", doc: "function pressed(node) — UI hook: LMB went down on this node's clickable element." },
+    ApiEntry { label: "released", insert: "released", doc: "function released(node) — UI hook: LMB came back up (on or off the element)." },
 ];
 
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable
@@ -2179,6 +2462,58 @@ the scene, and call into other scripts to build systems that span many files.
 Inside a script's own functions, `node` is always ITS node, so a method called
 from elsewhere still acts on the right object. Handles stay valid across frames —
 cache a lookup in start() and reuse it.",
+    ),
+    (
+        "References — noderef / scriptref / componentref (skip find())",
+        "\
+Declare a `defaults` entry as a REFERENCE and wire it in the Inspector (pick
+from the dropdown, or DRAG a node from the Hierarchy onto the slot):
+
+    defaults = {
+      target = noderef(),                  -- a node handle
+      victim = scriptref(\"health\"),       -- that script ON the wired node
+      body   = componentref(\"RigidBody\"), -- that component ON the wired node
+    }
+
+    function update(node, dt)
+      if params.victim then params.victim.damage(10) end
+      if params.body then params.body.friction = 0.05 end
+    end
+
+  • The picker filters to VALID targets (scriptref lists only nodes carrying
+    that script; componentref only nodes with that component).
+  • Unwired / invalid refs read nil — guard with `if params.x then`.
+  • Refs re-resolve by name each tick, so spawned/renamed targets rebind.
+  • This is the fast path: no find() scans, no getcomponent chains. (find()
+    itself is O(1) now — a hash index — but wiring beats typing names.)
+Components you can reference: RigidBody, PointLight, Camera, ParticleSystem,
+UiElement, UiSlider, UiLayer.",
+    ),
+    (
+        "Game UI from scripts — text, sliders, buttons",
+        "\
+UI elements are nodes, so the same handles drive HUDs:
+
+    hpLabel.text = hp                              -- numbers coerce to text
+    hpBar:getcomponent(\"UiSlider\").value = hp     -- Fill/Handle parts follow
+    hpBar:getcomponent(\"UiElement\").opacity = 0.5
+
+  • node.text — a UI element's label (read/write; nil on non-text nodes).
+  • getcomponent(\"UiElement\") — visible, opacity, posX/posY, width/height,
+    radius, border, fillR/G/B/A, textSize, textR/G/B/A, tintR/G/B/A.
+  • getcomponent(\"UiSlider\") — value / min / max on a slider track.
+  • getcomponent(\"UiLayer\") — enabled / z / designHeight.
+
+Buttons: turn on `button (clickable)` on an element (or Add > UI > Button) and
+its scripts get pointer hooks — plain functions with a node handle:
+
+    function hoverStart(node) node:getcomponent(\"UiElement\").opacity = 0.8 end
+    function hoverEnd(node)   node:getcomponent(\"UiElement\").opacity = 1.0 end
+    function clicked(node)    log(\"play!\") end
+
+Also: pressed / released. A slider with `draggable` on lets the player set the
+value by clicking/dragging the track — poll it with getcomponent(\"UiSlider\").
+The engine imposes no look: style hover/press states yourself, it's 3 lines.",
     ),
     (
         "Assets, models & materials — swap things at runtime",
@@ -2364,11 +2699,17 @@ mod tests {
         let caret = auto_indent_newline(&mut t, end, end);
         assert_eq!(t, "  x = 1\n  ");
         assert_eq!(caret, t.chars().count());
-        // Block opener: one level deeper (and `do` must be a WORD, not a suffix).
+        // Block opener: one level deeper. Unclosed → the matching end appears
+        // too (see enter_on_unclosed_block_inserts_end); already-closed → just
+        // the indent. (`do` must be a WORD, not a suffix — tested via avocado.)
         let mut t = "if x then".to_string();
         let end = t.chars().count();
         auto_indent_newline(&mut t, end, end);
-        assert_eq!(t, "if x then\n  ");
+        assert_eq!(t, "if x then\n  \nend");
+        let mut t = "if x then\nend".to_string();
+        let caret = "if x then".chars().count();
+        auto_indent_newline(&mut t, caret, caret);
+        assert_eq!(t, "if x then\n  \nend");
         let mut t = "x = avocado".to_string();
         let end = t.chars().count();
         auto_indent_newline(&mut t, end, end);
@@ -2417,6 +2758,61 @@ mod tests {
         // A word with no API competition comes from the buffer.
         let items = ac_matches("spd", "local spd_boost = 2\n");
         assert!(items.iter().any(|i| i.label == "spd_boost"));
+    }
+
+    #[test]
+    fn typed_vars_complete_only_their_component_fields() {
+        // `local rb = node:getcomponent("RigidBody")` types rb — completion
+        // offers RigidBody fields only (no UiElement/PointLight noise).
+        let src = "local rb = node:getcomponent(\"RigidBody\")\n";
+        let items = ac_matches("rb.r", src);
+        assert!(items.iter().any(|i| i.label == "rb.radius" || i.label == "rb.restitution"));
+        assert!(!items.iter().any(|i| i.label.contains("tintR") || i.label == "r"),
+            "PointLight/UiElement fields must not leak onto a typed RigidBody var");
+        // defaults refs type params.<key>: componentref("UiSlider") → slider fields.
+        let src = "defaults = { hp = componentref(\"UiSlider\") }\n";
+        let items = ac_matches("params.hp.v", src);
+        assert_eq!(items[0].insert, "value");
+        // An animator var only offers anim methods.
+        let src = "local a = node:animator()\n";
+        let items = ac_matches("a:pl", src);
+        assert_eq!(items[0].insert, "play(");
+        assert!(items.iter().all(|i| i.label.starts_with("anim:")));
+        // Untyped vars keep the generic behavior (discoverability).
+        assert!(ac_matches("mystery.fri", "").iter().any(|i| i.label == "friction"));
+    }
+
+    #[test]
+    fn block_balance_counts_real_blocks_only() {
+        assert_eq!(block_balance("function f()\n"), 1);
+        assert_eq!(block_balance("function f()\nend\n"), 0);
+        assert_eq!(block_balance("if x then y = 1 end\n"), 0);
+        assert_eq!(block_balance("if a then\nelseif b then\nelse\nend"), 0);
+        assert_eq!(block_balance("for i = 1, 10 do\n"), 1);
+        assert_eq!(block_balance("repeat\nuntil done"), 0);
+        // Keywords inside strings/comments don't count.
+        assert_eq!(block_balance("x = \"function if do\" -- if then\n"), 0);
+        assert_eq!(block_balance("--[[ function ]] local x = 1"), 0);
+    }
+
+    #[test]
+    fn enter_on_unclosed_block_inserts_end() {
+        // Enter at the end of an unclosed `function` header: body line + end.
+        let mut t = String::from("function update(node, dt)");
+        let caret = t.chars().count();
+        let c = auto_indent_newline(&mut t, caret, caret);
+        assert_eq!(t, "function update(node, dt)\n  \nend");
+        assert_eq!(c, "function update(node, dt)\n  ".chars().count());
+        // Inside an ALREADY balanced block, Enter only indents (no double end).
+        let mut t = String::from("function f()\nend");
+        let caret = "function f()".chars().count();
+        auto_indent_newline(&mut t, caret, caret);
+        assert_eq!(t, "function f()\n  \nend");
+        // `if ... then` gets its end too; nested indent is preserved.
+        let mut t = String::from("  if hp < 10 then");
+        let caret = t.chars().count();
+        auto_indent_newline(&mut t, caret, caret);
+        assert_eq!(t, "  if hp < 10 then\n    \n  end");
     }
 
     #[test]

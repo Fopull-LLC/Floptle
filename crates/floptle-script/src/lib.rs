@@ -365,6 +365,21 @@ struct Shared {
     vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
 }
 
+/// A script's declared defaults surface: numeric params + reference params.
+pub type ScriptDefaults = (Vec<(String, f32)>, Vec<(String, RefKind)>);
+
+/// What a script's reference param (declared in `defaults`) binds to — drives
+/// the Inspector's picker (candidate filtering) and the runtime handle type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    /// `noderef()` — a node handle.
+    Node,
+    /// `scriptref("health")` — a script handle for that script on the wired node.
+    Script(String),
+    /// `componentref("RigidBody")` — a component handle on the wired node.
+    Component(String),
+}
+
 /// A physics body's state exposed to its node's scripts.
 #[derive(Clone, Copy, Debug)]
 pub struct BodyState {
@@ -1151,13 +1166,83 @@ mod tests {
         // The defaults surface reports the ref params for the Inspector.
         let path = dir.join("aimer.lua");
         let (nums, refs) = host.script_defaults(&path);
-        assert_eq!(refs, vec!["missing".to_string(), "target".to_string()]);
+        assert_eq!(
+            refs,
+            vec![
+                ("missing".to_string(), RefKind::Node),
+                ("target".to_string(), RefKind::Node)
+            ]
+        );
         assert_eq!(nums, vec![("speed".to_string(), 2.0)]);
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         assert_eq!(world.get::<Transform>(turret).unwrap().translation.y, 5.0);
         // missing == nil (1) + speed (2): the sentinel never leaks as a string.
         assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 3.0);
+    }
+
+    #[test]
+    fn scriptref_and_componentref_bind_handles_directly() {
+        // scriptref("health") gives the wired node's health SCRIPT handle;
+        // componentref("RigidBody") gives its component handle; a wire to a node
+        // MISSING the declared thing reads nil (validated, not a dead handle).
+        let dir = std::env::temp_dir().join("floptle_script_test_kindrefs");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "health", "hp = 40\nfunction damage(n)\n  hp = hp - n\nend\n");
+        write_script(
+            &dir,
+            "attacker",
+            concat!(
+                "defaults = { victim = scriptref(\"health\"), body = componentref(\"RigidBody\"),\n",
+                "             bogus = componentref(\"PointLight\") }\n",
+                "function update(node, dt)\n",
+                "  if params.victim then params.victim.damage(15) end\n",
+                "  if params.body then params.body.friction = 0.05 end\n",
+                "  node.x = (params.bogus == nil) and 1 or 0\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let attacker = world.spawn();
+        world.insert(attacker, Transform::IDENTITY);
+        world.insert(
+            attacker,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "attacker".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![
+                    ("victim".into(), "Dummy".into()),
+                    ("body".into(), "Dummy".into()),
+                    ("bogus".into(), "Dummy".into()), // Dummy has no PointLight → nil
+                ],
+            }]),
+        );
+        let dummy = world.spawn();
+        world.insert(dummy, Transform::IDENTITY);
+        world.insert(dummy, floptle_core::Name("Dummy".into()));
+        world.insert(dummy, RigidBody::default());
+        world.insert(
+            dummy,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "health".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        // The health script's state took the damage call.
+        let hp: f64 = {
+            let key = (dummy.index(), "health".to_string());
+            let env = host.envs.borrow().get(&key).cloned().unwrap();
+            env.get("hp").unwrap()
+        };
+        assert_eq!(hp, 25.0);
+        assert_eq!(world.get::<RigidBody>(dummy).unwrap().friction, 0.05);
+        assert_eq!(world.get::<Transform>(attacker).unwrap().translation.x, 1.0);
     }
 
     #[test]
