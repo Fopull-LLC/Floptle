@@ -12,6 +12,7 @@ rust-version.workspace = true
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
 floptle-rules = { path = "../floptle-rules" }
+floptle-ui = { path = "../floptle-ui" }
 
 glam = { workspace = true }
 wgpu = { workspace = true }
@@ -19,6 +20,8 @@ winit = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
+# Game-UI text: tiny pure-Rust TTF rasterizer feeding the ui pass's glyph atlas.
+fontdue = "0.9"
 
 [dev-dependencies]
 # Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
