@@ -72,6 +72,11 @@ impl EditorTabViewer<'_> {
                     );
                     let resp =
                         ui.interact(er, egui::Id::new(("ui_ov", *idx)), egui::Sense::click_and_drag());
+                    // Claim the pointer for egui: the raw viewport press must not
+                    // pick (it can't see 2D elements ⏵ would clear the selection).
+                    if resp.hovered() || resp.dragged() {
+                        self.cmd.ui_hot = true;
+                    }
                     if resp.clicked()
                         && let Some(e) = ent
                     {
@@ -116,6 +121,9 @@ impl EditorTabViewer<'_> {
                                 1.0,
                                 egui::Color32::from_rgb(255, 180, 60),
                             );
+                            if hresp.hovered() || hresp.dragged() {
+                                self.cmd.ui_hot = true;
+                            }
                             if hresp.dragged() {
                                 let d = hresp.drag_delta() / *scale;
                                 // Size delta grows toward the dragged side.

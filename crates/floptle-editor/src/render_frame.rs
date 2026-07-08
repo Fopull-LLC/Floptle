@@ -3162,6 +3162,9 @@ impl Editor {
         if let Some(what) = cmd.add_ui {
             self.add_ui_node(what);
         }
+        // Latch "pointer on a UI overlay interact" for the raw LMB handler (which
+        // runs between frames): while set, presses belong to egui, not pick/gizmo.
+        self.ui_overlay_hot = cmd.ui_hot;
         if let Some((idx, d)) = cmd.ui_move {
             let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
             if let Some(e) = ent
