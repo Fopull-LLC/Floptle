@@ -223,9 +223,10 @@ impl Ui {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                // LessEqual, NOT Less: an element's shape/image/text stack at
-                // the SAME plane depth — painter's order must keep layering.
+                // Test against the scene but DON'T write: an alpha-blended
+                // pass writing depth would make transparent pixels occlude
+                // later layers. Painter's order handles intra-canvas layering.
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
