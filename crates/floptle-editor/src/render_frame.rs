@@ -69,13 +69,18 @@ impl Editor {
         } else {
             Vec::new()
         };
-        // Scene-view UI outlines (authoring aid): solved for the Scene rect,
-        // drawn by the tab, dragged deltas come back through cmd.ui_move.
-        self.ui_overlay = if self.playing {
-            Vec::new()
+        // Scene-view world canvases (authoring): each layer renders IN the
+        // world at its node's transform; outlines project onto the canvas and
+        // drags come back through cmd.ui_move (in design units).
+        let ui_world = if !ui_view {
+            let aspect = self
+                .gpu
+                .as_ref()
+                .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
+                .unwrap_or(16.0 / 9.0);
+            self.gather_ui_world(aspect)
         } else {
-            let vp = self.scene_rect.map(|r| [r.width(), r.height()]).unwrap_or([0.0, 0.0]);
-            self.solve_ui_overlay(vp)
+            Vec::new()
         };
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
@@ -2242,6 +2247,90 @@ impl Editor {
                         raster,
                     );
                 }
+                // ---- Scene-view UI canvases: the layers as world planes at
+                // their node transforms, depth-tested into the scene (the
+                // "physically in the world" authoring view). Also projects the
+                // element outlines for the Scene tab's select/drag overlay.
+                self.ui_overlay.clear();
+                if !ui_world.is_empty()
+                    && let Some(uir) = self.ui_render.as_mut()
+                {
+                    let vp_mat = cam.view_proj(aspect);
+                    let (w_px, h_px) = (gpu.config.width as f32, gpu.config.height as f32);
+                    let srect = self.scene_rect.unwrap_or(egui::Rect::NOTHING);
+                    for (dl, placed, origin, right, down) in &ui_world {
+                        let rel = floptle_core::math::Vec3::new(
+                            (origin[0] - cam.world_position.x) as f32,
+                            (origin[1] - cam.world_position.y) as f32,
+                            (origin[2] - cam.world_position.z) as f32,
+                        );
+                        let r3 = floptle_core::math::Vec3::from(*right);
+                        let d3 = floptle_core::math::Vec3::from(*down);
+                        let mut ui_instances = Vec::new();
+                        let mut ui_batches = Vec::new();
+                        {
+                            let reg = &self.texture_registry;
+                            uir.pack(gpu, dl, [0.0, 0.0], 1.0, &mut |p| reg.get(p).copied(), &mut ui_instances, &mut ui_batches);
+                        }
+                        uir.draw_world(
+                            gpu,
+                            color,
+                            depth,
+                            vp_mat.to_cols_array_2d(),
+                            floptle_render::UiPlane {
+                                origin: [rel.x, rel.y, rel.z],
+                                right: *right,
+                                down: *down,
+                            },
+                            &ui_instances,
+                            &ui_batches,
+                            raster,
+                        );
+                        // Project element rects → Scene-tab overlay entries.
+                        let to_screen = |p: floptle_core::math::Vec3| -> Option<egui::Pos2> {
+                            let clip = vp_mat * p.extend(1.0);
+                            if clip.w <= 0.01 {
+                                return None;
+                            }
+                            let ndc = clip / clip.w;
+                            Some(egui::pos2(
+                                (ndc.x * 0.5 + 0.5) * w_px,
+                                (1.0 - (ndc.y * 0.5 + 0.5)) * h_px,
+                            ))
+                        };
+                        for pl in placed {
+                            let [x, y, w, h] = pl.rect;
+                            let corners = [
+                                rel + r3 * x + d3 * y,
+                                rel + r3 * (x + w) + d3 * y,
+                                rel + r3 * x + d3 * (y + h),
+                                rel + r3 * (x + w) + d3 * (y + h),
+                            ];
+                            let pts: Vec<egui::Pos2> =
+                                corners.iter().filter_map(|c| to_screen(*c)).collect();
+                            if pts.len() < 4 {
+                                continue;
+                            }
+                            let (mut minx, mut miny, mut maxx, mut maxy) =
+                                (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                            for p in &pts {
+                                minx = minx.min(p.x);
+                                miny = miny.min(p.y);
+                                maxx = maxx.max(p.x);
+                                maxy = maxy.max(p.y);
+                            }
+                            // px → egui points, relative to the Scene rect.
+                            let sx = (minx / ppp) - srect.min.x;
+                            let sy = (miny / ppp) - srect.min.y;
+                            let sw = (maxx - minx) / ppp;
+                            let sh = (maxy - miny) / ppp;
+                            // Drag scale: overlay points per design unit.
+                            let scale = if w > 0.5 { sw / w } else { 1.0 };
+                            self.ui_overlay.push((pl.id, [sx, sy, sw, sh], scale.max(0.001)));
+                        }
+                    }
+                }
+
                 // Post runs BEFORE any retro upscale, at the scene's composited
                 // resolution. SSAO reads whichever depth the scene rendered with;
                 // in retro mode the chain outputs into the retro color target so

@@ -45,7 +45,7 @@ pub use mesh::{
 pub use outline::Outline;
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{PostSettings, PostStack, SsaoFrame};
-pub use ui::{Ui, UiBatch, UiInstance, UiTex};
+pub use ui::{Ui, UiBatch, UiInstance, UiPlane, UiTex};
 pub use raster::{
     instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId,
     TexSampling, TexWrap,

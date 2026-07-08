@@ -20,6 +20,10 @@ use floptle_ui::{
 
 use crate::Editor;
 
+/// World units per design unit for the Scene-view canvas (720 design units —
+/// a default layer's height — spans 7.2 world units).
+pub(crate) const UI_WORLD_SCALE: f32 = 0.01;
+
 /// What Add ⏵ UI creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AddUi {
@@ -94,13 +98,16 @@ impl Editor {
         out
     }
 
-    /// Scene-view authoring overlay: solved element rects at `viewport` (egui
-    /// points) — (entity index, rect, px-per-design-unit). The Scene tab draws
-    /// outlines from these and drags write back through `cmd.ui_move`.
-    pub(crate) fn solve_ui_overlay(&self, viewport: [f32; 2]) -> Vec<(u32, [f32; 4], f32)> {
-        if viewport[0] <= 1.0 || viewport[1] <= 1.0 {
-            return Vec::new();
-        }
+    /// Scene-view authoring: each UI layer as a WORLD CANVAS at its node's
+    /// transform — origin = translation (canvas top-left), plane axes from its
+    /// rotation, [`UI_WORLD_SCALE`] world units per design unit. Returns per
+    /// layer: (draw list, solved rects in design units, origin, right, down).
+    /// The layer node itself is arranged with the normal move/rotate gizmos.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn gather_ui_world(
+        &mut self,
+        window_aspect: f32,
+    ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3])> {
         let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
         let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
         for e in &order {
@@ -122,9 +129,9 @@ impl Editor {
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
+        let mut textures: Vec<String> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-            let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
             let roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
@@ -132,15 +139,29 @@ impl Editor {
             if roots.is_empty() {
                 continue;
             }
-            let design_vp = [viewport[0] / scale, viewport[1] / scale];
+            let design_vp =
+                [layer.design_height * window_aspect.max(0.1), layer.design_height];
             let measure = |t: &TextSpec| uir.measure(&t.text, t.size);
-            for pl in floptle_ui::solve(&roots, design_vp, &measure) {
-                out.push((
-                    pl.id,
-                    [pl.rect[0] * scale, pl.rect[1] * scale, pl.rect[2] * scale, pl.rect[3] * scale],
-                    scale,
-                ));
+            let placed = floptle_ui::solve(&roots, design_vp, &measure);
+            let dl = floptle_ui::draw_list(&roots, &placed);
+            for q in &dl.quads {
+                if !q.texture.is_empty() {
+                    textures.push(q.texture.clone());
+                }
             }
+            let wt = floptle_core::world_transform(&self.world, *e);
+            let right = wt.rotation * floptle_core::math::Vec3::X * UI_WORLD_SCALE;
+            let down = wt.rotation * (-floptle_core::math::Vec3::Y) * UI_WORLD_SCALE;
+            out.push((
+                dl,
+                placed,
+                [wt.translation.x, wt.translation.y, wt.translation.z],
+                [right.x, right.y, right.z],
+                [down.x, down.y, down.z],
+            ));
+        }
+        for t in textures {
+            let _ = self.ensure_texture(&t);
         }
         out
     }
