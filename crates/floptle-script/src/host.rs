@@ -457,6 +457,16 @@ impl ScriptHost {
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
         }
+        // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
+        // Must come after the handle API: it extends the node methods table.
+        let audio_bridges = crate::audio_api::AudioBridges {
+            commands: Rc::new(RefCell::new(Vec::new())),
+            info: Rc::new(RefCell::new(crate::AudioInfo::default())),
+            next_handle: Rc::new(RefCell::new(0)),
+        };
+        if let Err(e) = crate::audio_api::install_audio_api(&lua, &audio_bridges) {
+            eprintln!("[lua] failed to install the audio API: {e}");
+        }
         // The `net.*` API (docs/netcode-design.md §8): command queue out,
         // session state in, `net.on` handler registry, `net.rewind` (§7).
         let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
@@ -494,6 +504,8 @@ impl ScriptHost {
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
             vfx_commands: shared.vfx_commands.clone(),
+            audio_commands: audio_bridges.commands.clone(),
+            audio_info: audio_bridges.info.clone(),
             gizmos,
             spawn_effects,
             net,
@@ -526,6 +538,18 @@ impl ScriptHost {
     /// them to the live VFX instances before advancing them.
     pub fn take_vfx_commands(&self) -> Vec<(u32, VfxCmd)> {
         std::mem::take(&mut *self.vfx_commands.borrow_mut())
+    }
+
+    /// Feed the audio playback mirror for this frame (before `run`), so scripts
+    /// can read `sound:isPlaying()` / `node:sound():position()` / ….
+    pub fn set_audio_info(&self, info: crate::AudioInfo) {
+        *self.audio_info.borrow_mut() = info;
+    }
+
+    /// Drain the audio commands scripts queued this frame — the editor applies
+    /// them to the audio engine the same frame.
+    pub fn take_audio_commands(&self) -> Vec<crate::AudioCmd> {
+        std::mem::take(&mut *self.audio_commands.borrow_mut())
     }
 
     /// Drain the debug-draw commands scripts queued this frame (`gizmo.*`) — the

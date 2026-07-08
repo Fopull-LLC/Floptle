@@ -9,6 +9,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Types only (PlayParams + enums for the audio command queue); no OS audio stack.
+floptle-audio = { path = "../floptle-audio", default-features = false }
 floptle-core = { path = "../floptle-core" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }

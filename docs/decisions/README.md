@@ -29,5 +29,6 @@ reasoning history stays intact.
 | [0020](0020-fractal-shape-primitive.md) | **Fractal as a first-class shape primitive** (walkable/delvable, out of the box) | Accepted |
 | [0021](0021-hub-and-distribution.md) | **Hub & distribution** (eframe launcher + GitHub-Releases pipeline) | Proposed |
 | [0022](0022-networking-and-cloud.md) | **Networking & Floptle Cloud** (open netcode + monetized managed hosting) | Proposed |
+| [0023](0023-audio-system.md) | **Audio system** (custom mixer-graph engine on cpal + symphonia) | Accepted |
 
 > Date format: ISO `YYYY-MM-DD`. Decider: Ty Johnston (Fopull LLC).

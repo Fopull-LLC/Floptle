@@ -637,6 +637,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         net: None,
         ui_layer: None,
         ui: None,
+        audio: None,
     }
 }
 
@@ -673,6 +674,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 net: None,
                 ui_layer: None,
                 ui: None,
+                audio: None,
             },
             NodeDoc {
                 name: "sphere".into(),
@@ -692,6 +694,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 net: None,
                 ui_layer: None,
                 ui: None,
+                audio: None,
             },
             NodeDoc {
                 name: "blob".into(),
@@ -711,6 +714,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 net: None,
                 ui_layer: None,
                 ui: None,
+                audio: None,
             },
             default_camera_node(),
         ],

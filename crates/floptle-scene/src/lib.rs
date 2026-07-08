@@ -108,6 +108,10 @@ pub struct NodeDoc {
     /// A game-UI element on this node (place/size/shape/text/image/stack).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<floptle_ui::ElementSpec>,
+    /// A sound emitter on this node (`None` = silent). The component type is
+    /// its own serialized form — see [`floptle_audio::AudioSource`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<floptle_audio::AudioSource>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -743,6 +747,10 @@ pub struct ProjectConfigDoc {
     /// `None` on projects created before the Hub existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// The project-wide audio mixer graph (tracks, effects, routing). Edited
+    /// in the Mixer tab; every scene plays through it.
+    #[serde(default)]
+    pub mixer: floptle_audio::MixerDesc,
     // Legacy post-processing (pre-PostProcess-node projects) — deserialize only.
     #[serde(default, skip_serializing)]
     pub bloom: bool,
@@ -785,6 +793,7 @@ impl ProjectConfigDoc {
             retro_height: 240,
             matter: true,
             engine_version: None,
+            mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
             bloom_intensity: default_bloom_intensity(),
@@ -1065,6 +1074,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(u) = &node.ui {
         world.insert(e, u.clone());
     }
+    if let Some(a) = &node.audio {
+        world.insert(e, a.clone());
+    }
     e
 }
 
@@ -1174,6 +1186,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let net = world.get::<floptle_core::Replicated>(e).map(ReplicatedDoc::from_component);
         let ui_layer = world.get::<floptle_ui::UiLayer>(e).copied();
         let ui = world.get::<floptle_ui::ElementSpec>(e).cloned();
+        let audio = world.get::<floptle_audio::AudioSource>(e).cloned();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -1193,6 +1206,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             net,
             ui_layer,
             ui,
+            audio,
         });
     }
     let lighting =
@@ -1295,6 +1309,18 @@ mod tests {
                         mask: Some(floptle_ui::MaskSpec { targets: vec!["Minimap".into()] }),
                         ..Default::default()
                     }),
+                    audio: Some(floptle_audio::AudioSource {
+                        clip: "audio/hum.ogg".into(),
+                        params: floptle_audio::PlayParams {
+                            volume: 0.7,
+                            max_distance: 35.0, // exercise the non-default round-trip
+                            falloff: floptle_audio::Falloff::Linear,
+                            track: "SFX".into(),
+                            end: floptle_audio::EndBehavior::Loop,
+                            ..Default::default()
+                        },
+                        play_on_start: false, // exercise the non-default round-trip
+                    }),
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -1317,6 +1343,7 @@ mod tests {
                     net: None,
                     ui_layer: None,
                     ui: None,
+                    audio: None,
                 },
                 NodeDoc {
                     name: "lamp".into(),
@@ -1336,6 +1363,7 @@ mod tests {
                     net: None,
                     ui_layer: None,
                     ui: None,
+                    audio: None,
                 },
                 NodeDoc {
                     name: "eye".into(),
@@ -1355,6 +1383,7 @@ mod tests {
                     net: None,
                     ui_layer: None,
                     ui: None,
+                    audio: None,
                 },
             ],
         }

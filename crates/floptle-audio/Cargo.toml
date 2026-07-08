@@ -1,0 +1,36 @@
+# floptle-audio — the engine's sound system.
+#
+# Everything audible routes through here: decoded clips, playing voices
+# (spatial or flat), and the mixer graph (tracks -> effects -> routing ->
+# master) that owns the final output. Real-time safe: the cpal callback never
+# locks or allocates on the steady path; control threads talk to it through a
+# command queue and atomics.
+
+[package]
+name = "floptle-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# The pure half (component/mixer/effect types + DSP) has no native deps, so
+# data-model crates (floptle-scene) can use it without dragging in the OS
+# audio stack. The editor/runtime enables "backend" for actual output.
+default = ["backend"]
+backend = ["dep:cpal", "dep:symphonia"]
+
+[dependencies]
+glam.workspace = true
+log.workspace = true
+serde.workspace = true
+cpal = { version = "0.18", optional = true }    # device output — ADR-0023
+symphonia = { version = "0.6", optional = true, default-features = false, features = [
+    "wav", "ogg", "vorbis", "mp3", "flac", "pcm",
+] } # clip decoding: the formats sound packs actually ship
+
+[dev-dependencies]
+ron.workspace = true
+env_logger.workspace = true

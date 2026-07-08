@@ -61,6 +61,12 @@ pub(crate) fn is_vfx(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(floptle_scene::VFX_EXT)
 }
 
+/// An audio clip (`.wav/.ogg/.mp3/.flac`) — playable by the sound system.
+pub(crate) fn is_audio(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    floptle_audio::AUDIO_EXTENSIONS.iter().any(|ext| p.ends_with(&format!(".{ext}")))
+}
+
 pub(crate) fn is_scene(path: &str) -> bool {
     let p = path.to_ascii_lowercase().replace('\\', "/");
     p.ends_with(".ron") && p.contains("scenes/")
@@ -91,6 +97,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("◎", egui::Color32::from_rgb(180, 160, 250)) // animation controller
     } else if is_vfx(path) {
         ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
+    } else if is_audio(path) {
+        ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
     } else if path.to_ascii_lowercase().ends_with(".ron") {
         ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
     } else if is_markdown(path) {
@@ -159,6 +167,17 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
         .strip_prefix(project_root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string())
+}
+
+/// Collect every audio clip path in the asset tree (for the AudioSource clip picker).
+pub(crate) fn collect_audio_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            AssetEntry::Dir(_, children) => collect_audio_paths(children, out),
+            AssetEntry::File { path, .. } if is_audio(path) => out.push(path.clone()),
+            AssetEntry::File { .. } => {}
+        }
+    }
 }
 
 /// Collect the path of every importable model (.glb/.gltf) in the asset tree — for the

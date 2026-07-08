@@ -36,6 +36,40 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
+    // AudioSource tunables (camelCase, live during play — the audio system
+    // diffs the component each frame and updates the voice). Enums are
+    // numeric here (the f64 mirror): mode 0=Spatial 1=Distance 2=Flat;
+    // falloff 0=Inverse 1=Linear 2=Exponential; endBehavior 0=Stop 1=Destroy
+    // 2=Loop. `node:sound()` covers play/stop/setClip (strings/methods).
+    if let Some(src) = world.get::<floptle_audio::AudioSource>(e) {
+        let p = &src.params;
+        out.insert(
+            "AudioSource".to_string(),
+            HashMap::from([
+                ("volume".to_string(), p.volume as f64),
+                ("pitch".to_string(), p.pitch as f64),
+                ("pan".to_string(), p.pan as f64),
+                ("minDistance".to_string(), p.min_distance as f64),
+                ("maxDistance".to_string(), p.max_distance as f64),
+                ("playOnStart".to_string(), if src.play_on_start { 1.0 } else { 0.0 }),
+                ("mode".to_string(), match p.mode {
+                    floptle_audio::SpatialMode::Spatial => 0.0,
+                    floptle_audio::SpatialMode::Distance => 1.0,
+                    floptle_audio::SpatialMode::Flat => 2.0,
+                }),
+                ("falloff".to_string(), match p.falloff {
+                    floptle_audio::Falloff::Inverse => 0.0,
+                    floptle_audio::Falloff::Linear => 1.0,
+                    floptle_audio::Falloff::Exponential => 2.0,
+                }),
+                ("endBehavior".to_string(), match p.end {
+                    floptle_audio::EndBehavior::Stop => 0.0,
+                    floptle_audio::EndBehavior::Destroy => 1.0,
+                    floptle_audio::EndBehavior::Loop => 2.0,
+                }),
+            ]),
+        );
+    }
     // Game-UI components (docs/ui-system-proposal.md): drive HUDs from scripts.
     // Fields are camelCase (user-facing API); `node.text` covers the string side.
     if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
@@ -266,6 +300,41 @@ pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, 
                     "r" => color[0] = val as f32,
                     "g" => color[1] = val as f32,
                     "b" => color[2] = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        "AudioSource" => {
+            if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(ent) {
+                let p = &mut src.params;
+                match field {
+                    "volume" => p.volume = (val as f32).clamp(0.0, 4.0),
+                    "pitch" => p.pitch = (val as f32).clamp(0.05, 8.0),
+                    "pan" => p.pan = (val as f32).clamp(-1.0, 1.0),
+                    "minDistance" => p.min_distance = (val as f32).max(0.01),
+                    "maxDistance" => p.max_distance = (val as f32).max(0.02),
+                    "playOnStart" => src.play_on_start = val != 0.0,
+                    "mode" => {
+                        p.mode = match val as i64 {
+                            1 => floptle_audio::SpatialMode::Distance,
+                            2 => floptle_audio::SpatialMode::Flat,
+                            _ => floptle_audio::SpatialMode::Spatial,
+                        }
+                    }
+                    "falloff" => {
+                        p.falloff = match val as i64 {
+                            1 => floptle_audio::Falloff::Linear,
+                            2 => floptle_audio::Falloff::Exponential,
+                            _ => floptle_audio::Falloff::Inverse,
+                        }
+                    }
+                    "endBehavior" => {
+                        p.end = match val as i64 {
+                            1 => floptle_audio::EndBehavior::Destroy,
+                            2 => floptle_audio::EndBehavior::Loop,
+                            _ => floptle_audio::EndBehavior::Stop,
+                        }
+                    }
                     _ => {}
                 }
             }

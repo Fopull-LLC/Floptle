@@ -11,6 +11,8 @@ rust-version.workspace = true
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-ui = { path = "../floptle-ui" }
+# Types only (AudioSource component + mixer graph); no OS audio stack here.
+floptle-audio = { path = "../floptle-audio", default-features = false }
 
 serde = { workspace = true }
 ron = { workspace = true }

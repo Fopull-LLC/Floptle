@@ -37,6 +37,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 mod anim;
 mod anim_ui;
 mod assets;
+mod audio;
 mod assets_ui;
 mod console;
 mod curve_edit;
@@ -66,6 +67,7 @@ mod timeline;
 mod vfx;
 mod vfx_inspector;
 mod vfx_ui;
+mod mixer_ui;
 mod viewports;
 mod viz;
 
@@ -146,6 +148,14 @@ struct EditorCmd {
     /// viewport press must not gizmo-grab or pick (picking can't see 2D elements
     /// and would clear the selection out from under the drag).
     ui_hot: bool,
+    /// Attach an AudioSource component (empty clip — picked in the Inspector).
+    add_audio: Option<Entity>,
+    remove_audio: Option<Entity>,
+    /// Play a clip flat through the editor engine (asset-browser preview).
+    preview_audio: Option<String>,
+    /// The mixer graph changed (Mixer tab / rename / delete) — live-apply it
+    /// to the engine and the running play session.
+    mixer_changed: bool,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -448,6 +458,12 @@ struct EditorTabViewer<'a> {
     vfx: &'a mut vfx::VfxSystem,
     /// Particles tab UI state.
     vfx_ui: &'a mut vfx_ui::VfxUiState,
+    /// The audio system (clip cache, engine, meters — the Mixer tab + previews).
+    audio: &'a mut audio::AudioSystem,
+    /// Mixer tab UI state.
+    mixer_ui: &'a mut mixer_ui::MixerUiState,
+    /// The project-wide mixer graph being edited (saved with the project).
+    mixer: &'a mut floptle_audio::MixerDesc,
     /// The Particles tab is visible this frame — so the Inspector swaps to the
     /// selected track's settings (VFX artists edit tracks in the Inspector, not a
     /// cramped bottom panel).
@@ -512,6 +528,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Animation => self.animating_ui(ui),
             EditorTab::AnimGraph => self.anim_graph_tab_ui(ui),
             EditorTab::Particles => self.particles_ui(ui),
+            EditorTab::Mixer => self.mixer_ui(ui),
         }
     }
 }
@@ -1477,6 +1494,10 @@ struct Editor {
     anim: anim::AnimSystem,
     /// Particles: effect registry + live play-mode instances.
     vfx: vfx::VfxSystem,
+    /// Audio: the sound engine, clip cache, play-mode voices, mixer state.
+    audio: audio::AudioSystem,
+    /// Mixer tab UI state (selected track/effect, meters).
+    mixer_ui: mixer_ui::MixerUiState,
     /// Particles tab UI state (open effect, playhead, selections).
     vfx_ui: vfx_ui::VfxUiState,
     /// Animation UI state (graph window + Animating tab).

@@ -2108,7 +2108,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "assets", "gizmo",
-    "net", "synced", "replicated", "onRpc",
+    "net", "synced", "replicated", "onRpc", "audio",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2121,6 +2121,7 @@ const API_CATEGORIES: &[&str] = &[
     "networking — net.*, synced",
     "components — getcomponent",
     "animation — node:animator",
+    "audio — sounds & the mixer",
     "assets",
     "debug gizmos",
     "lua stdlib",
@@ -2149,6 +2150,8 @@ fn api_category(label: &str) -> &'static str {
         "networking — net.*, synced"
     } else if label.starts_with("gizmo") {
         "debug gizmos"
+    } else if label.starts_with("audio") || label == "node:sound" || label.starts_with("sound:") {
+        "audio — sounds & the mixer"
     } else if label.starts_with("assets") {
         "assets"
     } else if label.starts_with("anim") {
@@ -2272,6 +2275,10 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
     ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end." },
     ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
+    ApiEntry { label: "node:sound", insert: "node:sound()", doc: "node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip(\"audio/x.ogg\"), :seek(secs), :isPlaying(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent(\"AudioSource\")." },
+    ApiEntry { label: "audio.play", insert: "audio.play(", doc: "audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play(\"audio/ding.ogg\") is flat 2D; pass x,y,z for a world point; pass a node to follow it. opts: {volume, pitch, pan, mode=\"Spatial|Distance|Flat\", falloff=\"Inverse|Linear|Exponential\", minDistance, maxDistance, track, endBehavior=\"Stop|Destroy|Loop\", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play(\"audio/hit.ogg\", h.x, h.y, h.z, { maxDistance = 35, track = \"SFX\" })" },
+    ApiEntry { label: "audio.stopAll", insert: "audio.stopAll()", doc: "audio.stopAll() — stop every playing sound (sources and one-shots), with a click-free fade." },
+    ApiEntry { label: "audio.track", insert: "audio.track(", doc: "audio.track(name) — a live mixer-track handle (\"Master\" or a track from the Mixer tab): :setVolume(db), :setPan(-1..1), :setMuted(bool), :setSoloed(bool). Changes affect the running session only and revert on Stop. e.g. audio.track(\"Music\"):setVolume(-12) to duck music." },
     ApiEntry { label: "particles:play", insert: ":play()", doc: "particles:play() — start emitting if the effect is idle (spawns a fresh instance). No-op if already playing." },
     ApiEntry { label: "particles:stop", insert: ":stop()", doc: "particles:stop() — stop + despawn the effect; its live particles vanish." },
     ApiEntry { label: "particles:restart", insert: ":restart()", doc: "particles:restart() — re-spawn from t=0 (re-fire a one-shot burst, e.g. a muzzle flash on each shot)." },
@@ -2577,6 +2584,41 @@ FIRE-AND-FORGET — spawn a one-shot at a world point with no node at all:
     spawnEffect(\"vfx/Explosion\", x, y, z)   -- plays once, despawns itself
     local h = raycast(px,py,pz, dx,dy,dz, 100)
     if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end",
+    ),
+    (
+        "Audio — sounds & the mixer",
+        "\
+THE 5-SECOND VERSION — no prefabs, no source setup, just a clip path:
+    audio.play(\"audio/ding.ogg\")                       -- flat 2D (UI, stingers)
+    audio.play(\"audio/hit.ogg\", h.x, h.y, h.z)         -- 3D at a world point
+    audio.play(\"audio/engine.ogg\", carNode, {loop=true}) -- follows the node
+
+Every option rides in the table (all optional):
+    local s = audio.play(\"audio/roar.ogg\", boss, {
+        volume = 0.8, pitch = 1.1,
+        mode = \"Spatial\",        -- \"Distance\" = no panning · \"Flat\" = 2D
+        falloff = \"Inverse\",     -- \"Linear\" · \"Exponential\"
+        minDistance = 2, maxDistance = 50,
+        track = \"SFX\",           -- mixer track (default Master)
+        endBehavior = \"Destroy\", -- \"Stop\" (default) · \"Destroy\" · \"Loop\"
+    })
+The returned handle stays live while it plays:
+    s:setVolume(0.5)  s:setPitch(2)  s:stop()  s:isPlaying()  s:position()
+
+NODES — an Audio Source component (Inspector ➕) makes a node an emitter:
+    node:sound():play()            -- restart its clip
+    node:sound():setClip(\"audio/alarm2.ogg\")
+    node:getcomponent(\"AudioSource\").volume = 0.3   -- live tunables
+    (fields: volume, pitch, pan, minDistance, maxDistance, playOnStart,
+     mode 0/1/2 = Spatial/Distance/Flat, falloff 0/1/2 = Inv/Lin/Exp,
+     endBehavior 0/1/2 = Stop/Destroy/Loop)
+
+THE MIXER — every sound routes through the 🎚 Mixer tab's tracks (volume,
+pan, effects like EQ/reverb/delay, routing into other tracks, all ending at
+Master). Scripts get live control that reverts when Play stops:
+    audio.track(\"Music\"):setVolume(-12)   -- duck music (dB)
+    audio.track(\"Master\"):setMuted(true)
+    audio.stopAll()",
     ),
     (
         "Globals — params, time, dt, log",
