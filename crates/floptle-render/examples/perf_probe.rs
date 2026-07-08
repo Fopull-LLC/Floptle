@@ -150,7 +150,7 @@ fn main() {
         if raster.depth_prepass(&gpu, rg, &instances, gpu.depth_texture()) {
             raymarch.set_depth_prime(&gpu, raster.prepass_view());
         }
-        raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
+        raymarch.draw_into_primed(&gpu, &color_view, gpu.depth_view(), rm);
         raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg, &instances, None, Some(raymarch.field_bind()));
     });
 
