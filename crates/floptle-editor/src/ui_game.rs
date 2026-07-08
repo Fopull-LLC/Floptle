@@ -439,44 +439,22 @@ impl Editor {
         if let Some(img) = &mut spec.image {
             ui.horizontal(|ui| {
                 ui.label("texture");
-                // A searchable picker over the project's textures folder — the
-                // same list Materials use, nobody types paths.
                 let current = if img.texture.is_empty() {
                     "(none)".to_string()
                 } else {
                     img.texture.rsplit('/').next().unwrap_or(&img.texture).to_string()
                 };
-                egui::ComboBox::from_id_salt(("ui_tex_pick", e.index()))
-                    .selected_text(current)
-                    .width(170.0)
-                    .show_ui(ui, |ui| {
-                        let sid = egui::Id::new(("ui_tex_search", e.index()));
-                        let mut q: String =
-                            ui.data_mut(|d| d.get_temp(sid).unwrap_or_default());
-                        ui.add(egui::TextEdit::singleline(&mut q).hint_text("🔍 search…"));
-                        ui.data_mut(|d| d.insert_temp(sid, q.clone()));
-                        if ui.selectable_label(img.texture.is_empty(), "(none)").clicked() {
-                            img.texture.clear();
-                            c = true;
-                        }
-                        let ql = q.to_lowercase();
-                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                            for p in tex_list
-                                .iter()
-                                .filter(|p| ql.is_empty() || p.to_lowercase().contains(&ql))
-                            {
-                                let name = p.rsplit('/').next().unwrap_or(p);
-                                if ui
-                                    .selectable_label(img.texture == **p, name)
-                                    .on_hover_text(p.as_str())
-                                    .clicked()
-                                {
-                                    img.texture = p.clone();
-                                    c = true;
-                                }
-                            }
-                        });
-                    });
+                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                    ui,
+                    egui::Id::new(("ui_tex_pick", e.index())),
+                    &current,
+                    Some("(none)"),
+                    tex_list,
+                    170.0,
+                ) {
+                    img.texture = pick.unwrap_or_default();
+                    c = true;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("tint");

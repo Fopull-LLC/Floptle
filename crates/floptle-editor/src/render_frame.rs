@@ -2255,6 +2255,7 @@ impl Editor {
                 // element outlines for the Scene tab's select/drag overlay.
                 self.ui_overlay.clear();
                 self.ui_canvas.clear();
+                let ui_gizmos = self.show_gizmos;
                 if !ui_world.is_empty()
                     && let Some(uir) = self.ui_render.as_mut()
                 {
@@ -2289,7 +2290,12 @@ impl Editor {
                             &ui_batches,
                             raster,
                         );
-                        // Project element rects → Scene-tab overlay entries.
+                        // Project element rects → Scene-tab overlay entries
+                        // (gizmos — the master Gizmos toggle hides them, the
+                        // canvas CONTENT stays since it's your actual UI).
+                        if !ui_gizmos {
+                            continue;
+                        }
                         let to_screen = |p: floptle_core::math::Vec3| -> Option<egui::Pos2> {
                             let clip = vp_mat * p.extend(1.0);
                             if clip.w <= 0.01 {

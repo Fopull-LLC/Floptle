@@ -110,20 +110,17 @@ pub(crate) fn material_props_ui(
             .as_deref()
             .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
             .unwrap_or_else(|| "none".into());
-        egui::ComboBox::from_id_salt("mat_tex").selected_text(cur).show_ui(ui, |ui| {
-            if ui.selectable_label(m.texture.is_none(), "none").clicked() {
-                m.texture = None;
-                r.changed = true;
-            }
-            for path in textures {
-                let name =
-                    Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                if ui.selectable_label(m.texture.as_deref() == Some(path.as_str()), name).clicked() {
-                    m.texture = Some(path.clone());
-                    r.changed = true;
-                }
-            }
-        });
+        if let Some(pick) = crate::ui_widgets::searchable_picker(
+            ui,
+            egui::Id::new("mat_tex"),
+            if cur.is_empty() { "none" } else { &cur },
+            Some("none"),
+            textures,
+            160.0,
+        ) {
+            m.texture = pick;
+            r.changed = true;
+        }
         ui.end_row();
         ui.label("emissive");
         ui.horizontal(|ui| {
@@ -533,19 +530,19 @@ impl EditorTabViewer<'_> {
                                 };
                                 ui.horizontal(|ui| {
                                     ui.label("model");
-                                    egui::ComboBox::from_id_salt("mesh-model")
-                                        .selected_text(file_label(asset_path))
-                                        .show_ui(ui, |ui| {
-                                            for p in &models {
-                                                if ui.selectable_label(asset_path == p, file_label(p)).clicked()
-                                                    && asset_path != p
-                                                {
-                                                    *asset_path = p.clone();
-                                                    cmd.import_model = Some(p.clone());
-                                                    cmd.inspector_changed = true;
-                                                }
-                                            }
-                                        });
+                                    if let Some(Some(p)) = crate::ui_widgets::searchable_picker(
+                                        ui,
+                                        egui::Id::new("mesh-model"),
+                                        &file_label(asset_path),
+                                        None,
+                                        &models,
+                                        180.0,
+                                    )
+                                        && *asset_path != p {
+                                            *asset_path = p.clone();
+                                            cmd.import_model = Some(p.clone());
+                                            cmd.inspector_changed = true;
+                                        }
                                 });
                                 ui.small(asset_path.as_str());
                                 if ui
@@ -664,16 +661,17 @@ impl EditorTabViewer<'_> {
                                     };
                                     ui.horizontal(|ui| {
                                         ui.label("texture");
-                                        egui::ComboBox::from_id_salt("sky-tex")
-                                            .selected_text(if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) })
-                                            .show_ui(ui, |ui| {
-                                                for p in &tl {
-                                                    if ui.selectable_label(&cur == p, label(p)).clicked() {
-                                                        *texture = Some(p.clone());
-                                                        cmd.inspector_changed = true;
-                                                    }
-                                                }
-                                            });
+                                        if let Some(Some(p)) = crate::ui_widgets::searchable_picker(
+                                            ui,
+                                            egui::Id::new("sky-tex"),
+                                            &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
+                                            None,
+                                            &tl,
+                                            180.0,
+                                        ) {
+                                            *texture = Some(p);
+                                            cmd.inspector_changed = true;
+                                        }
                                     });
                                     ui.small("an equirectangular (2:1) image, wrapped seamlessly around the sky.");
                                     ui.horizontal(|ui| {

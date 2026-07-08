@@ -259,21 +259,17 @@ fn look_section(
         VfxRenderDoc::Billboard { texture } => {
             ui.horizontal(|ui| {
                 ui.label("texture");
-                egui::ComboBox::from_id_salt("vfx_tex")
-                    .width(160.0)
-                    .selected_text(short(texture.as_deref().unwrap_or("(plain quad)")))
-                    .show_ui(ui, |ui| {
-                        if ui.selectable_label(texture.is_none(), "(plain quad)").clicked() {
-                            *texture = None;
-                            *dirty = true;
-                        }
-                        for p in tex_list {
-                            if ui.selectable_label(texture.as_deref() == Some(p), short(p)).clicked() {
-                                *texture = Some(p.clone());
-                                *dirty = true;
-                            }
-                        }
-                    });
+                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                    ui,
+                    egui::Id::new("vfx_tex"),
+                    &short(texture.as_deref().unwrap_or("(plain quad)")),
+                    Some("(plain quad)"),
+                    tex_list,
+                    160.0,
+                ) {
+                    *texture = pick;
+                    *dirty = true;
+                }
             });
             // Blend only matters for billboards (mesh particles composite through
             // the raster transparent pass by alpha).

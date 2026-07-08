@@ -64,6 +64,17 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+// Editor/authored colors are sRGB values; the render target is sRGB-encoded,
+// so anything we write must be LINEAR or it comes out washed-out bright (a
+// 0.12 dark panel rendering light grey — the "transparency looks broken" bug).
+// Textures are already linearized by their sRGB views; only vertex colors need
+// converting.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 // Signed distance to a rounded rect centered at origin.
 fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - half + vec2<f32>(r);
@@ -73,21 +84,23 @@ fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let kind = in.params.z;
+    let tint = vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
     if kind > 0.5 {
         // Glyph: atlas red channel is coverage.
         let a = textureSample(tex, samp, in.uv).r;
-        return vec4<f32>(in.color.rgb, in.color.a * a);
+        return vec4<f32>(tint.rgb, tint.a * a);
     }
     // Shape/image: rounded-rect mask (1px anti-aliased edge) + optional border.
     let r = min(in.params.x, min(in.half_size.x, in.half_size.y));
     let d = sd_round_rect(in.local, in.half_size, r);
     let mask = clamp(0.5 - d, 0.0, 1.0);
-    var col = in.color * textureSample(tex, samp, in.uv);
+    var col = tint * textureSample(tex, samp, in.uv);
     let bw = in.params.y;
     if bw > 0.0 {
         // Inside within `bw` of the edge → border color.
         let t = clamp(0.5 - (d + bw), 0.0, 1.0);
-        col = mix(in.border_color, col, t);
+        let bc = vec4<f32>(srgb_to_linear(in.border_color.rgb), in.border_color.a);
+        col = mix(bc, col, t);
     }
     return vec4<f32>(col.rgb, col.a * mask);
 }

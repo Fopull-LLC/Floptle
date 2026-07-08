@@ -61,6 +61,7 @@ mod terrain_edit;
 mod terrain_ui;
 mod theme;
 mod ui_game;
+mod ui_widgets;
 mod timeline;
 mod vfx;
 mod vfx_inspector;
