@@ -177,6 +177,12 @@ pub struct Raster {
     transparent_pipeline: wgpu::RenderPipeline,
     /// Silhouette-mask pipeline (solid 1.0, no depth/cull) for selection outlines.
     mask_pipeline: wgpu::RenderPipeline,
+    /// Depth-only prepass pipeline (see [`depth_prepass`](Self::depth_prepass)).
+    prepass_pipeline: wgpu::RenderPipeline,
+    /// The prepass's own sampleable depth target (recreated on size change):
+    /// bound by the raymarch as its per-pixel march cap, copied over the frame's
+    /// depth buffer to prime early-z for the color pass.
+    prepass_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     tex_layout: wgpu::BindGroupLayout,
@@ -280,7 +286,10 @@ impl Raster {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // LessEqual (not Less): when the depth prepass primed the buffer,
+                // the color pass's fragments arrive at depths EQUAL to their own
+                // prepass writes and must still shade.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -294,6 +303,43 @@ impl Raster {
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Depth-only prepass (opaque instances, conservative alpha discard): primes
+        // the frame's depth buffer so the color pass early-z-kills hidden fragments
+        // (their shading marches the shadow field — the expensive part) and gives
+        // the raymarch a per-pixel march cap. Needs only groups 0 + 1.
+        let prepass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-prepass"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
+            immediate_size: 0,
+        });
+        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-prepass"),
+            layout: Some(&prepass_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_depth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
             }),
             multiview_mask: None,
             cache: None,
@@ -427,6 +473,8 @@ impl Raster {
             pipeline,
             transparent_pipeline,
             mask_pipeline,
+            prepass_pipeline,
+            prepass_tex: None,
             globals_bind,
             globals_buf,
             tex_layout,
@@ -743,6 +791,143 @@ impl Raster {
             }
         }
         gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// The prepass depth target's view (valid after [`depth_prepass`](Self::depth_prepass)
+    /// ran at least once) — what `Raymarch::set_depth_prime` binds as the march cap.
+    pub fn prepass_view(&self) -> Option<&wgpu::TextureView> {
+        self.prepass_tex.as_ref().map(|(_, v)| v)
+    }
+
+    /// Depth-only prepass over the OPAQUE instances (per-texel conservative alpha
+    /// discard — see `fs_depth`), rendered into the raster's own sampleable depth
+    /// target and then copied over `main_depth`:
+    ///
+    /// - the copied depth PRIMES early-z for the color pass, so hidden opaque
+    ///   fragments never run the (field-marching) fragment shader regardless of
+    ///   draw order — the color pass must therefore Load, not Clear, the depth;
+    /// - the sampleable copy caps the raymarch per pixel (`set_depth_prime`), so
+    ///   SDF rays stop at the nearest mesh instead of marching the field behind it.
+    ///
+    /// Returns `true` when the prepass target was (re)created (size change) — the
+    /// caller must then re-bind it on the raymarch, whose bind group is immutable.
+    pub fn depth_prepass(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        main_depth: &wgpu::Texture,
+    ) -> bool {
+        let size = main_depth.size();
+        let recreated = match &self.prepass_tex {
+            Some((t, _)) => t.size() != size,
+            None => true,
+        };
+        if recreated {
+            let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("raster-prepass-depth"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: Gpu::DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.prepass_tex = Some((tex, view));
+        }
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        // Opaque instances only, bucketed by (mesh, texture) exactly like
+        // `draw_scene` (the texture is bound for the per-texel alpha discard).
+        const OPAQUE_CUTOFF: f32 = 0.999;
+        let mut raws: Vec<InstanceRaw> = Vec::new();
+        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+        let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
+        for (id, tex, raw) in instances {
+            if raw.color[3] >= OPAQUE_CUTOFF {
+                let k = (id.0 as usize, tex.map(|t| t.0));
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
+        for (mesh_idx, tex_key) in keys {
+            let start = raws.len() as u32;
+            for (id, tex, raw) in instances {
+                if raw.color[3] >= OPAQUE_CUTOFF
+                    && id.0 as usize == mesh_idx
+                    && tex.map(|t| t.0) == tex_key
+                {
+                    raws.push(*raw);
+                }
+            }
+            let count = raws.len() as u32 - start;
+            if count > 0 {
+                buckets.push((mesh_idx, tex_key, start, count));
+            }
+        }
+        self.ensure_instances(gpu, raws.len() as u32);
+        if !raws.is_empty() {
+            gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+        }
+        let (prepass_tex, prepass_view) = self.prepass_tex.as_ref().expect("prepass target");
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-prepass") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-prepass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: prepass_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.prepass_pipeline);
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            for &(mesh_idx, tex_key, start, count) in &buckets {
+                let mesh = &self.meshes[mesh_idx];
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
+        }
+        // Prime the frame's depth buffer with the prepass result.
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: prepass_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: main_depth,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            size,
+        );
+        gpu.queue.submit([encoder.finish()]);
+        recreated
     }
 }
 

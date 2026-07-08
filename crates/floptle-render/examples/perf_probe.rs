@@ -146,6 +146,13 @@ fn main() {
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
         raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg, &instances, None, Some(raymarch.field_bind()));
     });
+    time_pass("full      (depth prepass + raymarch + raster)", &mut || {
+        if raster.depth_prepass(&gpu, rg, &instances, gpu.depth_texture()) {
+            raymarch.set_depth_prime(&gpu, raster.prepass_view());
+        }
+        raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
+        raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg, &instances, None, Some(raymarch.field_bind()));
+    });
 
     // Optional PNG for eyeballing the framing: perf_probe -- <out.png>
     if let Some(out) = std::env::args().nth(1) {

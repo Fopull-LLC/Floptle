@@ -154,7 +154,7 @@ impl Editor {
         ) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
-            self.raymarch.as_ref(),
+            self.raymarch.as_mut(),
             self.retro.as_mut(),
             self.outline.as_ref(),
             self.grid_render.as_mut(),
@@ -2220,6 +2220,14 @@ impl Editor {
                 // with nothing to raymarch the globals still upload so the raster
                 // pass's field group (shadows/AO/proxies) sees this frame's data.
                 let raster_clear = if rm_draw {
+                    // Opaque depth prepass: primes the depth buffer (early-z kills
+                    // hidden raster fragments before their shadow-marching shader
+                    // runs) and caps the raymarch at the nearest mesh per pixel.
+                    let depth_tex =
+                        if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
+                    if raster.depth_prepass(gpu, globals, &instances, depth_tex) {
+                        raymarch.set_depth_prime(gpu, raster.prepass_view());
+                    }
                     raymarch.draw_into(gpu, color, depth, rm);
                     None
                 } else {
