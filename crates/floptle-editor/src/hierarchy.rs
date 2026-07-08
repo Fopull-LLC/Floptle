@@ -122,7 +122,20 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();
         }
-        if let Some(m) = pick {
+        ui.menu_button("🖼 UI", |ui| {
+        for (label, what, hover) in [
+            ("Layer", crate::ui_game::AddUi::Layer, "a screen-space UI canvas — elements go inside it"),
+            ("Panel", crate::ui_game::AddUi::Panel, "a rounded-rect shape (radius 0 = sharp, high = pill)"),
+            ("Text", crate::ui_game::AddUi::Text, "a text label (your fonts later; neutral fallback for now)"),
+            ("Image", crate::ui_game::AddUi::Image, "any texture from your assets — the engine ships no UI art"),
+        ] {
+            if ui.button(label).on_hover_text(hover).clicked() {
+                cmd.add_ui = Some(what);
+                ui.close();
+            }
+        }
+    });
+    if let Some(m) = pick {
             match parent {
                 Some(p) => cmd.add_parented = Some((m, p)),
                 None => cmd.add = Some(m),

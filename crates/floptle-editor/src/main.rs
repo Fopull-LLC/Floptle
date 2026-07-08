@@ -60,6 +60,7 @@ mod shading;
 mod terrain_edit;
 mod terrain_ui;
 mod theme;
+mod ui_game;
 mod timeline;
 mod vfx;
 mod vfx_inspector;
@@ -125,6 +126,8 @@ struct EditorCmd {
     /// Export the project as a runnable game build: (folder, target index —
     /// see `EXPORT_TARGETS`).
     export_game: Option<(String, usize)>,
+    /// Add ⏵ UI: create a game-UI node (layer/panel/text/image).
+    add_ui: Option<crate::ui_game::AddUi>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -1105,6 +1108,8 @@ struct Editor {
     mesh_registry: HashMap<String, MeshAsset>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
+    /// The game-UI render pass (instanced quads + glyph atlas).
+    ui_render: Option<floptle_render::Ui>,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,
@@ -1619,6 +1624,7 @@ impl ApplicationHandler for Editor {
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
         self.particles = Some(floptle_render::Particles::new(&gpu));
+        self.ui_render = Some(floptle_render::Ui::new(&gpu));
 
         let ctx = egui::Context::default();
         let state = egui_winit::State::new(

@@ -1057,6 +1057,11 @@ impl EditorTabViewer<'_> {
                     }
                 }
 
+                // ===== Game UI (layer/element; only when the node has one) =====
+                if crate::Editor::ui_inspector(world, e, ui) {
+                    cmd.inspector_changed = true;
+                }
+
                 // ===== Networked (replication; only when the node has one) =====
                 // The authored half of the netcode (docs/netcode-design.md §4.2): which
                 // props sync and whether the owner-client predicts it. Owner/NetId are
