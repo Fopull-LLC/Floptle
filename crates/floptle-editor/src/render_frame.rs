@@ -1093,6 +1093,7 @@ impl Editor {
         let player_mode = self.player_mode;
         let play_t = self.play_t;
         let ui_overlay_snapshot = self.ui_overlay.clone();
+        let ui_canvas_snapshot = self.ui_canvas.clone();
         let show_export = &mut self.show_export;
         let export_dir = &mut self.export_dir;
         let export_title = &mut self.export_title;
@@ -1493,6 +1494,7 @@ impl Editor {
                 world,
                 selection,
                 ui_overlay: &ui_overlay_snapshot,
+                ui_canvas: &ui_canvas_snapshot,
                 bone_selection,
                 fullscreen_tab,
                 collapsed,
@@ -2252,13 +2254,14 @@ impl Editor {
                 // "physically in the world" authoring view). Also projects the
                 // element outlines for the Scene tab's select/drag overlay.
                 self.ui_overlay.clear();
+                self.ui_canvas.clear();
                 if !ui_world.is_empty()
                     && let Some(uir) = self.ui_render.as_mut()
                 {
                     let vp_mat = cam.view_proj(aspect);
                     let (w_px, h_px) = (gpu.config.width as f32, gpu.config.height as f32);
                     let srect = self.scene_rect.unwrap_or(egui::Rect::NOTHING);
-                    for (dl, placed, origin, right, down) in &ui_world {
+                    for (dl, placed, origin, right, down, design_vp) in &ui_world {
                         let rel = floptle_core::math::Vec3::new(
                             (origin[0] - cam.world_position.x) as f32,
                             (origin[1] - cam.world_position.y) as f32,
@@ -2327,6 +2330,24 @@ impl Editor {
                             // Drag scale: overlay points per design unit.
                             let scale = if w > 0.5 { sw / w } else { 1.0 };
                             self.ui_overlay.push((pl.id, [sx, sy, sw, sh], scale.max(0.001)));
+                        }
+                        // Canvas bounds gizmo: the layer's design viewport as a
+                        // projected quadrilateral (Scene-tab points).
+                        let (cw, chh) = (design_vp[0], design_vp[1]);
+                        let corners = [
+                            rel,
+                            rel + r3 * cw,
+                            rel + r3 * cw + d3 * chh,
+                            rel + d3 * chh,
+                        ];
+                        let pts: Vec<egui::Pos2> =
+                            corners.iter().filter_map(|c| to_screen(*c)).collect();
+                        if pts.len() == 4 {
+                            let mut quad = [[0.0f32; 2]; 4];
+                            for (i, p) in pts.iter().enumerate() {
+                                quad[i] = [p.x / ppp - srect.min.x, p.y / ppp - srect.min.y];
+                            }
+                            self.ui_canvas.push(quad);
                         }
                     }
                 }

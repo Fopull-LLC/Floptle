@@ -253,14 +253,29 @@ impl Default for ElementSpec {
 /// design units always span the window height (resolution independence).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiLayer {
+    /// Resolution independence: this many design units ALWAYS span the window
+    /// height, at any resolution — bigger number = smaller-looking UI. The
+    /// width follows the window's aspect.
     pub design_height: f32,
     /// Layers draw lowest-z first.
     pub z: i32,
+    /// Master switch: an off layer draws nothing (in-game and in-editor).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Scene-view authoring only: world units per design unit for the canvas
+    /// hologram (gameplay always fills the screen regardless). 0.01 → a
+    /// 720-design layer stands 7.2 world units tall.
+    #[serde(default = "default_canvas_scale")]
+    pub canvas_scale: f32,
+}
+
+fn default_canvas_scale() -> f32 {
+    0.01
 }
 
 impl Default for UiLayer {
     fn default() -> Self {
-        UiLayer { design_height: 720.0, z: 0 }
+        UiLayer { design_height: 720.0, z: 0, enabled: true, canvas_scale: 0.01 }
     }
 }
 

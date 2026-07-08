@@ -26,6 +26,23 @@ impl EditorTabViewer<'_> {
             // Click selects the element; drag moves it (Free pos / Pin offset —
             // written back in design units through cmd.ui_move). The Game tab
             // shows the real render; this is the "where is everything" aid.
+            // Canvas bounds first: the layer's full design viewport in the world.
+            if !self.ui_canvas.is_empty() {
+                let painter = ui.painter_at(rect);
+                for quad in self.ui_canvas.iter() {
+                    let p: Vec<egui::Pos2> = quad
+                        .iter()
+                        .map(|c| rect.min + egui::vec2(c[0], c[1]))
+                        .collect();
+                    let col = egui::Color32::from_rgba_unmultiplied(160, 160, 255, 130);
+                    for i in 0..4 {
+                        painter.line_segment(
+                            [p[i], p[(i + 1) % 4]],
+                            egui::Stroke::new(1.5, col),
+                        );
+                    }
+                }
+            }
             if !self.ui_overlay.is_empty() {
                 let painter = ui.painter_at(rect);
                 for (idx, r, scale) in self.ui_overlay.iter() {

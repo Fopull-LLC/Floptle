@@ -224,7 +224,9 @@ impl Ui {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // LessEqual, NOT Less: an element's shape/image/text stack at
+                // the SAME plane depth — painter's order must keep layering.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

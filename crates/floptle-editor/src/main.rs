@@ -337,6 +337,8 @@ struct EditorTabViewer<'a> {
     selection: &'a mut Vec<Entity>,
     /// Game-UI element outlines for the Scene view (index, rect pts, scale).
     ui_overlay: &'a [(u32, [f32; 4], f32)],
+    /// Canvas bounds (4 corners per layer, Scene-tab points).
+    ui_canvas: &'a [[[f32; 2]; 4]],
     /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
     /// exclusive with `selection`; drives the Hierarchy highlight + Inspector bone editor.
     bone_selection: &'a mut Option<(Entity, usize)>,
@@ -1114,8 +1116,10 @@ struct Editor {
     texture_registry: HashMap<String, TexId>,
     /// The game-UI render pass (instanced quads + glyph atlas).
     ui_render: Option<floptle_render::Ui>,
-    /// This frame's Scene-view UI overlay (from `solve_ui_overlay`).
+    /// This frame's Scene-view UI overlay (projected element rects).
     ui_overlay: Vec<(u32, [f32; 4], f32)>,
+    /// Canvas bounds gizmos: 4 projected corners per layer (Scene-tab points).
+    ui_canvas: Vec<[[f32; 2]; 4]>,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,
