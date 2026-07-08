@@ -91,6 +91,15 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
             );
         }
     }
+    if let Some(Matter::Camera { fov_y, active }) = world.get::<Matter>(e) {
+        out.insert(
+            "Camera".to_string(),
+            HashMap::from([
+                ("fovY".to_string(), *fov_y as f64),
+                ("active".to_string(), if *active { 1.0 } else { 0.0 }),
+            ]),
+        );
+    }
     if let Some(l) = world.get::<floptle_ui::UiLayer>(e) {
         out.insert(
             "UiLayer".to_string(),
@@ -219,6 +228,15 @@ pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, 
                     "value" => s.value = val as f32,
                     "min" => s.min = val as f32,
                     "max" => s.max = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        "Camera" => {
+            if let Some(Matter::Camera { fov_y, active }) = world.get_mut::<Matter>(ent) {
+                match field {
+                    "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
+                    "active" => *active = val != 0.0,
                     _ => {}
                 }
             }
@@ -1100,6 +1118,22 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     lua.globals().set(
         "noderef",
         lua.create_function(|_, ()| Ok(crate::env::NODEREF_SENTINEL))?,
+    )?;
+    // scriptref("health"): the param binds to that SCRIPT on the wired node — the
+    // Inspector only lists nodes carrying it, and the script gets a script handle
+    // directly (call its functions, read its state). componentref("RigidBody"):
+    // same idea for a component handle. Both read nil while unwired/invalid.
+    lua.globals().set(
+        "scriptref",
+        lua.create_function(|_, kind: String| {
+            Ok(format!("{}{kind}", crate::env::SCRIPTREF_PREFIX))
+        })?,
+    )?;
+    lua.globals().set(
+        "componentref",
+        lua.create_function(|_, name: String| {
+            Ok(format!("{}{name}", crate::env::COMPREF_PREFIX))
+        })?,
     )?;
     {
         let scene = shared.scene.clone();

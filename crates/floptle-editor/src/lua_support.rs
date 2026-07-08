@@ -49,7 +49,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / UiElement / UiSlider / UiLayer), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / UiElement / UiSlider / UiLayer), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
@@ -78,6 +78,11 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+
+---A Camera's live properties (`node:getcomponent(\"Camera\")`).
+---@class CameraHandle
+---@field fovY number Vertical field of view, radians.
+---@field active number The play-mode view camera (1/0) — assign true to switch to it.
 
 ---A UI element's live properties (`node:getcomponent(\"UiElement\")`) — drive a HUD
 ---from scripts. Position/size numbers follow whatever mode the Inspector set
@@ -175,10 +180,25 @@ function update(node, dt) end
 function fixedUpdate(node, dt) end
 
 ---Mark a `defaults` entry as a NODE REFERENCE: `defaults = { hpBar = noderef() }`
----shows a node picker in the Inspector, and the script reads `params.hpBar` as a
----node handle (or nil while unwired) — no `find()` needed.
+---shows a node picker in the Inspector (or drag a node from the Hierarchy onto
+---the slot), and the script reads `params.hpBar` as a node handle (or nil while
+---unwired) — no `find()` needed.
 ---@return any
 function noderef() end
+
+---Mark a `defaults` entry as a SCRIPT REFERENCE: `defaults = { hp = scriptref(\"health\") }`
+---binds to that script ON the wired node — `params.hp` is a script handle directly
+---(call its functions, read its state). The Inspector lists only nodes carrying it.
+---@param kind string The script name (its .lua file stem).
+---@return any
+function scriptref(kind) end
+
+---Mark a `defaults` entry as a COMPONENT REFERENCE: `defaults = { body = componentref(\"RigidBody\") }`
+---binds to that component ON the wired node — `params.body.friction = 0.05` directly.
+---Components: RigidBody, PointLight, Camera, ParticleSystem, UiElement, UiSlider, UiLayer.
+---@param name string The component name.
+---@return any
+function componentref(name) end
 
 ---UI button hook: fires when this node's UI element (with `button` on) is clicked
 ---(pressed AND released on it). Also available: `pressed`, `released`,

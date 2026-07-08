@@ -1101,6 +1101,7 @@ impl Editor {
         let player_mode = self.player_mode;
         let play_t = self.play_t;
         let ui_overlay_snapshot = self.ui_overlay.clone();
+        let ref_kinds = &self.ref_kinds;
         let ui_canvas_snapshot = self.ui_canvas.clone();
         let show_export = &mut self.show_export;
         let export_dir = &mut self.export_dir;
@@ -1503,6 +1504,7 @@ impl Editor {
                 selection,
                 ui_overlay: &ui_overlay_snapshot,
                 ui_canvas: &ui_canvas_snapshot,
+                ref_kinds,
                 bone_selection,
                 fullscreen_tab,
                 collapsed,

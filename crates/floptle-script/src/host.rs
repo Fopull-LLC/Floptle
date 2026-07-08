@@ -25,8 +25,8 @@ type GizmoRayArgs = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Opt
 type GizmoBallArgs = (f64, f64, f64, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 use crate::{
     error_line, gizmo_color, install_handle_api, AnimCmd, AnimInfo, BodyState, GizmoCmd,
-    InputSnapshot, Instance, LogLevel, SceneMirror, ScriptHost, ScriptLog, Shared, Source, VfxCmd,
-    VfxInfo,
+    InputSnapshot, Instance, LogLevel, SceneMirror, ScriptHost, ScriptLog, Shared, Source,
+    VfxCmd, VfxInfo,
 };
 
 impl Default for ScriptHost {
@@ -1185,10 +1185,11 @@ impl ScriptHost {
     }
 
     /// The tunables a script declares via its top-level `defaults` table, used to
-    /// seed a freshly attached instance's params: `(numeric params, node-ref param
-    /// names)`. A default of `noderef()` marks a node-reference param (the Inspector
-    /// shows a node picker for it). Empty if it declares none or can't be loaded.
-    pub fn script_defaults(&self, path: &Path) -> (Vec<(String, f32)>, Vec<String>) {
+    /// seed a freshly attached instance's params: `(numeric params, reference
+    /// params with their kinds)`. A default of `noderef()` / `scriptref(kind)` /
+    /// `componentref(name)` marks a reference param (the Inspector shows a
+    /// filtered node picker for it). Empty if none declared or unloadable.
+    pub fn script_defaults(&self, path: &Path) -> crate::ScriptDefaults {
         let Ok(src) = std::fs::read_to_string(path) else { return Default::default() };
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let Ok(env) = build_env(&self.lua, &src, &name) else { return Default::default() };
@@ -1199,16 +1200,18 @@ impl ScriptHost {
             match v {
                 mlua::Value::Number(n) => nums.push((k, n as f32)),
                 mlua::Value::Integer(n) => nums.push((k, n as f32)),
-                mlua::Value::String(s)
-                    if s.to_string_lossy() == crate::env::NODEREF_SENTINEL =>
-                {
-                    refs.push(k)
+                mlua::Value::String(s) => {
+                    if let Some(kind) =
+                        crate::env::parse_ref_sentinel(&s.to_string_lossy())
+                    {
+                        refs.push((k, kind));
+                    }
                 }
                 _ => {}
             }
         }
         nums.sort_by(|a, b| a.0.cmp(&b.0));
-        refs.sort();
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
         (nums, refs)
     }
 
@@ -1317,10 +1320,16 @@ impl ScriptHost {
         };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
-        // Resolve node-reference params by NAME through the O(1) index — per tick,
-        // so a target spawned or renamed mid-play rebinds automatically.
-        let resolved: Vec<(String, Option<u32>)> = {
+        // Resolve reference params by NAME through the O(1) index — per tick, so
+        // a target spawned or renamed mid-play rebinds automatically. The KIND
+        // (node / script / component) comes from the declared `defaults` sentinel,
+        // and script/component targets validate against the live scene so an
+        // invalid wire reads nil rather than a dead handle.
+        let resolved: Vec<(String, crate::env::ResolvedRef)> = {
+            use crate::env::{parse_ref_sentinel, ResolvedRef};
             let s = self.scene.borrow();
+            let envs = self.envs.borrow();
+            let defaults = env.get::<Table>("defaults").ok();
             refs.iter()
                 .map(|(k, target)| {
                     let id = if target.is_empty() {
@@ -1328,7 +1337,25 @@ impl ScriptHost {
                     } else {
                         s.by_name.get(target).copied()
                     };
-                    (k.clone(), id)
+                    let kind = defaults
+                        .as_ref()
+                        .and_then(|d| d.get::<String>(k.as_str()).ok())
+                        .and_then(|v| parse_ref_sentinel(&v));
+                    let r = match (kind, id) {
+                        (Some(crate::RefKind::Node), Some(id)) => ResolvedRef::Node(id),
+                        (Some(crate::RefKind::Script(sk)), Some(id))
+                            if envs.contains_key(&(id, sk.clone())) =>
+                        {
+                            ResolvedRef::Script(id, sk)
+                        }
+                        (Some(crate::RefKind::Component(c)), Some(id))
+                            if s.components.get(&id).is_some_and(|m| m.contains_key(&c)) =>
+                        {
+                            ResolvedRef::Component(id, c)
+                        }
+                        _ => ResolvedRef::None,
+                    };
+                    (k.clone(), r)
                 })
                 .collect()
         };
@@ -1347,7 +1374,7 @@ impl ScriptHost {
         &self,
         env: &Table,
         params: &[(String, f32)],
-        refs: &[(String, Option<u32>)],
+        refs: &[(String, crate::env::ResolvedRef)],
         tr: &mut Transform,
         dt: f32,
         time: f32,

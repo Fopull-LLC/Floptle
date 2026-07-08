@@ -306,6 +306,11 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `intensity` / `range` | Brightness multiplier / reach in world units. |
 | `r` `g` `b` | Light color, 0..1 per channel. |
 
+| `getcomponent("Camera")` | Meaning (Inspector: ⌖ Camera) |
+|---|---|
+| `fovY` | Vertical field of view, radians. |
+| `active` | The play-mode view camera — assign `true` to switch to it (a scripted camera cut). |
+
 Booleans can be written as `true`/`false` (they read back as 1/0). All fields are
 numbers — anything else raises a script error naming the field.
 
@@ -439,9 +444,31 @@ end
 ```
 
 This is the preferred way to point a script at a specific node: no name typos in
-code, no lookups, and re-wiring is a dropdown pick instead of an edit. The
-reference resolves by name each tick, so a target spawned or renamed mid-play
-binds automatically.
+code, no lookups, and re-wiring is a dropdown pick instead of an edit — or just
+**drag a node from the Hierarchy onto the slot**. The reference resolves by name
+each tick, so a target spawned or renamed mid-play binds automatically.
+
+Want the thing ON the node rather than the node? Declare the kind and skip the
+`getcomponent`/`getscript` chain entirely:
+
+```lua
+defaults = {
+  victim = scriptref("health"),        -- that SCRIPT on the wired node
+  body   = componentref("RigidBody"),  -- that COMPONENT on the wired node
+}
+
+function update(node, dt)
+  if params.victim then params.victim.damage(10) end   -- a script handle
+  if params.body then params.body.friction = 0.05 end  -- a component handle
+end
+```
+
+The Inspector filters the picker to valid targets — `scriptref("health")` only
+lists nodes carrying a `health` script, `componentref("RigidBody")` only nodes
+with a Rigidbody (and a dragged node is rejected with a red outline if it
+doesn't qualify). Referenceable components: `RigidBody`, `PointLight`,
+`Camera`, `ParticleSystem`, `UiElement`, `UiSlider`, `UiLayer`. Unwired or
+invalid references read `nil`.
 
 ### Reaching other scripts
 

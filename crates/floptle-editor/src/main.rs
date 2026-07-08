@@ -86,8 +86,8 @@ use viz::*;
 /// Rect-tool UI resize payload: (entity index, size delta, min-edge per axis,
 /// current solved design size).
 pub(crate) type UiResize = (u32, [f32; 2], [bool; 2], [f32; 2]);
-/// A script's declared defaults: (numeric params, node-ref param names).
-pub(crate) type ScriptDefaults = (Vec<(String, f32)>, Vec<String>);
+/// A script's declared defaults: (numeric params, reference params + kinds).
+pub(crate) type ScriptDefaults = (Vec<(String, f32)>, Vec<(String, floptle_script::RefKind)>);
 
 #[derive(Default)]
 struct EditorCmd {
@@ -348,6 +348,9 @@ struct EditorTabViewer<'a> {
     selection: &'a mut Vec<Entity>,
     /// Game-UI element outlines for the Scene view (index, rect pts, scale).
     ui_overlay: &'a [(u32, [f32; 4], f32)],
+    /// The selected node's reference-param kinds ((script kind, param) → kind),
+    /// so ref pickers filter to valid targets.
+    ref_kinds: &'a HashMap<(String, String), floptle_script::RefKind>,
     /// Canvas bounds (4 corners per layer, Scene-tab points).
     ui_canvas: &'a [[[f32; 2]; 4]],
     /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
@@ -1138,6 +1141,10 @@ struct Editor {
     ui_lmb_was: bool,
     /// UI hook events detected this frame, dispatched after the script run.
     ui_events: Vec<(u32, &'static str)>,
+    /// The SELECTED node's reference-param kinds, (script kind, param) → kind —
+    /// refreshed by `sync_selected_script_params`, read by the Inspector to
+    /// filter ref pickers (script/component refs only list valid targets).
+    ref_kinds: HashMap<(String, String), floptle_script::RefKind>,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,

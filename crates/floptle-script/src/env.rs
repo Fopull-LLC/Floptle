@@ -52,27 +52,54 @@ pub(crate) fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<F
 /// The sentinel `noderef()` returns — a `defaults` value of this string marks the
 /// param as a NODE REFERENCE the Inspector wires to a scene node by name.
 pub(crate) const NODEREF_SENTINEL: &str = "__floptle_noderef";
+/// `scriptref("health")` → `__floptle_scriptref:health` — the param binds to
+/// that SCRIPT on the wired node (the script sees a script handle directly).
+pub(crate) const SCRIPTREF_PREFIX: &str = "__floptle_scriptref:";
+/// `componentref("RigidBody")` → `__floptle_compref:RigidBody` — the param
+/// binds to that COMPONENT on the wired node (a component handle directly).
+pub(crate) const COMPREF_PREFIX: &str = "__floptle_compref:";
+
+/// Parse a `defaults` sentinel value into the reference kind it declares.
+pub(crate) fn parse_ref_sentinel(v: &str) -> Option<crate::RefKind> {
+    if v == NODEREF_SENTINEL {
+        Some(crate::RefKind::Node)
+    } else if let Some(k) = v.strip_prefix(SCRIPTREF_PREFIX) {
+        Some(crate::RefKind::Script(k.to_string()))
+    } else {
+        v.strip_prefix(COMPREF_PREFIX).map(|c| crate::RefKind::Component(c.to_string()))
+    }
+}
+
+/// A reference param's binding for this tick, fully resolved + validated by the
+/// host (the target exists and carries the declared script/component).
+pub(crate) enum ResolvedRef {
+    None,
+    Node(u32),
+    Script(u32, String),
+    Component(u32, String),
+}
 
 /// Build the `params` table a script sees: its declared `defaults` as the base, with
 /// any per-instance overrides (Inspector tweaks) layered on top. Seeding from `defaults`
 /// is what makes `params.foo` resolve out of the box — without it, a script with no saved
 /// overrides sees an empty `params` and every `params.foo` reads `nil`.
 ///
-/// `refs` are the instance's node-reference params, resolved to entity indices
-/// (or `None` when unwired / the target is gone): the script sees a node HANDLE
-/// — `params.hpBar.text = hp`, zero `find()` calls — or `nil`.
+/// `refs` are the instance's reference params, resolved + validated by the host:
+/// the script sees a node / script / component HANDLE — `params.hpBar.text = hp`,
+/// `params.health.damage(5)`, `params.body.friction = 0` — zero `find()` calls.
+/// Unwired or invalid targets read `nil` (so `if params.x then` guards work).
 pub(crate) fn params_table(
     lua: &Lua,
     env: &Table,
     params: &[(String, f32)],
-    refs: &[(String, Option<u32>)],
+    refs: &[(String, ResolvedRef)],
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     if let Ok(defaults) = env.get::<Table>("defaults") {
         for (k, v) in defaults.pairs::<Value, Value>().flatten() {
-            // Never leak the noderef sentinel string: an unwired ref reads nil.
+            // Never leak a ref sentinel string: an unwired ref reads nil.
             if let Value::String(s) = &v
-                && s.to_string_lossy() == NODEREF_SENTINEL
+                && parse_ref_sentinel(&s.to_string_lossy()).is_some()
             {
                 continue;
             }
@@ -82,11 +109,16 @@ pub(crate) fn params_table(
     for (k, v) in params {
         t.set(k.as_str(), *v as f64)?;
     }
-    for (k, id) in refs {
-        match id {
-            Some(id) => t.set(k.as_str(), new_node_handle(lua, *id)?)?,
-            // Unwired/missing: nil (not the sentinel string) so `if params.x` works.
-            None => t.set(k.as_str(), Value::Nil)?,
+    for (k, r) in refs {
+        match r {
+            ResolvedRef::Node(id) => t.set(k.as_str(), new_node_handle(lua, *id)?)?,
+            ResolvedRef::Script(id, kind) => {
+                t.set(k.as_str(), new_script_handle(lua, *id, kind)?)?
+            }
+            ResolvedRef::Component(id, comp) => {
+                t.set(k.as_str(), new_component_handle(lua, *id, comp)?)?
+            }
+            ResolvedRef::None => t.set(k.as_str(), Value::Nil)?,
         }
     }
     Ok(t)
