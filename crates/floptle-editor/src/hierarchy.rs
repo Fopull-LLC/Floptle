@@ -128,6 +128,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             ("Panel", crate::ui_game::AddUi::Panel, "a rounded-rect shape (radius 0 = sharp, high = pill)"),
             ("Text", crate::ui_game::AddUi::Text, "a text label (your fonts later; neutral fallback for now)"),
             ("Image", crate::ui_game::AddUi::Image, "any texture from your assets — the engine ships no UI art"),
+            ("Slider", crate::ui_game::AddUi::Slider, "a value-driven bar (health, progress…): track + Fill + Handle parts you retexture and arrange freely"),
         ] {
             if ui.button(label).on_hover_text(hover).clicked() {
                 cmd.add_ui = Some(what);

@@ -1293,6 +1293,7 @@ dependencies = [
  "floptle-input",
  "floptle-net",
  "floptle-physics",
+ "floptle-ui",
  "glam",
  "mlua",
 ]

@@ -1264,8 +1264,20 @@ mod tests {
                         }),
                         text: Some(floptle_ui::TextSpec {
                             text: "HP".into(),
+                            valign: floptle_ui::Align::End, // exercise the round-trip
+                            fit: true,
                             ..Default::default()
                         }),
+                        // Exercise the slider/part/mask round-trips.
+                        slider: Some(floptle_ui::SliderSpec {
+                            min: 0.0,
+                            max: 200.0,
+                            value: 150.0,
+                            dir: floptle_ui::Dir::Row,
+                            flip: true,
+                        }),
+                        part: Some(floptle_ui::SliderPart::Fill),
+                        mask: Some(floptle_ui::MaskSpec { targets: vec!["Minimap".into()] }),
                         ..Default::default()
                     }),
                 },

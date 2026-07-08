@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use floptle_core::{Entity, Parent, Transform};
 use floptle_scene::MatterDoc;
 use floptle_ui::{
-    Align, Anchor, Dir, ElementSpec, ImageSpec, Justify, Place, ShapeSpec, Size, StackCfg,
-    TextSpec, UiLayer,
+    Align, Anchor, Dir, ElementSpec, ImageSpec, Justify, MaskSpec, Place, ShapeSpec, Size,
+    SliderPart, SliderSpec, StackCfg, TextSpec, UiLayer,
 };
 
 use crate::Editor;
@@ -29,6 +29,49 @@ pub(crate) enum AddUi {
     Panel,
     Text,
     Image,
+    Slider,
+}
+
+/// Resolve a layer's mask pairs `(mask id, target id)` in scene order: every
+/// element with a MaskSpec claims its targets BY NAME within this layer (first
+/// name match in scene order). Order in = order out, so "earliest mask wins"
+/// in [`floptle_ui::draw_list`] means earliest in the scene.
+fn layer_masks(
+    world: &floptle_core::World,
+    ents: &HashMap<u32, Entity>,
+    roots: &[floptle_ui::Node],
+) -> Vec<(u32, u32)> {
+    fn walk(n: &floptle_ui::Node, out: &mut Vec<u32>) {
+        out.push(n.id);
+        for c in &n.children {
+            walk(c, out);
+        }
+    }
+    let mut ids = Vec::new();
+    for r in roots {
+        walk(r, &mut ids);
+    }
+    let mut by_name: HashMap<&str, u32> = HashMap::new();
+    for id in &ids {
+        if let Some(e) = ents.get(id)
+            && let Some(n) = world.get::<floptle_core::Name>(*e)
+        {
+            by_name.entry(n.0.as_str()).or_insert(*id);
+        }
+    }
+    let mut out = Vec::new();
+    for id in &ids {
+        let Some(e) = ents.get(id) else { continue };
+        let Some(spec) = world.get::<ElementSpec>(*e) else { continue };
+        if let Some(mask) = &spec.mask {
+            for t in &mask.targets {
+                if let Some(&tid) = by_name.get(t.as_str()) {
+                    out.push((*id, tid));
+                }
+            }
+        }
+    }
+    out
 }
 
 impl Editor {
@@ -41,6 +84,7 @@ impl Editor {
         }
         // Scene order + children map (node order = deterministic draw order).
         let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
+        let ents: HashMap<u32, Entity> = order.iter().map(|e| (e.index(), *e)).collect();
         let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
         for e in &order {
             if let Some(p) = self.world.get::<Parent>(*e) {
@@ -85,7 +129,8 @@ impl Editor {
             let design_vp = [viewport[0] / scale, viewport[1] / scale];
             let measure = |t: &TextSpec| uir.measure(&t.text, t.size);
             let placed = floptle_ui::solve(roots, design_vp, &measure);
-            let dl = floptle_ui::draw_list(roots, &placed);
+            let masks = layer_masks(&self.world, &ents, roots);
+            let dl = floptle_ui::draw_list(roots, &placed, &masks);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -111,6 +156,7 @@ impl Editor {
     ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3], [f32; 2])>
     {
         let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
+        let ents: HashMap<u32, Entity> = order.iter().map(|e| (e.index(), *e)).collect();
         let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
         for e in &order {
             if let Some(p) = self.world.get::<Parent>(*e) {
@@ -148,7 +194,8 @@ impl Editor {
                 [layer.design_height * window_aspect.max(0.1), layer.design_height];
             let measure = |t: &TextSpec| uir.measure(&t.text, t.size);
             let placed = floptle_ui::solve(&roots, design_vp, &measure);
-            let dl = floptle_ui::draw_list(&roots, &placed);
+            let masks = layer_masks(&self.world, &ents, &roots);
+            let dl = floptle_ui::draw_list(&roots, &placed, &masks);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -208,6 +255,23 @@ impl Editor {
                     ..Default::default()
                 }),
             ),
+            // The track. Its Fill/Handle children are spawned below — they are
+            // ordinary elements the designer retextures/moves/resizes freely.
+            AddUi::Slider => (
+                "Slider",
+                None,
+                Some(ElementSpec {
+                    place: Place::Free { pos: [40.0, 40.0] },
+                    size: [Size::Fixed(320.0), Size::Fixed(28.0)],
+                    shape: Some(ShapeSpec {
+                        fill: [0.13, 0.13, 0.15, 0.9],
+                        radius: 8.0,
+                        ..Default::default()
+                    }),
+                    slider: Some(SliderSpec::default()),
+                    ..Default::default()
+                }),
+            ),
         };
         self.add_node(name, MatterDoc::Empty);
         // add_node selects what it created — attach the components there.
@@ -217,6 +281,47 @@ impl Editor {
         }
         if let Some(s) = spec {
             self.world.insert(e, s);
+        }
+        if what == AddUi::Slider {
+            // Plain-shape parts, no imposed look — swap in your own textures.
+            let parts: [(&str, ElementSpec); 2] = [
+                (
+                    "Fill",
+                    ElementSpec {
+                        part: Some(SliderPart::Fill),
+                        place: Place::Free { pos: [0.0, 0.0] },
+                        size: [Size::Pct(1.0), Size::Pct(1.0)],
+                        shape: Some(ShapeSpec {
+                            fill: [0.85, 0.87, 0.9, 1.0],
+                            radius: 8.0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "Handle",
+                    ElementSpec {
+                        part: Some(SliderPart::Handle),
+                        place: Place::Pin { anchor: Anchor::Left, offset: [0.0, 0.0] },
+                        size: [Size::Fixed(16.0), Size::Fixed(36.0)],
+                        shape: Some(ShapeSpec {
+                            fill: [1.0, 1.0, 1.0, 1.0],
+                            radius: 6.0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ),
+            ];
+            for (pname, pspec) in parts {
+                let c = self.world.spawn();
+                self.world.insert(c, floptle_core::Transform::IDENTITY);
+                self.world.insert(c, floptle_core::Name(pname.into()));
+                self.world.insert(c, MatterDoc::Empty.to_matter());
+                self.world.insert(c, Parent(e));
+                self.world.insert(c, pspec);
+            }
         }
     }
 
@@ -423,10 +528,26 @@ impl Editor {
             c |= ui.text_edit_singleline(&mut t.text).changed();
             ui.horizontal(|ui| {
                 ui.label("size");
-                c |= ui.add(egui::DragValue::new(&mut t.size).speed(0.5).range(4.0..=256.0)).changed();
+                ui.add_enabled_ui(!t.fit, |ui| {
+                    c |= ui
+                        .add(egui::DragValue::new(&mut t.size).speed(0.5).range(4.0..=256.0))
+                        .changed();
+                });
+                c |= ui
+                    .checkbox(&mut t.fit, "fit")
+                    .on_hover_text(
+                        "dynamic sizing: the text scales to fill the element's rect                          (largest size that fits) — size is ignored",
+                    )
+                    .changed();
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut t.color).changed();
+            });
+            ui.horizontal(|ui| {
                 for (v, l) in [(Align::Start, "left"), (Align::Center, "center"), (Align::End, "right")] {
                     c |= ui.selectable_value(&mut t.align, v, l).changed();
+                }
+                ui.separator();
+                for (v, l) in [(Align::Start, "top"), (Align::Center, "middle"), (Align::End, "bottom")] {
+                    c |= ui.selectable_value(&mut t.valign, v, l).changed();
                 }
             });
         }
@@ -460,6 +581,147 @@ impl Editor {
                 ui.label("tint");
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut img.tint).changed();
             });
+        }
+        // --- slider (value-driven bar: this element is the track) ---
+        let mut has = spec.slider.is_some();
+        if ui
+            .checkbox(&mut has, "slider")
+            .on_hover_text(
+                "value-driven bar (health, progress…): child elements marked as                  Fill scale with the value, Handle children ride its position —                  the parts stay ordinary elements you retexture and arrange freely",
+            )
+            .changed()
+        {
+            spec.slider = has.then(SliderSpec::default);
+            c = true;
+        }
+        if let Some(s) = &mut spec.slider {
+            ui.horizontal(|ui| {
+                ui.label("value");
+                let lo = s.min.min(s.max);
+                let hi = s.max.max(s.min);
+                c |= ui.add(egui::Slider::new(&mut s.value, lo..=hi)).changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("min");
+                c |= ui.add(egui::DragValue::new(&mut s.min).speed(1.0)).changed();
+                ui.label("max");
+                c |= ui.add(egui::DragValue::new(&mut s.max).speed(1.0)).changed();
+                c |= ui.selectable_value(&mut s.dir, Dir::Row, "↔").on_hover_text("horizontal").changed();
+                c |= ui.selectable_value(&mut s.dir, Dir::Column, "↕").on_hover_text("vertical").changed();
+                c |= ui
+                    .checkbox(&mut s.flip, "flip")
+                    .on_hover_text("the handle rides from the far end back toward the start")
+                    .changed();
+            });
+        }
+        // --- slider part (role under a slider parent) ---
+        if world
+            .get::<Parent>(e)
+            .and_then(|p| world.get::<ElementSpec>(p.0))
+            .is_some_and(|ps| ps.slider.is_some())
+        {
+            ui.horizontal(|ui| {
+                ui.label("slider part");
+                let cur = match spec.part {
+                    None => "none",
+                    Some(SliderPart::Fill) => "fill",
+                    Some(SliderPart::Handle) => "handle",
+                };
+                egui::ComboBox::from_id_salt(("ui_part", e.index()))
+                    .selected_text(cur)
+                    .width(90.0)
+                    .show_ui(ui, |ui| {
+                        for (label, v) in [
+                            ("none", None),
+                            ("fill", Some(SliderPart::Fill)),
+                            ("handle", Some(SliderPart::Handle)),
+                        ] {
+                            if ui.selectable_label(cur == label, label).clicked() && spec.part != v
+                            {
+                                spec.part = v;
+                                c = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "fill scales with the parent slider's value; handle rides its                          position — its authored size is the full-value size",
+                    );
+            });
+        }
+        // --- mask (clip other elements to this element's rounded rect) ---
+        let mut has = spec.mask.is_some();
+        if ui
+            .checkbox(&mut has, "mask")
+            .on_hover_text(
+                "clip the chosen elements (and everything inside them) to this                  element's rounded rect — pick targets by node name below",
+            )
+            .changed()
+        {
+            spec.mask = has.then(MaskSpec::default);
+            c = true;
+        }
+        if let Some(mask) = &mut spec.mask {
+            // Candidates: every UI element node's name (this element excluded —
+            // masking yourself is targeting your own name, allowed via Other).
+            let mut names: Vec<String> = world
+                .query::<ElementSpec>()
+                .filter_map(|(oe, _)| world.get::<floptle_core::Name>(oe).map(|n| n.0.clone()))
+                .collect();
+            names.sort();
+            names.dedup();
+            let mut remove: Option<usize> = None;
+            for (i, target) in mask.targets.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.button("✕").on_hover_text("remove this target").clicked() {
+                        remove = Some(i);
+                    }
+                    if let Some(pick) = crate::ui_widgets::searchable_picker(
+                        ui,
+                        egui::Id::new(("ui_mask_target", e.index(), i)),
+                        if target.is_empty() { "(pick element)" } else { target },
+                        None,
+                        &names,
+                        170.0,
+                    ) {
+                        *target = pick.unwrap_or_default();
+                        c = true;
+                    }
+                    // Conflict: the FIRST mask in scene order claiming a name
+                    // wins — warn when that isn't this one.
+                    if !target.is_empty() {
+                        let winner = world
+                            .query::<ElementSpec>()
+                            .find(|(_, os)| {
+                                os.mask.as_ref().is_some_and(|m| m.targets.contains(target))
+                            })
+                            .map(|(oe, _)| oe);
+                        if let Some(w) = winner
+                            && w != e
+                        {
+                            let wname = world
+                                .get::<floptle_core::Name>(w)
+                                .map(|n| n.0.clone())
+                                .unwrap_or_default();
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "⚠",
+                            )
+                            .on_hover_text(format!(
+                                "'{wname}' (earlier in the scene) also masks this element                                  — the earliest mask wins"
+                            ));
+                        }
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                mask.targets.remove(i);
+                c = true;
+            }
+            if ui.button("＋ add target").clicked() {
+                mask.targets.push(String::new());
+                c = true;
+            }
         }
         if c {
             world.insert(e, spec);

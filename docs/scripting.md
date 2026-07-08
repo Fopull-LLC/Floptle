@@ -321,6 +321,37 @@ end
 
 > Handles work cross-node too: `find("Crate"):getcomponent("RigidBody").restitution = 0.9`.
 
+### Game UI from scripts: `node.text` + the `Ui*` handles
+
+UI elements are ordinary nodes, so the same handle mechanism drives HUDs. The string
+side is a node property; everything numeric goes through `getcomponent`:
+
+```lua
+function start(node)
+  -- cache in start (see §8) — find() every frame is wasteful
+  hpLabel = find("HpLabel")
+  hpBar   = find("HpBar")
+end
+
+function update(node, dt)
+  hpLabel.text = hp                                   -- numbers coerce to text
+  hpBar:getcomponent("UiSlider").value = hp           -- the Fill/Handle parts follow
+  local el = hpBar:getcomponent("UiElement")
+  el.opacity = hp < 20 and (0.5 + 0.5 * math.sin(time * 8)) or 1   -- low-hp flash
+end
+```
+
+| Handle | Fields |
+|---|---|
+| `node.text` | The element's label text — read/write; writing a number is fine (`label.text = 42`). `nil` on nodes without a UI text. Writing to a UI element without a text spec creates one. |
+| `getcomponent("UiElement")` | `visible` (1/0), `opacity`, `posX` `posY` (free position or pin offset, design units), `width` `height` (the number in the axis's sizing mode: px value, % fraction, or grow weight; `nil` on a *fit* axis — writing one makes it fixed px), `radius`, `border`, `fillR/G/B/A`, `textSize`, `textR/G/B/A`, `tintR/G/B/A`. |
+| `getcomponent("UiSlider")` | `value`, `min`, `max` — on a slider (track) element. `value` is clamped to the range at draw time. |
+| `getcomponent("UiLayer")` | `enabled` (1/0 — an off layer draws nothing), `z`, `designHeight`. |
+
+Handles are `nil` when the node lacks the component — a node without an Element spec
+has no `"UiElement"`, only slider tracks have `"UiSlider"`, only layers have
+`"UiLayer"`.
+
 ## 8. Referencing other nodes & scripts
 
 A script isn't limited to its own node. You can **walk the hierarchy**, **find any

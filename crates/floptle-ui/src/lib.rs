@@ -171,11 +171,22 @@ impl Default for ShapeSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextSpec {
     pub text: String,
-    /// Glyph size in design units.
+    /// Glyph size in design units (ignored when `fit` is on).
     pub size: f32,
     pub color: [f32; 4],
     /// Horizontal alignment inside the element's rect.
     pub align: Align,
+    /// Vertical alignment inside the element's rect (Start = top, End = bottom).
+    #[serde(default = "default_center")]
+    pub valign: Align,
+    /// Dynamic sizing: scale the glyphs so the run fills the element's rect
+    /// (largest size that fits both axes). `size` becomes irrelevant.
+    #[serde(default)]
+    pub fit: bool,
+}
+
+fn default_center() -> Align {
+    Align::Center
 }
 
 impl Default for TextSpec {
@@ -185,6 +196,8 @@ impl Default for TextSpec {
             size: 24.0,
             color: [1.0, 1.0, 1.0, 1.0],
             align: Align::Start,
+            valign: Align::Center,
+            fit: false,
         }
     }
 }
@@ -200,6 +213,69 @@ impl Default for ImageSpec {
     fn default() -> Self {
         ImageSpec { texture: String::new(), tint: [1.0; 4] }
     }
+}
+
+/// A value-driven bar/slider (health bars, progress, volume…). The slider node
+/// is the TRACK; its child elements marked [`SliderPart::Fill`] scale along
+/// `dir` with the value, and [`SliderPart::Handle`] children ride the value's
+/// position. The parts are ORDINARY elements — retexture, recolor, move, and
+/// resize them freely; the slider only drives the value axis and respects your
+/// offsets on it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SliderSpec {
+    pub min: f32,
+    pub max: f32,
+    pub value: f32,
+    /// Which axis the value runs along: Row = horizontal, Column = vertical.
+    #[serde(default = "default_row")]
+    pub dir: Dir,
+    /// Handle rides from the far end (right/bottom) back toward the start —
+    /// for meters that drain toward the origin. (A fill's direction is set by
+    /// how you anchor it: pin it Right/Bottom and it empties that way.)
+    #[serde(default)]
+    pub flip: bool,
+}
+
+fn default_row() -> Dir {
+    Dir::Row
+}
+
+impl Default for SliderSpec {
+    fn default() -> Self {
+        SliderSpec { min: 0.0, max: 100.0, value: 65.0, dir: Dir::Row, flip: false }
+    }
+}
+
+impl SliderSpec {
+    /// The value as a 0..=1 fraction of the range (0 when the range is empty).
+    pub fn t(&self) -> f32 {
+        let span = self.max - self.min;
+        if span.abs() < f32::EPSILON {
+            0.0
+        } else {
+            ((self.value - self.min) / span).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// What a child element does under a slider parent (nothing elsewhere).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SliderPart {
+    /// Scales along the slider's axis with the value. Its authored size is the
+    /// FULL-value size; anchoring picks the direction it empties toward.
+    Fill,
+    /// Its center rides the value's position along the slider's axis (the
+    /// authored position on that axis becomes an extra offset). The cross axis
+    /// stays fully yours.
+    Handle,
+}
+
+/// Clip other elements to this element's rounded rect. Targets are node names
+/// (any elements in the same layer); each target's WHOLE subtree clips. If two
+/// masks claim the same element, the mask earliest in scene order wins.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MaskSpec {
+    pub targets: Vec<String>,
 }
 
 /// A UI element — the ONE node kind. What it looks like is whichever visual
@@ -219,6 +295,16 @@ pub struct ElementSpec {
     pub text: Option<TextSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageSpec>,
+    /// Value-driven bar: this element is a track whose Fill/Handle children
+    /// follow `value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slider: Option<SliderSpec>,
+    /// Role under a slider parent (Fill scales, Handle rides the value).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<SliderPart>,
+    /// Clip the named target elements (+ subtrees) to this element's rect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<MaskSpec>,
     #[serde(default = "default_true")]
     pub visible: bool,
     /// Multiplies every color this element draws (self only, v1).
@@ -242,6 +328,9 @@ impl Default for ElementSpec {
             shape: None,
             text: None,
             image: None,
+            slider: None,
+            part: None,
+            mask: None,
             visible: true,
             opacity: 1.0,
         }
@@ -466,8 +555,27 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
         }
     } else {
         for c in visible {
-            let cs = measure_node(c, [pw, ph], measure);
-            let pos = place_in(&c.spec, cs, [px, py], [pw, ph]);
+            let mut cs = measure_node(c, [pw, ph], measure);
+            // A slider parent drives its Fill/Handle parts along its axis —
+            // everything else about the part (cross axis, anchoring, offsets)
+            // stays exactly as the designer authored it.
+            let drive = n.spec.slider.zip(c.spec.part);
+            if let Some((s, SliderPart::Fill)) = drive {
+                let (axis, _) = axes(s.dir);
+                cs[axis] *= s.t();
+            }
+            let mut pos = place_in(&c.spec, cs, [px, py], [pw, ph]);
+            if let Some((s, SliderPart::Handle)) = drive {
+                let (axis, _) = axes(s.dir);
+                let t = if s.flip { 1.0 - s.t() } else { s.t() };
+                let authored = match c.spec.place {
+                    Place::Free { pos } => pos[axis],
+                    Place::Pin { offset, .. } => offset[axis],
+                };
+                let parent = [px, py];
+                let extent = [pw, ph];
+                pos[axis] = parent[axis] + extent[axis] * t - cs[axis] * 0.5 + authored;
+            }
             layout_node(c, [pos[0], pos[1], cs[0], cs[1]], measure, out);
         }
     }
@@ -476,6 +584,14 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
 // ---------------------------------------------------------------------------
 // Draw list
 // ---------------------------------------------------------------------------
+
+/// A mask's clip region: pixels outside this rounded rect are discarded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clip {
+    /// x, y, w, h in design units.
+    pub rect: [f32; 4],
+    pub radius: f32,
+}
 
 /// One rounded-rect quad, in design units (the renderer scales).
 #[derive(Clone, Debug, PartialEq)]
@@ -487,6 +603,8 @@ pub struct Quad {
     pub border_color: [f32; 4],
     /// Texture asset path (empty = solid fill).
     pub texture: String,
+    /// Set when a mask claims this element.
+    pub clip: Option<Clip>,
 }
 
 /// One text run (the renderer owns the font and lays out glyphs).
@@ -498,6 +616,12 @@ pub struct TextRun {
     pub size: f32,
     pub color: [f32; 4],
     pub align: Align,
+    /// Vertical alignment (Start = top, Center, End = bottom).
+    pub valign: Align,
+    /// Scale glyphs to fill the rect instead of using `size`.
+    pub fit: bool,
+    /// Set when a mask claims this element.
+    pub clip: Option<Clip>,
 }
 
 /// Everything a layer draws this frame, painter's order.
@@ -509,20 +633,48 @@ pub struct DrawList {
 
 /// Build the draw list for solved elements. `roots`/`placed` must come from
 /// the same [`solve`] call (painter's order is reused).
-pub fn draw_list(roots: &[Node], placed: &[Placed]) -> DrawList {
-    fn collect<'a>(n: &'a Node, m: &mut std::collections::HashMap<u32, &'a ElementSpec>) {
-        m.insert(n.id, &n.spec);
+///
+/// `masks` is `(mask element id, target element id)` pairs: the target and its
+/// whole subtree clip to the mask's solved rect (+ the mask's shape radius).
+/// When several masks claim the same element, the FIRST pair wins — build the
+/// list in scene order and the rule is "earliest mask in the scene wins". A
+/// mask that wasn't placed this frame (hidden) clips nothing.
+pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> DrawList {
+    fn collect<'a>(n: &'a Node, m: &mut std::collections::HashMap<u32, &'a Node>) {
+        m.insert(n.id, n);
         for c in &n.children {
             collect(c, m);
         }
     }
-    let mut specs = std::collections::HashMap::new();
+    let mut nodes = std::collections::HashMap::new();
     for r in roots {
-        collect(r, &mut specs);
+        collect(r, &mut nodes);
+    }
+    let rects: std::collections::HashMap<u32, [f32; 4]> =
+        placed.iter().map(|p| (p.id, p.rect)).collect();
+    // Resolve masks: element id → the clip it draws under (first claim wins).
+    let mut clip_of: std::collections::HashMap<u32, Clip> = std::collections::HashMap::new();
+    for (mask_id, target_id) in masks {
+        let Some(&rect) = rects.get(mask_id) else { continue };
+        let radius = nodes
+            .get(mask_id)
+            .and_then(|n| n.spec.shape)
+            .map(|s| s.radius)
+            .unwrap_or(0.0);
+        let clip = Clip { rect, radius };
+        let mut stack = vec![*target_id];
+        while let Some(id) = stack.pop() {
+            clip_of.entry(id).or_insert(clip);
+            if let Some(n) = nodes.get(&id) {
+                stack.extend(n.children.iter().map(|c| c.id));
+            }
+        }
     }
     let mut dl = DrawList::default();
     for p in placed {
-        let Some(spec) = specs.get(&p.id) else { continue };
+        let Some(node) = nodes.get(&p.id) else { continue };
+        let spec = &node.spec;
+        let clip = clip_of.get(&p.id).copied();
         let a = spec.opacity.clamp(0.0, 1.0);
         if let Some(s) = spec.shape {
             let mut fill = s.fill;
@@ -536,6 +688,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed]) -> DrawList {
                 border: s.border,
                 border_color: bc,
                 texture: String::new(),
+                clip,
             });
         }
         if let Some(img) = &spec.image
@@ -550,6 +703,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed]) -> DrawList {
                 border: 0.0,
                 border_color: [0.0; 4],
                 texture: img.texture.clone(),
+                clip,
             });
         }
         if let Some(t) = &spec.text
@@ -563,6 +717,9 @@ pub fn draw_list(roots: &[Node], placed: &[Placed]) -> DrawList {
                 size: t.size,
                 color,
                 align: t.align,
+                valign: t.valign,
+                fit: t.fit,
+                clip,
             });
         }
     }
@@ -795,12 +952,159 @@ mod tests {
             vec![],
         );
         let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
-        let dl = draw_list(&[n], &placed);
+        let dl = draw_list(&[n], &placed, &[]);
         assert_eq!(dl.quads.len(), 2, "shape + image");
         assert!((dl.quads[0].color[3] - 0.4).abs() < 1e-6, "opacity multiplies fill alpha");
         assert_eq!(dl.quads[1].texture, "textures/Grass.png");
         assert_eq!(dl.texts.len(), 1);
         assert!((dl.texts[0].color[3] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slider_fill_scales_and_pin_right_empties_leftward() {
+        let fill = el(
+            ElementSpec {
+                part: Some(SliderPart::Fill),
+                place: Place::Pin { anchor: Anchor::Right, offset: [0.0, 0.0] },
+                size: [Size::Pct(1.0), Size::Pct(1.0)],
+                ..Default::default()
+            },
+            vec![],
+        );
+        let fid = fill.id;
+        let track = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(400.0), Size::Fixed(40.0)],
+                slider: Some(SliderSpec { min: 0.0, max: 100.0, value: 25.0, ..Default::default() }),
+                ..Default::default()
+            },
+            vec![fill],
+        );
+        let placed = solve(&[track], [1280.0, 720.0], &m);
+        let r = rect_of(&placed, fid);
+        assert_eq!(r[2], 100.0, "quarter value = quarter width");
+        assert_eq!(r[0] + r[2], 400.0, "pinned Right: the fill empties leftward");
+        assert_eq!(r[3], 40.0, "cross axis untouched");
+    }
+
+    #[test]
+    fn slider_handle_rides_the_value_and_flip_reverses_it() {
+        for (flip, expected_center) in [(false, 300.0), (true, 100.0)] {
+            let handle = el(
+                ElementSpec {
+                    part: Some(SliderPart::Handle),
+                    place: Place::Pin { anchor: Anchor::Left, offset: [0.0, 0.0] },
+                    size: [Size::Fixed(20.0), Size::Fixed(20.0)],
+                    ..Default::default()
+                },
+                vec![],
+            );
+            let hid = handle.id;
+            let track = el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, 0.0] },
+                    size: [Size::Fixed(400.0), Size::Fixed(40.0)],
+                    slider: Some(SliderSpec {
+                        min: 0.0,
+                        max: 1.0,
+                        value: 0.75,
+                        dir: Dir::Row,
+                        flip,
+                    }),
+                    ..Default::default()
+                },
+                vec![handle],
+            );
+            let placed = solve(&[track], [1280.0, 720.0], &m);
+            let r = rect_of(&placed, hid);
+            assert_eq!(r[0] + r[2] * 0.5, expected_center, "flip={flip}");
+            assert_eq!(r[1], 10.0, "cross axis: Pin Left centers vertically");
+        }
+    }
+
+    #[test]
+    fn empty_slider_range_reads_as_zero() {
+        let s = SliderSpec { min: 5.0, max: 5.0, value: 5.0, ..Default::default() };
+        assert_eq!(s.t(), 0.0);
+    }
+
+    #[test]
+    fn mask_clips_target_subtree_and_first_mask_wins() {
+        let inner = el(
+            ElementSpec { size: [Size::Fixed(10.0), Size::Fixed(10.0)],
+                shape: Some(ShapeSpec::default()), ..Default::default() },
+            vec![],
+        );
+        let iid = inner.id;
+        let target = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(50.0), Size::Fixed(50.0)],
+                shape: Some(ShapeSpec::default()),
+                ..Default::default()
+            },
+            vec![inner],
+        );
+        let tid = target.id;
+        let mask_a = el(
+            ElementSpec {
+                place: Place::Free { pos: [100.0, 0.0] },
+                size: [Size::Fixed(80.0), Size::Fixed(80.0)],
+                shape: Some(ShapeSpec { radius: 12.0, ..Default::default() }),
+                mask: Some(MaskSpec { targets: vec!["t".into()] }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let aid = mask_a.id;
+        let mask_b = el(
+            ElementSpec {
+                place: Place::Free { pos: [300.0, 0.0] },
+                size: [Size::Fixed(9.0), Size::Fixed(9.0)],
+                mask: Some(MaskSpec { targets: vec!["t".into()] }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let bid = mask_b.id;
+        let roots = vec![target, mask_a, mask_b];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        // Both masks claim the target; A comes first in the pair list.
+        let dl = draw_list(&roots, &placed, &[(aid, tid), (bid, tid)]);
+        let clip = Clip { rect: [100.0, 0.0, 80.0, 80.0], radius: 12.0 };
+        let target_quad = dl.quads.iter().find(|q| q.rect == [0.0, 0.0, 50.0, 50.0]).unwrap();
+        assert_eq!(target_quad.clip, Some(clip), "first mask wins");
+        let inner_quad = dl.quads.iter().find(|q| q.rect[2] == 10.0).unwrap();
+        assert_eq!(inner_quad.clip, Some(clip), "the whole subtree clips");
+        let _ = (iid, tid);
+        // The masks themselves aren't clipped.
+        assert!(dl
+            .quads
+            .iter()
+            .filter(|q| q.rect[0] >= 100.0)
+            .all(|q| q.clip.is_none()));
+    }
+
+    #[test]
+    fn text_valign_and_fit_reach_the_draw_list() {
+        let n = el(
+            ElementSpec {
+                size: [Size::Fixed(200.0), Size::Fixed(80.0)],
+                text: Some(TextSpec {
+                    text: "hp".into(),
+                    valign: Align::End,
+                    fit: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let dl = draw_list(&[n], &placed, &[]);
+        assert_eq!(dl.texts[0].valign, Align::End);
+        assert!(dl.texts[0].fit);
     }
 
     #[test]

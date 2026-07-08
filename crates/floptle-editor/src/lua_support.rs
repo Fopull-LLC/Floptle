@@ -48,7 +48,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|nil Live component handle (RigidBody / PointLight), nil if the node lacks it.
+---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / UiElement / UiSlider / UiLayer), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
@@ -77,6 +78,45 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+
+---A UI element's live properties (`node:getcomponent(\"UiElement\")`) — drive a HUD
+---from scripts. Position/size numbers follow whatever mode the Inspector set
+---(px, %, grow); `text` content is `node.text`.
+---@class UiElementHandle
+---@field visible number Shown (1/0; assign true/false).
+---@field opacity number Multiplies every color the element draws, 0..1.
+---@field posX number Free position X / Pin offset X (design units).
+---@field posY number Free position Y / Pin offset Y (design units).
+---@field width number Width in the axis's sizing mode (px value, % fraction, or grow weight). Absent (nil) on a fit axis; writing one makes it fixed px.
+---@field height number Height (same rules as width).
+---@field radius number Shape corner radius (design units).
+---@field border number Shape border thickness (design units).
+---@field fillR number Shape fill red 0..1.
+---@field fillG number Shape fill green 0..1.
+---@field fillB number Shape fill blue 0..1.
+---@field fillA number Shape fill alpha 0..1.
+---@field textSize number Text glyph size (design units; ignored while fit is on).
+---@field textR number Text color red 0..1.
+---@field textG number Text color green 0..1.
+---@field textB number Text color blue 0..1.
+---@field textA number Text color alpha 0..1.
+---@field tintR number Image tint red 0..1.
+---@field tintG number Image tint green 0..1.
+---@field tintB number Image tint blue 0..1.
+---@field tintA number Image tint alpha 0..1.
+
+---A UI slider's live value (`node:getcomponent(\"UiSlider\")`) — the health-bar hook:
+---`bar:getcomponent(\"UiSlider\").value = hp` and the Fill/Handle parts follow.
+---@class UiSliderHandle
+---@field value number Current value (clamped to min..max at draw time).
+---@field min number Range start.
+---@field max number Range end.
+
+---A UI layer's live properties (`node:getcomponent(\"UiLayer\")`).
+---@class UiLayerHandle
+---@field enabled number Master switch (1/0; assign true/false) — an off layer draws nothing.
+---@field z number Draw order: lowest z first.
+---@field designHeight number Design units that span the window height.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.

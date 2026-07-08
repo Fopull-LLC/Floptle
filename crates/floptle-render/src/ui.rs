@@ -17,7 +17,7 @@ use crate::device::Gpu;
 use crate::raster::{Raster, TexId};
 use floptle_ui::{Align, DrawList};
 
-/// One quad/glyph instance — mirrors `ui.wgsl`'s five vec4 attributes.
+/// One quad/glyph instance — mirrors `ui.wgsl`'s six vec4 attributes.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiInstance {
@@ -25,10 +25,12 @@ pub struct UiInstance {
     pub rect: [f32; 4],
     pub color: [f32; 4],
     pub border_color: [f32; 4],
-    /// radius px, border px, kind (0 = shape/image, 1 = glyph), unused.
+    /// radius px, border px, kind (0 = shape/image, 1 = glyph), clip radius px.
     pub params: [f32; 4],
     /// u0, v0, u1, v1.
     pub uv: [f32; 4],
+    /// UI-mask clip rect in px (w <= 0 = unclipped).
+    pub clip: [f32; 4],
 }
 
 /// What a batch binds at group 1.
@@ -114,12 +116,13 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 5 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 6 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -438,6 +441,20 @@ impl Ui {
         instances: &mut Vec<UiInstance>,
         batches: &mut Vec<UiBatch>,
     ) {
+        let clip_px = |clip: &Option<floptle_ui::Clip>| -> ([f32; 4], f32) {
+            match clip {
+                Some(c) => (
+                    [
+                        origin[0] + c.rect[0] * scale,
+                        origin[1] + c.rect[1] * scale,
+                        c.rect[2] * scale,
+                        c.rect[3] * scale,
+                    ],
+                    c.radius * scale,
+                ),
+                None => ([0.0; 4], 0.0),
+            }
+        };
         let push = |instances: &mut Vec<UiInstance>,
                         batches: &mut Vec<UiBatch>,
                         tex: UiTex,
@@ -458,6 +475,7 @@ impl Ui {
                     None => UiTex::White, // missing texture: tinted solid
                 }
             };
+            let (clip, clip_r) = clip_px(&q.clip);
             push(
                 instances,
                 batches,
@@ -471,14 +489,26 @@ impl Ui {
                     ],
                     color: q.color,
                     border_color: q.border_color,
-                    params: [q.radius * scale, q.border * scale, 0.0, 0.0],
+                    params: [q.radius * scale, q.border * scale, 0.0, clip_r],
                     uv: [0.0, 0.0, 1.0, 1.0],
+                    clip,
                 },
             );
         }
         for t in &list.texts {
-            let px = (t.size * scale).round().max(1.0) as u32;
-            let run_w = self.measure(&t.text, t.size)[0] * scale;
+            // Dynamic sizing: `fit` scales the glyphs so the run fills the
+            // element's rect (largest size that fits both axes).
+            let size = if t.fit && !t.text.is_empty() {
+                let natural = self.measure(&t.text, t.size);
+                let f = (t.rect[2] / natural[0].max(1e-3))
+                    .min(t.rect[3] / natural[1].max(1e-3))
+                    .max(0.01);
+                t.size * f
+            } else {
+                t.size
+            };
+            let px = (size * scale).round().max(1.0) as u32;
+            let run_w = self.measure(&t.text, size)[0] * scale;
             let rect_px = [
                 origin[0] + t.rect[0] * scale,
                 origin[1] + t.rect[1] * scale,
@@ -490,14 +520,20 @@ impl Ui {
                 Align::Center => rect_px[0] + (rect_px[2] - run_w) * 0.5,
                 Align::End => rect_px[0] + rect_px[2] - run_w,
             };
-            // Baseline: vertically center the line box in the rect.
+            // Baseline: anchor the line box per valign (top / center / bottom).
             let (ascent, descent) = self
                 .font
                 .horizontal_line_metrics(px as f32)
                 .map(|l| (l.ascent, l.descent))
                 .unwrap_or((px as f32, 0.0));
             let line_h = ascent - descent;
-            let baseline = rect_px[1] + (rect_px[3] - line_h) * 0.5 + ascent;
+            let vf = match t.valign {
+                Align::Start => 0.0,
+                Align::Center | Align::Stretch => 0.5,
+                Align::End => 1.0,
+            };
+            let baseline = rect_px[1] + (rect_px[3] - line_h) * vf + ascent;
+            let (clip, clip_r) = clip_px(&t.clip);
             for c in t.text.chars() {
                 let Some(g) = self.glyph(gpu, c, px) else { continue };
                 if g.size[0] > 0.0 {
@@ -514,8 +550,9 @@ impl Ui {
                             ],
                             color: t.color,
                             border_color: [0.0; 4],
-                            params: [0.0, 0.0, 1.0, 0.0],
+                            params: [0.0, 0.0, 1.0, clip_r],
                             uv: g.uv,
+                            clip,
                         },
                     );
                 }
