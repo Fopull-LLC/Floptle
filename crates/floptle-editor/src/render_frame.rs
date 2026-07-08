@@ -69,6 +69,14 @@ impl Editor {
         } else {
             Vec::new()
         };
+        // Scene-view UI outlines (authoring aid): solved for the Scene rect,
+        // drawn by the tab, dragged deltas come back through cmd.ui_move.
+        self.ui_overlay = if self.playing {
+            Vec::new()
+        } else {
+            let vp = self.scene_rect.map(|r| [r.width(), r.height()]).unwrap_or([0.0, 0.0]);
+            self.solve_ui_overlay(vp)
+        };
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
@@ -1079,6 +1087,7 @@ impl Editor {
         // the multiplayer window, which still works for LAN/relay sessions.
         let player_mode = self.player_mode;
         let play_t = self.play_t;
+        let ui_overlay_snapshot = self.ui_overlay.clone();
         let show_export = &mut self.show_export;
         let export_dir = &mut self.export_dir;
         let export_title = &mut self.export_title;
@@ -1478,6 +1487,7 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                ui_overlay: &ui_overlay_snapshot,
                 bone_selection,
                 fullscreen_tab,
                 collapsed,
@@ -3016,6 +3026,24 @@ impl Editor {
         }
         if let Some(what) = cmd.add_ui {
             self.add_ui_node(what);
+        }
+        if let Some((idx, d)) = cmd.ui_move {
+            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
+            if let Some(e) = ent
+                && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+            {
+                match &mut spec.place {
+                    floptle_ui::Place::Free { pos } => {
+                        pos[0] += d[0];
+                        pos[1] += d[1];
+                    }
+                    floptle_ui::Place::Pin { offset, .. } => {
+                        offset[0] += d[0];
+                        offset[1] += d[1];
+                    }
+                }
+                self.world.insert(e, spec);
+            }
         }
         if cmd.inspector_changed {
             self.begin_edit();

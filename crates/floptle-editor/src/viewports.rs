@@ -402,6 +402,21 @@ impl Editor {
         if retro_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
             retro.blit_to(gpu, &cv);
         }
+        // ---- game UI: the docked Game view shows exactly what a build shows ----
+        let ui_layers = self.gather_game_ui([w.max(1) as f32, h.max(1) as f32]);
+        if !ui_layers.is_empty()
+            && let (Some(gpu), Some(raster), Some(uir)) =
+                (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
+        {
+            let vp = [w.max(1) as f32, h.max(1) as f32];
+            let mut ui_instances = Vec::new();
+            let mut ui_batches = Vec::new();
+            for (dl, scale) in &ui_layers {
+                let reg = &self.texture_registry;
+                uir.pack(gpu, dl, [0.0, 0.0], *scale, &mut |p| reg.get(p).copied(), &mut ui_instances, &mut ui_batches);
+            }
+            uir.draw(gpu, &cv, vp, &ui_instances, &ui_batches, raster);
+        }
     }
 
     /// What the Inspector should draw for the current selection's preview.

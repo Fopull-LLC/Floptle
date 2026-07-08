@@ -128,6 +128,8 @@ struct EditorCmd {
     export_game: Option<(String, usize)>,
     /// Add ⏵ UI: create a game-UI node (layer/panel/text/image).
     add_ui: Option<crate::ui_game::AddUi>,
+    /// Scene-view UI drag: (element entity index, accumulated design-unit delta).
+    ui_move: Option<(u32, [f32; 2])>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -333,6 +335,8 @@ enum ProjectAction {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
+    /// Game-UI element outlines for the Scene view (index, rect pts, scale).
+    ui_overlay: &'a [(u32, [f32; 4], f32)],
     /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
     /// exclusive with `selection`; drives the Hierarchy highlight + Inspector bone editor.
     bone_selection: &'a mut Option<(Entity, usize)>,
@@ -1110,6 +1114,8 @@ struct Editor {
     texture_registry: HashMap<String, TexId>,
     /// The game-UI render pass (instanced quads + glyph atlas).
     ui_render: Option<floptle_render::Ui>,
+    /// This frame's Scene-view UI overlay (from `solve_ui_overlay`).
+    ui_overlay: Vec<(u32, [f32; 4], f32)>,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,

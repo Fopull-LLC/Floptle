@@ -22,6 +22,57 @@ impl EditorTabViewer<'_> {
                 }
         } else {
             *self.scene_rect = Some(rect);
+            // ---- game-UI authoring overlay: element outlines in the Scene view.
+            // Click selects the element; drag moves it (Free pos / Pin offset —
+            // written back in design units through cmd.ui_move). The Game tab
+            // shows the real render; this is the "where is everything" aid.
+            if !self.ui_overlay.is_empty() {
+                let painter = ui.painter_at(rect);
+                for (idx, r, scale) in self.ui_overlay.iter() {
+                    let er = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(r[0], r[1]),
+                        egui::vec2(r[2].max(4.0), r[3].max(4.0)),
+                    );
+                    if !rect.intersects(er) {
+                        continue;
+                    }
+                    let ent = self
+                        .world
+                        .query::<floptle_core::transform::Transform>()
+                        .map(|(e, _)| e)
+                        .find(|e| e.index() == *idx);
+                    let selected = ent.map(|e| self.selection.contains(&e)).unwrap_or(false);
+                    let color = if selected {
+                        egui::Color32::from_rgb(255, 180, 60)
+                    } else {
+                        egui::Color32::from_rgba_unmultiplied(80, 200, 255, 170)
+                    };
+                    painter.rect_stroke(
+                        er,
+                        2.0,
+                        egui::Stroke::new(if selected { 2.0 } else { 1.0 }, color),
+                        egui::StrokeKind::Outside,
+                    );
+                    let resp =
+                        ui.interact(er, egui::Id::new(("ui_ov", *idx)), egui::Sense::click_and_drag());
+                    if resp.clicked()
+                        && let Some(e) = ent
+                    {
+                        self.selection.clear();
+                        self.selection.push(e);
+                    }
+                    if resp.dragged() && selected {
+                        let d = resp.drag_delta() / *scale;
+                        match &mut self.cmd.ui_move {
+                            Some((i, acc)) if *i == *idx => {
+                                acc[0] += d.x;
+                                acc[1] += d.y;
+                            }
+                            slot => *slot = Some((*idx, [d.x, d.y])),
+                        }
+                    }
+                }
+            }
         }
 
         // The Game tab is the active-camera gameplay view — no editor tools/gizmos.
