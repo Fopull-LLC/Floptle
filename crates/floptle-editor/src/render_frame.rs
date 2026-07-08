@@ -827,6 +827,9 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                // vol_tight_* are renderer-patched at draw time from the uploaded
+                // volumes; the default is "unbounded" (behaves like the full brick).
+                ..Default::default()
             }
         };
 
@@ -3903,6 +3906,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                // vol_tight_* are renderer-patched at draw time (default: unbounded).
+                ..Default::default()
             };
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             g

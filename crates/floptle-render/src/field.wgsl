@@ -64,6 +64,13 @@ struct Globals {
     // byte-identical to the Rust `RaymarchGlobals` that feeds it.
     fog_color: vec4<f32>,                // rgb = fog color (w unused)
     fog_params: vec4<f32>,               // x start dist, y end dist, z on (0/1), w unused
+    // Per volume: the tight CONTENT box (camera-relative center + half-extent),
+    // scanned from the baked voxels at upload — the sub-box of the brick that
+    // actually holds surface. All march bounds use it instead of the full brick:
+    // a generous terrain box is mostly empty air above the hills, and a camera
+    // standing inside the brick must not pay to march (and fetch) through it.
+    vol_tight_c: array<vec4<f32>, 16>,
+    vol_tight_h: array<vec4<f32>, 16>,
 };
 
 fn sd_sphere(p: vec3<f32>, r: f32) -> f32 {
@@ -130,7 +137,9 @@ fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
-        let s = slab_span(ro, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i)));
+        // The TIGHT content box, not the brick: rays over the hills toward the
+        // sky must exit at the terrain's true top, not the brick's.
+        let s = slab_span(ro, inv, G.vol_tight_c[i].xyz, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i)));
         if (s.x <= s.y && s.y > 0.0) {
             t0 = min(t0, s.x);
             t1 = max(t1, s.y);
@@ -200,7 +209,12 @@ fn volume_d(i: u32, p: vec3<f32>) -> f32 {
     // Far from the brick the box distance alone is a valid (conservative) lower
     // bound and the edge-continuation can't influence any nearby surface — skip
     // the 3D-texture fetch entirely. The cutoff scales with the fuse radius so a
-    // wide smin still sees the continued field where it actually blends.
+    // wide smin still sees the continued field where it actually blends. (The
+    // TIGHT content box is deliberately NOT used here: in the brick's air its
+    // distance is a much weaker bound than the fetched true distance, so trading
+    // the fetch for it costs more small steps than it saves — measured slower.
+    // The tight box pays off where whole marches are skipped or ended early:
+    // `field_span` and the `light_vis` relevance sweep.)
     if (box_d > 4.0 + 2.0 * G.vol_half[i].w) {
         return box_d;
     }
@@ -530,8 +544,11 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (G.vol_center[i].w < 0.5) { continue; } // absent (shadow-only bakes stay in)
-        let pen = max(dot(G.vol_center[i].xyz - ro, l), 0.0) / pen_k;
-        let s = slab_span(ro, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i) + pen));
+        // Tight content box, not the brick: a sun ray from open ground exits the
+        // terrain at its true top, so t_end stops just past the hills instead of
+        // marching to the brick's roof.
+        let pen = max(dot(G.vol_tight_c[i].xyz - ro, l), 0.0) / pen_k;
+        let s = slab_span(ro, inv, G.vol_tight_c[i].xyz, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i) + pen));
         if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
             vmask = vmask | (1u << i);
             t_end = max(t_end, min(s.y, max_d));

@@ -165,7 +165,8 @@ fn volume_at(i: u32, p: vec3<f32>) -> Matter {
     let box_d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
     // Far from the brick: the box distance alone is a valid conservative bound
     // and the color can't reach any blend — skip both texture fetches (mirrors
-    // `volume_d` in field.wgsl; the cutoff scales with the fuse radius).
+    // `volume_d` in field.wgsl, including why the tight content box is NOT the
+    // bound here; the cutoff scales with the fuse radius).
     if (box_d > 4.0 + 2.0 * G.vol_half[i].w) {
         return Matter(box_d, vec3<f32>(1.0));
     }
