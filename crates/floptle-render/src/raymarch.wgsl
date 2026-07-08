@@ -159,6 +159,12 @@ fn volume_at(i: u32, p: vec3<f32>) -> Matter {
     let rel = p - G.vol_center[i].xyz;
     let q = abs(rel) - vh;
     let box_d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+    // Far from the brick: the box distance alone is a valid conservative bound
+    // and the color can't reach any blend — skip both texture fetches (mirrors
+    // `volume_d` in field.wgsl; the cutoff scales with the fuse radius).
+    if (box_d > 4.0 + 2.0 * G.vol_half[i].w) {
+        return Matter(box_d, vec3<f32>(1.0));
+    }
     if (box_d > 0.0) {
         // Outside the brick: CONTINUE the field, exactly like `Terrain::sample` —
         // box distance PLUS the clamped edge sample's air gap. A constant floor here
@@ -337,8 +343,12 @@ fn fs(in: VOut) -> FsOut {
     let rd = normalize(far.xyz / far.w - ro);
 
     let max_t = march_bound();
-    var t = 0.0;
-    var prev_t = 0.0;
+    // Everything drawable lives inside the volume boxes + blob spheres: march
+    // only the ray's span through those bounds. Rays that miss every bound are
+    // provably sky (zero steps); rays toward distant matter skip the empty air.
+    let span = field_span(ro, rd, max_t);
+    var t = span.x;
+    var prev_t = span.x;
     var hit = false;
     // Closest approach to a real surface, so a grazing ray that never quite trips the
     // coarse threshold — the silhouette of a hill/ravine, where the step shrinks and
@@ -349,6 +359,9 @@ fn fs(in: VOut) -> FsOut {
     var min_t = 0.0;
     var min_prev = 0.0;
     for (var i = 0; i < 256; i = i + 1) {
+        if (t > span.y) {
+            break;
+        }
         let p = ro + rd * t;
         // Distance-only sampling in the hot loop (map_d, field.wgsl) — the color
         // atlas is read once, at the refined hit, not per step.
@@ -372,9 +385,6 @@ fn fs(in: VOut) -> FsOut {
         // not a perfectly exact SDF, so understep to avoid overshoot cracks when
         // the camera is close to the surface.
         t = t + max(d, 0.003) * 0.85;
-        if (t > max_t) {
-            break;
-        }
     }
     // Grazing-silhouette fill: no clean hit, but the ray passed within ~a voxel of a
     // real surface → accept that closest approach (refined by the bisection below).
@@ -510,9 +520,13 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     let rd = normalize(far.xyz / far.w - ro);
 
     let max_t = march_bound();
-    var t = 0.0;
+    let span = field_span(ro, rd, max_t);
+    var t = span.x;
     var masked = 0.0;
     for (var i = 0; i < 160; i = i + 1) {
+        if (t > span.y) {
+            break;
+        }
         let p = ro + rd * t;
         let d = map_d(p);
         let thr = 0.0015 * t + 0.0025;
@@ -525,9 +539,6 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
             break;
         }
         t = t + max(d, 0.003) * 0.8;
-        if (t > max_t) {
-            break;
-        }
     }
     if (masked < 0.5) {
         discard;
