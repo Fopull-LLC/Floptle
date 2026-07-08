@@ -70,6 +70,83 @@ fn sd_sphere(p: vec3<f32>, r: f32) -> f32 {
     return length(p) - r;
 }
 
+// ---- Ray/bounds intersection helpers -----------------------------------------
+// Everything in the field is bounded (volume boxes, blob spheres, proxy shapes),
+// so a ray can compute ONCE where field content can possibly live along it and
+// march only that span. This is the engine's central raymarch optimization: sky
+// rays never march, distant terrain skips all the empty air in front of it, and
+// shadow rays that leave the bounds stop immediately.
+
+// 1/dir with zero components clamped away (keeps the slab test finite; the tiny
+// epsilon direction is equivalent to nudging the ray, never wrong by > 1e-8).
+fn safe_inv(d: vec3<f32>) -> vec3<f32> {
+    let s = select(vec3<f32>(1.0), vec3<f32>(-1.0), d < vec3<f32>(0.0));
+    return s / max(abs(d), vec3<f32>(1e-8));
+}
+
+// Entry/exit of ray `ro + t*inv⁻¹` through the box (center c, half-extent h):
+// returns (t_in, t_out); a miss has t_in > t_out.
+fn slab_span(ro: vec3<f32>, inv: vec3<f32>, c: vec3<f32>, h: vec3<f32>) -> vec2<f32> {
+    let t1 = (c - h - ro) * inv;
+    let t2 = (c + h - ro) * inv;
+    let tmin = min(t1, t2);
+    let tmax = max(t1, t2);
+    return vec2<f32>(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+}
+
+// Entry/exit of ray `ro + t*rd` (rd normalized) through the sphere (c, r):
+// returns (t_in, t_out); a miss has t_in > t_out.
+fn sphere_span(ro: vec3<f32>, rd: vec3<f32>, c: vec3<f32>, r: f32) -> vec2<f32> {
+    let oc = ro - c;
+    let b = dot(oc, rd);
+    let disc = b * b - (dot(oc, oc) - r * r);
+    if (disc < 0.0) {
+        return vec2<f32>(1.0, -1.0);
+    }
+    let s = sqrt(disc);
+    return vec2<f32>(-b - s, -b + s);
+}
+
+// A volume's bound margin: the smin fuse can bulge the surface at most k/4
+// outside the pieces' own bounds — 2k is a generous cover for both the
+// volume↔volume fuse and the blob↔volume blend (G.params.z).
+fn vol_pad(i: u32) -> f32 {
+    return 0.5 + 2.0 * max(G.vol_half[i].w, G.params.z);
+}
+
+// A blob's bounding radius: the metaball geometry reaches ≈0.83·s from its
+// center; margins cover the blob↔blob (0.3·s) and blob↔volume (params.z) fuses.
+fn blob_bound(i: u32) -> f32 {
+    let s = max(G.blobs[i].w, 0.02);
+    return s + max(0.3 * s, G.params.z);
+}
+
+// The span of the whole DRAWN field (render volumes + blobs) along a ray — the
+// primary march runs only inside it. Returns (t0, t1); t0 > t1 = provably sky.
+fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
+    var t0 = 1e30;
+    var t1 = -1e30;
+    let inv = safe_inv(rd);
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        let s = slab_span(ro, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i)));
+        if (s.x <= s.y && s.y > 0.0) {
+            t0 = min(t0, s.x);
+            t1 = max(t1, s.y);
+        }
+    }
+    let count = min(u32(G.params.y), 16u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let s = sphere_span(ro, rd, G.blobs[i].xyz, blob_bound(i));
+        if (s.x <= s.y && s.y > 0.0) {
+            t0 = min(t0, s.x);
+            t1 = max(t1, s.y);
+        }
+    }
+    return vec2<f32>(max(t0, 0.0), min(t1, max_t));
+}
+
 fn smin(a: f32, b: f32, k: f32) -> f32 {
     let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
     return mix(b, a, h) - k * h * (1.0 - h);
@@ -120,6 +197,13 @@ fn volume_d(i: u32, p: vec3<f32>) -> f32 {
     let rel = p - G.vol_center[i].xyz;
     let q = abs(rel) - vh;
     let box_d = length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+    // Far from the brick the box distance alone is a valid (conservative) lower
+    // bound and the edge-continuation can't influence any nearby surface — skip
+    // the 3D-texture fetch entirely. The cutoff scales with the fuse radius so a
+    // wide smin still sees the continued field where it actually blends.
+    if (box_d > 4.0 + 2.0 * G.vol_half[i].w) {
+        return box_d;
+    }
     let d = textureSampleLevel(dist_tex, vol_samp, atlas_uvw(i, rel), 0.0).r;
     if (box_d > 0.0) {
         return max(box_d + max(d, 0.0), 0.08);
@@ -140,10 +224,11 @@ fn box_edge(i: u32, p: vec3<f32>) -> f32 {
 // near volume A's face but deep inside overlapping volume B, the union edge is B's
 // (large), so no taper; on a face no neighbor continues past, it's small → taper.
 // A single isolated volume reduces exactly to its own edge (the original look).
-fn union_edge(p: vec3<f32>) -> f32 {
+fn union_edge_m(p: vec3<f32>, mask: u32) -> f32 {
     var e = -1e9;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
+        if ((mask & (1u << i)) == 0u) { continue; }
         if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < 0.0) {
@@ -151,6 +236,10 @@ fn union_edge(p: vec3<f32>) -> f32 {
         }
     }
     return e;
+}
+
+fn union_edge(p: vec3<f32>) -> f32 {
+    return union_edge_m(p, 0xffffu);
 }
 
 // True when `p` is inside ANY volume's box expanded by `e` — used to reject false
@@ -228,11 +317,16 @@ fn map_d(p: vec3<f32>) -> f32 {
 // grid+f16 noise), a small fixed epsilon on the analytic blobs.
 fn field_eps(p: vec3<f32>) -> f32 {
     var h = 0.012;
-    let ci = containing_volume(p, 0.08);
-    if (ci >= 0) {
-        let i = u32(ci);
-        let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
-        h = clamp(max(voxel.x, max(voxel.y, voxel.z)), 0.02, 1.0);
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < 0.08) {
+            // Where boxes overlap the LARGEST voxel wins — pure box tests, no
+            // texture fetch (this runs per shadow ray, it must stay cheap).
+            let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+            h = max(h, clamp(max(voxel.x, max(voxel.y, voxel.z)), 0.02, 1.0));
+        }
     }
     return h;
 }
@@ -338,13 +432,114 @@ fn prox_d(i: u32, p: vec3<f32>) -> f32 {
     return length(max(d, vec3<f32>(0.0))) + min(max(d.x, max(d.y, d.z)), 0.0);
 }
 
+// The bounding sphere of proxy occluder `i` — (center, radius) covering the
+// sphere/capsule/oriented-box exactly (used for the shadow ray's relevance sweep).
+fn prox_bound(i: u32) -> vec4<f32> {
+    let a = G.prox_a[i];
+    let b = G.prox_b[i];
+    if (b.w < 0.5) { // sphere
+        return vec4<f32>(a.xyz, a.w);
+    }
+    if (b.w < 1.5) { // capsule from a to b
+        let c = 0.5 * (a.xyz + b.xyz);
+        return vec4<f32>(c, 0.5 * length(b.xyz - a.xyz) + a.w);
+    }
+    // Oriented box: half-extents in b.xyz around center a.
+    return vec4<f32>(a.xyz, length(b.xyz));
+}
+
+// The masked shadow-march field: the same fold as `min(map_d, shadow_volumes_d)`
+// but touching ONLY the pieces whose bounds the shadow ray actually crosses
+// (`vmask` bits over volumes of both kinds, `blobs` for the analytic part).
+// Skipped pieces sit ≥ their bound margin from every point on the ray, where
+// their contribution to the fold provably cannot move the surface.
+fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
+    var vd = 1e9;   // render volumes (w = 1): smin fold + union-edge taper
+    var any = false;
+    var sd = 1e9;   // shadow-only occluder bakes (w = 2): plain min
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if ((vmask & (1u << i)) == 0u) { continue; }
+        if (G.vol_center[i].w > 1.5) {
+            sd = min(sd, volume_d(i, p));
+        } else {
+            let v = volume_d(i, p);
+            if (!any) {
+                vd = v;
+                any = true;
+            } else {
+                vd = smin(vd, v, max(G.vol_half[i].w, 0.0001));
+            }
+        }
+    }
+    if (any) {
+        let uedge = union_edge_m(p, vmask);
+        if (uedge > -1e8) {
+            vd = max(vd, 2.0 - uedge);
+        }
+    }
+    var field = 1e9;
+    let has_blobs = blobs && G.params.y >= 0.5;
+    if (any && has_blobs) {
+        field = smin(analytic_d(p), vd, max(G.params.z, 0.0001));
+    } else if (any) {
+        field = vd;
+    } else if (has_blobs) {
+        field = analytic_d(p);
+    }
+    return min(field, sd);
+}
+
 // Visibility of the sun from surface point `p` with normal `n`: 1 = fully lit,
 // 0 = fully shadowed, in between = analytic penumbra. Marches the fused field
 // PLUS the proxy occluders toward the light, tracking iq's `min(k·d/t)` — the
 // single `k` sweeps razor-hard (large) to dreamy-soft (small) with no kernels.
+//
+// Before marching, one cheap relevance sweep intersects the ray with every
+// piece's bound: pieces the ray can't touch are skipped in the march entirely,
+// a ray that touches nothing returns lit with no march at all (the common case
+// for open ground / sky-facing walls), and the march stops at the LAST bound
+// exit instead of crawling to the full shadow distance.
 fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let k = G.shadow_params.y;
     let max_d = G.shadow_params.w;
+
+    // ---- Relevance sweep: which pieces can this ray possibly hit?
+    let inv = safe_inv(l);
+    var vmask = 0u;
+    var pmask = 0u;
+    var blobs = false;
+    var t_end = 0.0;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (G.vol_center[i].w < 0.5) { continue; } // absent (shadow-only bakes stay in)
+        let s = slab_span(p, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i)));
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            vmask = vmask | (1u << i);
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    let bc = min(u32(G.params.y), 16u);
+    for (var i = 0u; i < bc; i = i + 1u) {
+        let s = sphere_span(p, l, G.blobs[i].xyz, blob_bound(i));
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            blobs = true;
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    let pc = min(u32(G.prox_count.x), 32u);
+    for (var i = 0u; i < pc; i = i + 1u) {
+        let bnd = prox_bound(i);
+        let s = sphere_span(p, l, bnd.xyz, bnd.w);
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            pmask = pmask | (1u << i);
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    if (vmask == 0u && pmask == 0u && !blobs) {
+        return 1.0; // nothing anywhere along this ray — fully lit, no march
+    }
+
     // Lift off the surface along the normal (voxel-aware) so the ray doesn't
     // immediately re-hit the surface it starts on (shadow acne on the noisy
     // f16-sampled terrain field). When the sun GRAZES the surface (n·l → 0) the
@@ -358,10 +553,10 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // (a character standing inside its own capsule) — skip it so meshes don't
     // blanket-shadow themselves; it still casts on everything else.
     var skip = 0u;
-    let pc = min(u32(G.prox_count.x), 32u);
     for (var i = 0u; i < pc; i = i + 1u) {
-        if (prox_d(i, ro) < lift) { skip = skip | (1u << i); }
+        if ((pmask & (1u << i)) != 0u && prox_d(i, ro) < lift) { skip = skip | (1u << i); }
     }
+    let march = pmask & ~skip;
     var t = lift;
     var vis = 1.0;
     // The k·d/t penumbra estimator is hypersensitive while t is tiny: right at the
@@ -373,19 +568,19 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let pen_t0 = base * 3.0;
     for (var s = 0; s < 64; s = s + 1) {
         let q = ro + l * t;
-        var d = min(map_d(q), shadow_volumes_d(q));
+        var d = shadow_field_d(q, vmask, blobs);
         for (var i = 0u; i < pc; i = i + 1u) {
-            if ((skip & (1u << i)) == 0u) {
+            if ((march & (1u << i)) != 0u) {
                 d = min(d, prox_d(i, q));
             }
         }
         if (d < 0.001) { return 0.0; }   // hard hit — fully occluded
-        if (d > 1e8) { break; }          // empty scene along this ray — fully lit
+        if (d > 1e8) { break; }          // nothing along this ray — fully lit
         if (t > pen_t0) {
             vis = min(vis, clamp(k * d / t, 0.0, 1.0));
         }
         t = t + clamp(d, 0.02, 4.0);
-        if (vis < 0.01 || t > max_d) { break; }
+        if (vis < 0.01 || t > t_end) { break; }
     }
     return clamp(vis, 0.0, 1.0);
 }
