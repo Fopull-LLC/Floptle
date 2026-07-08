@@ -638,14 +638,37 @@ impl Editor {
         };
         let target = target.min(EXPORT_TARGETS.len() - 1);
         let t = &EXPORT_TARGETS[target];
-        match t.triple {
-            None => {
+        match t.kind {
+            ExportKind::SelfBinary => {
                 let result = std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
-                    export_game_with(&self.project_root, Path::new(&dir), &title, &exe, t.exe_suffix)
+                    export_game_with(&self.project_root, Path::new(&dir), &title, &exe, t)
                 });
                 self.finish_export(result);
             }
-            Some(triple) => {
+            ExportKind::Prebuilt(rel) => {
+                let result = repo_root()
+                    .ok_or_else(|| {
+                        "prebuilt-binary exports need the engine source checkout this editor \
+                         was built from"
+                            .to_string()
+                    })
+                    .and_then(|root| {
+                        let bin = root.join(rel);
+                        if bin.is_file() {
+                            export_game_with(&self.project_root, Path::new(&dir), &title, &bin, t)
+                        } else {
+                            Err(format!(
+                                "no {} binary at {} — push the repo, run the `macos-binary` \
+                                 workflow (GitHub ⏵ Actions ⏵ Run workflow), download its \
+                                 artifact, untar, and put the binary there",
+                                t.label,
+                                bin.display()
+                            ))
+                        }
+                    });
+                self.finish_export(result);
+            }
+            ExportKind::CargoCross(triple) => {
                 if self.export_build.is_some() {
                     self.export_status = Some("a target build is already running…".into());
                     return;
@@ -696,15 +719,19 @@ impl Editor {
         let mut b = self.export_build.take().expect("checked above");
         let status = b.child.wait();
         let t = &EXPORT_TARGETS[b.target];
+        let triple = match t.kind {
+            ExportKind::CargoCross(tr) => Some(tr),
+            _ => None,
+        };
         let result = match status {
             Ok(s) if s.success() => {
-                match t.triple.and_then(|tr| cross_binary_path(tr, t.exe_suffix)) {
+                match triple.and_then(|tr| cross_binary_path(tr, t.exe_suffix)) {
                     Some(bin) if bin.is_file() => export_game_with(
                         &self.project_root,
                         Path::new(&b.out_dir),
                         &b.title,
                         &bin,
-                        t.exe_suffix,
+                        t,
                     )
                     .map(|m| format!("{m} (built in {:.0} s)", b.started.elapsed().as_secs_f32())),
                     _ => Err("the build succeeded but its binary wasn't found".into()),
@@ -717,23 +744,61 @@ impl Editor {
     }
 }
 
-/// The Export Game… target menu. `triple` is `None` for "whatever this editor
-/// is" (copy our own binary), or the Rust target to cross-compile.
-struct ExportTarget {
-    label: &'static str,
-    triple: Option<&'static str>,
-    exe_suffix: &'static str,
+/// How an Export Game… target obtains its engine binary.
+enum ExportKind {
+    /// Copy the running binary — always available, always this platform.
+    SelfBinary,
+    /// `cargo build` for this Rust triple in the background (cross-compiled
+    /// locally — Windows-from-Linux via mingw).
+    CargoCross(&'static str),
+    /// A CI-built binary the user drops at this repo-relative path (macOS —
+    /// Apple's SDK can't leave a Mac, so the `macos-binary` GitHub workflow
+    /// builds it and the export consumes the downloaded artifact).
+    Prebuilt(&'static str),
 }
 
+struct ExportTarget {
+    label: &'static str,
+    kind: ExportKind,
+    exe_suffix: &'static str,
+    /// A README dropped into the build, `{exe}` replaced with the binary name
+    /// (macOS: Gatekeeper won't run unsigned internet downloads untouched).
+    readme: Option<&'static str>,
+}
+
+const MAC_README: &str = "\
+This is an unsigned build (no Apple notarization yet), so macOS quarantines it
+after a download. In Terminal, from this folder, run once:
+
+    xattr -dr com.apple.quarantine .
+    chmod +x ./{exe}
+
+Then start the game with:
+
+    ./{exe}
+
+F1 in-game opens the multiplayer menu (host / join with a lobby code).
+";
+
 const EXPORT_TARGETS: &[ExportTarget] = &[
-    ExportTarget { label: "This machine", triple: None, exe_suffix: std::env::consts::EXE_SUFFIX },
+    ExportTarget {
+        label: "This machine",
+        kind: ExportKind::SelfBinary,
+        exe_suffix: std::env::consts::EXE_SUFFIX,
+        readme: None,
+    },
     ExportTarget {
         label: "Windows (x86_64)",
-        triple: Some("x86_64-pc-windows-gnu"),
+        kind: ExportKind::CargoCross("x86_64-pc-windows-gnu"),
         exe_suffix: ".exe",
+        readme: None,
     },
-    // macOS can't be cross-compiled without Apple's SDK — export from an
-    // editor running on a Mac instead (the dialog says so).
+    ExportTarget {
+        label: "macOS",
+        kind: ExportKind::Prebuilt("prebuilt/floptle-macos"),
+        exe_suffix: "",
+        readme: Some(MAC_README),
+    },
 ];
 
 /// A cross-target build in flight: the spawned `cargo build`, everything
@@ -781,12 +846,17 @@ fn windows_toolchain_bin() -> Result<Option<PathBuf>, String> {
     ))
 }
 
+/// The engine source checkout this editor was built from (compiled-in path —
+/// a dev machine, which is where exports happen today). `None` if it's gone.
+fn repo_root() -> Option<PathBuf> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
+    repo.join("Cargo.toml").is_file().then(|| repo.to_path_buf())
+}
+
 /// Spawn the background `cargo build` for a cross-target export. Needs the
-/// engine source checkout (compiled-in path — a dev machine, which is where
-/// exports happen today) and the target's rustup toolchain + C toolchain.
+/// engine source checkout and the target's rustup + C toolchains.
 fn spawn_cross_build(triple: &str, log: &Path) -> Result<std::process::Child, String> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent);
-    let repo = repo.filter(|r| r.join("Cargo.toml").is_file()).ok_or_else(|| {
+    let repo = repo_root().ok_or_else(|| {
         "cross-target exports need the engine source checkout this editor was built from"
             .to_string()
     })?;
@@ -829,14 +899,16 @@ fn spawn_cross_build(triple: &str, log: &Path) -> Result<std::process::Child, St
 /// File ⏵ Export Game…: stamp out a runnable build — an engine binary + the
 /// project's assets + the `floptle-game.ron` manifest that flips it into
 /// player mode. `binary` is the engine to ship: our own executable for a
-/// native export, or the cross-compiled one a background build produced.
+/// native export, a cross-compiled one a background build produced, or a
+/// CI-built prebuilt (macOS).
 fn export_game_with(
     project_root: &Path,
     out: &Path,
     title: &str,
     binary: &Path,
-    exe_suffix: &str,
+    target: &ExportTarget,
 ) -> Result<String, String> {
+    let exe_suffix = target.exe_suffix;
     std::fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
     let out_c = out.canonicalize().map_err(|e| format!("export dir: {e}"))?;
@@ -851,7 +923,19 @@ fn export_game_with(
     let stem = stem.trim_matches('_');
     let stem = if stem.is_empty() { "game" } else { stem };
     let exe_name = format!("{stem}{exe_suffix}");
-    std::fs::copy(binary, out_c.join(&exe_name)).map_err(|e| format!("copy binary: {e}"))?;
+    let shipped = out_c.join(&exe_name);
+    std::fs::copy(binary, &shipped).map_err(|e| format!("copy binary: {e}"))?;
+    // A CI artifact may have lost its executable bit in transit — restore it
+    // (only meaningful for unix-family targets; .exe doesn't care).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&shipped, std::fs::Permissions::from_mode(0o755));
+    }
+    if let Some(tpl) = target.readme {
+        std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
+            .map_err(|e| format!("write README: {e}"))?;
+    }
     let files = copy_tree(&proj, &out_c.join("assets")).map_err(|e| format!("copy assets: {e}"))?;
     let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
@@ -1981,7 +2065,7 @@ mod cli_tests {
 
 #[cfg(test)]
 mod export_tests {
-    use super::{export_game_with, GameManifest};
+    use super::{export_game_with, GameManifest, EXPORT_TARGETS};
     use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
@@ -2005,7 +2089,7 @@ mod export_tests {
         let out = temp("out");
 
         let me = std::env::current_exe().unwrap();
-        let msg = export_game_with(&proj, &out, "My Cool Game!", &me, std::env::consts::EXE_SUFFIX)
+        let msg = export_game_with(&proj, &out, "My Cool Game!", &me, &EXPORT_TARGETS[0])
             .expect("export succeeds");
         assert!(msg.contains("2 asset file(s)"), "dot-entries must be skipped: {msg}");
         assert!(out.join("assets/project.ron").is_file());
@@ -2022,7 +2106,16 @@ mod export_tests {
 
         // Exporting INTO the project is refused (it would copy itself).
         let inside = proj.join("build");
-        assert!(export_game_with(&proj, &inside, "x", &me, "").is_err());
+        assert!(export_game_with(&proj, &inside, "x", &me, &EXPORT_TARGETS[0]).is_err());
+
+        // A macOS-target export ships the Gatekeeper README, {exe} filled in.
+        let out2 = temp("out-mac");
+        let mac = EXPORT_TARGETS.iter().find(|t| t.label == "macOS").unwrap();
+        export_game_with(&proj, &out2, "Sea Game", &me, mac).expect("mac export");
+        let readme = std::fs::read_to_string(out2.join("README.txt")).unwrap();
+        assert!(readme.contains("./Sea_Game"), "README names the actual binary: {readme}");
+        assert!(readme.contains("com.apple.quarantine"));
+        let _ = std::fs::remove_dir_all(&out2);
 
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&out);

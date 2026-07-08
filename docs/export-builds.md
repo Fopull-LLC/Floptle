@@ -45,9 +45,24 @@ The dialog's **Target** picker chooses the build's platform:
 
   Cross exports need the engine source checkout the editor was built from
   (it rebuilds itself) — i.e. a dev machine, which is where exports happen.
-- **macOS** cannot be cross-compiled (Apple's SDK license) — run the export
-  from an editor on a Mac. Prebuilt per-platform engine binaries + fully
-  one-click exports are the Hub pipeline's job (ADR-0021, later).
+- **macOS** — Apple's SDK can't leave a Mac, so GitHub's macOS runners build
+  the engine binary natively and the export consumes it:
+
+  1. Push the repo, then GitHub ⏵ **Actions ⏵ macos-binary ⏵ Run workflow**
+     (`arm64` default = Apple Silicon; `universal` also covers Intel Macs at
+     ~2× the minutes — note macOS runner minutes bill at 10× on private repos,
+     which is why it's on-demand).
+  2. Download the `floptle-macos` artifact, untar, put the binary at
+     **`prebuilt/floptle-macos`** in this checkout (git-ignored).
+  3. Export with Target = macOS — instant from then on; refresh the prebuilt
+     when you want the build on a newer engine commit (the wire protocol
+     refuses version mismatches at connect, so keep it current for
+     multiplayer tests).
+
+  macOS exports include a `README.txt` for the recipient: the build is
+  unsigned, so after downloading they run
+  `xattr -dr com.apple.quarantine .` once in the folder, then launch the
+  binary from Terminal. (Signing/notarization is a Hub-pipeline concern.)
 
 ## Multi-device LAN testing
 
