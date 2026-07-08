@@ -56,6 +56,19 @@ impl Editor {
         self.check_active_script_syntax();
         // Reap a finished cross-target export build (Windows-from-Linux etc.).
         self.poll_export_build();
+        // Game-UI layers: gather + solve on the CPU while `self` is free (the
+        // draw core borrows the GPU stack); drawn over the finished frame below.
+        let ui_view = self.game_view() || self.player_mode;
+        let ui_layers = if ui_view {
+            let vp = self
+                .gpu
+                .as_ref()
+                .map(|g| [g.config.width as f32, g.config.height as f32])
+                .unwrap_or([0.0, 0.0]);
+            self.gather_game_ui(vp)
+        } else {
+            Vec::new()
+        };
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
@@ -2238,6 +2251,29 @@ impl Editor {
                     retro.blit(gpu, &frame);
                 }
 
+                // ---- game UI: over the finished frame (native res), before
+                // the editor's own chrome. One instanced pass per frame.
+                if !ui_layers.is_empty()
+                    && let Some(uir) = self.ui_render.as_mut()
+                {
+                    let vp = [gpu.config.width as f32, gpu.config.height as f32];
+                    let mut ui_instances = Vec::new();
+                    let mut ui_batches = Vec::new();
+                    for (dl, scale) in &ui_layers {
+                        let reg = &self.texture_registry;
+                        uir.pack(
+                            gpu,
+                            dl,
+                            [0.0, 0.0],
+                            *scale,
+                            &mut |p| reg.get(p).copied(),
+                            &mut ui_instances,
+                            &mut ui_batches,
+                        );
+                    }
+                    uir.draw(gpu, &frame.view, vp, &ui_instances, &ui_batches, raster);
+                }
+
                 // Selection outline: mask the selected object's silhouette (full
                 // frame res, so it stays crisp over the retro scene) then edge-detect
                 // it onto the frame. Works for meshes and the SDF blob alike.
@@ -2977,6 +3013,9 @@ impl Editor {
                 MatterDoc::PostProcess { .. } => "Post Processing",
             };
             self.add_node(name, m);
+        }
+        if let Some(what) = cmd.add_ui {
+            self.add_ui_node(what);
         }
         if cmd.inspector_changed {
             self.begin_edit();
