@@ -4,8 +4,14 @@
 // arrive in painter's order; batches switch only the bound texture.
 
 struct Globals {
-    // Viewport size in physical px (zw unused).
+    // x, y = viewport px; z = mode (0 = screen-space, 1 = world canvas).
     viewport: vec4<f32>,
+    // World-canvas basis (mode 1): origin (top-left), right + down are the
+    // plane axes scaled to world-units-per-design-unit.
+    plane_origin: vec4<f32>,
+    plane_right: vec4<f32>,
+    plane_down: vec4<f32>,
+    view_proj: mat4x4<f32>,
 }
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -35,12 +41,20 @@ struct VsOut {
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     let p = in.rect.xy + in.corner * in.rect.zw;
-    // px → NDC (y down in px, up in NDC).
-    let ndc = vec2<f32>(
-        p.x / globals.viewport.x * 2.0 - 1.0,
-        1.0 - p.y / globals.viewport.y * 2.0,
-    );
-    out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    if globals.viewport.z > 0.5 {
+        // World canvas (Scene-view authoring): design units on the layer plane.
+        let world = globals.plane_origin.xyz
+            + globals.plane_right.xyz * p.x
+            + globals.plane_down.xyz * p.y;
+        out.pos = globals.view_proj * vec4<f32>(world, 1.0);
+    } else {
+        // Screen space: px → NDC (y down in px, up in NDC).
+        let ndc = vec2<f32>(
+            p.x / globals.viewport.x * 2.0 - 1.0,
+            1.0 - p.y / globals.viewport.y * 2.0,
+        );
+        out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    }
     out.color = in.color;
     out.border_color = in.border_color;
     out.params = in.params;

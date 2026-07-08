@@ -59,8 +59,32 @@ struct Glyph {
 
 const ATLAS_SIZE: u32 = 1024;
 
+/// Mirrors `ui.wgsl`'s Globals.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct UiGlobals {
+    /// x, y = viewport px; z = mode (0 screen, 1 world canvas).
+    pub viewport: [f32; 4],
+    pub plane_origin: [f32; 4],
+    pub plane_right: [f32; 4],
+    pub plane_down: [f32; 4],
+    pub view_proj: [[f32; 4]; 4],
+}
+
+/// A world canvas placement: top-left origin + the plane axes, already scaled
+/// to world-units-per-design-unit.
+#[derive(Clone, Copy, Debug)]
+pub struct UiPlane {
+    pub origin: [f32; 3],
+    pub right: [f32; 3],
+    pub down: [f32; 3],
+}
+
 pub struct Ui {
     pipeline: wgpu::RenderPipeline,
+    /// The world-canvas variant (Scene-view authoring): depth-tested against
+    /// the scene so the layer plane sits IN the world.
+    pipeline_world: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
     white_bind: wgpu::BindGroup,
@@ -177,10 +201,41 @@ impl Ui {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline_world = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui-world"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ui-globals"),
-            size: 16,
+            size: std::mem::size_of::<UiGlobals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -279,6 +334,7 @@ impl Ui {
 
         Ui {
             pipeline,
+            pipeline_world,
             globals_buf,
             globals_bind,
             white_bind,
@@ -491,11 +547,14 @@ impl Ui {
         if instances.is_empty() {
             return;
         }
-        gpu.queue.write_buffer(
-            &self.globals_buf,
-            0,
-            bytemuck::cast_slice(&[viewport[0], viewport[1], 0.0, 0.0]),
-        );
+        let g = UiGlobals {
+            viewport: [viewport[0], viewport[1], 0.0, 0.0],
+            plane_origin: [0.0; 4],
+            plane_right: [0.0; 4],
+            plane_down: [0.0; 4],
+            view_proj: [[0.0; 4]; 4],
+        };
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
         self.ensure_instances(gpu, instances.len() as u32);
         gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         let mut encoder =
@@ -515,6 +574,78 @@ impl Ui {
                 multiview_mask: None,
             });
             rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            for b in batches {
+                if b.range.is_empty() {
+                    continue;
+                }
+                let bind = match b.tex {
+                    UiTex::White => &self.white_bind,
+                    UiTex::Atlas => &self.atlas_bind,
+                    UiTex::Tex(id) => raster.material_bind(id).unwrap_or(&self.white_bind),
+                };
+                rp.set_bind_group(1, bind, &[]);
+                rp.draw_indexed(0..6, 0, b.range.clone());
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// Scene-view authoring: draw packed instances as a WORLD-SPACE canvas on
+    /// `plane`, depth-tested against the scene (Load both attachments).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_world(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        view_proj: [[f32; 4]; 4],
+        plane: UiPlane,
+        instances: &[UiInstance],
+        batches: &[UiBatch],
+        raster: &Raster,
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        let g = UiGlobals {
+            viewport: [1.0, 1.0, 1.0, 0.0],
+            plane_origin: [plane.origin[0], plane.origin[1], plane.origin[2], 0.0],
+            plane_right: [plane.right[0], plane.right[1], plane.right[2], 0.0],
+            plane_down: [plane.down[0], plane.down[1], plane.down[2], 0.0],
+            view_proj,
+        };
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
+        self.ensure_instances(gpu, instances.len() as u32);
+        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-world") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-world"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.pipeline_world);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
