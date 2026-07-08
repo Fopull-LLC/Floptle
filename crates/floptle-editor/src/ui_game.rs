@@ -94,6 +94,57 @@ impl Editor {
         out
     }
 
+    /// Scene-view authoring overlay: solved element rects at `viewport` (egui
+    /// points) — (entity index, rect, px-per-design-unit). The Scene tab draws
+    /// outlines from these and drags write back through `cmd.ui_move`.
+    pub(crate) fn solve_ui_overlay(&self, viewport: [f32; 2]) -> Vec<(u32, [f32; 4], f32)> {
+        if viewport[0] <= 1.0 || viewport[1] <= 1.0 {
+            return Vec::new();
+        }
+        let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
+        let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
+        for e in &order {
+            if let Some(p) = self.world.get::<Parent>(*e) {
+                kids.entry(p.0.index()).or_default().push(*e);
+            }
+        }
+        fn build(
+            world: &floptle_core::World,
+            kids: &HashMap<u32, Vec<Entity>>,
+            e: Entity,
+        ) -> Option<floptle_ui::Node> {
+            let spec = world.get::<ElementSpec>(e)?.clone();
+            let children = kids
+                .get(&e.index())
+                .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
+                .unwrap_or_default();
+            Some(floptle_ui::Node { id: e.index(), spec, children })
+        }
+        let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        for e in &order {
+            let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
+            let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
+            let roots: Vec<_> = kids
+                .get(&e.index())
+                .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
+                .unwrap_or_default();
+            if roots.is_empty() {
+                continue;
+            }
+            let design_vp = [viewport[0] / scale, viewport[1] / scale];
+            let measure = |t: &TextSpec| uir.measure(&t.text, t.size);
+            for pl in floptle_ui::solve(&roots, design_vp, &measure) {
+                out.push((
+                    pl.id,
+                    [pl.rect[0] * scale, pl.rect[1] * scale, pl.rect[2] * scale, pl.rect[3] * scale],
+                    scale,
+                ));
+            }
+        }
+        out
+    }
+
     /// Add ⏵ UI: an Empty node carrying the UI components. Elements land
     /// under the selected node (so building a screen is: add a Layer, keep
     /// adding elements inside it).
@@ -143,7 +194,12 @@ impl Editor {
 
     /// The Inspector's UI section: shown for nodes carrying UiLayer and/or
     /// ElementSpec. Returns true when something changed (undo coalescing).
-    pub(crate) fn ui_inspector(world: &mut floptle_core::World, e: Entity, ui: &mut egui::Ui) -> bool {
+    pub(crate) fn ui_inspector(
+        world: &mut floptle_core::World,
+        e: Entity,
+        ui: &mut egui::Ui,
+        tex_list: &[String],
+    ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
             ui.separator();
@@ -331,7 +387,44 @@ impl Editor {
         if let Some(img) = &mut spec.image {
             ui.horizontal(|ui| {
                 ui.label("texture");
-                c |= ui.text_edit_singleline(&mut img.texture).on_hover_text("e.g. assets/textures/Grass.png").changed();
+                // A searchable picker over the project's textures folder — the
+                // same list Materials use, nobody types paths.
+                let current = if img.texture.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    img.texture.rsplit('/').next().unwrap_or(&img.texture).to_string()
+                };
+                egui::ComboBox::from_id_salt(("ui_tex_pick", e.index()))
+                    .selected_text(current)
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        let sid = egui::Id::new(("ui_tex_search", e.index()));
+                        let mut q: String =
+                            ui.data_mut(|d| d.get_temp(sid).unwrap_or_default());
+                        ui.add(egui::TextEdit::singleline(&mut q).hint_text("🔍 search…"));
+                        ui.data_mut(|d| d.insert_temp(sid, q.clone()));
+                        if ui.selectable_label(img.texture.is_empty(), "(none)").clicked() {
+                            img.texture.clear();
+                            c = true;
+                        }
+                        let ql = q.to_lowercase();
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            for p in tex_list
+                                .iter()
+                                .filter(|p| ql.is_empty() || p.to_lowercase().contains(&ql))
+                            {
+                                let name = p.rsplit('/').next().unwrap_or(p);
+                                if ui
+                                    .selectable_label(img.texture == **p, name)
+                                    .on_hover_text(p.as_str())
+                                    .clicked()
+                                {
+                                    img.texture = p.clone();
+                                    c = true;
+                                }
+                            }
+                        });
+                    });
             });
             ui.horizontal(|ui| {
                 ui.label("tint");

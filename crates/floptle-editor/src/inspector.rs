@@ -1058,8 +1058,12 @@ impl EditorTabViewer<'_> {
                 }
 
                 // ===== Game UI (layer/element; only when the node has one) =====
-                if crate::Editor::ui_inspector(world, e, ui) {
-                    cmd.inspector_changed = true;
+                {
+                    let mut ui_tex_list = Vec::new();
+                    crate::assets::collect_texture_paths(self.asset_tree, &mut ui_tex_list);
+                    if crate::Editor::ui_inspector(world, e, ui, &ui_tex_list) {
+                        cmd.inspector_changed = true;
+                    }
                 }
 
                 // ===== Networked (replication; only when the node has one) =====
