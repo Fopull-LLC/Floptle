@@ -1059,7 +1059,9 @@ impl EditorTabViewer<'_> {
                 {
                     let mut ui_tex_list = Vec::new();
                     crate::assets::collect_texture_paths(self.asset_tree, &mut ui_tex_list);
-                    if crate::Editor::ui_inspector(world, e, ui, &ui_tex_list) {
+                    let mut ui_font_list = Vec::new();
+                    crate::assets::collect_font_paths(self.asset_tree, &mut ui_font_list);
+                    if crate::Editor::ui_inspector(world, e, ui, &ui_tex_list, &ui_font_list) {
                         cmd.inspector_changed = true;
                     }
                 }
@@ -1218,6 +1220,11 @@ impl EditorTabViewer<'_> {
                     });
                     let mut remove: Option<usize> = None;
                     let mut copy_idx: Option<usize> = None;
+                    // Candidates for node-reference params (any named node).
+                    let mut node_names: Vec<String> =
+                        world.query::<floptle_core::Name>().map(|(_, n)| n.0.clone()).collect();
+                    node_names.sort();
+                    node_names.dedup();
                     ui.indent("script_list", |ui| {
                         if let Some(scr) = world.get_mut::<Scripts>(e) {
                             for (i, inst) in scr.0.iter_mut().enumerate() {
@@ -1250,6 +1257,25 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed |= ui
                                         .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
                                         .changed();
+                                }
+                                // Node-reference params (`name = noderef()` in the
+                                // script's defaults): wire a scene node by name — the
+                                // script gets a handle directly, no find() scans.
+                                for (ri, (k, target)) in inst.refs.iter_mut().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(format!("{k}  "));
+                                        if let Some(pick) = crate::ui_widgets::searchable_picker(
+                                            ui,
+                                            egui::Id::new(("script_ref", e.index(), i, ri)),
+                                            if target.is_empty() { "(pick node)" } else { target },
+                                            Some("(none)"),
+                                            &node_names,
+                                            150.0,
+                                        ) {
+                                            *target = pick.unwrap_or_default();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
                                 }
                                 ui.add_space(4.0);
                             }

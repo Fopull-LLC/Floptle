@@ -352,6 +352,30 @@ Handles are `nil` when the node lacks the component — a node without an Elemen
 has no `"UiElement"`, only slider tracks have `"UiSlider"`, only layers have
 `"UiLayer"`.
 
+### Buttons & pointer hooks
+
+Turn on **button (clickable)** on any element (or Add ⏵ UI ⏵ Button) and its
+scripts get pointer hooks — plain functions, called with a node handle:
+
+| Hook | Fires |
+|---|---|
+| `hoverStart(node)` / `hoverEnd(node)` | the pointer entered / left the element |
+| `pressed(node)` / `released(node)` | LMB went down on it / came back up |
+| `clicked(node)` | pressed AND released on the same element |
+
+The engine imposes no button look — style the states yourself, it's 5 lines:
+
+```lua
+function hoverStart(node)  node:getcomponent("UiElement").opacity = 0.8 end
+function hoverEnd(node)    node:getcomponent("UiElement").opacity = 1.0 end
+function clicked(node)     log("play pressed!") end
+```
+
+A slider with **draggable** on lets the player click/drag the track to set its
+value — read it with `getcomponent("UiSlider").value` (a settings volume slider
+is a draggable slider + one `update` that reads the value). Display-only meters
+(health bars) leave it off.
+
 ## 8. Referencing other nodes & scripts
 
 A script isn't limited to its own node. You can **walk the hierarchy**, **find any
@@ -386,6 +410,9 @@ Scene-wide lookups are globals:
 | `findScript("GameManager")` | a **script handle** for the first node anywhere running that script (the manager pattern), or `nil` |
 | `findScripts("third_person")` | an array of script handles — EVERY node carrying that script, in scene order (pair with `net.isMine` to pick the local player among many avatars) |
 
+`find()` is an O(1) hash lookup (the engine keeps a name index), so it's cheap —
+but caching a handle in `start` is still the cleanest habit for per-frame use.
+
 ```lua
 -- A door that opens when the player is near it.
 function update(node, dt)
@@ -395,6 +422,26 @@ function update(node, dt)
   if dx*dx + dz*dz < 9 then node.y = 3 else node.y = 0 end   -- raise / lower
 end
 ```
+
+### Node references — wire them in the Inspector, skip `find()` entirely
+
+Declare a `defaults` entry as `noderef()` and the Inspector shows a **node
+picker** for it. The script reads the param as a ready node handle:
+
+```lua
+defaults = { target = noderef(), speed = 2 }
+
+function update(node, dt)
+  if params.target then                 -- nil while unwired (or the node is gone)
+    node.yaw = math.atan2(params.target.x - node.x, params.target.z - node.z)
+  end
+end
+```
+
+This is the preferred way to point a script at a specific node: no name typos in
+code, no lookups, and re-wiring is a dropdown pick instead of an edit. The
+reference resolves by name each tick, so a target spawned or renamed mid-play
+binds automatically.
 
 ### Reaching other scripts
 

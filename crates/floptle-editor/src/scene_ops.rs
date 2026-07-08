@@ -97,6 +97,7 @@ impl Editor {
                         kind: i.kind.clone(),
                         enabled: i.enabled,
                         params: i.params.clone(),
+                        refs: i.refs.clone(),
                     })
                     .collect()
             })
@@ -155,6 +156,7 @@ impl Editor {
                     kind: s.kind.clone(),
                     enabled: s.enabled,
                     params: s.params.clone(),
+                    refs: s.refs.clone(),
                 })
                 .collect();
             self.world.insert(e, Scripts(insts));

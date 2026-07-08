@@ -280,6 +280,9 @@ pub struct ScriptDoc {
     pub enabled: bool,
     #[serde(default)]
     pub params: Vec<(String, f32)>,
+    /// Node-reference params: param name → target node NAME (Inspector-wired).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<(String, String)>,
 }
 
 fn yes() -> bool {
@@ -288,10 +291,20 @@ fn yes() -> bool {
 
 impl ScriptDoc {
     fn to_inst(&self) -> ScriptInst {
-        ScriptInst { kind: self.kind.clone(), enabled: self.enabled, params: self.params.clone() }
+        ScriptInst {
+            kind: self.kind.clone(),
+            enabled: self.enabled,
+            params: self.params.clone(),
+            refs: self.refs.clone(),
+        }
     }
     fn from_inst(s: &ScriptInst) -> Self {
-        Self { kind: s.kind.clone(), enabled: s.enabled, params: s.params.clone() }
+        Self {
+            kind: s.kind.clone(),
+            enabled: s.enabled,
+            params: s.params.clone(),
+            refs: s.refs.clone(),
+        }
     }
 }
 
@@ -1212,6 +1225,7 @@ mod tests {
                         kind: "pulsate".into(),
                         enabled: true,
                         params: vec![("speed".into(), 2.0)],
+                        refs: vec![("target".into(), "blob".into())], // exercise the round-trip
                     }],
                     material: Some(MaterialDoc {
                         color: [0.8, 0.3, 0.2],
@@ -1275,6 +1289,7 @@ mod tests {
                             value: 150.0,
                             dir: floptle_ui::Dir::Row,
                             flip: true,
+                            interact: true,
                         }),
                         part: Some(floptle_ui::SliderPart::Fill),
                         mask: Some(floptle_ui::MaskSpec { targets: vec!["Minimap".into()] }),

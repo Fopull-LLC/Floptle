@@ -25,7 +25,7 @@ impl<'a> EditorTabViewer<'a> {
             }
             ui.label("?").on_hover_text(
                 "Right-click here for New ⏵ Cube / Sphere / Folder / Terrain / Camera …\n\
-                 Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt\n\
+                 Tools: 1 select · 2 move · 3 rotate · 4 scale · 5 sculpt · 6 rect\n\
                  F focus · Q unselect · G grid · ⏶/⏷ step selection · Del delete\n\
                  F1 play · F2 pause · Ctrl+S save · Ctrl+Z/Y undo/redo\n\
                  Viewport: LMB select · Shift+LMB multi · RMB-drag look · RMB-click menu",
@@ -129,6 +129,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             ("Text", crate::ui_game::AddUi::Text, "a text label (your fonts later; neutral fallback for now)"),
             ("Image", crate::ui_game::AddUi::Image, "any texture from your assets — the engine ships no UI art"),
             ("Slider", crate::ui_game::AddUi::Slider, "a value-driven bar (health, progress…): track + Fill + Handle parts you retexture and arrange freely"),
+            ("Button", crate::ui_game::AddUi::Button, "a clickable element — its scripts get hoverStart/pressed/clicked hooks"),
         ] {
             if ui.button(label).on_hover_text(hover).clicked() {
                 cmd.add_ui = Some(what);

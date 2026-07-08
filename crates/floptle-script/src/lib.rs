@@ -305,6 +305,9 @@ struct SceneMirror {
     /// Stable iteration order (entity index), for deterministic name lookups.
     order: Vec<u32>,
     names: HashMap<u32, String>,
+    /// name → FIRST entity in scene order with that name: the O(1) index behind
+    /// `find()` and node-reference params (no more linear scans per call).
+    by_name: HashMap<String, u32>,
     parent: HashMap<u32, u32>,
     children: HashMap<u32, Vec<u32>>,
     /// Entity → the script kinds attached to it (for `node:getscript`).
@@ -416,7 +419,7 @@ mod tests {
         world.insert(e, Scripts(vec![floptle_core::ScriptInst {
             kind: "rotate".into(),
             enabled: true,
-            params: vec![("speed".into(), 90.0)],
+            params: vec![("speed".into(), 90.0)], refs: Vec::new(),
         }]));
 
         let mut host = ScriptHost::new();
@@ -443,7 +446,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "spin".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "spin".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0, 1.0);
@@ -471,7 +474,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "ticker".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "ticker".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         // run_fixed BEFORE any frame pass: instance doesn't exist yet → no tick, no error.
@@ -520,7 +523,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "netty".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "netty".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.set_net_state(NetState {
@@ -617,7 +620,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 0.016, 0.016); // start + first update
@@ -650,7 +653,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "caster".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.set_colliders(
@@ -678,7 +681,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "drawer".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "drawer".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 0.1, 0.1);
@@ -769,7 +772,7 @@ mod tests {
         world.insert(e, Scripts(vec![floptle_core::ScriptInst {
             kind: "spin".into(),
             enabled: true,
-            params: vec![("speed".into(), 90.0)],
+            params: vec![("speed".into(), 90.0)], refs: Vec::new(),
         }]));
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0, 1.0);
@@ -796,7 +799,7 @@ mod tests {
         world.insert(e, Scripts(vec![floptle_core::ScriptInst {
             kind: "drive".into(),
             enabled: true,
-            params: Vec::new(),
+            params: Vec::new(), refs: Vec::new(),
         }]));
         let mut host = ScriptHost::new();
         let mut bodies = HashMap::new();
@@ -817,8 +820,9 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         write_script(&dir, "pulsate", "defaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\n");
         let host = ScriptHost::new();
-        let d = host.script_defaults(&dir.join("pulsate.lua"));
+        let (d, refs) = host.script_defaults(&dir.join("pulsate.lua"));
         assert_eq!(d.len(), 3);
+        assert!(refs.is_empty());
         assert!(d.iter().any(|(k, v)| k == "amplitude" && (*v - 0.3).abs() < 1e-6));
     }
 
@@ -829,7 +833,7 @@ mod tests {
         world.insert(e, Scripts(vec![floptle_core::ScriptInst {
             kind: kind.into(),
             enabled: true,
-            params: vec![],
+            params: vec![], refs: Vec::new(),
         }]));
         (world, e)
     }
@@ -1013,7 +1017,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "reader".into(),
                 enabled: true,
-                params: vec![],
+                params: vec![], refs: Vec::new(),
             }]),
         );
         let mut host = ScriptHost::new();
@@ -1052,7 +1056,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "manager".into(),
                 enabled: true,
-                params: vec![],
+                params: vec![], refs: Vec::new(),
             }]),
         );
         let t = world.spawn();
@@ -1062,7 +1066,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "ticker".into(),
                 enabled: true,
-                params: vec![],
+                params: vec![], refs: Vec::new(),
             }]),
         );
         let mut host = ScriptHost::new();
@@ -1095,7 +1099,7 @@ mod tests {
         world.insert(e, Matter::Mesh { asset_path: "assets/models/old.glb".into() });
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "swap".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "swap".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -1106,6 +1110,96 @@ mod tests {
         }
         let changes = host.take_model_changes();
         assert_eq!(changes.get(&e.index()).map(|s| s.as_str()), Some("assets/models/new.glb"));
+    }
+
+    #[test]
+    fn noderef_param_resolves_to_a_handle_and_rebinds_by_name() {
+        // defaults = { target = noderef() } + an Inspector-wired name -> the script
+        // sees a node handle in params (no find()); unwired refs read nil.
+        let dir = std::env::temp_dir().join("floptle_script_test_noderef");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "aimer",
+            concat!(
+                "defaults = { target = noderef(), missing = noderef(), speed = 2 }\n",
+                "function update(node, dt)\n",
+                "  if params.target then params.target.y = 5 end\n",
+                "  node.x = (params.missing == nil and 1 or 0) + params.speed\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "aimer".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![
+                    ("target".into(), "Turret".into()),
+                    ("missing".into(), String::new()),
+                ],
+            }]),
+        );
+        let turret = world.spawn();
+        world.insert(turret, Transform::IDENTITY);
+        world.insert(turret, floptle_core::Name("Turret".into()));
+        let mut host = ScriptHost::new();
+        // The defaults surface reports the ref params for the Inspector.
+        let path = dir.join("aimer.lua");
+        let (nums, refs) = host.script_defaults(&path);
+        assert_eq!(refs, vec!["missing".to_string(), "target".to_string()]);
+        assert_eq!(nums, vec![("speed".to_string(), 2.0)]);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(turret).unwrap().translation.y, 5.0);
+        // missing == nil (1) + speed (2): the sentinel never leaks as a string.
+        assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 3.0);
+    }
+
+    #[test]
+    fn ui_hook_events_reach_the_node_scripts() {
+        // A clicked/hoverStart event fires the same-named function on the node's
+        // scripts, with a node handle argument; writes flush like any handle write.
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_hooks");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "btn",
+            concat!(
+                "function clicked(node)\n  node.y = node.y + 1\n",
+                "  local c = node:getcomponent(\"UiElement\")\n",
+                "  if c then c.opacity = 0.25 end\nend\n",
+                "function hoverStart(node)\n  node.z = 7\nend\n",
+            ),
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("Play".into()));
+        world.insert(
+            e,
+            floptle_ui::ElementSpec { button: true, ..Default::default() },
+        );
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "btn".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0); // builds the instance envs
+        host.run_ui_hooks(&mut world, &[(e.index(), "hoverStart"), (e.index(), "clicked")]);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(e).unwrap();
+        assert_eq!((tr.translation.y, tr.translation.z), (1.0, 7.0));
+        assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.25);
     }
 
     #[test]
@@ -1133,7 +1227,7 @@ mod tests {
         world.insert(driver, Transform::IDENTITY);
         world.insert(
             driver,
-            Scripts(vec![floptle_core::ScriptInst { kind: "hud".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "hud".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let label = world.spawn();
         world.insert(label, Transform::IDENTITY);
@@ -1179,7 +1273,7 @@ mod tests {
         world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "paint".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "paint".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         let mut mats = HashMap::new();
@@ -1208,7 +1302,7 @@ mod tests {
         world.insert(e, Matter::PointLight { color: [1.0, 1.0, 1.0], intensity: 2.0, range: 10.0 });
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -1254,7 +1348,7 @@ mod tests {
         world.insert(e, RigidBody::default());
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "ice".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "ice".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -1287,7 +1381,7 @@ mod tests {
         world.insert(e, Matter::Mesh { asset_path: "m.glb".into() });
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "hide".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "hide".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -1315,7 +1409,7 @@ mod tests {
         world.insert(e, Transform::IDENTITY);
         world.insert(
             e,
-            Scripts(vec![floptle_core::ScriptInst { kind: "probe".into(), enabled: true, params: vec![] }]),
+            Scripts(vec![floptle_core::ScriptInst { kind: "probe".into(), enabled: true, params: vec![], refs: Vec::new() }]),
         );
         let mut host = ScriptHost::new();
         host.set_project_root(root);
@@ -1362,7 +1456,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "caster".into(),
                 enabled: true,
-                params: vec![("targetid".into(), (e.index() + 1000) as f32)],
+                params: vec![("targetid".into(), (e.index() + 1000) as f32)], refs: Vec::new(),
             }]),
         );
         let mut host = ScriptHost::new();
@@ -1405,8 +1499,8 @@ mod tests {
         world.insert(
             e,
             Scripts(vec![
-                floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![] },
-                floptle_core::ScriptInst { kind: "weapon".into(), enabled: true, params: vec![] },
+                floptle_core::ScriptInst { kind: "mover".into(), enabled: true, params: vec![], refs: Vec::new() },
+                floptle_core::ScriptInst { kind: "weapon".into(), enabled: true, params: vec![], refs: Vec::new() },
             ]),
         );
         let mut host = ScriptHost::new();
@@ -1461,7 +1555,7 @@ mod tests {
                 Scripts(vec![floptle_core::ScriptInst {
                     kind: "avatar".into(),
                     enabled: true,
-                    params: vec![],
+                    params: vec![], refs: Vec::new(),
                 }]),
             );
             e
@@ -1475,7 +1569,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "probe".into(),
                 enabled: true,
-                params: vec![],
+                params: vec![], refs: Vec::new(),
             }]),
         );
         let mut host = ScriptHost::new();
@@ -1542,7 +1636,7 @@ mod tests {
             Scripts(vec![floptle_core::ScriptInst {
                 kind: "judge".into(),
                 enabled: true,
-                params: vec![],
+                params: vec![], refs: Vec::new(),
             }]),
         );
         let mut host = ScriptHost::new();

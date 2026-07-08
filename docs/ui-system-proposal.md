@@ -328,6 +328,16 @@ in scene order wins a contested target, the Inspector warns on the loser); and
 the first slice of the Lua API — `node.text` and
 `getcomponent("UiElement" / "UiSlider" / "UiLayer")` (scripting.md §7).
 
+**Status (2026-07-08, round 2):** §8.1 shipped — `noderef()` script params with an
+Inspector node picker + the engine-side name index (`find()` is O(1) now);
+**project fonts** (.ttf/.otf anywhere in assets, per-text picker, multi-font
+glyph atlas); **buttons + pointer hooks** (`button` flag → `hoverStart`/
+`hoverEnd`/`pressed`/`released`/`clicked` on the node's scripts, no imposed
+look) and **draggable sliders** (`interact` on the track); the **Rect tool**
+(toolbar / key 6) — 8 grab handles on a selected element in the Scene view
+(opposite edge stays put, %-sizes scale proportionally), and on 3D shapes a
+bounds box whose faces push/pull (scale + recenter in one gesture).
+
 ## 13. Decisions
 
 **Resolved by Ty (2026-07-08):** the designer keeps full control — free

@@ -88,6 +88,50 @@ impl EditorTabViewer<'_> {
                             slot => *slot = Some((*idx, [d.x, d.y])),
                         }
                     }
+                    // Rect tool: 8 grab handles on the selected element — drag a
+                    // side/corner to resize toward it; the opposite edge stays
+                    // put (offsets are compensated per placement mode).
+                    if selected && self.tool == Tool::Rect {
+                        let hs = 5.0; // handle half-size, pts
+                        let handles: [(egui::Pos2, i8, i8); 8] = [
+                            (er.left_top(), -1, -1),
+                            (er.center_top(), 0, -1),
+                            (er.right_top(), 1, -1),
+                            (er.left_center(), -1, 0),
+                            (er.right_center(), 1, 0),
+                            (er.left_bottom(), -1, 1),
+                            (er.center_bottom(), 0, 1),
+                            (er.right_bottom(), 1, 1),
+                        ];
+                        for (k, (pos, hx, hy)) in handles.iter().enumerate() {
+                            let hr =
+                                egui::Rect::from_center_size(*pos, egui::vec2(hs * 2.0, hs * 2.0));
+                            let hresp = ui.interact(
+                                hr,
+                                egui::Id::new(("ui_rs", *idx, k)),
+                                egui::Sense::drag(),
+                            );
+                            painter.rect_filled(
+                                hr.shrink(if hresp.hovered() || hresp.dragged() { 0.0 } else { 2.0 }),
+                                1.0,
+                                egui::Color32::from_rgb(255, 180, 60),
+                            );
+                            if hresp.dragged() {
+                                let d = hresp.drag_delta() / *scale;
+                                // Size delta grows toward the dragged side.
+                                let ds = [d.x * *hx as f32, d.y * *hy as f32];
+                                let from_min = [*hx < 0, *hy < 0];
+                                let cur = [r[2] / *scale, r[3] / *scale];
+                                match &mut self.cmd.ui_resize {
+                                    Some((i, acc, fm, _)) if *i == *idx && *fm == from_min => {
+                                        acc[0] += ds[0];
+                                        acc[1] += ds[1];
+                                    }
+                                    slot => *slot = Some((*idx, ds, from_min, cur)),
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -114,7 +158,7 @@ impl EditorTabViewer<'_> {
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Sculpt] {
+                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Rect, Tool::Sculpt] {
                                 if ui.selectable_label(self.tool == t, t.label()).clicked() {
                                     self.cmd.set_tool = Some(t);
                                 }
