@@ -109,6 +109,15 @@ pub struct RaymarchGlobals {
     pub fog_color: [f32; 4],
     /// Depth fog: x = start dist, y = end dist, z = enabled (0/1), w unused.
     pub fog_params: [f32; 4],
+    /// Per volume: xyz = camera-relative center of the tight CONTENT box — the
+    /// sub-box of the brick that actually holds surface, measured from the baked
+    /// voxels at upload (renderer-patched at draw time; callers leave the default).
+    /// A generous terrain box is mostly empty air above the hills; bounding the
+    /// marches with the content box instead of the brick is what keeps a camera
+    /// standing INSIDE the box from paying for all that air.
+    pub vol_tight_c: [[f32; 4]; 16],
+    /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
+    pub vol_tight_h: [[f32; 4]; 16],
 }
 
 impl Default for RaymarchGlobals {
@@ -155,6 +164,10 @@ impl Default for RaymarchGlobals {
             prox_rot: [[0.0, 0.0, 0.0, 1.0]; 32],
             fog_color: [0.0; 4],
             fog_params: [0.0; 4],
+            // Effectively unbounded until the renderer patches the real content
+            // bounds — an unpatched volume behaves exactly like the full brick.
+            vol_tight_c: [[0.0; 4]; 16],
+            vol_tight_h: [[1e8, 1e8, 1e8, 0.0]; 16],
         }
     }
 }
@@ -172,6 +185,72 @@ pub const MAX_POINT_LIGHTS: usize = 16;
 /// Max proxy shadow occluders (collider shapes cast for raster meshes) in one pass.
 pub const MAX_SHADOW_PROXIES: usize = 32;
 
+/// One uploaded volume's atlas slot: its voxel origin + dims inside the shared 3D
+/// atlas, plus the tight CONTENT bounds in voxel coordinates — the sub-box that
+/// actually holds surface (|distance| within ~2 voxels), scanned from the baked
+/// grid at upload. The shaders bound all their marches with the content box
+/// instead of the full brick (see `vol_tight_*` in field.wgsl): a generous
+/// terrain box is mostly empty air above the hills, and without the tight bound
+/// a camera standing inside the box marches (and texture-fetches) through all
+/// of it, even for rays pointing at open sky.
+struct VolSlot {
+    origin: [u32; 3],
+    dims: [u32; 3],
+    tight_min: [f32; 3],
+    tight_max: [f32; 3],
+}
+
+/// The voxel-space AABB of the content inside `baked`'s sub-box `[min, max)`
+/// (`None` when the region is all air). "Content" is any voxel within two voxel
+/// widths of the surface — generous enough that trilinear reads and the smin
+/// fuse bulge stay inside once the shader adds its own bound margin.
+fn content_bounds(baked: &BakedSdf, min: [u32; 3], max: [u32; 3]) -> Option<([f32; 3], [f32; 3])> {
+    let [w, h, _d] = baked.dims;
+    let voxel = |a: usize| 2.0 * baked.half_extent[a] / baked.dims[a].max(1) as f32;
+    let thr = 2.0 * voxel(0).max(voxel(1)).max(voxel(2));
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    let mut any = false;
+    for z in min[2]..max[2] {
+        for y in min[1]..max[1] {
+            let row = ((z * h + y) * w) as usize;
+            for x in min[0]..max[0] {
+                if baked.distance[row + x as usize] <= thr {
+                    let v = [x as f32, y as f32, z as f32];
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(v[a]);
+                        hi[a] = hi[a].max(v[a]);
+                    }
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any {
+        return None;
+    }
+    // One voxel of margin each side (a content voxel's trilinear cell reaches its
+    // neighbours; +1 because voxel centers sit at index + 0.5), clamped to the grid.
+    for ((l, h), dim) in lo.iter_mut().zip(hi.iter_mut()).zip(baked.dims) {
+        *l = (*l - 1.0).max(0.0);
+        *h = (*h + 2.0).min(dim as f32);
+    }
+    Some((lo, hi))
+}
+
+/// `content_bounds` over the whole grid, as the degenerate center point when the
+/// volume is all air (nothing to march — a zero-size tight box skips everything).
+fn full_content_bounds(baked: &BakedSdf) -> ([f32; 3], [f32; 3]) {
+    content_bounds(baked, [0, 0, 0], baked.dims).unwrap_or_else(|| {
+        let c = [
+            baked.dims[0] as f32 * 0.5,
+            baked.dims[1] as f32 * 0.5,
+            baked.dims[2] as f32 * 0.5,
+        ];
+        (c, c)
+    })
+}
+
 pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,
     /// Silhouette-mask pipeline (writes 1.0 where the blob is hit, no depth).
@@ -185,7 +264,7 @@ pub struct Raymarch {
     /// Atlas layout: each uploaded volume's (voxel offset, voxel dims) inside the
     /// shared 3D textures. Patched into the globals at draw time so callers only
     /// provide world data (`vol_center`/`vol_half`).
-    slots: Vec<([u32; 3], [u32; 3])>,
+    slots: Vec<VolSlot>,
     terrain_tex: wgpu::Texture,
     /// Equirectangular sky texture (1×1 white until a skybox texture is set).
     sky_tex: wgpu::Texture,
@@ -545,6 +624,9 @@ impl Raymarch {
                 && cur.depth_or_array_layers == b.dims[2]
             {
                 write_volume_data(gpu, &self._dist_tex, &self._color_tex, b, [0, 0, 0]);
+                let (tight_min, tight_max) = full_content_bounds(b);
+                self.slots[0].tight_min = tight_min;
+                self.slots[0].tight_max = tight_max;
                 return 1;
             }
         }
@@ -553,7 +635,8 @@ impl Raymarch {
         self.slots.clear();
         for (b, origin) in &accepted {
             write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
-            self.slots.push((*origin, b.dims));
+            let (tight_min, tight_max) = full_content_bounds(b);
+            self.slots.push(VolSlot { origin: *origin, dims: b.dims, tight_min, tight_max });
         }
         self.field_bind =
             make_field_bind(&gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &self.sampler);
@@ -575,7 +658,8 @@ impl Raymarch {
         min: [u32; 3],
         max: [u32; 3],
     ) {
-        let Some(&(off, dims)) = self.slots.get(slot) else { return };
+        let Some(s) = self.slots.get(slot) else { return };
+        let (off, dims) = (s.origin, s.dims);
         if dims != baked.dims {
             return; // resized since upload — the caller's dirty flag takes the full path
         }
@@ -589,6 +673,16 @@ impl Raymarch {
         let (rw, rh, rd) = (x1 - x0, y1 - y0, z1 - z0);
         if rw == 0 || rh == 0 || rd == 0 {
             return;
+        }
+        // Expand the tight content bounds over the dab (raising terrain can push
+        // content past the recorded box). Expand-only: lowering leaves the bounds
+        // conservatively large until the next full upload re-tightens them.
+        if let Some((lo, hi)) = content_bounds(baked, [x0, y0, z0], [x1, y1, z1]) {
+            let s = &mut self.slots[slot];
+            for a in 0..3 {
+                s.tight_min[a] = s.tight_min[a].min(lo[a]);
+                s.tight_max[a] = s.tight_max[a].max(hi[a]);
+            }
         }
         // Pack the sub-box tightly (x-fastest), converting distance to f16.
         let mut dist = Vec::with_capacity((rw * rh * rd) as usize);
@@ -629,12 +723,24 @@ impl Raymarch {
         );
     }
 
-    /// Fill the renderer-owned globals fields: each slot's atlas offset + dims, and
-    /// the uploaded volume count (`params.w`). Callers only provide world data.
+    /// Fill the renderer-owned globals fields: each slot's atlas offset + dims,
+    /// the uploaded volume count (`params.w`), and the tight content box — mapped
+    /// from voxel coordinates into the caller's (camera-relative) world box, so
+    /// it stays consistent under the floating origin. Callers only provide world
+    /// data.
     fn patch_globals(&self, globals: &mut RaymarchGlobals) {
-        for (i, &(off, dims)) in self.slots.iter().enumerate().take(MAX_VOLUMES) {
+        for (i, s) in self.slots.iter().enumerate().take(MAX_VOLUMES) {
+            let (off, dims) = (s.origin, s.dims);
             globals.vol_atlas[i] = [off[0] as f32, off[1] as f32, off[2] as f32, 0.0];
             globals.vol_dims[i] = [dims[0] as f32, dims[1] as f32, dims[2] as f32, 0.0];
+            for (a, &dim) in dims.iter().enumerate() {
+                let (c, h) = (globals.vol_center[i][a], globals.vol_half[i][a]);
+                let scale = 2.0 * h / dim.max(1) as f32; // world units per voxel
+                let lo = c - h + s.tight_min[a] * scale;
+                let hi = c - h + s.tight_max[a] * scale;
+                globals.vol_tight_c[i][a] = 0.5 * (lo + hi);
+                globals.vol_tight_h[i][a] = 0.5 * (hi - lo);
+            }
         }
         globals.params[3] = self.slots.len() as f32;
     }
