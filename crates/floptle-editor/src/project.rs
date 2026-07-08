@@ -622,6 +622,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             kind: "freelook".into(),
             enabled: true,
             params: Vec::new(),
+            refs: Vec::new(),
         }],
         material: None,
         rigidbody: None,

@@ -35,6 +35,11 @@ pub(crate) enum Tool {
     Scale,
     /// Terrain sculpt/paint brush (LMB-drag edits the terrain field).
     Sculpt,
+    /// Bounds box: drag a face to stretch the object toward that side (the
+    /// opposite face stays put — scale + offset in one gesture). The main
+    /// arranging tool for UI elements; works on 3D shapes too (pull a cube
+    /// into a floor).
+    Rect,
 }
 
 impl Tool {
@@ -45,7 +50,8 @@ impl Tool {
             3 => Some(Tool::Rotate),
             4 => Some(Tool::Scale),
             5 => Some(Tool::Sculpt),
-            _ => None, // 6-9 reserved for future tools
+            6 => Some(Tool::Rect),
+            _ => None, // 7-9 reserved for future tools
         }
     }
 
@@ -56,6 +62,7 @@ impl Tool {
             Tool::Rotate => "rotate",
             Tool::Scale => "scale",
             Tool::Sculpt => "sculpt",
+            Tool::Rect => "rect",
         }
     }
 }
@@ -67,6 +74,10 @@ pub(crate) enum Handle {
     AxisX,
     AxisY,
     AxisZ,
+    /// Rect tool: the −X/−Y/−Z faces (the +axis faces reuse AxisX/Y/Z).
+    AxisXN,
+    AxisYN,
+    AxisZN,
     Center,
 }
 
@@ -74,10 +85,18 @@ impl Handle {
     /// Index into the world basis (X=0, Y=1, Z=2), or `None` for the center.
     pub(crate) fn axis_index(self) -> Option<usize> {
         match self {
-            Handle::AxisX => Some(0),
-            Handle::AxisY => Some(1),
-            Handle::AxisZ => Some(2),
+            Handle::AxisX | Handle::AxisXN => Some(0),
+            Handle::AxisY | Handle::AxisYN => Some(1),
+            Handle::AxisZ | Handle::AxisZN => Some(2),
             Handle::Center => None,
+        }
+    }
+
+    /// Which side of the axis a Rect face handle sits on (+1 / −1).
+    pub(crate) fn sign(self) -> f32 {
+        match self {
+            Handle::AxisXN | Handle::AxisYN | Handle::AxisZN => -1.0,
+            _ => 1.0,
         }
     }
 }
@@ -86,7 +105,12 @@ impl Handle {
 pub(crate) struct GizmoFrame {
     pub(crate) center: Vec2,
     /// Local-axis arrow tips; `None` for an axis that projects behind the camera.
+    /// For the Rect tool these are the +axis FACE centers of the bounds box.
     pub(crate) tips: [Option<Vec2>; 3],
+    /// Rect tool: the −axis face centers.
+    pub(crate) neg_tips: [Option<Vec2>; 3],
+    /// Rect tool: the projected bounds-box edges (12 segments).
+    pub(crate) box_edges: Vec<[Vec2; 2]>,
     /// Rotation-ring polylines, one per local axis (only filled for the Rotate tool).
     pub(crate) ring_pts: [Vec<Vec2>; 3],
     /// A flat screen-space ring around the center: the free/trackball handle for
@@ -174,6 +198,7 @@ pub(crate) fn build_gizmo(
     vp: Mat4,
     w: f32,
     h: f32,
+    rect_half: Option<Vec3>,
 ) -> Option<GizmoFrame> {
     if tool == Tool::Select || tool == Tool::Sculpt {
         return None;
@@ -183,6 +208,78 @@ pub(crate) fn build_gizmo(
     let t = floptle_core::world_transform(world, e);
     let center = project(t.translation, cam_world, vp, w, h)?;
     let rot = t.rotation;
+
+    if tool == Tool::Rect {
+        // Bounds box: face handles at ±half along the object's local axes.
+        let base = rect_half?;
+        let half = [
+            (base.x * t.scale.x.abs()).max(1e-3),
+            (base.y * t.scale.y.abs()).max(1e-3),
+            (base.z * t.scale.z.abs()).max(1e-3),
+        ];
+        let mut tips = [None; 3];
+        let mut neg_tips = [None; 3];
+        for i in 0..3 {
+            let d = (local_axis(rot, i) * half[i]).as_dvec3();
+            tips[i] = project(t.translation + d, cam_world, vp, w, h);
+            neg_tips[i] = project(t.translation - d, cam_world, vp, w, h);
+        }
+        // The 12 box edges, projected.
+        let corner = |sx: f32, sy: f32, sz: f32| {
+            t.translation
+                + (local_axis(rot, 0) * (half[0] * sx)
+                    + local_axis(rot, 1) * (half[1] * sy)
+                    + local_axis(rot, 2) * (half[2] * sz))
+                    .as_dvec3()
+        };
+        let signs = [
+            [-1.0f32, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+        ];
+        const EDGES: [(usize, usize); 12] = [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7),
+        ];
+        let pts: Vec<Option<Vec2>> = signs
+            .iter()
+            .map(|s| project(corner(s[0], s[1], s[2]), cam_world, vp, w, h))
+            .collect();
+        let mut box_edges = Vec::new();
+        for (a, b) in EDGES {
+            if let (Some(pa), Some(pb)) = (pts[a], pts[b]) {
+                box_edges.push([pa, pb]);
+            }
+        }
+        let hovered = cursor.and_then(|c| {
+            let mut cands: Vec<(Handle, f32)> = Vec::new();
+            for i in 0..3 {
+                if let Some(p) = tips[i] {
+                    cands.push((handle_for_axis(i), (c - p).length()));
+                }
+                if let Some(p) = neg_tips[i] {
+                    cands.push((
+                        [Handle::AxisXN, Handle::AxisYN, Handle::AxisZN][i],
+                        (c - p).length(),
+                    ));
+                }
+            }
+            cands
+                .into_iter()
+                .filter(|(_, d)| *d <= HANDLE_PX)
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(h, _)| h)
+        });
+        return Some(GizmoFrame {
+            center,
+            tips,
+            neg_tips,
+            box_edges,
+            ring_pts: [Vec::new(), Vec::new(), Vec::new()],
+            center_ring: Vec::new(),
+            hovered,
+        });
+    }
 
     // Pixel-constant handle length: world units that subtend ~GIZMO_PX at this depth
     // (60° vertical fov). Clamp the near distance so a close object doesn't explode.
@@ -223,7 +320,15 @@ pub(crate) fn build_gizmo(
     }
 
     let hovered = cursor.and_then(|c| hit_test(tool, c, center, &tips, &ring_pts, &center_ring));
-    Some(GizmoFrame { center, tips, ring_pts, center_ring, hovered })
+    Some(GizmoFrame {
+        center,
+        tips,
+        neg_tips: [None; 3],
+        box_edges: Vec::new(),
+        ring_pts,
+        center_ring,
+        hovered,
+    })
 }
 
 /// Nearest gizmo handle to the cursor within `HANDLE_PX`, if any.
@@ -259,7 +364,7 @@ pub(crate) fn hit_test(
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
         }
-        Tool::Select | Tool::Sculpt => {}
+        Tool::Select | Tool::Sculpt | Tool::Rect => {} // Rect hit-tests in build_gizmo
     }
     cands
         .into_iter()
@@ -355,6 +460,34 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                 }
             }
             painter.circle_filled(center, 3.0, Color32::from_gray(200));
+        }
+        Tool::Rect => {
+            // Bounds box + face squares (axis-colored; hover brightens).
+            for e in &g.box_edges {
+                painter.line_segment(
+                    [pt(e[0]), pt(e[1])],
+                    Stroke::new(1.5, Color32::from_rgba_unmultiplied(220, 220, 230, 160)),
+                );
+            }
+            for i in 0..3 {
+                let col = axis_col[i];
+                for (tip, hnd) in [
+                    (g.tips[i], handle_for_axis(i)),
+                    (g.neg_tips[i], [Handle::AxisXN, Handle::AxisYN, Handle::AxisZN][i]),
+                ] {
+                    if let Some(tip) = tip {
+                        let on = active(hnd);
+                        painter.rect_filled(
+                            egui::Rect::from_center_size(
+                                pt(tip),
+                                egui::vec2(if on { 11.0 } else { 9.0 }, if on { 11.0 } else { 9.0 }),
+                            ),
+                            1.5,
+                            brighten(col, on),
+                        );
+                    }
+                }
+            }
         }
         Tool::Select | Tool::Sculpt => {}
     }

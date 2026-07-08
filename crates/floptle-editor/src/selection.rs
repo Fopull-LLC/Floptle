@@ -334,6 +334,39 @@ impl Editor {
                     self.set_world_transform(e, Transform { scale: sc, ..start });
                 }
             }
+            Tool::Rect => {
+                // Face push/pull: the dragged face follows the cursor along its
+                // outward normal; the OPPOSITE face stays put (scale + recenter
+                // in one gesture — pull a cube into a floor without offset math).
+                let Some(i) = handle.axis_index() else { return };
+                let outward = local_axis(start.rotation, i) * handle.sign();
+                let (Some(s0), Some(s1)) = (
+                    project(start.translation, cam_world, vp, w, h),
+                    project(start.translation + outward.as_dvec3(), cam_world, vp, w, h),
+                ) else {
+                    return;
+                };
+                let sdir = s1 - s0;
+                let len2 = sdir.length_squared();
+                if len2 < 1e-6 {
+                    return; // face normal points (almost) straight at the camera
+                }
+                let mut units = cursor_delta.dot(sdir) / len2;
+                if snap {
+                    units = (units / step as f32).round() * step as f32;
+                }
+                let Some(base) = rect_base_half(&self.world, &self.mesh_registry, e) else {
+                    return;
+                };
+                let h0 = (base[i] * start.scale[i].abs()).max(1e-3);
+                // New full extent along the axis; keep it positive.
+                let extent = (2.0 * h0 + units).max(0.02 * h0);
+                let applied = extent - 2.0 * h0;
+                let mut sc = start.scale;
+                sc[i] = start.scale[i] * (extent / (2.0 * h0));
+                let p = start.translation + (outward * (applied * 0.5)).as_dvec3();
+                self.set_world_transform(e, Transform { translation: p, scale: sc, ..start });
+            }
             Tool::Select | Tool::Sculpt => {}
         }
     }
@@ -378,5 +411,33 @@ impl Editor {
         if let Some(t) = self.world.get_mut::<Transform>(e) {
             *t = local;
         }
+    }
+}
+
+/// The object's local bounds half-extents (pre-`Transform.scale`) for the Rect
+/// tool's face handles — mirrors [`Editor::pick`]'s primitive sizes. `None` =
+/// the Rect tool has no box for this matter (Empty, lights, UI elements — the
+/// Scene tab gives those their own 2D handles).
+pub(crate) fn rect_base_half(
+    world: &floptle_core::World,
+    mesh_registry: &std::collections::HashMap<String, crate::MeshAsset>,
+    e: Entity,
+) -> Option<Vec3> {
+    // A UI element's rect is edited by the Scene-tab handles, not the 3D box.
+    if world.get::<floptle_ui::ElementSpec>(e).is_some() {
+        return None;
+    }
+    match world.get::<Matter>(e)? {
+        Matter::Primitive { shape, .. } => Some(match shape {
+            Shape::Cube => Vec3::splat(0.7),
+            Shape::Sphere => Vec3::splat(0.85),
+            Shape::Capsule => Vec3::new(0.5, 1.0, 0.5),
+        }),
+        Matter::Blob { scale } => Some(Vec3::splat(0.85 * *scale)),
+        Matter::Mesh { asset_path } => {
+            let r = mesh_registry.get(asset_path).map(|a| a.size * 0.5).unwrap_or(1.0);
+            Some(Vec3::splat(r.max(0.05)))
+        }
+        _ => None,
     }
 }

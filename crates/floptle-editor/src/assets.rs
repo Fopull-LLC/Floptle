@@ -124,6 +124,23 @@ pub(crate) fn reveal_in_explorer(path: &Path) {
     }
 }
 
+/// A font the UI text can use (drop .ttf/.otf files anywhere in your assets).
+pub(crate) fn is_font(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.ends_with(".ttf") || p.ends_with(".otf")
+}
+
+/// Collect every font path in the asset tree (for the UI text font picker).
+pub(crate) fn collect_font_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
+    for e in entries {
+        match e {
+            AssetEntry::Dir(_, children) => collect_font_paths(children, out),
+            AssetEntry::File { path, .. } if is_font(path) => out.push(path.clone()),
+            AssetEntry::File { .. } => {}
+        }
+    }
+}
+
 /// Collect every texture image path in the asset tree (for the material picker).
 pub(crate) fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
     for e in entries {

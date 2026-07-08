@@ -550,6 +550,13 @@ impl Editor {
         }
 
         // Rebuild the overlay gizmo for the selected object (projects + hit-tests).
+        // The Rect tool needs the object's local bounds (None = unsupported matter,
+        // e.g. a UI element — those get 2D handles in the Scene tab instead).
+        let rect_half = self
+            .selection
+            .last()
+            .copied()
+            .and_then(|e| crate::selection::rect_base_half(&self.world, &self.mesh_registry, e));
         self.gizmo = build_gizmo(
             self.tool,
             self.selection.last().copied(),
@@ -559,6 +566,7 @@ impl Editor {
             view_proj,
             gpu.config.width as f32,
             gpu.config.height.max(1) as f32,
+            rect_half,
         );
 
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
@@ -2709,6 +2717,11 @@ impl Editor {
                     [yaw, pitch]
                 })
             });
+            // Game-UI interaction (buttons + draggable sliders): detect hover/press/
+            // click against this frame's layout BEFORE scripts run, so a dragged
+            // slider's value is already in the ECS when `update` reads it. The hook
+            // events dispatch to Lua right after the run.
+            self.ui_interact();
             // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
@@ -2753,6 +2766,10 @@ impl Editor {
             // node:particles():isPlaying()/:alive() this frame.
             self.script_host.set_vfx_info(self.vfx.script_info(&self.world));
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
+            // UI hook events (clicked / hoverStart / …) fire against the run's
+            // fresh scene mirror, with their own write flush.
+            let ui_events = std::mem::take(&mut self.ui_events);
+            self.script_host.run_ui_hooks(&mut self.world, &ui_events);
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
             // cursor for free-look, or release it). The state persists until changed/Stop.
@@ -3156,6 +3173,43 @@ impl Editor {
                     floptle_ui::Place::Pin { offset, .. } => {
                         offset[0] += d[0];
                         offset[1] += d[1];
+                    }
+                }
+                self.world.insert(e, spec);
+            }
+        }
+        // Rect-tool resize: grow/shrink toward the dragged side, keeping the
+        // OPPOSITE edge visually fixed — Free positions and Pin offsets get the
+        // exact compensation for their placement mode.
+        if let Some((idx, dsize, from_min, cur)) = cmd.ui_resize {
+            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
+            if let Some(e) = ent
+                && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+            {
+                for a in 0..2 {
+                    if dsize[a] == 0.0 {
+                        continue;
+                    }
+                    let old = cur[a].max(1.0);
+                    let new = (old + dsize[a]).max(1.0);
+                    let d = new - old;
+                    spec.size[a] = match spec.size[a] {
+                        // % keeps tracking the parent (scaled proportionally);
+                        // px adjusts; fit/grow become concrete px on first drag.
+                        floptle_ui::Size::Pct(p) => floptle_ui::Size::Pct(p * new / old),
+                        floptle_ui::Size::Fixed(v) => floptle_ui::Size::Fixed((v + d).max(1.0)),
+                        _ => floptle_ui::Size::Fixed(new),
+                    };
+                    match &mut spec.place {
+                        floptle_ui::Place::Free { pos } => {
+                            if from_min[a] {
+                                pos[a] -= d;
+                            }
+                        }
+                        floptle_ui::Place::Pin { anchor, offset } => {
+                            let f = anchor.factors()[a];
+                            offset[a] += d * if from_min[a] { f - 1.0 } else { f };
+                        }
                     }
                 }
                 self.world.insert(e, spec);

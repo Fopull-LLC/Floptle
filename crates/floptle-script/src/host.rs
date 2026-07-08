@@ -1008,7 +1008,9 @@ impl ScriptHost {
             let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
-                    self.tick_instance(*e, &inst.kind, &inst.params, &mut tr, dt, time, fixed);
+                    self.tick_instance(
+                        *e, &inst.kind, &inst.params, &inst.refs, &mut tr, dt, time, fixed,
+                    );
                     ran = true;
                 }
             }
@@ -1078,11 +1080,53 @@ impl ScriptHost {
         self.component_changes.borrow_mut().clear();
     }
 
+    /// Fire UI-interaction hooks on a node's scripts: for each `(entity, hook)`
+    /// event, every script instance on that entity that defines `hook` as a
+    /// function is called with a node handle (`function clicked(node) ... end`).
+    /// Hooks: `hoverStart`, `hoverEnd`, `pressed`, `released`, `clicked`.
+    /// Call AFTER [`run`](Self::run) each frame — the events were detected
+    /// against this frame's layout, and the writes flush here.
+    pub fn run_ui_hooks(&mut self, world: &mut World, events: &[(u32, &str)]) {
+        if events.is_empty() {
+            return;
+        }
+        let mut failures: Vec<(String, String)> = Vec::new();
+        for (eid, hook) in events {
+            let envs: Vec<(String, Table)> = self
+                .envs
+                .borrow()
+                .iter()
+                .filter(|((e, _), _)| e == eid)
+                .map(|((_, kind), env)| (kind.clone(), env.clone()))
+                .collect();
+            for (kind, env) in envs {
+                let f = match env.get::<Value>(*hook) {
+                    Ok(Value::Function(f)) => f,
+                    _ => continue,
+                };
+                let node = match crate::env::new_node_handle(&self.lua, *eid) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                *self.net.current.borrow_mut() = Some((*eid, kind.clone()));
+                if let Err(err) = f.call::<()>(node) {
+                    failures.push((kind.clone(), format!("{kind}: {hook}: {err}")));
+                }
+                *self.net.current.borrow_mut() = None;
+            }
+        }
+        for (kind, msg) in failures {
+            self.record_error(&kind, msg);
+        }
+        self.flush_writes(world);
+    }
+
     /// Rebuild the scene-graph mirror the Lua handles read/write, from the live ECS.
     fn sync_scene(&self, world: &World) {
         let mut s = self.scene.borrow_mut();
         s.order.clear();
         s.names.clear();
+        s.by_name.clear();
         s.parent.clear();
         s.children.clear();
         s.scripts.clear();
@@ -1116,6 +1160,7 @@ impl ScriptHost {
             }
             if let Some(n) = world.get::<floptle_core::Name>(e) {
                 s.names.insert(id, n.0.clone());
+                s.by_name.entry(n.0.clone()).or_insert(id);
             }
             if let Some(p) = world.get::<floptle_core::Parent>(e) {
                 let pid = p.0.index();
@@ -1140,19 +1185,31 @@ impl ScriptHost {
     }
 
     /// The tunables a script declares via its top-level `defaults` table, used to
-    /// seed a freshly attached instance's params. Empty if it declares none or
-    /// can't be loaded.
-    pub fn script_defaults(&self, path: &Path) -> Vec<(String, f32)> {
-        let Ok(src) = std::fs::read_to_string(path) else { return Vec::new() };
+    /// seed a freshly attached instance's params: `(numeric params, node-ref param
+    /// names)`. A default of `noderef()` marks a node-reference param (the Inspector
+    /// shows a node picker for it). Empty if it declares none or can't be loaded.
+    pub fn script_defaults(&self, path: &Path) -> (Vec<(String, f32)>, Vec<String>) {
+        let Ok(src) = std::fs::read_to_string(path) else { return Default::default() };
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let Ok(env) = build_env(&self.lua, &src, &name) else { return Vec::new() };
-        let Ok(defaults) = env.get::<Table>("defaults") else { return Vec::new() };
-        let mut out = Vec::new();
-        for pair in defaults.pairs::<String, f32>().flatten() {
-            out.push(pair);
+        let Ok(env) = build_env(&self.lua, &src, &name) else { return Default::default() };
+        let Ok(defaults) = env.get::<Table>("defaults") else { return Default::default() };
+        let mut nums = Vec::new();
+        let mut refs = Vec::new();
+        for (k, v) in defaults.pairs::<String, mlua::Value>().flatten() {
+            match v {
+                mlua::Value::Number(n) => nums.push((k, n as f32)),
+                mlua::Value::Integer(n) => nums.push((k, n as f32)),
+                mlua::Value::String(s)
+                    if s.to_string_lossy() == crate::env::NODEREF_SENTINEL =>
+                {
+                    refs.push(k)
+                }
+                _ => {}
+            }
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
+        nums.sort_by(|a, b| a.0.cmp(&b.0));
+        refs.sort();
+        (nums, refs)
     }
 
     /// Make sure the `(entity, script)` environment is built (hot-reloading on change),
@@ -1237,6 +1294,7 @@ impl ScriptHost {
         e: Entity,
         name: &str,
         params: &[(String, f32)],
+        refs: &[(String, String)],
         tr: &mut Transform,
         dt: f32,
         time: f32,
@@ -1259,9 +1317,24 @@ impl ScriptHost {
         };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
+        // Resolve node-reference params by NAME through the O(1) index — per tick,
+        // so a target spawned or renamed mid-play rebinds automatically.
+        let resolved: Vec<(String, Option<u32>)> = {
+            let s = self.scene.borrow();
+            refs.iter()
+                .map(|(k, target)| {
+                    let id = if target.is_empty() {
+                        None
+                    } else {
+                        s.by_name.get(target).copied()
+                    };
+                    (k.clone(), id)
+                })
+                .collect()
+        };
         // Mark the current instance while its hooks run (`net.on` ownership).
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
-        let result = self.tick(&env, params, tr, dt, time, first, eid, body, fixed);
+        let result = self.tick(&env, params, &resolved, tr, dt, time, first, eid, body, fixed);
         *self.net.current.borrow_mut() = None;
         if let Err(err) = result {
             self.fail(name, format!("{name}: {err}"));
@@ -1274,6 +1347,7 @@ impl ScriptHost {
         &self,
         env: &Table,
         params: &[(String, f32)],
+        refs: &[(String, Option<u32>)],
         tr: &mut Transform,
         dt: f32,
         time: f32,
@@ -1282,7 +1356,7 @@ impl ScriptHost {
         body: Option<BodyState>,
         fixed: bool,
     ) -> mlua::Result<()> {
-        env.set("params", params_table(&self.lua, env, params)?)?;
+        env.set("params", params_table(&self.lua, env, params, refs)?)?;
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 

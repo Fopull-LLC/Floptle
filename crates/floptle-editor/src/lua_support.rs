@@ -174,6 +174,22 @@ function update(node, dt) end
 ---@param dt number The constant tick delta (1/60 s by default).
 function fixedUpdate(node, dt) end
 
+---Mark a `defaults` entry as a NODE REFERENCE: `defaults = { hpBar = noderef() }`
+---shows a node picker in the Inspector, and the script reads `params.hpBar` as a
+---node handle (or nil while unwired) — no `find()` needed.
+---@return any
+function noderef() end
+
+---UI button hook: fires when this node's UI element (with `button` on) is clicked
+---(pressed AND released on it). Also available: `pressed`, `released`,
+---`hoverStart`, `hoverEnd` — same signature. Style the states here (no imposed look).
+---@param node Node
+function clicked(node) end
+
+---UI button hook: the pointer entered this node's element. Pair with `hoverEnd`.
+---@param node Node
+function hoverStart(node) end
+
 ---Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
 ---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/
 ---write them as `synced.hp` — the server owns them), handle remote calls with

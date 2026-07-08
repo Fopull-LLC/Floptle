@@ -278,7 +278,11 @@ impl Editor {
 
     /// A script's declared `defaults`, cached by file mtime so we only re-parse the Lua
     /// when the file actually changes (keeps the per-frame inspector sync cheap).
-    pub(crate) fn cached_script_defaults(&mut self, name: &str) -> Vec<(String, f32)> {
+    /// Returns `(numeric params, node-ref param names)`.
+    pub(crate) fn cached_script_defaults(
+        &mut self,
+        name: &str,
+    ) -> crate::ScriptDefaults {
         let path = self.project_root.join("scripts").join(format!("{name}.lua"));
         let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         let key = name.to_string();
@@ -306,13 +310,13 @@ impl Editor {
             None => return,
         };
         // Resolve each script's current defaults first (needs &mut self for the cache).
-        let defaults: Vec<Vec<(String, f32)>> =
+        let defaults: Vec<crate::ScriptDefaults> =
             names.iter().map(|n| self.cached_script_defaults(n)).collect();
         let Some(scr) = self.world.get_mut::<Scripts>(e) else { return };
-        for (inst, defs) in scr.0.iter_mut().zip(defaults) {
+        for (inst, (defs, ref_names)) in scr.0.iter_mut().zip(defaults) {
             // An empty result means "no defaults declared" OR a transient parse error
             // (e.g. mid-edit) — never wipe the user's overrides in that case.
-            if defs.is_empty() {
+            if defs.is_empty() && ref_names.is_empty() {
                 continue;
             }
             // Drop params no longer declared in defaults.
@@ -321,6 +325,13 @@ impl Editor {
             for (dk, dv) in &defs {
                 if !inst.params.iter().any(|(k, _)| k == dk) {
                     inst.params.push((dk.clone(), *dv));
+                }
+            }
+            // Same for node-ref params (wired targets survive; stale keys drop).
+            inst.refs.retain(|(k, _)| ref_names.contains(k));
+            for rk in &ref_names {
+                if !inst.refs.iter().any(|(k, _)| k == rk) {
+                    inst.refs.push((rk.clone(), String::new()));
                 }
             }
         }
@@ -338,9 +349,10 @@ impl Editor {
             return;
         }
         let name = script_name_of(path);
-        let params = self.script_host.script_defaults(Path::new(path));
+        let (params, ref_names) = self.script_host.script_defaults(Path::new(path));
         self.record();
-        let inst = ScriptInst { kind: name, enabled: true, params };
+        let refs = ref_names.into_iter().map(|k| (k, String::new())).collect();
+        let inst = ScriptInst { kind: name, enabled: true, params, refs };
         if let Some(scr) = self.world.get_mut::<Scripts>(e) {
             scr.0.push(inst);
         } else {

@@ -1080,16 +1080,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     }
     lua.set_named_registry_value("floptle_script_mt", script_mt)?;
 
-    // ---- globals: find / findAll / findScript ---------------------------------------
+    // ---- globals: find / findAll / findScript / noderef -----------------------------
     {
         let scene = shared.scene.clone();
         lua.globals().set(
             "find",
             lua.create_function(move |lua, name: String| {
-                let found = {
-                    let s = scene.borrow();
-                    s.order.iter().copied().find(|e| s.names.get(e).map(|n| n == &name).unwrap_or(false))
-                };
+                // O(1): the name index built each sync (first node in scene order wins).
+                let found = scene.borrow().by_name.get(&name).copied();
                 Ok(match found {
                     Some(e) => Value::Table(new_node_handle(lua, e)?),
                     None => Value::Nil,
@@ -1097,6 +1095,12 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             })?,
         )?;
     }
+    // noderef(): mark a `defaults` entry as a node-reference param — the Inspector
+    // shows a node picker for it and the script receives a node handle (or nil).
+    lua.globals().set(
+        "noderef",
+        lua.create_function(|_, ()| Ok(crate::env::NODEREF_SENTINEL))?,
+    )?;
     {
         let scene = shared.scene.clone();
         lua.globals().set(

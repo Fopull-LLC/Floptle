@@ -183,6 +183,10 @@ pub struct TextSpec {
     /// (largest size that fits both axes). `size` becomes irrelevant.
     #[serde(default)]
     pub fit: bool,
+    /// A .ttf/.otf from the project's assets (same relative paths as textures);
+    /// empty = the engine's neutral fallback font.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub font: String,
 }
 
 fn default_center() -> Align {
@@ -198,6 +202,7 @@ impl Default for TextSpec {
             align: Align::Start,
             valign: Align::Center,
             fit: false,
+            font: String::new(),
         }
     }
 }
@@ -234,6 +239,10 @@ pub struct SliderSpec {
     /// how you anchor it: pin it Right/Bottom and it empties that way.)
     #[serde(default)]
     pub flip: bool,
+    /// Player-draggable: clicking/dragging the track sets the value from the
+    /// pointer (settings sliders). Off for display-only meters (health bars).
+    #[serde(default)]
+    pub interact: bool,
 }
 
 fn default_row() -> Dir {
@@ -242,7 +251,7 @@ fn default_row() -> Dir {
 
 impl Default for SliderSpec {
     fn default() -> Self {
-        SliderSpec { min: 0.0, max: 100.0, value: 65.0, dir: Dir::Row, flip: false }
+        SliderSpec { min: 0.0, max: 100.0, value: 65.0, dir: Dir::Row, flip: false, interact: false }
     }
 }
 
@@ -305,6 +314,11 @@ pub struct ElementSpec {
     /// Clip the named target elements (+ subtrees) to this element's rect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<MaskSpec>,
+    /// Clickable: the pointer can hover/press/click this element, firing the
+    /// script hooks (`hoverStart`/`hoverEnd`/`pressed`/`released`/`clicked`)
+    /// on this node's scripts. No imposed look — style the states in Lua.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub button: bool,
     #[serde(default = "default_true")]
     pub visible: bool,
     /// Multiplies every color this element draws (self only, v1).
@@ -331,6 +345,7 @@ impl Default for ElementSpec {
             slider: None,
             part: None,
             mask: None,
+            button: false,
             visible: true,
             opacity: 1.0,
         }
@@ -620,6 +635,8 @@ pub struct TextRun {
     pub valign: Align,
     /// Scale glyphs to fill the rect instead of using `size`.
     pub fit: bool,
+    /// Project font asset path (empty = fallback font).
+    pub font: String,
     /// Set when a mask claims this element.
     pub clip: Option<Clip>,
 }
@@ -719,6 +736,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 align: t.align,
                 valign: t.valign,
                 fit: t.fit,
+                font: t.font.clone(),
                 clip,
             });
         }
@@ -1011,6 +1029,7 @@ mod tests {
                         value: 0.75,
                         dir: Dir::Row,
                         flip,
+                        interact: false,
                     }),
                     ..Default::default()
                 },

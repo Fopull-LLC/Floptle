@@ -83,6 +83,12 @@ use viz::*;
 
 /// Deferred editor commands raised by the UI inside `run_ui`, applied after the
 /// frame (so they can call `&mut self` methods the UI closure can't reach).
+/// Rect-tool UI resize payload: (entity index, size delta, min-edge per axis,
+/// current solved design size).
+pub(crate) type UiResize = (u32, [f32; 2], [bool; 2], [f32; 2]);
+/// A script's declared defaults: (numeric params, node-ref param names).
+pub(crate) type ScriptDefaults = (Vec<(String, f32)>, Vec<String>);
+
 #[derive(Default)]
 struct EditorCmd {
     add: Option<MatterDoc>,
@@ -131,6 +137,10 @@ struct EditorCmd {
     add_ui: Option<crate::ui_game::AddUi>,
     /// Scene-view UI drag: (element entity index, accumulated design-unit delta).
     ui_move: Option<(u32, [f32; 2])>,
+    /// Rect-tool resize of a UI element (Scene tab handles): entity index,
+    /// size delta (design units), which edge per axis (true = min/left/top),
+    /// and the element's current solved design size (for %-mode scaling).
+    ui_resize: Option<UiResize>,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -1121,6 +1131,13 @@ struct Editor {
     ui_overlay: Vec<(u32, [f32; 4], f32)>,
     /// Canvas bounds gizmos: 4 projected corners per layer (Scene-tab points).
     ui_canvas: Vec<[[f32; 2]; 4]>,
+    /// Game-UI interaction state: the element the pointer hovers / grabbed.
+    ui_hover: Option<u32>,
+    ui_active: Option<u32>,
+    /// Last frame's LMB, for press/release edges in the UI interact pass.
+    ui_lmb_was: bool,
+    /// UI hook events detected this frame, dispatched after the script run.
+    ui_events: Vec<(u32, &'static str)>,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,
@@ -1453,7 +1470,7 @@ struct Editor {
     script_errors: Vec<String>,
     /// Cache of each script file's declared `defaults` keyed by path, with the file's
     /// mtime so we only re-parse when it changes — drives live inspector param sync.
-    script_defaults_cache: HashMap<String, (std::time::SystemTime, Vec<(String, f32)>)>,
+    script_defaults_cache: HashMap<String, (std::time::SystemTime, ScriptDefaults)>,
     /// Syntax diagnostic (line, message) for the active IDE file, for red squiggles.
     ide_diag: Option<(usize, String)>,
     /// The external editor command for "Open in IDE" (ADR-0011); a user preference.

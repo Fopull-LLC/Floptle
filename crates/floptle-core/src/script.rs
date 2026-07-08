@@ -16,6 +16,11 @@ pub struct ScriptInst {
     pub kind: String,
     pub enabled: bool,
     pub params: Vec<(String, f32)>,
+    /// Node-reference params (declared `name = noderef()` in the script's
+    /// `defaults`): param name → the target node's NAME, wired in the Inspector
+    /// and resolved by name each tick (O(1) via the host's name index). The
+    /// script sees a node handle — no `find()` needed.
+    pub refs: Vec<(String, String)>,
 }
 
 impl ScriptInst {
@@ -27,7 +32,7 @@ impl ScriptInst {
     /// A fresh instance of the named script with no params yet (the editor seeds
     /// them from the script's `defaults` table when attaching).
     pub fn new(kind: &str) -> Self {
-        Self { kind: kind.to_string(), enabled: true, params: Vec::new() }
+        Self { kind: kind.to_string(), enabled: true, params: Vec::new(), refs: Vec::new() }
     }
 }
 

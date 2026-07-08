@@ -49,19 +49,45 @@ pub(crate) fn lifecycle_fn(env: &Table, names: &[&str]) -> mlua::Result<Option<F
     Ok(None)
 }
 
+/// The sentinel `noderef()` returns — a `defaults` value of this string marks the
+/// param as a NODE REFERENCE the Inspector wires to a scene node by name.
+pub(crate) const NODEREF_SENTINEL: &str = "__floptle_noderef";
+
 /// Build the `params` table a script sees: its declared `defaults` as the base, with
 /// any per-instance overrides (Inspector tweaks) layered on top. Seeding from `defaults`
 /// is what makes `params.foo` resolve out of the box — without it, a script with no saved
 /// overrides sees an empty `params` and every `params.foo` reads `nil`.
-pub(crate) fn params_table(lua: &Lua, env: &Table, params: &[(String, f32)]) -> mlua::Result<Table> {
+///
+/// `refs` are the instance's node-reference params, resolved to entity indices
+/// (or `None` when unwired / the target is gone): the script sees a node HANDLE
+/// — `params.hpBar.text = hp`, zero `find()` calls — or `nil`.
+pub(crate) fn params_table(
+    lua: &Lua,
+    env: &Table,
+    params: &[(String, f32)],
+    refs: &[(String, Option<u32>)],
+) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     if let Ok(defaults) = env.get::<Table>("defaults") {
         for (k, v) in defaults.pairs::<Value, Value>().flatten() {
+            // Never leak the noderef sentinel string: an unwired ref reads nil.
+            if let Value::String(s) = &v
+                && s.to_string_lossy() == NODEREF_SENTINEL
+            {
+                continue;
+            }
             t.set(k, v)?;
         }
     }
     for (k, v) in params {
         t.set(k.as_str(), *v as f64)?;
+    }
+    for (k, id) in refs {
+        match id {
+            Some(id) => t.set(k.as_str(), new_node_handle(lua, *id)?)?,
+            // Unwired/missing: nil (not the sentinel string) so `if params.x` works.
+            None => t.set(k.as_str(), Value::Nil)?,
+        }
     }
     Ok(t)
 }

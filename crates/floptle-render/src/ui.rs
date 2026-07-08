@@ -92,8 +92,11 @@ pub struct Ui {
     white_bind: wgpu::BindGroup,
     atlas: wgpu::Texture,
     atlas_bind: wgpu::BindGroup,
-    font: fontdue::Font,
-    glyphs: HashMap<(char, u32), Option<Glyph>>,
+    /// Font 0 is the embedded fallback; project .ttf/.otf assets append.
+    fonts: Vec<fontdue::Font>,
+    /// Asset path → index into `fonts` (None = failed to parse, use fallback).
+    font_ids: HashMap<String, Option<usize>>,
+    glyphs: HashMap<(usize, char, u32), Option<Glyph>>,
     // Shelf packer cursor.
     shelf: (u32, u32, u32),
     instance_buf: wgpu::Buffer,
@@ -346,7 +349,8 @@ impl Ui {
             white_bind,
             atlas,
             atlas_bind,
-            font,
+            fonts: vec![font],
+            font_ids: HashMap::new(),
             glyphs: HashMap::new(),
             shelf: (0, 0, 0),
             instance_buf,
@@ -357,24 +361,66 @@ impl Ui {
         }
     }
 
+    /// Register a project font (.ttf/.otf bytes) under its asset path. Parse
+    /// failures are remembered (and warned once) — the text falls back to font 0.
+    pub fn ensure_font(&mut self, path: &str, bytes: &[u8]) {
+        if self.font_ids.contains_key(path) {
+            return;
+        }
+        let id = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+            Ok(f) => {
+                self.fonts.push(f);
+                Some(self.fonts.len() - 1)
+            }
+            Err(e) => {
+                log::warn!("ui font '{path}' failed to parse: {e} — using the fallback");
+                None
+            }
+        };
+        self.font_ids.insert(path.to_string(), id);
+    }
+
+    /// Whether `ensure_font` has already seen this path (ok or failed).
+    pub fn has_font(&self, path: &str) -> bool {
+        self.font_ids.contains_key(path)
+    }
+
+    /// The font index for an asset path (0 = fallback for empty/unknown/failed).
+    pub fn font_id(&self, path: &str) -> usize {
+        if path.is_empty() {
+            return 0;
+        }
+        self.font_ids.get(path).copied().flatten().unwrap_or(0)
+    }
+
     /// Measure a single-line run in the same units as `size` (the layout
     /// solver's Fit callback — design units in, design units out).
     pub fn measure(&self, text: &str, size: f32) -> [f32; 2] {
+        self.measure_font(0, text, size)
+    }
+
+    /// Measure with a text spec's font (the solver callback for real layers).
+    pub fn measure_spec(&self, t: &floptle_ui::TextSpec) -> [f32; 2] {
+        self.measure_font(self.font_id(&t.font), t.text.as_str(), t.size)
+    }
+
+    fn measure_font(&self, fid: usize, text: &str, size: f32) -> [f32; 2] {
+        let font = &self.fonts[fid];
         let mut w = 0.0f32;
         for c in text.chars() {
-            w += self.font.metrics(c, size).advance_width;
+            w += font.metrics(c, size).advance_width;
         }
-        let lm = self.font.horizontal_line_metrics(size);
+        let lm = font.horizontal_line_metrics(size);
         let h = lm.map(|l| l.ascent - l.descent).unwrap_or(size);
         [w, h]
     }
 
     /// Rasterize-or-fetch a glyph at an exact pixel size.
-    fn glyph(&mut self, gpu: &Gpu, c: char, px: u32) -> Option<Glyph> {
-        if let Some(g) = self.glyphs.get(&(c, px)) {
+    fn glyph(&mut self, gpu: &Gpu, fid: usize, c: char, px: u32) -> Option<Glyph> {
+        if let Some(g) = self.glyphs.get(&(fid, c, px)) {
             return *g;
         }
-        let (metrics, bitmap) = self.font.rasterize(c, px as f32);
+        let (metrics, bitmap) = self.fonts[fid].rasterize(c, px as f32);
         let g = if metrics.width == 0 || metrics.height == 0 {
             // Whitespace: advance only.
             Some(Glyph {
@@ -396,7 +442,7 @@ impl Ui {
                     log::warn!("ui glyph atlas full — some text will not render");
                     self.atlas_full_warned = true;
                 }
-                self.glyphs.insert((c, px), None);
+                self.glyphs.insert((fid, c, px), None);
                 return None;
             }
             gpu.queue.write_texture(
@@ -423,7 +469,7 @@ impl Ui {
                 advance: metrics.advance_width,
             })
         };
-        self.glyphs.insert((c, px), g);
+        self.glyphs.insert((fid, c, px), g);
         g
     }
 
@@ -496,10 +542,11 @@ impl Ui {
             );
         }
         for t in &list.texts {
+            let fid = self.font_id(&t.font);
             // Dynamic sizing: `fit` scales the glyphs so the run fills the
             // element's rect (largest size that fits both axes).
             let size = if t.fit && !t.text.is_empty() {
-                let natural = self.measure(&t.text, t.size);
+                let natural = self.measure_font(fid, &t.text, t.size);
                 let f = (t.rect[2] / natural[0].max(1e-3))
                     .min(t.rect[3] / natural[1].max(1e-3))
                     .max(0.01);
@@ -508,7 +555,7 @@ impl Ui {
                 t.size
             };
             let px = (size * scale).round().max(1.0) as u32;
-            let run_w = self.measure(&t.text, size)[0] * scale;
+            let run_w = self.measure_font(fid, &t.text, size)[0] * scale;
             let rect_px = [
                 origin[0] + t.rect[0] * scale,
                 origin[1] + t.rect[1] * scale,
@@ -521,8 +568,7 @@ impl Ui {
                 Align::End => rect_px[0] + rect_px[2] - run_w,
             };
             // Baseline: anchor the line box per valign (top / center / bottom).
-            let (ascent, descent) = self
-                .font
+            let (ascent, descent) = self.fonts[fid]
                 .horizontal_line_metrics(px as f32)
                 .map(|l| (l.ascent, l.descent))
                 .unwrap_or((px as f32, 0.0));
@@ -535,7 +581,7 @@ impl Ui {
             let baseline = rect_px[1] + (rect_px[3] - line_h) * vf + ascent;
             let (clip, clip_r) = clip_px(&t.clip);
             for c in t.text.chars() {
-                let Some(g) = self.glyph(gpu, c, px) else { continue };
+                let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
                 if g.size[0] > 0.0 {
                     push(
                         instances,
