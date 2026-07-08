@@ -65,7 +65,10 @@ struct VsIn {
 };
 
 struct VsOut {
-    @builtin(position) clip: vec4<f32>,
+    // `@invariant` guarantees the depth prepass and the color pass compute
+    // byte-identical positions from the same inputs, so the color pass's
+    // fragments always pass `LessEqual` against their own primed depth.
+    @invariant @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
@@ -157,4 +160,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+
+// Depth-only prepass: writes depth for texels that are CERTAINLY opaque and
+// discards the rest — conservative, so cutout/blended texels never wrongly
+// occlude what's behind them (they simply don't prime the depth buffer). The
+// primed depth early-z-kills hidden fragments in the color pass (whose shading
+// marches the shadow field — the expensive part) and caps the raymarch per pixel.
+@fragment
+fn fs_depth(in: VsOut) {
+    let a = textureSample(tex, samp, in.uv).a * in.color.a;
+    if (a < 0.99) {
+        discard;
+    }
 }

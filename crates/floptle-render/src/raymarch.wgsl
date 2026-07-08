@@ -24,6 +24,10 @@
 // The equirectangular skybox texture (sampled for background pixels, reusing the
 // REPEAT terrain sampler so it wraps seamlessly).
 @group(0) @binding(6) var sky_tex: texture_2d<f32>;
+// The opaque-mesh depth prepass (screen-sized when primed, a 1×1 "off" fallback
+// otherwise): caps the march per pixel so rays stop at the nearest mesh instead
+// of marching the field behind it. Depth32Float binds as unfilterable float.
+@group(0) @binding(7) var prime_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 
@@ -346,7 +350,20 @@ fn fs(in: VOut) -> FsOut {
     // Everything drawable lives inside the volume boxes + blob spheres: march
     // only the ray's span through those bounds. Rays that miss every bound are
     // provably sky (zero steps); rays toward distant matter skip the empty air.
-    let span = field_span(ro, rd, max_t);
+    var span = field_span(ro, rd, max_t);
+    // Opaque-mesh cap (the depth prepass): never march past the nearest mesh —
+    // its fragment would lose the depth test anyway. A small forward bias keeps
+    // mesh↔field contact edges hole-free (those hits still depth-resolve right).
+    let pdims = textureDimensions(prime_tex);
+    if (pdims.x > 1u) {
+        let pix = min(vec2<u32>(in.clip.xy), pdims - vec2<u32>(1u));
+        let dmesh = textureLoad(prime_tex, pix, 0).x;
+        if (dmesh < 1.0) {
+            let wp = G.inv_view_proj * vec4<f32>(in.ndc, dmesh, 1.0);
+            let t_mesh = dot(wp.xyz / wp.w - ro, rd);
+            span.y = min(span.y, t_mesh + max(0.05, 0.005 * t_mesh));
+        }
+    }
     var t = span.x;
     var prev_t = span.x;
     var hit = false;

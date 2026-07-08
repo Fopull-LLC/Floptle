@@ -195,6 +195,15 @@ pub struct Raymarch {
     /// (shadows received + true SDF AO). Rebuilt with the atlas.
     field_layout: wgpu::BindGroupLayout,
     field_bind: wgpu::BindGroup,
+    /// The currently bound depth-prime view (the prepass depth, or the 1x1
+    /// fallback) - kept so atlas/sky/palette rebinds can rebuild the bind group.
+    prime_view: wgpu::TextureView,
+    /// The 1x1 "no mesh anywhere" fallback (R32Float = 1.0), kept alive.
+    prime_fallback: wgpu::Texture,
+    /// True when `prime_view` is a real prepass: `draw_into` then LOADS the
+    /// depth buffer (already primed + cleared by the prepass copy) instead of
+    /// clearing it.
+    primed: bool,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at.
@@ -266,6 +275,19 @@ impl Raymarch {
                     },
                     count: None,
                 },
+                // The opaque-mesh depth prepass (march cap). Depth32Float binds as
+                // an UNFILTERABLE float texture; the fallback is a 1x1 R32Float
+                // holding 1.0 ("no mesh anywhere") for standalone draws/probes.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -288,7 +310,12 @@ impl Raymarch {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
+                // LessEqual (not Always): when the depth prepass primed the buffer,
+                // field hits behind a mesh (and the sky at depth 1.0 under mesh
+                // pixels) must lose to the mesh depth. Unprimed frames clear the
+                // depth to 1.0 first, where LessEqual accepts everything - the
+                // original behavior.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -373,9 +400,11 @@ impl Raymarch {
         write_volume_data(gpu, &dist_tex, &color_tex, &empty, [0, 0, 0]);
         let terrain_tex = make_terrain_array(gpu, &[]);
         let sky_tex = make_sky_texture(gpu, None);
+        let prime_fallback = make_prime_fallback(gpu);
+        let prime_view = prime_fallback.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler, &sky_tex,
+            &tile_sampler, &sky_tex, &prime_view,
         );
         let field_layout = field_bind_layout(device);
         let field_bind = make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &sampler);
@@ -395,6 +424,9 @@ impl Raymarch {
             bind,
             field_layout,
             field_bind,
+            prime_view,
+            prime_fallback,
+            primed: false,
         }
     }
 
@@ -415,6 +447,31 @@ impl Raymarch {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
     }
 
+    /// Bind (or clear, with `None`) the opaque-mesh depth prepass as the march's
+    /// per-pixel cap. Call when the prepass target is (re)created — a size change
+    /// needs a new bind group (they're immutable), not per frame. While primed,
+    /// [`draw_into`](Self::draw_into) LOADS the depth buffer (the prepass copy
+    /// already primed it) instead of clearing.
+    pub fn set_depth_prime(&mut self, gpu: &Gpu, view: Option<&wgpu::TextureView>) {
+        self.primed = view.is_some();
+        self.prime_view = match view {
+            Some(v) => v.clone(),
+            None => self.prime_fallback.create_view(&wgpu::TextureViewDescriptor::default()),
+        };
+        self.bind = make_bind(
+            &gpu.device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &self._dist_tex,
+            &self._color_tex,
+            &self.sampler,
+            &self.terrain_tex,
+            &self.tile_sampler,
+            &self.sky_tex,
+            &self.prime_view,
+        );
+    }
+
     /// Upload the equirectangular skybox texture (`None` resets to solid / white). The
     /// runtime selects solid vs. texture and the tint/rotation via `RaymarchGlobals`.
     pub fn set_sky_texture(&mut self, gpu: &Gpu, tex: Option<&TextureData>) {
@@ -429,6 +486,7 @@ impl Raymarch {
             &self.terrain_tex,
             &self.tile_sampler,
             &self.sky_tex,
+            &self.prime_view,
         );
     }
 
@@ -447,6 +505,7 @@ impl Raymarch {
             &self.terrain_tex,
             &self.tile_sampler,
             &self.sky_tex,
+            &self.prime_view,
         );
     }
 
@@ -511,6 +570,7 @@ impl Raymarch {
             &self.terrain_tex,
             &self.tile_sampler,
             &self.sky_tex,
+            &self.prime_view,
         );
         self.field_bind =
             make_field_bind(&gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &self.sampler);
@@ -623,7 +683,14 @@ impl Raymarch {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        // Primed: the depth prepass already cleared + filled this
+                        // buffer with the opaque mesh depths — keep them so field
+                        // hits behind meshes (and sky under them) depth-reject.
+                        load: if self.primed {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(1.0)
+                        },
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -745,6 +812,7 @@ fn make_bind(
     terrain: &wgpu::Texture,
     tile_sampler: &wgpu::Sampler,
     sky: &wgpu::Texture,
+    prime: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -764,8 +832,37 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(tile_sampler) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(prime) },
         ],
     })
+}
+
+/// The 1x1 R32Float "no mesh anywhere" depth-prime fallback, holding 1.0. Any
+/// unfilterable-float 2D texture satisfies the binding; the shader gates the cap
+/// on the texture being larger than 1x1.
+fn make_prime_fallback(gpu: &Gpu) -> wgpu::Texture {
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("raymarch-prime-fallback"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::bytes_of(&1.0f32),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    tex
 }
 
 /// Upload an equirectangular sky texture (RGBA8 sRGB), or a 1×1 white texture when

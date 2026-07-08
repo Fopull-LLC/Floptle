@@ -21,6 +21,7 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub surface: Option<wgpu::Surface<'static>>,
     pub config: wgpu::SurfaceConfiguration,
+    depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
 }
 
@@ -91,9 +92,9 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        let (_, depth_view) = Self::make_depth(&device, config.width, config.height);
+        let (depth_tex, depth_view) = Self::make_depth(&device, config.width, config.height);
 
-        Self { instance, adapter, device, queue, surface: Some(surface), config, depth_view }
+        Self { instance, adapter, device, queue, surface: Some(surface), config, depth_tex, depth_view }
     }
 
     /// Create a headless GPU (no window/surface) for offscreen rendering at
@@ -134,8 +135,8 @@ impl Gpu {
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
         };
-        let (_, depth_view) = Self::make_depth(&device, config.width, config.height);
-        Self { instance, adapter, device, queue, surface: None, config, depth_view }
+        let (depth_tex, depth_view) = Self::make_depth(&device, config.width, config.height);
+        Self { instance, adapter, device, queue, surface: None, config, depth_tex, depth_view }
     }
 
     /// The depth format the renderer uses everywhere (always available as a depth
@@ -144,7 +145,8 @@ impl Gpu {
 
     /// Build a depth target sized to the surface. Recreated on every resize so it
     /// can never desync from the swapchain (a size mismatch is a hard validation
-    /// error at draw time). `TEXTURE_BINDING` so post passes (SSAO) can sample it.
+    /// error at draw time). `TEXTURE_BINDING` so post passes (SSAO) can sample it;
+    /// `COPY_DST` so the opaque depth prepass can prime it (see `Raster`).
     fn make_depth(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
@@ -153,7 +155,9 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: Self::DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -163,6 +167,12 @@ impl Gpu {
     /// The depth view passes attach for depth testing.
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth_view
+    }
+
+    /// The depth TEXTURE behind [`depth_view`](Self::depth_view) — the copy target
+    /// when the opaque depth prepass primes the frame's depth buffer.
+    pub fn depth_texture(&self) -> &wgpu::Texture {
+        &self.depth_tex
     }
 
     /// The surface's swapchain format — every pass that targets the screen needs it.
@@ -179,7 +189,8 @@ impl Gpu {
         if let Some(surface) = self.surface.as_ref() {
             surface.configure(&self.device, &self.config);
         }
-        let (_, depth_view) = Self::make_depth(&self.device, self.config.width, self.config.height);
+        let (depth_tex, depth_view) = Self::make_depth(&self.device, self.config.width, self.config.height);
+        self.depth_tex = depth_tex;
         self.depth_view = depth_view;
     }
 

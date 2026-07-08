@@ -504,8 +504,25 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let k = G.shadow_params.y;
     let max_d = G.shadow_params.w;
 
-    // ---- Relevance sweep: which pieces can this ray possibly hit?
+    // Lift off the surface along the normal (voxel-aware) so the ray doesn't
+    // immediately re-hit the surface it starts on (shadow acne on the noisy
+    // f16-sampled terrain field). When the sun GRAZES the surface (n·l → 0) the
+    // ray hugs that noisy shell for a long stretch and grazing walls stripe —
+    // boost the lift there, but leave ordinary sun angles alone so contact
+    // shadows stay tight. (Computed before the relevance sweep: the sweep must
+    // test the ACTUAL march ray, which starts at `ro`, not at the surface.)
+    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    let lift = base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0);
+    let ro = p + n * lift;
+
+    // ---- Relevance sweep: which pieces can this ray possibly matter for?
+    // "Matter" is wider than "hit": the k*d/t penumbra estimator dims for pieces
+    // the ray merely passes NEAR — within t/k at range t — so every bound is
+    // expanded by (distance along the ray to the piece)/k, the estimator's exact
+    // reach at that range. Without this, shadows clip to their caster's raw
+    // bound (a box shadow rounds into its bounding-sphere's ellipse).
     let inv = safe_inv(l);
+    let pen_k = max(k, 1.0);
     var vmask = 0u;
     var pmask = 0u;
     var blobs = false;
@@ -513,7 +530,8 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if (G.vol_center[i].w < 0.5) { continue; } // absent (shadow-only bakes stay in)
-        let s = slab_span(p, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i)));
+        let pen = max(dot(G.vol_center[i].xyz - ro, l), 0.0) / pen_k;
+        let s = slab_span(ro, inv, G.vol_center[i].xyz, G.vol_half[i].xyz + vec3<f32>(vol_pad(i) + pen));
         if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
             vmask = vmask | (1u << i);
             t_end = max(t_end, min(s.y, max_d));
@@ -521,7 +539,8 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     }
     let bc = min(u32(G.params.y), 16u);
     for (var i = 0u; i < bc; i = i + 1u) {
-        let s = sphere_span(p, l, G.blobs[i].xyz, blob_bound(i));
+        let pen = max(dot(G.blobs[i].xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, G.blobs[i].xyz, blob_bound(i) + pen);
         if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
             blobs = true;
             t_end = max(t_end, min(s.y, max_d));
@@ -530,7 +549,8 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     let pc = min(u32(G.prox_count.x), 32u);
     for (var i = 0u; i < pc; i = i + 1u) {
         let bnd = prox_bound(i);
-        let s = sphere_span(p, l, bnd.xyz, bnd.w);
+        let pen = max(dot(bnd.xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, bnd.xyz, bnd.w + pen);
         if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
             pmask = pmask | (1u << i);
             t_end = max(t_end, min(s.y, max_d));
@@ -539,16 +559,6 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     if (vmask == 0u && pmask == 0u && !blobs) {
         return 1.0; // nothing anywhere along this ray — fully lit, no march
     }
-
-    // Lift off the surface along the normal (voxel-aware) so the ray doesn't
-    // immediately re-hit the surface it starts on (shadow acne on the noisy
-    // f16-sampled terrain field). When the sun GRAZES the surface (n·l → 0) the
-    // ray hugs that noisy shell for a long stretch and grazing walls stripe —
-    // boost the lift there, but leave ordinary sun angles alone so contact
-    // shadows stay tight.
-    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
-    let lift = base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0);
-    let ro = p + n * lift;
     // A proxy containing the start point is the caster this fragment belongs to
     // (a character standing inside its own capsule) — skip it so meshes don't
     // blanket-shadow themselves; it still casts on everything else.

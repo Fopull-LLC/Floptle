@@ -15,6 +15,7 @@ use crate::device::{Frame, Gpu};
 
 pub struct Retro {
     color_view: wgpu::TextureView,
+    depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -97,36 +98,39 @@ impl Retro {
             ..Default::default()
         });
 
-        let (color_view, depth_view, width, height) = make_targets(gpu, internal_height);
+        let (color_view, depth_tex, depth_view, width, height) = make_targets(gpu, internal_height);
         let bind = make_bind(device, &bind_layout, &color_view, &sampler);
 
-        Self { color_view, depth_view, width, height, pipeline, bind_layout, sampler, bind }
+        Self { color_view, depth_tex, depth_view, width, height, pipeline, bind_layout, sampler, bind }
     }
 
     /// Rebuild the target at a new internal height and/or window aspect.
     pub fn resize(&mut self, gpu: &Gpu, internal_height: u32) {
-        let (color_view, depth_view, width, height) = make_targets(gpu, internal_height);
-        self.rebind(gpu, color_view, depth_view, width, height);
+        let (color_view, depth_tex, depth_view, width, height) = make_targets(gpu, internal_height);
+        self.rebind(gpu, color_view, depth_tex, depth_view, width, height);
     }
 
     /// Rebuild the target at an explicit `width × height` — for an offscreen viewport
     /// whose aspect differs from the window (e.g. a docked/split Game tab that wants the
     /// same retro look as fullscreen but at its own panel aspect).
     pub fn resize_to(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        let (color_view, depth_view, width, height) = make_targets_wh(gpu, width.max(1), height.max(1));
-        self.rebind(gpu, color_view, depth_view, width, height);
+        let (color_view, depth_tex, depth_view, width, height) =
+            make_targets_wh(gpu, width.max(1), height.max(1));
+        self.rebind(gpu, color_view, depth_tex, depth_view, width, height);
     }
 
     fn rebind(
         &mut self,
         gpu: &Gpu,
         color_view: wgpu::TextureView,
+        depth_tex: wgpu::Texture,
         depth_view: wgpu::TextureView,
         width: u32,
         height: u32,
     ) {
         self.bind = make_bind(&gpu.device, &self.bind_layout, &color_view, &self.sampler);
         self.color_view = color_view;
+        self.depth_tex = depth_tex;
         self.depth_view = depth_view;
         self.width = width;
         self.height = height;
@@ -140,6 +144,12 @@ impl Retro {
     /// The low-res depth target (engine depth format).
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth_view
+    }
+
+    /// The depth TEXTURE behind [`depth_view`](Self::depth_view) — the copy target
+    /// when the opaque depth prepass primes the retro depth buffer.
+    pub fn depth_texture(&self) -> &wgpu::Texture {
+        &self.depth_tex
     }
 
     /// Current internal resolution.
@@ -188,7 +198,7 @@ impl Retro {
 fn make_targets(
     gpu: &Gpu,
     internal_height: u32,
-) -> (wgpu::TextureView, wgpu::TextureView, u32, u32) {
+) -> (wgpu::TextureView, wgpu::Texture, wgpu::TextureView, u32, u32) {
     let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
     let height = internal_height.max(1);
     let width = ((height as f32 * aspect).round() as u32).max(1);
@@ -200,7 +210,7 @@ fn make_targets_wh(
     gpu: &Gpu,
     width: u32,
     height: u32,
-) -> (wgpu::TextureView, wgpu::TextureView, u32, u32) {
+) -> (wgpu::TextureView, wgpu::Texture, wgpu::TextureView, u32, u32) {
     let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("retro-color"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -222,13 +232,16 @@ fn make_targets_wh(
         format: Gpu::DEPTH_FORMAT,
         // TEXTURE_BINDING so SSAO can sample the low-res depth in retro mode
         // (the post chain runs AT this resolution, before the upscale, so AO —
-        // like every other effect — goes chunky with the pixels).
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // like every other effect — goes chunky with the pixels). COPY_DST so
+        // the opaque depth prepass can prime it (see `Raster`).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    (color_view, depth_view, width, height)
+    (color_view, depth, depth_view, width, height)
 }
 
 fn make_bind(
