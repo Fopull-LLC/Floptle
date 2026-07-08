@@ -141,6 +141,11 @@ struct EditorCmd {
     /// size delta (design units), which edge per axis (true = min/left/top),
     /// and the element's current solved design size (for %-mode scaling).
     ui_resize: Option<UiResize>,
+    /// The pointer is over an interactive Scene-view UI overlay (an element rect
+    /// or a Rect-tool handle) — those egui interacts own the click, so the raw
+    /// viewport press must not gizmo-grab or pick (picking can't see 2D elements
+    /// and would clear the selection out from under the drag).
+    ui_hot: bool,
     /// Attach a ParticleSystem component referencing an existing effect asset.
     add_particles: Option<(Entity, String)>,
     /// Create a starter `.vfx.ron` effect and attach it to this entity.
@@ -1141,6 +1146,9 @@ struct Editor {
     ui_lmb_was: bool,
     /// UI hook events detected this frame, dispatched after the script run.
     ui_events: Vec<(u32, &'static str)>,
+    /// Last frame's `cmd.ui_hot`: the cursor sat on a Scene-view UI overlay
+    /// interact (element rect / Rect handle), so LMB belongs to egui.
+    ui_overlay_hot: bool,
     /// The SELECTED node's reference-param kinds, (script kind, param) → kind —
     /// refreshed by `sync_selected_script_params`, read by the Inspector to
     /// filter ref pickers (script/component refs only list valid targets).
@@ -1926,7 +1934,12 @@ impl ApplicationHandler for Editor {
                         // Clicking the viewport dismisses an open context menu (but
                         // clicking a panel/menu, which isn't over_scene, keeps it).
                         self.context_menu = None;
-                        if let (Some(h), Some(e)) = (hovered, self.primary()) {
+                        if self.ui_overlay_hot {
+                            // On a UI-overlay interact (element rect / Rect handle):
+                            // egui owns this press — selecting or dragging happens
+                            // there. Picking here would miss (elements are 2D) and
+                            // clear the selection, killing the handle mid-grab.
+                        } else if let (Some(h), Some(e)) = (hovered, self.primary()) {
                             // On a gizmo handle ⏵ start an undoable edit and grab it.
                             // start_xf is the WORLD transform; gizmo math runs in world
                             // space and is converted back to local on write (parenting).
