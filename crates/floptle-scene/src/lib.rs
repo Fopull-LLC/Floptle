@@ -102,6 +102,12 @@ pub struct NodeDoc {
     /// session (`None` = local-only). See [`floptle_core::Replicated`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net: Option<ReplicatedDoc>,
+    /// A game-UI layer root on this node (docs/ui-system-proposal.md §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_layer: Option<floptle_ui::UiLayer>,
+    /// A game-UI element on this node (place/size/shape/text/image/stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<floptle_ui::ElementSpec>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -1040,6 +1046,12 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(n) = &node.net {
         world.insert(e, n.to_component());
     }
+    if let Some(l) = &node.ui_layer {
+        world.insert(e, *l);
+    }
+    if let Some(u) = &node.ui {
+        world.insert(e, u.clone());
+    }
     e
 }
 
@@ -1147,6 +1159,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .get::<floptle_core::ParticleSystem>(e)
             .map(ParticleSystemDoc::from_component);
         let net = world.get::<floptle_core::Replicated>(e).map(ReplicatedDoc::from_component);
+        let ui_layer = world.get::<floptle_ui::UiLayer>(e).copied();
+        let ui = world.get::<floptle_ui::ElementSpec>(e).cloned();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
         nodes.push(NodeDoc {
             name,
@@ -1164,6 +1178,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             parent,
             attachment,
             net,
+            ui_layer,
+            ui,
         });
     }
     let lighting =
@@ -1234,6 +1250,24 @@ mod tests {
                         interp: false,
                         interp_delay: 12, // exercise the non-default round-trip
                     }),
+                    ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2 }),
+                    ui: Some(floptle_ui::ElementSpec {
+                        place: floptle_ui::Place::Pin {
+                            anchor: floptle_ui::Anchor::BottomRight,
+                            offset: [-12.0, -12.0],
+                        },
+                        size: [floptle_ui::Size::Fixed(220.0), floptle_ui::Size::Fixed(40.0)],
+                        shape: Some(floptle_ui::ShapeSpec {
+                            fill: [0.1, 0.1, 0.1, 0.7],
+                            radius: 8.0,
+                            ..Default::default()
+                        }),
+                        text: Some(floptle_ui::TextSpec {
+                            text: "HP".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -1254,6 +1288,8 @@ mod tests {
                         offset: TransformDoc::default(),
                     }), // exercise the bone-attachment round-trip
                     net: None,
+                    ui_layer: None,
+                    ui: None,
                 },
                 NodeDoc {
                     name: "lamp".into(),
@@ -1271,6 +1307,8 @@ mod tests {
                     parent: None,
                     attachment: None,
                     net: None,
+                    ui_layer: None,
+                    ui: None,
                 },
                 NodeDoc {
                     name: "eye".into(),
@@ -1288,6 +1326,8 @@ mod tests {
                     parent: None,
                     attachment: None,
                     net: None,
+                    ui_layer: None,
+                    ui: None,
                 },
             ],
         }

@@ -1280,6 +1280,7 @@ name = "floptle-scene"
 version = "0.0.0"
 dependencies = [
  "floptle-core",
+ "floptle-ui",
  "ron",
  "serde",
 ]
