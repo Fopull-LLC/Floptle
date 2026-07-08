@@ -119,6 +119,8 @@ impl Editor {
             .world
             .get::<floptle_core::Replicated>(e)
             .map(floptle_scene::ReplicatedDoc::from_component);
+        let ui_layer = self.world.get::<floptle_ui::UiLayer>(e).copied();
+        let ui = self.world.get::<floptle_ui::ElementSpec>(e).cloned();
         Some(NodeDoc {
             name,
             transform,
@@ -135,6 +137,8 @@ impl Editor {
             parent: None,
             attachment: None, // captured/restored by save-load (to_doc/from_doc), not the clipboard
             net,
+            ui_layer,
+            ui,
         })
     }
 
@@ -179,6 +183,12 @@ impl Editor {
         if let Some(n) = &node.net {
             self.world.insert(e, n.to_component());
         }
+        if let Some(l) = &node.ui_layer {
+            self.world.insert(e, *l);
+        }
+        if let Some(u) = &node.ui {
+            self.world.insert(e, u.clone());
+        }
         e
     }
 
@@ -206,6 +216,8 @@ impl Editor {
             parent: None,
             attachment: None,
             net: None,
+            ui_layer: None,
+            ui: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -243,6 +255,8 @@ impl Editor {
                 parent: None,
                 attachment: None,
                 net: None,
+                ui_layer: None,
+                ui: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

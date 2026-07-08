@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+floptle-ui = { path = "../floptle-ui" }
 
 serde = { workspace = true }
 ron = { workspace = true }
