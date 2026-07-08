@@ -171,6 +171,8 @@ pub struct ScriptHost {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
+    ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
     component_changes: ComponentWrites,
     /// The material presets the editor lends each frame (name → Material), so a script can
@@ -311,6 +313,8 @@ struct SceneMirror {
     transforms: HashMap<u32, Transform>,
     /// Mesh nodes' current model path (so a script can read `node.model`).
     models: HashMap<u32, String>,
+    /// UI elements' current text (so a script can read `node.text`).
+    ui_texts: HashMap<u32, String>,
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
@@ -343,6 +347,8 @@ struct Shared {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
+    ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
@@ -1100,6 +1106,65 @@ mod tests {
         }
         let changes = host.take_model_changes();
         assert_eq!(changes.get(&e.index()).map(|s| s.as_str()), Some("assets/models/new.glb"));
+    }
+
+    #[test]
+    fn script_drives_ui_text_slider_and_element_fields() {
+        // The HUD path: node.text swaps a label, getcomponent("UiSlider").value
+        // drives a health bar, getcomponent("UiElement") reaches visibility etc.
+        let dir = std::env::temp_dir().join("floptle_script_test_ui");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hud",
+            concat!(
+                "function update(node, dt)\n",
+                "  local label = find(\"HpLabel\")\n",
+                "  label.text = 42\n",
+                "  local bar = find(\"HpBar\")\n",
+                "  bar:getcomponent(\"UiSlider\").value = 25\n",
+                "  bar:getcomponent(\"UiElement\").opacity = 0.5\n",
+                "  node.x = (label.text == \"42\" and 1 or 0)\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst { kind: "hud".into(), enabled: true, params: vec![] }]),
+        );
+        let label = world.spawn();
+        world.insert(label, Transform::IDENTITY);
+        world.insert(label, floptle_core::Name("HpLabel".into()));
+        world.insert(
+            label,
+            floptle_ui::ElementSpec {
+                text: Some(floptle_ui::TextSpec { text: "hp".into(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        let bar = world.spawn();
+        world.insert(bar, Transform::IDENTITY);
+        world.insert(bar, floptle_core::Name("HpBar".into()));
+        world.insert(
+            bar,
+            floptle_ui::ElementSpec {
+                slider: Some(floptle_ui::SliderSpec::default()),
+                ..Default::default()
+            },
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let lspec = world.get::<floptle_ui::ElementSpec>(label).unwrap();
+        assert_eq!(lspec.text.as_ref().unwrap().text, "42");
+        let bspec = world.get::<floptle_ui::ElementSpec>(bar).unwrap();
+        assert_eq!(bspec.slider.unwrap().value, 25.0);
+        assert_eq!(bspec.opacity, 0.5);
+        // Read-your-writes: the script saw its own label.text assignment.
+        assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 1.0);
     }
 
     #[test]

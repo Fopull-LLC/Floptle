@@ -36,6 +36,71 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
+    // Game-UI components (docs/ui-system-proposal.md): drive HUDs from scripts.
+    // Fields are camelCase (user-facing API); `node.text` covers the string side.
+    if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
+        let b = |v: bool| if v { 1.0 } else { 0.0 };
+        let mut f: HashMap<String, f64> = HashMap::from([
+            ("visible".to_string(), b(spec.visible)),
+            ("opacity".to_string(), spec.opacity as f64),
+        ]);
+        // Position: the active placement's numbers (Free pos or Pin offset).
+        let (px, py) = match spec.place {
+            floptle_ui::Place::Free { pos } => (pos[0], pos[1]),
+            floptle_ui::Place::Pin { offset, .. } => (offset[0], offset[1]),
+        };
+        f.insert("posX".to_string(), px as f64);
+        f.insert("posY".to_string(), py as f64);
+        // Size: the numeric part of the current mode (Fixed px, Pct fraction,
+        // Grow weight). A Fit axis has no number — the field is absent (nil).
+        for (key, s) in [("width", spec.size[0]), ("height", spec.size[1])] {
+            match s {
+                floptle_ui::Size::Fixed(v) | floptle_ui::Size::Pct(v) | floptle_ui::Size::Grow(v) => {
+                    f.insert(key.to_string(), v as f64);
+                }
+                floptle_ui::Size::Fit => {}
+            }
+        }
+        if let Some(s) = spec.shape {
+            f.insert("radius".to_string(), s.radius as f64);
+            f.insert("border".to_string(), s.border as f64);
+            for (k, v) in ["fillR", "fillG", "fillB", "fillA"].iter().zip(s.fill) {
+                f.insert(k.to_string(), v as f64);
+            }
+        }
+        if let Some(t) = &spec.text {
+            f.insert("textSize".to_string(), t.size as f64);
+            for (k, v) in ["textR", "textG", "textB", "textA"].iter().zip(t.color) {
+                f.insert(k.to_string(), v as f64);
+            }
+        }
+        if let Some(img) = &spec.image {
+            for (k, v) in ["tintR", "tintG", "tintB", "tintA"].iter().zip(img.tint) {
+                f.insert(k.to_string(), v as f64);
+            }
+        }
+        out.insert("UiElement".to_string(), f);
+        if let Some(s) = spec.slider {
+            out.insert(
+                "UiSlider".to_string(),
+                HashMap::from([
+                    ("value".to_string(), s.value as f64),
+                    ("min".to_string(), s.min as f64),
+                    ("max".to_string(), s.max as f64),
+                ]),
+            );
+        }
+    }
+    if let Some(l) = world.get::<floptle_ui::UiLayer>(e) {
+        out.insert(
+            "UiLayer".to_string(),
+            HashMap::from([
+                ("enabled".to_string(), if l.enabled { 1.0 } else { 0.0 }),
+                ("z".to_string(), l.z as f64),
+                ("designHeight".to_string(), l.design_height as f64),
+            ]),
+        );
+    }
     if let Some(rb) = world.get::<RigidBody>(e) {
         let b = |v: bool| if v { 1.0 } else { 0.0 };
         out.insert(
@@ -67,10 +132,107 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
     out
 }
 
+/// Format a Lua number the way `tostring` would (integers without the `.0`).
+fn format_lua_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Which RGBA channel a `fillR`/`textG`/`tintA`-style field addresses.
+fn rgba_index(field: &str) -> usize {
+    match field.as_bytes().last() {
+        Some(b'R') => 0,
+        Some(b'G') => 1,
+        Some(b'B') => 2,
+        _ => 3,
+    }
+}
+
 /// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
 /// [`mirror_components`]). Unknown component/field names are ignored.
 pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
     match comp {
+        "UiElement" => {
+            if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
+                let v = val as f32;
+                match field {
+                    "visible" => spec.visible = val != 0.0,
+                    "opacity" => spec.opacity = v.clamp(0.0, 1.0),
+                    "posX" | "posY" => {
+                        let i = usize::from(field == "posY");
+                        match &mut spec.place {
+                            floptle_ui::Place::Free { pos } => pos[i] = v,
+                            floptle_ui::Place::Pin { offset, .. } => offset[i] = v,
+                        }
+                    }
+                    "width" | "height" => {
+                        let i = usize::from(field == "height");
+                        // Keep the axis's sizing mode; a Fit axis becomes Fixed.
+                        spec.size[i] = match spec.size[i] {
+                            floptle_ui::Size::Pct(_) => floptle_ui::Size::Pct(v),
+                            floptle_ui::Size::Grow(_) => floptle_ui::Size::Grow(v),
+                            _ => floptle_ui::Size::Fixed(v),
+                        };
+                    }
+                    "radius" => {
+                        if let Some(s) = &mut spec.shape {
+                            s.radius = v;
+                        }
+                    }
+                    "border" => {
+                        if let Some(s) = &mut spec.shape {
+                            s.border = v;
+                        }
+                    }
+                    "fillR" | "fillG" | "fillB" | "fillA" => {
+                        if let Some(s) = &mut spec.shape {
+                            s.fill[rgba_index(field)] = v;
+                        }
+                    }
+                    "textSize" => {
+                        if let Some(t) = &mut spec.text {
+                            t.size = v;
+                        }
+                    }
+                    "textR" | "textG" | "textB" | "textA" => {
+                        if let Some(t) = &mut spec.text {
+                            t.color[rgba_index(field)] = v;
+                        }
+                    }
+                    "tintR" | "tintG" | "tintB" | "tintA" => {
+                        if let Some(img) = &mut spec.image {
+                            img.tint[rgba_index(field)] = v;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "UiSlider" => {
+            if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent)
+                && let Some(s) = &mut spec.slider
+            {
+                match field {
+                    "value" => s.value = val as f32,
+                    "min" => s.min = val as f32,
+                    "max" => s.max = val as f32,
+                    _ => {}
+                }
+            }
+        }
+        "UiLayer" => {
+            if let Some(l) = world.get_mut::<floptle_ui::UiLayer>(ent) {
+                match field {
+                    "enabled" => l.enabled = val != 0.0,
+                    "z" => l.z = val as i32,
+                    "designHeight" => l.design_height = (val as f32).max(1.0),
+                    _ => {}
+                }
+            }
+        }
         "ParticleSystem" => {
             if let Some(ps) = world.get_mut::<ParticleSystem>(ent)
                 && field == "play_on_start"
@@ -133,6 +295,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let scene = shared.scene.clone();
         let bodies = shared.bodies.clone();
         let body_changes = shared.body_changes.clone();
+        let ui_text_changes = shared.ui_text_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             // Transform reads.
@@ -191,6 +354,20 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
                     return Ok(Value::Boolean(v));
                 }
+                // A UI element's text (nil on non-text nodes). Assigning it (see
+                // __newindex) changes what the label shows — read-your-writes within
+                // the frame via the pending-changes map.
+                "text" => {
+                    let t = ui_text_changes
+                        .borrow()
+                        .get(&e)
+                        .cloned()
+                        .or_else(|| scene.borrow().ui_texts.get(&e).cloned());
+                    return Ok(match t {
+                        Some(t) => Value::String(lua.create_string(&t)?),
+                        None => Value::Nil,
+                    });
+                }
                 _ => {}
             }
             // Physics body fields.
@@ -247,6 +424,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let model_changes = shared.model_changes.clone();
         let material_changes = shared.material_changes.clone();
         let visible_changes = shared.visible_changes.clone();
+        let ui_text_changes = shared.ui_text_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // Transform writes.
@@ -361,6 +539,22 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "visible" => {
                     if let Value::Boolean(b) = val {
                         visible_changes.borrow_mut().insert(e, b);
+                    }
+                    return Ok(());
+                }
+                // UI element text: numbers coerce (hp counters write numbers directly).
+                "text" => {
+                    match &val {
+                        Value::String(s) => {
+                            ui_text_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                        }
+                        Value::Number(n) => {
+                            ui_text_changes.borrow_mut().insert(e, format_lua_number(*n));
+                        }
+                        Value::Integer(n) => {
+                            ui_text_changes.borrow_mut().insert(e, n.to_string());
+                        }
+                        _ => {}
                     }
                     return Ok(());
                 }

@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-input = { path = "../floptle-input" }
+floptle-ui = { path = "../floptle-ui" }
 floptle-physics = { path = "../floptle-physics" }
 glam = { workspace = true }
 mlua = { version = "0.10", features = ["luajit", "vendored"] }

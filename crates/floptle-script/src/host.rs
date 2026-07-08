@@ -447,6 +447,7 @@ impl ScriptHost {
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
+            ui_text_changes: Rc::new(RefCell::new(HashMap::new())),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
@@ -484,6 +485,7 @@ impl ScriptHost {
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
+            ui_text_changes: shared.ui_text_changes.clone(),
             component_changes: shared.component_changes.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
@@ -1054,6 +1056,15 @@ impl ScriptHost {
                     world.insert(ent, Visible(*shown));
                 }
             }
+            // `node.text = ...`: write the UI element's label (creating the text
+            // spec if the element doesn't have one yet).
+            for (eid, txt) in self.ui_text_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid)
+                    && let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent)
+                {
+                    spec.text.get_or_insert_with(Default::default).text = txt.clone();
+                }
+            }
             // Apply node:getcomponent(...) field writes back to the ECS.
             for ((eid, comp, field), val) in self.component_changes.borrow().iter() {
                 if let Some(&ent) = scene.ents.get(eid) {
@@ -1063,6 +1074,7 @@ impl ScriptHost {
         }
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
+        self.ui_text_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
     }
 
@@ -1080,6 +1092,7 @@ impl ScriptHost {
         s.models.clear();
         s.visible.clear();
         s.components.clear();
+        s.ui_texts.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -1087,6 +1100,11 @@ impl ScriptHost {
             s.transforms.insert(id, *tr);
             if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) {
                 s.models.insert(id, asset_path.clone());
+            }
+            if let Some(t) =
+                world.get::<floptle_ui::ElementSpec>(e).and_then(|spec| spec.text.as_ref())
+            {
+                s.ui_texts.insert(id, t.text.clone());
             }
             // Mirror the numeric fields scripts can reach via node:getcomponent(...).
             let comps = mirror_components(world, e);

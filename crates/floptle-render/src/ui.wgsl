@@ -23,8 +23,9 @@ struct VsIn {
     @location(1) rect: vec4<f32>,            // x, y, w, h (physical px)
     @location(2) color: vec4<f32>,
     @location(3) border_color: vec4<f32>,
-    @location(4) params: vec4<f32>,          // radius px, border px, kind, unused
+    @location(4) params: vec4<f32>,          // radius px, border px, kind, clip radius px
     @location(5) uv_rect: vec4<f32>,         // u0, v0, u1, v1
+    @location(6) clip: vec4<f32>,            // mask rect x, y, w, h px (w <= 0 = none)
 }
 
 struct VsOut {
@@ -35,6 +36,8 @@ struct VsOut {
     @location(3) uv: vec2<f32>,
     @location(4) local: vec2<f32>,           // px within the rect
     @location(5) half_size: vec2<f32>,       // rect half extents px
+    @location(6) px: vec2<f32>,              // pre-transform px position (clip space)
+    @location(7) @interpolate(flat) clip: vec4<f32>,
 }
 
 @vertex
@@ -61,6 +64,8 @@ fn vs_main(in: VsIn) -> VsOut {
     out.uv = mix(in.uv_rect.xy, in.uv_rect.zw, in.corner);
     out.local = (in.corner - vec2<f32>(0.5)) * in.rect.zw;
     out.half_size = in.rect.zw * 0.5;
+    out.px = p;
+    out.clip = in.clip;
     return out;
 }
 
@@ -83,12 +88,21 @@ fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // UI mask: pixels outside the clip's rounded rect vanish (1px AA edge).
+    var cmask = 1.0;
+    if in.clip.z > 0.0 {
+        let chalf = in.clip.zw * 0.5;
+        let ccenter = in.clip.xy + chalf;
+        let cr = min(in.params.w, min(chalf.x, chalf.y));
+        let cd = sd_round_rect(in.px - ccenter, chalf, cr);
+        cmask = clamp(0.5 - cd, 0.0, 1.0);
+    }
     let kind = in.params.z;
     let tint = vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
     if kind > 0.5 {
         // Glyph: atlas red channel is coverage.
         let a = textureSample(tex, samp, in.uv).r;
-        return vec4<f32>(tint.rgb, tint.a * a);
+        return vec4<f32>(tint.rgb, tint.a * a * cmask);
     }
     // Shape/image: rounded-rect mask (1px anti-aliased edge) + optional border.
     let r = min(in.params.x, min(in.half_size.x, in.half_size.y));
@@ -102,5 +116,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let bc = vec4<f32>(srgb_to_linear(in.border_color.rgb), in.border_color.a);
         col = mix(bc, col, t);
     }
-    return vec4<f32>(col.rgb, col.a * mask);
+    return vec4<f32>(col.rgb, col.a * mask * cmask);
 }

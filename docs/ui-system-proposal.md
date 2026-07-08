@@ -319,6 +319,15 @@ documented anti-pattern the IDE can nudge about later.
 Phases 1–3 are the "designer-first" bet paying off *before* scripting even
 enters; that ordering is on purpose.
 
+**Status (2026-07-08):** phase 1 shipped, plus early pulls from later phases by
+request: text vertical anchoring + fit-to-rect dynamic sizing; **Slider**
+(Add ⏵ UI ⏵ Slider — a track whose Fill/Handle children are ordinary elements
+you retexture and arrange; `min`/`max`/`value`/axis/flip); **UI masks** (an
+element clips chosen target nodes + subtrees to its rounded rect; earliest mask
+in scene order wins a contested target, the Inspector warns on the loser); and
+the first slice of the Lua API — `node.text` and
+`getcomponent("UiElement" / "UiSlider" / "UiLayer")` (scripting.md §7).
+
 ## 13. Decisions
 
 **Resolved by Ty (2026-07-08):** the designer keeps full control — free
