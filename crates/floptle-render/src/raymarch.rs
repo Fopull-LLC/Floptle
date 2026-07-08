@@ -195,15 +195,16 @@ pub struct Raymarch {
     /// (shadows received + true SDF AO). Rebuilt with the atlas.
     field_layout: wgpu::BindGroupLayout,
     field_bind: wgpu::BindGroup,
-    /// The currently bound depth-prime view (the prepass depth, or the 1x1
-    /// fallback) - kept so atlas/sky/palette rebinds can rebuild the bind group.
-    prime_view: wgpu::TextureView,
-    /// The 1x1 "no mesh anywhere" fallback (R32Float = 1.0), kept alive.
-    prime_fallback: wgpu::Texture,
-    /// True when `prime_view` is a real prepass: `draw_into` then LOADS the
-    /// depth buffer (already primed + cleared by the prepass copy) instead of
-    /// clearing it.
-    primed: bool,
+    /// The 1x1 "no mesh anywhere" fallback prime view (R32Float = 1.0) that
+    /// `bind` always carries — unprimed draws (offscreen previews, probes) and
+    /// the mask pass march uncapped.
+    prime_fallback: wgpu::TextureView,
+    /// The real depth-prepass view, when the editor's surface path primed one —
+    /// kept so atlas/sky/palette rebinds can rebuild `bind_primed`.
+    prime_view: Option<wgpu::TextureView>,
+    /// `bind` with the real prepass depth at binding 7 — what
+    /// [`draw_into_primed`](Self::draw_into_primed) uses.
+    bind_primed: Option<wgpu::BindGroup>,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at.
@@ -401,10 +402,9 @@ impl Raymarch {
         let terrain_tex = make_terrain_array(gpu, &[]);
         let sky_tex = make_sky_texture(gpu, None);
         let prime_fallback = make_prime_fallback(gpu);
-        let prime_view = prime_fallback.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler, &sky_tex, &prime_view,
+            &tile_sampler, &sky_tex, &prime_fallback,
         );
         let field_layout = field_bind_layout(device);
         let field_bind = make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &sampler);
@@ -424,10 +424,41 @@ impl Raymarch {
             bind,
             field_layout,
             field_bind,
-            prime_view,
             prime_fallback,
-            primed: false,
+            prime_view: None,
+            bind_primed: None,
         }
+    }
+
+    /// Rebuild `bind` (fallback prime) and, when primed, `bind_primed` — after
+    /// any bound resource (atlas, palette, sky, prime) changes.
+    fn rebuild_binds(&mut self, device: &wgpu::Device) {
+        self.bind = make_bind(
+            device,
+            &self.bind_layout,
+            &self.globals_buf,
+            &self._dist_tex,
+            &self._color_tex,
+            &self.sampler,
+            &self.terrain_tex,
+            &self.tile_sampler,
+            &self.sky_tex,
+            &self.prime_fallback,
+        );
+        self.bind_primed = self.prime_view.as_ref().map(|v| {
+            make_bind(
+                device,
+                &self.bind_layout,
+                &self.globals_buf,
+                &self._dist_tex,
+                &self._color_tex,
+                &self.sampler,
+                &self.terrain_tex,
+                &self.tile_sampler,
+                &self.sky_tex,
+                v,
+            )
+        });
     }
 
     /// The field bind group the raster pass binds at group(2) — the same globals
@@ -447,47 +478,22 @@ impl Raymarch {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
     }
 
-    /// Bind (or clear, with `None`) the opaque-mesh depth prepass as the march's
-    /// per-pixel cap. Call when the prepass target is (re)created — a size change
-    /// needs a new bind group (they're immutable), not per frame. While primed,
-    /// [`draw_into`](Self::draw_into) LOADS the depth buffer (the prepass copy
-    /// already primed it) instead of clearing.
+    /// Bind (or drop, with `None`) the opaque-mesh depth prepass as
+    /// [`draw_into_primed`](Self::draw_into_primed)'s per-pixel march cap. Call
+    /// when the prepass target is (re)created — a size change needs a new bind
+    /// group (they're immutable), not per frame. Plain [`draw_into`]
+    /// (Self::draw_into) is unaffected: offscreen previews and probes stay
+    /// unprimed with their own cleared depth.
     pub fn set_depth_prime(&mut self, gpu: &Gpu, view: Option<&wgpu::TextureView>) {
-        self.primed = view.is_some();
-        self.prime_view = match view {
-            Some(v) => v.clone(),
-            None => self.prime_fallback.create_view(&wgpu::TextureViewDescriptor::default()),
-        };
-        self.bind = make_bind(
-            &gpu.device,
-            &self.bind_layout,
-            &self.globals_buf,
-            &self._dist_tex,
-            &self._color_tex,
-            &self.sampler,
-            &self.terrain_tex,
-            &self.tile_sampler,
-            &self.sky_tex,
-            &self.prime_view,
-        );
+        self.prime_view = view.cloned();
+        self.rebuild_binds(&gpu.device);
     }
 
     /// Upload the equirectangular skybox texture (`None` resets to solid / white). The
     /// runtime selects solid vs. texture and the tint/rotation via `RaymarchGlobals`.
     pub fn set_sky_texture(&mut self, gpu: &Gpu, tex: Option<&TextureData>) {
         self.sky_tex = make_sky_texture(gpu, tex);
-        self.bind = make_bind(
-            &gpu.device,
-            &self.bind_layout,
-            &self.globals_buf,
-            &self._dist_tex,
-            &self._color_tex,
-            &self.sampler,
-            &self.terrain_tex,
-            &self.tile_sampler,
-            &self.sky_tex,
-            &self.prime_view,
-        );
+        self.rebuild_binds(&gpu.device);
     }
 
     /// Upload the terrain texture palette (up to [`TERRAIN_SLOTS`] layers, each
@@ -495,18 +501,7 @@ impl Raymarch {
     /// painted alpha index (slot n = palette layer n).
     pub fn set_terrain_textures(&mut self, gpu: &Gpu, layers: &[TextureData]) {
         self.terrain_tex = make_terrain_array(gpu, layers);
-        self.bind = make_bind(
-            &gpu.device,
-            &self.bind_layout,
-            &self.globals_buf,
-            &self._dist_tex,
-            &self._color_tex,
-            &self.sampler,
-            &self.terrain_tex,
-            &self.tile_sampler,
-            &self.sky_tex,
-            &self.prime_view,
-        );
+        self.rebuild_binds(&gpu.device);
     }
 
     /// Upload a single baked volume (replaces all previous ones) — the common case
@@ -560,22 +555,11 @@ impl Raymarch {
             write_volume_data(gpu, &dist_tex, &color_tex, b, *origin);
             self.slots.push((*origin, b.dims));
         }
-        self.bind = make_bind(
-            &gpu.device,
-            &self.bind_layout,
-            &self.globals_buf,
-            &dist_tex,
-            &color_tex,
-            &self.sampler,
-            &self.terrain_tex,
-            &self.tile_sampler,
-            &self.sky_tex,
-            &self.prime_view,
-        );
         self.field_bind =
             make_field_bind(&gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &self.sampler);
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
+        self.rebuild_binds(&gpu.device);
         accepted.len()
     }
 
@@ -655,13 +639,40 @@ impl Raymarch {
         globals.params[3] = self.slots.len() as f32;
     }
 
-    /// Clear `color`/`depth` and draw the SDF matter into them (with true depth).
+    /// Clear `color`/`depth` and draw the SDF matter into them (with true depth) —
+    /// the unprimed path (offscreen previews, probes, standalone draws).
     pub fn draw_into(
         &self,
         gpu: &Gpu,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         globals: RaymarchGlobals,
+    ) {
+        self.draw_scene_pass(gpu, color, depth, globals, false);
+    }
+
+    /// Like [`draw_into`](Self::draw_into) but marching against the depth prepass
+    /// set via [`set_depth_prime`](Self::set_depth_prime): the depth buffer is
+    /// LOADED (the prepass copy already primed + cleared it) and each ray stops
+    /// at the nearest opaque mesh. Falls back to the unprimed draw when no prime
+    /// is bound.
+    pub fn draw_into_primed(
+        &self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: RaymarchGlobals,
+    ) {
+        self.draw_scene_pass(gpu, color, depth, globals, self.bind_primed.is_some());
+    }
+
+    fn draw_scene_pass(
+        &self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: RaymarchGlobals,
+        primed: bool,
     ) {
         self.upload_globals(gpu, globals);
 
@@ -686,11 +697,7 @@ impl Raymarch {
                         // Primed: the depth prepass already cleared + filled this
                         // buffer with the opaque mesh depths — keep them so field
                         // hits behind meshes (and sky under them) depth-reject.
-                        load: if self.primed {
-                            wgpu::LoadOp::Load
-                        } else {
-                            wgpu::LoadOp::Clear(1.0)
-                        },
+                        load: if primed { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(1.0) },
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -700,7 +707,11 @@ impl Raymarch {
                 multiview_mask: None,
             });
             rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, &self.bind, &[]);
+            rp.set_bind_group(
+                0,
+                if primed { self.bind_primed.as_ref().unwrap_or(&self.bind) } else { &self.bind },
+                &[],
+            );
             rp.draw(0..3, 0..1);
         }
         gpu.queue.submit([encoder.finish()]);
@@ -839,8 +850,8 @@ fn make_bind(
 
 /// The 1x1 R32Float "no mesh anywhere" depth-prime fallback, holding 1.0. Any
 /// unfilterable-float 2D texture satisfies the binding; the shader gates the cap
-/// on the texture being larger than 1x1.
-fn make_prime_fallback(gpu: &Gpu) -> wgpu::Texture {
+/// on the texture being larger than 1x1. (The view keeps its texture alive.)
+fn make_prime_fallback(gpu: &Gpu) -> wgpu::TextureView {
     let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("raymarch-prime-fallback"),
         size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -862,7 +873,7 @@ fn make_prime_fallback(gpu: &Gpu) -> wgpu::Texture {
         wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
         wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
-    tex
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Upload an equirectangular sky texture (RGBA8 sRGB), or a 1×1 white texture when

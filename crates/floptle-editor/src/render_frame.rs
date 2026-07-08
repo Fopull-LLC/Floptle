@@ -2228,7 +2228,7 @@ impl Editor {
                     if raster.depth_prepass(gpu, globals, &instances, depth_tex) {
                         raymarch.set_depth_prime(gpu, raster.prepass_view());
                     }
-                    raymarch.draw_into(gpu, color, depth, rm);
+                    raymarch.draw_into_primed(gpu, color, depth, rm);
                     None
                 } else {
                     raymarch.upload_globals(gpu, rm);
