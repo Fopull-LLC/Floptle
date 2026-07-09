@@ -22,6 +22,18 @@ hot-reload as everything else. A HUD is a subtree under a `UiRoot` (a canvas in
 screen space); a 3D world-space panel is the *same* subtree parented to a world
 node. This is the single biggest simplification in the design.
 
+> **Screen vs world space (shipped).** The layer component (`UiLayer`) has a
+> `space` field — `Screen` (default: a flat overlay that fills the window) or
+> `World` (a flat panel living in the 3D scene at the layer node's transform,
+> sized by `canvas_scale` world units per design unit). Flip it in the
+> Inspector's UI Layer section, or from Lua via
+> `getcomponent("UiLayer").worldSpace = 1`. A world-space panel is depth-tested
+> into the scene (geometry occludes it) and its buttons/sliders are clickable
+> via a camera ray → panel-plane hit-test. Move/rotate the layer node to place
+> it. *Known gaps:* the interaction ray doesn't yet test scene depth (a panel
+> behind a wall still catches clicks), and there's no per-pixel occlusion of
+> input.
+
 The element set is deliberately **lean** — six leaves plus the layout containers:
 
 ```

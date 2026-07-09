@@ -59,6 +59,8 @@ impl Editor {
         // Game-UI layers: gather + solve on the CPU while `self` is free (the
         // draw core borrows the GPU stack); drawn over the finished frame below.
         let ui_view = self.game_view() || self.player_mode;
+        // Screen-space overlay layers (game view only). gather_game_ui skips
+        // world-space layers — those live in the scene below.
         let ui_layers = if ui_view {
             let vp = self
                 .gpu
@@ -69,19 +71,17 @@ impl Editor {
         } else {
             Vec::new()
         };
-        // Scene-view world canvases (authoring): each layer renders IN the
-        // world at its node's transform; outlines project onto the canvas and
-        // drags come back through cmd.ui_move (in design units).
-        let ui_world = if !ui_view {
-            let aspect = self
-                .gpu
-                .as_ref()
-                .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
-                .unwrap_or(16.0 / 9.0);
-            self.gather_ui_world(aspect)
-        } else {
-            Vec::new()
-        };
+        // World canvases: in the Scene (authoring) view, EVERY layer renders as
+        // a movable hologram at its node's transform; in game/player view, only
+        // the layers whose `space` is World (screen-space ones are the overlay
+        // above). Either way outlines project onto the canvas and drags come
+        // back through cmd.ui_move (in design units).
+        let aspect = self
+            .gpu
+            .as_ref()
+            .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
+            .unwrap_or(16.0 / 9.0);
+        let ui_world = self.gather_ui_world(aspect, !ui_view);
 
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
