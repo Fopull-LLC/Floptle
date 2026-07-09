@@ -1459,6 +1459,11 @@ struct Editor {
     editing: bool,
     /// The pre-edit scene snapshot captured at the start of this frame.
     frame_snapshot: Option<floptle_scene::SceneDoc>,
+    /// The dock tab the user is focused in (updated each frame from the dock's
+    /// focused leaf). Global scene shortcuts (Delete, arrows, F, Ctrl+C/V/D…) are
+    /// suppressed while a timeline tab holds focus so it owns those keys for its
+    /// own keyframes — see the key handler and `focused_in_timeline`.
+    focused_tab: Option<EditorTab>,
     /// RMB press position + accumulated motion — distinguishes a look-drag from a
     /// context-menu click.
     rmb_press: Option<Vec2>,
@@ -1890,18 +1895,28 @@ impl ApplicationHandler for Editor {
                             // Everything else is an EDITOR shortcut — suppressed in the
                             // Game view so it behaves like a real build.
                             _ if !game_view => {
+                                // A focused timeline tab (Animating/Graph/Particles) OWNS
+                                // Delete, the arrows, F, Space, Home/End for its own
+                                // keyframes/events — so suppress the scene versions here,
+                                // letting the panel's own egui handlers run. App-wide
+                                // controls (undo/redo/save) still fire everywhere.
+                                let in_timeline = matches!(
+                                    self.focused_tab,
+                                    Some(EditorTab::Animation | EditorTab::AnimGraph | EditorTab::Particles)
+                                );
                                 if self.ctrl {
                                     match code {
                                         KeyCode::KeyZ => self.undo(),
                                         KeyCode::KeyY => self.redo(),
-                                        KeyCode::KeyC => self.copy_selected(),
-                                        KeyCode::KeyV => self.paste(),
-                                        KeyCode::KeyD => self.duplicate_selected(),
-                                        KeyCode::KeyA => self.select_all(),
                                         KeyCode::KeyS => self.save_all(),
+                                        // Scene-mutating — not while a timeline has focus.
+                                        KeyCode::KeyC if !in_timeline => self.copy_selected(),
+                                        KeyCode::KeyV if !in_timeline => self.paste(),
+                                        KeyCode::KeyD if !in_timeline => self.duplicate_selected(),
+                                        KeyCode::KeyA if !in_timeline => self.select_all(),
                                         _ => {}
                                     }
-                                } else {
+                                } else if !in_timeline {
                                     match code {
                                         KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
                                         KeyCode::KeyF => self.focus_selected(),

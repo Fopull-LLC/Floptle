@@ -113,6 +113,15 @@ impl Editor {
             return;
         }
 
+        // Which dock tab holds focus (from last frame's dock state — the raw winit
+        // key handler runs between frames, so a one-frame-old read is exact). Lets
+        // that handler route Delete/arrows/F to a focused timeline panel instead of
+        // the scene. Fullscreen forces its own tab.
+        self.focused_tab = self.fullscreen_tab.or(self
+            .dock_state
+            .as_mut()
+            .and_then(|d| d.find_active_focused().map(|(_, t)| *t)));
+
         let (dt, elapsed) = self.advance_clock(game_focused);
         // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
         // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
@@ -3300,6 +3309,17 @@ impl Editor {
         }
         if cmd.inspector_changed {
             self.begin_edit();
+        }
+        // Close the undo-coalescing session whenever the pointer isn't held. A drag
+        // (gizmo, DragValue, UI move) keeps the button down across frames, so it stays
+        // ONE step; but a discrete edit (checkbox, combo pick, typed value) releases
+        // the button, so this frees `editing` and the NEXT edit banks its own pre-edit
+        // snapshot. Without it, `editing` stuck true after any non-drag edit and every
+        // following edit silently coalesced into it — the "undo doesn't work on
+        // property edits" bug. (The raw LMB-release handler also clears it; this is the
+        // reliable backstop for keyboard/scroll/click edits that skip that path.)
+        if !frame_pointer_down {
+            self.editing = false;
         }
         // Persist pending animation-asset edits even when their tab is hidden
         // (the tabs flush on draw; this covers edits left behind a tab switch).
