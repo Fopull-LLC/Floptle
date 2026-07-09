@@ -8,7 +8,7 @@ use floptle_core::{Entity, Matter};
 use floptle_scene::MatterDoc;
 
 use crate::assets::{is_script, AssetPayload};
-use crate::matter_catalog::{new_capsule, new_cube, new_sphere};
+use crate::matter_catalog::{new_capsule, new_cube, new_plane, new_sphere};
 use crate::{EditorCmd, EditorTabViewer};
 
 /// What a hierarchy row carries while dragged — its entity, so dropping it on
@@ -87,6 +87,10 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
         }
         if ui.button("▪ Capsule").on_hover_text("a capsule primitive (ideal for a physics character body)").clicked() {
             pick = Some(new_capsule());
+            ui.close();
+        }
+        if ui.button("▭ Plane").on_hover_text("a flat double-sided quad — add a Material to texture it, drop opacity below 1 for transparency").clicked() {
+            pick = Some(new_plane());
             ui.close();
         }
         if ui.button("◑ Blob").clicked() {

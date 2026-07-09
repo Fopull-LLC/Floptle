@@ -506,6 +506,7 @@ impl EditorTabViewer<'_> {
                                             cmd.inspector_changed |= ui.selectable_value(shape, Shape::Cube, "Cube").clicked();
                                             cmd.inspector_changed |= ui.selectable_value(shape, Shape::Sphere, "Sphere").clicked();
                                             cmd.inspector_changed |= ui.selectable_value(shape, Shape::Capsule, "Capsule").clicked();
+                                            cmd.inspector_changed |= ui.selectable_value(shape, Shape::Plane, "Plane").clicked();
                                         });
                                 });
                                 ui.horizontal(|ui| {
@@ -1327,7 +1328,7 @@ impl EditorTabViewer<'_> {
                         let kind = match world.get::<Matter>(e) {
                             Some(Matter::Mesh { .. }) => "triangle mesh",
                             Some(Matter::Primitive { shape, .. }) => match shape {
-                                floptle_core::Shape::Cube => "box",
+                                floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
                                 floptle_core::Shape::Sphere => "sphere",
                                 floptle_core::Shape::Capsule => "capsule",
                             },
@@ -1687,7 +1688,7 @@ impl EditorTabViewer<'_> {
                     let collider_kind = match cur {
                         Some(Matter::Mesh { .. }) => Some("triangle mesh"),
                         Some(Matter::Primitive { shape, .. }) => Some(match shape {
-                            floptle_core::Shape::Cube => "box",
+                            floptle_core::Shape::Cube | floptle_core::Shape::Plane => "box",
                             floptle_core::Shape::Sphere => "sphere",
                             floptle_core::Shape::Capsule => "capsule",
                         }),

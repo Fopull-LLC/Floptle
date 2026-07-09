@@ -42,6 +42,9 @@ pub enum Shape {
     Cube,
     Sphere,
     Capsule,
+    // Keep new shapes LAST: the renderer indexes meshes by `shape as usize`,
+    // so appending preserves the existing 0/1/2 discriminants.
+    Plane,
 }
 
 /// How fast an entity spins about Y (radians/sec) — a tiny demo behavior.

@@ -468,6 +468,12 @@ impl Editor {
                         let m = Mat4::from_scale_rotation_translation(s, wt.rotation, wt.translation.as_vec3());
                         oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
                     }
+                    floptle_core::Shape::Plane => {
+                        // Flat in Z: outline the thin-box collider proxy.
+                        let thin = Vec3::new(s.x, s.y, 0.02 * s.z.max(1.0));
+                        let m = Mat4::from_scale_rotation_translation(thin, wt.rotation, wt.translation.as_vec3());
+                        oriented_box_lines(m, 0.7, cam.world_position, view_proj, gw, gh)
+                    }
                     floptle_core::Shape::Sphere => rigidbody_lines(
                         wt.translation, false, 0.85 * s.max_element(), 0.0,
                         cam.world_position, view_proj, gw, gh,
@@ -3209,6 +3215,7 @@ impl Editor {
                 MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
                 MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
                 MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
+                MatterDoc::Primitive { shape: ShapeDoc::Plane, .. } => "Plane",
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",

@@ -8,6 +8,9 @@ use floptle_scene::{MatterDoc, ShapeDoc};
 pub(crate) fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }
 }
+pub(crate) fn new_plane() -> MatterDoc {
+    MatterDoc::Primitive { shape: ShapeDoc::Plane, color: [0.8, 0.8, 0.8] }
+}
 
 /// The default node name for a matter kind.
 pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
@@ -15,6 +18,7 @@ pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Primitive { shape: ShapeDoc::Cube, .. } => "Cube",
         MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
         MatterDoc::Primitive { shape: ShapeDoc::Capsule, .. } => "Capsule",
+        MatterDoc::Primitive { shape: ShapeDoc::Plane, .. } => "Plane",
         MatterDoc::Blob { .. } => "Blob",
         MatterDoc::Mesh { .. } => "Mesh",
         MatterDoc::Empty => "Empty",
@@ -39,6 +43,7 @@ pub(crate) fn matter_kind_label(m: &Matter) -> &'static str {
         Matter::Primitive { shape: Shape::Cube, .. } => "Cube",
         Matter::Primitive { shape: Shape::Sphere, .. } => "Sphere",
         Matter::Primitive { shape: Shape::Capsule, .. } => "Capsule",
+        Matter::Primitive { shape: Shape::Plane, .. } => "Plane",
         Matter::Blob { .. } => "Blob",
         Matter::Mesh { .. } => "Mesh",
         Matter::Empty => "Empty",
@@ -57,6 +62,7 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::Primitive { shape: Shape::Cube, .. } => "■",
         Matter::Primitive { shape: Shape::Sphere, .. } => "○",
         Matter::Primitive { shape: Shape::Capsule, .. } => "▪",
+        Matter::Primitive { shape: Shape::Plane, .. } => "▭",
         Matter::Blob { .. } => "◑",
         Matter::Mesh { .. } => "✳",
         Matter::Empty => "🗀",
@@ -79,6 +85,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("■  Cube", Matter::Primitive { shape: Shape::Cube, color: [0.8, 0.5, 0.4] }),
         ("○  Sphere", Matter::Primitive { shape: Shape::Sphere, color: [0.4, 0.6, 0.9] }),
         ("▪  Capsule", Matter::Primitive { shape: Shape::Capsule, color: [0.5, 0.85, 0.6] }),
+        ("▭  Plane", Matter::Primitive { shape: Shape::Plane, color: [0.8, 0.8, 0.8] }),
         ("◑  Blob", Matter::Blob { scale: 1.0 }),
         ("🗀  Empty", Matter::Empty),
         ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),

@@ -179,7 +179,9 @@ impl Editor {
                     let ro_l = (m_inv * ro.extend(1.0)).truncate();
                     let rd_l = (m_inv * rd.extend(0.0)).truncate();
                     match shape {
-                        Shape::Cube => ray_aabb(ro_l, rd_l, 0.7),
+                        // Plane is flat in Z; pick it with the cube AABB so the quad
+                        // stays easy to click rather than a hairline-thin target.
+                        Shape::Cube | Shape::Plane => ray_aabb(ro_l, rd_l, 0.7),
                         Shape::Sphere => ray_sphere(ro_l, rd_l, Vec3::ZERO, 0.85),
                         // capsule(0.5, 0.5): total Y half-extent radius+half = 1.0; a
                         // bounding sphere of that radius contains it for picking.
@@ -430,6 +432,7 @@ pub(crate) fn rect_base_half(
     match world.get::<Matter>(e)? {
         Matter::Primitive { shape, .. } => Some(match shape {
             Shape::Cube => Vec3::splat(0.7),
+            Shape::Plane => Vec3::new(0.7, 0.7, 0.02),
             Shape::Sphere => Vec3::splat(0.85),
             Shape::Capsule => Vec3::new(0.5, 1.0, 0.5),
         }),

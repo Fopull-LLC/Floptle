@@ -19,7 +19,7 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material, Matter, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
-    capsule, cube, uv_sphere, FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
+    capsule, cube, plane, uv_sphere, FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
 };
 use floptle_scene::{
     MaterialDoc, MatterDoc, ProjectConfigDoc, SceneDoc,
@@ -1650,11 +1650,12 @@ impl ApplicationHandler for Editor {
         let gpu = Gpu::new(window.clone());
         let mut raster = Raster::new(&gpu);
         // Registration order defines the Shape→MeshId mapping (Shape as usize):
-        // Cube=0, Sphere=1, Capsule=2.
+        // Cube=0, Sphere=1, Capsule=2, Plane=3.
         let cube_id = raster.register(&gpu, &cube(0.7), None);
         let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36), None);
         let capsule_id = raster.register(&gpu, &capsule(0.5, 0.5, 16, 24), None);
-        self.mesh_ids = vec![cube_id, sphere_id, capsule_id];
+        let plane_id = raster.register(&gpu, &plane(0.7), None);
+        self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
         self.raymarch = Some(Raymarch::new(&gpu));
 
         // Built-in primitive meshes for particle mesh-render tracks (see vfx.rs). Reserved
