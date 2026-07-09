@@ -70,7 +70,7 @@ sound ends — self-cleaning one-shots), **Loop**.
   `Editor`: clip cache, play-mode voice per `AudioSource`, script one-shots,
   the runtime mixer overlay (Lua tweaks revert on Stop). Ticked in the play
   loop after physics/attachments so emitters ride final transforms.
-- **🎚 Mixer tab** — strips (Master + tracks): fader, pan, mute/solo, live
+- **🎧 Mixer tab** — strips (Master + tracks): fader, pan, mute/solo, live
   meter, output routing, effect chain; right panel edits the selected effect
   (the EQ gets the draggable response curve). Saves with the project.
 - **Inspector** — ♪ Audio Source section with a searchable clip picker and a

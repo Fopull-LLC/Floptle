@@ -288,7 +288,7 @@ impl EditorTabViewer<'_> {
 
         // A rigged mesh's bones/sub-objects, shown as a read-only tree of attach
         // targets (indented by skeleton depth) — select a node and pick one in the
-        // Inspector's 🦴 Bone attachment to ride it.
+        // Inspector's 🔗 Bone attachment to ride it.
         if !self.collapsed.contains(&e)
             && let Some(bones) = self.bone_names.get(&e)
         {
@@ -302,11 +302,11 @@ impl EditorTabViewer<'_> {
                     .horizontal(|ui| {
                         ui.add_space((depth + 1 + bdepth[i]) as f32 * 14.0 + 12.0);
                         let text = if sel {
-                            egui::RichText::new(format!("🦴 {bname}"))
+                            egui::RichText::new(format!("🔗 {bname}"))
                                 .strong()
                                 .color(ui.visuals().selection.stroke.color)
                         } else {
-                            egui::RichText::new(format!("🦴 {bname}")).weak()
+                            egui::RichText::new(format!("🔗 {bname}")).weak()
                         };
                         ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click()))
                             .on_hover_text("armature bone — click to select + edit/keyframe its transform in the Inspector")

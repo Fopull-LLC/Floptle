@@ -920,7 +920,7 @@ impl Editor {
             let mut remove: Option<usize> = None;
             for (i, target) in mask.targets.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    if ui.button("✕").on_hover_text("remove this target").clicked() {
+                    if ui.button("✖").on_hover_text("remove this target").clicked() {
                         remove = Some(i);
                     }
                     if let Some(pick) = crate::ui_widgets::searchable_picker(
@@ -965,7 +965,7 @@ impl Editor {
                 mask.targets.remove(i);
                 c = true;
             }
-            if ui.button("＋ add target").clicked() {
+            if ui.button("✚ add target").clicked() {
                 mask.targets.push(String::new());
                 c = true;
             }

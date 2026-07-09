@@ -2613,7 +2613,7 @@ NODES — an Audio Source component (Inspector ➕) makes a node an emitter:
      mode 0/1/2 = Spatial/Distance/Flat, falloff 0/1/2 = Inv/Lin/Exp,
      endBehavior 0/1/2 = Stop/Destroy/Loop)
 
-THE MIXER — every sound routes through the 🎚 Mixer tab's tracks (volume,
+THE MIXER — every sound routes through the 🎧 Mixer tab's tracks (volume,
 pan, effects like EQ/reverb/delay, routing into other tracks, all ending at
 Master). Scripts get live control that reverts when Play stops:
     audio.track(\"Music\"):setVolume(-12)   -- duck music (dB)

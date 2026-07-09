@@ -566,7 +566,7 @@ fn particle_section(
 fn forces_section(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
     use VfxForceDoc as F;
     let mut add: Option<F> = None;
-    ui.menu_button("＋ add force", |ui| {
+    ui.menu_button("✚ add force", |ui| {
         for (lbl, f) in [
             ("💨 wind (directional)", F::Directional { dir: [0.0, 1.0, 0.0], strength: 2.0 }),
             ("🎯 attractor (point)", F::Point { center: [0.0, 0.0, 0.0], strength: 3.0 }),

@@ -1,9 +1,11 @@
-//! The 🎚 Mixer tab: DAW-style track strips over the project's mixer graph.
+//! The 🎧 Mixer tab: DAW-style channel strips over the project's mixer graph.
 //!
-//! Left-to-right: Master, then every user track — each a strip with a fader,
-//! pan, mute/solo, live meter, output routing, and its effect chain. Selecting
-//! an effect opens its parameter editor in the right-hand panel (the
-//! parametric EQ gets a draggable response-curve editor).
+//! Left-to-right: Master, then every user track — each a strict top-down strip
+//! like a hardware console channel: name, insert-effect rack, pan, fader +
+//! meter (with mute/solo), and output routing at the bottom. Clicking an
+//! insert opens its parameter editor in the right-hand panel (the parametric
+//! EQ gets a draggable response-curve editor); right-clicking one gets
+//! bypass / reorder / copy / paste / remove.
 //!
 //! Edits mutate the project's [`MixerDesc`] directly and set
 //! `cmd.mixer_changed`, which live-applies the graph to the engine (and to the
@@ -17,12 +19,16 @@ pub(crate) struct MixerUiState {
     /// Selected effect: (track slot, effect index). Slot 0 = Master, slot
     /// `i+1` = `tracks[i]` — matching the strip order on screen.
     pub selected: Option<(usize, usize)>,
+    /// Copy/paste buffer for effect settings (right-click a chain row).
+    pub fx_clipboard: Option<EffectDesc>,
     /// Smoothed meter level per track name (raw peaks flicker too hard).
     meters: std::collections::HashMap<String, f32>,
 }
 
-const STRIP_W: f32 = 130.0;
-const FADER_H: f32 = 128.0;
+const STRIP_W: f32 = 140.0;
+const FADER_H: f32 = 140.0;
+/// Height of the insert-effect rack box (same on every strip so faders line up).
+const FX_H: f32 = 150.0;
 const DB_MIN: f32 = -60.0;
 const DB_MAX: f32 = 12.0;
 
@@ -65,7 +71,7 @@ impl crate::EditorTabViewer<'_> {
                 }
                 ui.vertical(|ui| {
                     ui.add_space(6.0);
-                    if ui.button("＋ Track").on_hover_text("Add a mixer track").clicked() {
+                    if ui.button("✚ Track").on_hover_text("Add a mixer track").clicked() {
                         let name = self.mixer.fresh_name("Track");
                         self.mixer.tracks.push(TrackDesc::new(name));
                         changed = true;
@@ -79,7 +85,7 @@ impl crate::EditorTabViewer<'_> {
         }
     }
 
-    /// One vertical track strip. `slot` 0 = Master, else `tracks[slot-1]`.
+    /// One channel strip. `slot` 0 = Master, else `tracks[slot-1]`.
     fn track_strip_ui(&mut self, ui: &mut egui::Ui, slot: usize) -> bool {
         let mut changed = false;
         let is_master = slot == 0;
@@ -89,126 +95,166 @@ impl crate::EditorTabViewer<'_> {
         let frame = egui::Frame::group(ui.style()).inner_margin(6.0);
         frame.show(ui, |ui| {
             ui.set_width(STRIP_W);
+            // The strips sit in a horizontal row; the strip itself is strictly
+            // top-down (the frame would otherwise inherit the row's layout).
             ui.vertical(|ui| {
-                let track =
-                    if is_master { &mut self.mixer.master } else { &mut self.mixer.tracks[slot - 1] };
-                // ---- name ----------------------------------------------------
-                if is_master {
-                    ui.strong(MASTER);
-                } else {
-                    let mut name = track.name.clone();
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut name).desired_width(STRIP_W - 30.0),
-                    );
-                    if resp.changed() && !name.is_empty() && name != MASTER {
-                        rename = Some((track.name.clone(), name));
-                    }
-                }
-
-                // ---- fader + meter -------------------------------------------
-                ui.add_space(4.0);
+                // ---- header: name (+ delete) ---------------------------------
                 ui.horizontal(|ui| {
-                    let resp = ui.add_sized(
-                        [40.0, FADER_H],
-                        egui::Slider::new(&mut track.gain_db, DB_MIN..=DB_MAX)
-                            .vertical()
-                            .show_value(false),
-                    );
-                    changed |= resp.changed();
-                    if resp.double_clicked() {
-                        track.gain_db = 0.0; // double-click a fader = unity
-                        changed = true;
-                    }
-
-                    // Meter: post-fader peak, drawn on a dB-ish scale.
-                    let (rect, _) = ui
-                        .allocate_exact_size(egui::vec2(14.0, FADER_H), egui::Sense::hover());
-                    let name = if is_master { MASTER } else { track.name.as_str() };
-                    let level = self.mixer_ui.meters.get(name).copied().unwrap_or(0.0);
-                    let db = 20.0 * level.max(1e-6).log10();
-                    let t = ((db - DB_MIN) / (0.0 - DB_MIN)).clamp(0.0, 1.0);
-                    let p = ui.painter();
-                    p.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-                    let fill = egui::Rect::from_min_max(
-                        egui::pos2(rect.left(), rect.bottom() - rect.height() * t),
-                        rect.max,
-                    );
-                    p.rect_filled(fill, 2.0, meter_color(level));
-
-                    ui.vertical(|ui| {
-                        ui.label(format!("{:+.1}", track.gain_db)).on_hover_text("dB");
-                        // ---- mute / solo -------------------------------------
-                        if !is_master {
-                            let m = ui.selectable_label(track.muted, "M").on_hover_text("Mute");
-                            if m.clicked() {
-                                track.muted = !track.muted;
-                                changed = true;
-                            }
-                            let s = ui.selectable_label(track.soloed, "S").on_hover_text("Solo");
-                            if s.clicked() {
-                                track.soloed = !track.soloed;
-                                changed = true;
-                            }
+                    if is_master {
+                        ui.add_sized(
+                            [STRIP_W - 26.0, 18.0],
+                            egui::Label::new(egui::RichText::new(MASTER).strong()),
+                        );
+                    } else {
+                        let track = &mut self.mixer.tracks[slot - 1];
+                        let mut name = track.name.clone();
+                        let resp = ui.add_sized(
+                            [STRIP_W - 26.0, 18.0],
+                            egui::TextEdit::singleline(&mut name),
+                        );
+                        if resp.changed() && !name.is_empty() && name != MASTER {
+                            rename = Some((track.name.clone(), name));
                         }
-                    });
+                        if ui.small_button("🗑").on_hover_text("Delete track").clicked() {
+                            delete = true;
+                        }
+                    }
                 });
+                ui.separator();
+
+                // ---- insert effects ------------------------------------------
+                changed |= self.effect_chain_ui(ui, slot);
 
                 // ---- pan -----------------------------------------------------
-                let pan = ui.add(
-                    egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(false).text("pan"),
-                );
-                changed |= pan.changed();
-                if pan.double_clicked() {
-                    track.pan = 0.0;
-                    changed = true;
+                ui.add_space(6.0);
+                {
+                    let track = if is_master {
+                        &mut self.mixer.master
+                    } else {
+                        &mut self.mixer.tracks[slot - 1]
+                    };
+                    ui.horizontal(|ui| {
+                        ui.weak("Pan");
+                        ui.spacing_mut().slider_width = STRIP_W - 46.0;
+                        let pan = ui
+                            .add(egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(false));
+                        changed |= pan.changed();
+                        if pan.double_clicked() {
+                            track.pan = 0.0;
+                            changed = true;
+                        }
+                        pan.on_hover_text(format!(
+                            "pan {:+.2} (double-click to center)",
+                            track.pan
+                        ));
+                    });
+
+                    // ---- fader + meter + readout / mute / solo ---------------
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        let fader = ui.add_sized(
+                            [28.0, FADER_H],
+                            egui::Slider::new(&mut track.gain_db, DB_MIN..=DB_MAX)
+                                .vertical()
+                                .show_value(false),
+                        );
+                        changed |= fader.changed();
+                        if fader.double_clicked() {
+                            track.gain_db = 0.0; // double-click a fader = unity
+                            changed = true;
+                        }
+
+                        // Meter: post-fader peak on a dB scale, 0 dB at the top.
+                        let (rect, _) = ui
+                            .allocate_exact_size(egui::vec2(12.0, FADER_H), egui::Sense::hover());
+                        let name = if is_master { MASTER } else { track.name.as_str() };
+                        let level = self.mixer_ui.meters.get(name).copied().unwrap_or(0.0);
+                        let db = 20.0 * level.max(1e-6).log10();
+                        let t = ((db - DB_MIN) / (0.0 - DB_MIN)).clamp(0.0, 1.0);
+                        let p = ui.painter();
+                        p.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+                        let fill = egui::Rect::from_min_max(
+                            egui::pos2(rect.left(), rect.bottom() - rect.height() * t),
+                            rect.max,
+                        );
+                        p.rect_filled(fill, 2.0, meter_color(level));
+                        let tick = ui.visuals().weak_text_color().linear_multiply(0.4);
+                        for tdb in [0.0f32, -12.0, -24.0, -48.0] {
+                            let ty = rect.bottom()
+                                - rect.height() * ((tdb - DB_MIN) / (0.0 - DB_MIN));
+                            p.line_segment(
+                                [egui::pos2(rect.left(), ty), egui::pos2(rect.right(), ty)],
+                                (1.0, tick),
+                            );
+                        }
+
+                        ui.vertical(|ui| {
+                            let dv = ui.add(
+                                egui::DragValue::new(&mut track.gain_db)
+                                    .speed(0.1)
+                                    .range(DB_MIN..=DB_MAX)
+                                    .max_decimals(1)
+                                    .suffix(" dB"),
+                            );
+                            changed |= dv.changed();
+                            if !is_master {
+                                ui.add_space(4.0);
+                                let m =
+                                    ui.selectable_label(track.muted, " M ").on_hover_text("Mute");
+                                if m.clicked() {
+                                    track.muted = !track.muted;
+                                    changed = true;
+                                }
+                                let s = ui
+                                    .selectable_label(track.soloed, " S ")
+                                    .on_hover_text("Solo");
+                                if s.clicked() {
+                                    track.soloed = !track.soloed;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                }
+
+                // ---- output routing ------------------------------------------
+                ui.add_space(4.0);
+                if is_master {
+                    ui.weak("→ output device");
+                } else {
+                    let current = self.mixer.tracks[slot - 1]
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| MASTER.to_string());
+                    let others: Vec<String> = std::iter::once(MASTER.to_string())
+                        .chain(
+                            self.mixer
+                                .tracks
+                                .iter()
+                                .enumerate()
+                                .filter(|(j, _)| *j != slot - 1)
+                                .map(|(_, t)| t.name.clone()),
+                        )
+                        .collect();
+                    let mut pick: Option<String> = None;
+                    egui::ComboBox::from_id_salt(("mixer_out", slot))
+                        .selected_text(format!("→ {current}"))
+                        .width(STRIP_W)
+                        .show_ui(ui, |ui| {
+                            for name in &others {
+                                if ui.selectable_label(*name == current, name).clicked() {
+                                    pick = Some(name.clone());
+                                }
+                            }
+                        });
+                    if let Some(p) = pick {
+                        self.mixer.tracks[slot - 1].output =
+                            if p == MASTER { None } else { Some(p) };
+                        changed = true;
+                    }
                 }
             });
-
-            // ---- output routing (needs &self.mixer immutably) -----------------
-            if !is_master {
-                let current = self.mixer.tracks[slot - 1]
-                    .output
-                    .clone()
-                    .unwrap_or_else(|| MASTER.to_string());
-                let others: Vec<String> = std::iter::once(MASTER.to_string())
-                    .chain(
-                        self.mixer
-                            .tracks
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != slot - 1)
-                            .map(|(_, t)| t.name.clone()),
-                    )
-                    .collect();
-                let mut pick: Option<String> = None;
-                egui::ComboBox::from_id_salt(("mixer_out", slot))
-                    .selected_text(format!("→ {current}"))
-                    .width(STRIP_W - 10.0)
-                    .show_ui(ui, |ui| {
-                        for name in &others {
-                            if ui.selectable_label(*name == current, name).clicked() {
-                                pick = Some(name.clone());
-                            }
-                        }
-                    });
-                if let Some(p) = pick {
-                    self.mixer.tracks[slot - 1].output =
-                        if p == MASTER { None } else { Some(p) };
-                    changed = true;
-                }
-            }
-
-            // ---- effect chain --------------------------------------------------
-            ui.add_space(4.0);
-            ui.separator();
-            changed |= self.effect_chain_ui(ui, slot);
-
-            if !is_master {
-                ui.add_space(2.0);
-                if ui.small_button("🗑 Delete track").clicked() {
-                    delete = true;
-                }
-            }
         });
 
         if let Some((old, new)) = rename {
@@ -234,51 +280,150 @@ impl crate::EditorTabViewer<'_> {
         changed
     }
 
-    /// The strip's effect list: select, bypass, reorder, remove, add.
+    /// The strip's insert rack: a fixed-height vertical list of effect slots.
+    /// Click selects (opens the editor panel); right-click gets bypass /
+    /// reorder / copy / paste / remove; `✚ Effect` below adds or pastes one.
     fn effect_chain_ui(&mut self, ui: &mut egui::Ui, slot: usize) -> bool {
         let mut changed = false;
         let is_master = slot == 0;
-        let track =
-            if is_master { &mut self.mixer.master } else { &mut self.mixer.tracks[slot - 1] };
 
+        // Deferred intents so the row loop can't invalidate its own iteration.
         let mut remove: Option<usize> = None;
         let mut swap: Option<(usize, usize)> = None;
-        let n = track.effects.len();
-        for (i, fx) in track.effects.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                let selected = self.mixer_ui.selected == Some((slot, i));
-                let label = if fx.bypass {
-                    format!("◌ {}", fx.effect.name())
-                } else {
-                    format!("● {}", fx.effect.name())
-                };
-                if ui.selectable_label(selected, label).clicked() {
-                    self.mixer_ui.selected = Some((slot, i));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("✖").on_hover_text("Remove effect").clicked() {
-                        remove = Some(i);
+        let mut copy: Option<EffectDesc> = None;
+        let mut paste_into: Option<usize> = None;
+        let mut push_fx: Option<EffectDesc> = None;
+
+        let clipboard = self.mixer_ui.fx_clipboard.clone();
+        let inset = egui::Frame::NONE
+            .fill(ui.visuals().extreme_bg_color)
+            .corner_radius(4.0)
+            .inner_margin(3.0);
+        inset.show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_min_height(FX_H);
+            egui::ScrollArea::vertical()
+                .id_salt(("mixer_fx", slot))
+                .max_height(FX_H)
+                .show(ui, |ui| {
+                    let track = if is_master {
+                        &mut self.mixer.master
+                    } else {
+                        &mut self.mixer.tracks[slot - 1]
+                    };
+                    let n = track.effects.len();
+                    if n == 0 {
+                        ui.add_space(FX_H * 0.42);
+                        ui.vertical_centered(|ui| ui.weak("no effects"));
                     }
-                    if i + 1 < n && ui.small_button("⏷").on_hover_text("Move down").clicked() {
-                        swap = Some((i, i + 1));
-                    }
-                    if i > 0 && ui.small_button("⏶").on_hover_text("Move up").clicked() {
-                        swap = Some((i, i - 1));
-                    }
-                    let b = ui
-                        .selectable_label(fx.bypass, "⊘")
-                        .on_hover_text("Bypass (keep in chain, skip processing)");
-                    if b.clicked() {
-                        fx.bypass = !fx.bypass;
-                        changed = true;
+                    for (i, fx) in track.effects.iter_mut().enumerate() {
+                        let selected = self.mixer_ui.selected == Some((slot, i));
+                        let mut text = egui::RichText::new(format!(
+                            "{} {}",
+                            if fx.bypass { "◌" } else { "●" },
+                            fx.effect.name()
+                        ));
+                        if fx.bypass {
+                            text = text.weak();
+                        }
+                        let resp = ui.add_sized(
+                            [ui.available_width(), 18.0],
+                            egui::Button::selectable(selected, text),
+                        );
+                        if resp.clicked() || resp.secondary_clicked() {
+                            self.mixer_ui.selected = Some((slot, i));
+                        }
+                        resp.context_menu(|ui| {
+                            if ui
+                                .button(if fx.bypass { "●  Enable" } else { "◌  Bypass" })
+                                .clicked()
+                            {
+                                fx.bypass = !fx.bypass;
+                                changed = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.add_enabled(i > 0, egui::Button::new("⏶  Move up")).clicked() {
+                                swap = Some((i, i - 1));
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(i + 1 < n, egui::Button::new("⏷  Move down"))
+                                .clicked()
+                            {
+                                swap = Some((i, i + 1));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("⎘  Copy settings").clicked() {
+                                copy = Some(fx.effect.clone());
+                                ui.close();
+                            }
+                            let can_paste =
+                                clipboard.as_ref().is_some_and(|c| c.same_kind(&fx.effect));
+                            let paste = ui
+                                .add_enabled(can_paste, egui::Button::new("📋  Paste settings"))
+                                .on_disabled_hover_text(
+                                    "copy settings from an effect of the same type first",
+                                );
+                            if paste.clicked() {
+                                paste_into = Some(i);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("🗑  Remove").clicked() {
+                                remove = Some(i);
+                                ui.close();
+                            }
+                        });
                     }
                 });
+        });
+
+        // ✚ Effect below the rack — add a fresh effect or paste the copied one.
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+            ui.menu_button("✚  Effect", |ui| {
+                for fx in EffectDesc::all_defaults() {
+                    if ui.button(fx.name()).clicked() {
+                        push_fx = Some(fx);
+                        ui.close();
+                    }
+                }
+                if let Some(clip) = &clipboard {
+                    ui.separator();
+                    if ui.button(format!("📋  Paste {}", clip.name())).clicked() {
+                        push_fx = Some(clip.clone());
+                        ui.close();
+                    }
+                }
             });
+        });
+
+        // Apply the deferred intents.
+        if let Some(fx) = copy {
+            self.mixer_ui.fx_clipboard = Some(fx);
+        }
+        let track =
+            if is_master { &mut self.mixer.master } else { &mut self.mixer.tracks[slot - 1] };
+        if let Some(i) = paste_into
+            && let Some(clip) = &self.mixer_ui.fx_clipboard
+        {
+            track.effects[i].effect = clip.clone();
+            changed = true;
+        }
+        if let Some(fx) = push_fx {
+            track.effects.push(EffectSlot { effect: fx, bypass: false });
+            self.mixer_ui.selected = Some((slot, track.effects.len() - 1));
+            changed = true;
         }
         if let Some(i) = remove {
             track.effects.remove(i);
-            if self.mixer_ui.selected == Some((slot, i)) {
-                self.mixer_ui.selected = None;
+            match self.mixer_ui.selected {
+                Some((s, j)) if s == slot && j == i => self.mixer_ui.selected = None,
+                Some((s, j)) if s == slot && j > i => {
+                    self.mixer_ui.selected = Some((s, j - 1));
+                }
+                _ => {}
             }
             changed = true;
         }
@@ -286,27 +431,19 @@ impl crate::EditorTabViewer<'_> {
             track.effects.swap(a, b);
             if self.mixer_ui.selected == Some((slot, a)) {
                 self.mixer_ui.selected = Some((slot, b));
+            } else if self.mixer_ui.selected == Some((slot, b)) {
+                self.mixer_ui.selected = Some((slot, a));
             }
             changed = true;
         }
-
-        ui.menu_button("＋ Effect", |ui| {
-            for fx in EffectDesc::all_defaults() {
-                if ui.button(fx.name()).clicked() {
-                    track.effects.push(EffectSlot { effect: fx, bypass: false });
-                    self.mixer_ui.selected = Some((slot, track.effects.len() - 1));
-                    changed = true;
-                    ui.close();
-                }
-            }
-        });
         changed
     }
 
     /// The right panel: the selected effect's parameters.
     fn effect_panel_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let Some((slot, idx)) = self.mixer_ui.selected else {
-            ui.weak("Select an effect to edit its parameters.");
+            ui.add_space(8.0);
+            ui.weak("Select an effect on a strip to edit it.");
             return false;
         };
         let track = if slot == 0 {
@@ -320,19 +457,38 @@ impl crate::EditorTabViewer<'_> {
                 }
             }
         };
-        let track_name =
-            if slot == 0 { MASTER.to_string() } else { track.name.clone() };
+        let track_name = if slot == 0 { MASTER.to_string() } else { track.name.clone() };
         let Some(fx) = track.effects.get_mut(idx) else {
             self.mixer_ui.selected = None;
             return false;
         };
 
-        ui.strong(format!("{} — {}", track_name, fx.effect.name()));
-        ui.separator();
         let mut changed = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            changed = effect_params_ui(ui, &mut fx.effect);
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            ui.strong(format!("{} — {}", track_name, fx.effect.name()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("🗑").on_hover_text("Remove effect").clicked() {
+                    remove = true;
+                }
+                let b = ui
+                    .selectable_label(fx.bypass, "⊘")
+                    .on_hover_text("Bypass (keep in chain, skip processing)");
+                if b.clicked() {
+                    fx.bypass = !fx.bypass;
+                    changed = true;
+                }
+            });
         });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            changed |= effect_params_ui(ui, &mut fx.effect);
+        });
+        if remove {
+            track.effects.remove(idx);
+            self.mixer_ui.selected = None;
+            changed = true;
+        }
         changed
     }
 }
@@ -573,7 +729,7 @@ fn eq_editor_ui(ui: &mut egui::Ui, bands: &mut Vec<EqBand>) -> bool {
         bands.remove(i);
         changed = true;
     }
-    if ui.button("＋ Band").clicked() {
+    if ui.button("✚ Band").clicked() {
         bands.push(EqBand { kind: EqBandKind::Peak, freq_hz: 1000.0, gain_db: 0.0, q: 1.0, enabled: true });
         changed = true;
     }

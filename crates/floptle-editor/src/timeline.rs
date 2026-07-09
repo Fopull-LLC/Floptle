@@ -38,7 +38,7 @@ impl TimelineView {
     }
 }
 
-/// A "nice" tick step (1-2-5 × 10ⁿ) at least `raw` seconds, so labels land on round
+/// A "nice" tick step (1-2-5 × 10^n) at least `raw` seconds, so labels land on round
 /// numbers whatever the zoom.
 pub(crate) fn nice_step(raw: f32) -> f32 {
     if raw <= 0.0 || !raw.is_finite() {

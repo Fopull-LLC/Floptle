@@ -45,7 +45,7 @@ impl ComponentClip {
         }
     }
 }
-/// A component section header row: bold title on the left, a right-aligned `⋮`
+/// A component section header row: bold title on the left, a right-aligned `…`
 /// overflow menu (Copy ⎘ always; Paste 📋 when `can_paste`; Remove 🗑 when
 /// `can_remove`). Returns `(copy, paste, remove)` — which item was clicked.
 pub(crate) fn component_header(
@@ -230,7 +230,7 @@ impl EditorTabViewer<'_> {
         let mesh_name = self.world.get::<Name>(mesh).map(|n| n.0.clone()).unwrap_or_default();
 
         ui.horizontal(|ui| {
-            ui.strong(format!("🦴 {bone_name}"));
+            ui.strong(format!("🔗 {bone_name}"));
             if ui.small_button("⮪ back").on_hover_text("back to the node inspector").clicked() {
                 *self.bone_selection = None;
             }
@@ -816,7 +816,7 @@ impl EditorTabViewer<'_> {
                 {
                     let (copy, paste, _) = component_header(
                         ui,
-                        "✛ Transform",
+                        "⊕ Transform",
                         matches!(clip, Some(ComponentClip::Transform(_))),
                         false,
                     );
@@ -1565,12 +1565,12 @@ impl EditorTabViewer<'_> {
                 // ===== Animation Controller (when attached) =====
                 anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
 
-                // ===== 🦴 Bone attachment (node parented to a rigged mesh) =====
+                // ===== 🔗 Bone attachment (node parented to a rigged mesh) =====
                 if let Some(floptle_core::Parent(mesh)) = world.get::<floptle_core::Parent>(e).copied()
                     && let Some(bones) = bone_names.get(&mesh)
                 {
                     ui.separator();
-                    ui.strong("🦴 Bone attachment");
+                    ui.strong("🔗 Bone attachment");
                     ui.small("ride a bone / part of the parent model (a weapon on a hand)");
                     let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
                     egui::ComboBox::from_id_salt("bone_attach_pick")
