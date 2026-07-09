@@ -11,7 +11,7 @@ use floptle_scene::{
 };
 
 use crate::EditorTabViewer;
-use crate::assets::{collect_model_paths, collect_texture_paths};
+use crate::assets::collect_model_paths;
 use crate::curve_edit::value_or_curve;
 use crate::vfx_ui::{LaneRef, lane_curve_mut, lane_fixed_range, lane_ref_label};
 
@@ -25,9 +25,10 @@ impl EditorTabViewer<'_> {
     }
 
     pub(crate) fn vfx_track_inspector_ui(&mut self, ui: &mut egui::Ui) {
-        // Asset lists for the pickers (borrow asset_tree before the doc).
-        let mut tex_list = Vec::new();
-        collect_texture_paths(self.asset_tree, &mut tex_list);
+        // Asset data for the pickers (borrow asset_tree before the doc). The
+        // texture picker browses the tree directly; the mesh picker still needs
+        // a flat list so it can mix in the `builtin://` shapes.
+        let tree = self.asset_tree;
         let mut model_list = Vec::new();
         collect_model_paths(self.asset_tree, &mut model_list);
 
@@ -103,7 +104,7 @@ impl EditorTabViewer<'_> {
                     .show(ui, |ui| body(ui));
             };
             section(ui, "vfx_look", "🎨  Look", true, &mut |ui| {
-                look_section(ui, track, &tex_list, &model_list, &mut dirty)
+                look_section(ui, track, tree, &model_list, &mut dirty)
             });
             section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
                 emission_section(ui, ti, track, &mut dirty)
@@ -235,7 +236,7 @@ fn clip_burst_detail(
 fn look_section(
     ui: &mut egui::Ui,
     track: &mut floptle_scene::VfxTrackDoc,
-    tex_list: &[String],
+    asset_tree: &[crate::assets::AssetEntry],
     model_list: &[String],
     dirty: &mut bool,
 ) {
@@ -259,12 +260,13 @@ fn look_section(
         VfxRenderDoc::Billboard { texture } => {
             ui.horizontal(|ui| {
                 ui.label("texture");
-                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new("vfx_tex"),
                     &short(texture.as_deref().unwrap_or("(plain quad)")),
                     Some("(plain quad)"),
-                    tex_list,
+                    asset_tree,
+                    crate::assets::is_texture,
                     160.0,
                 ) {
                     *texture = pick;
