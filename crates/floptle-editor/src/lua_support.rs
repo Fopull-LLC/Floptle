@@ -110,6 +110,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field tintG number Image tint green 0..1.
 ---@field tintB number Image tint blue 0..1.
 ---@field tintA number Image tint alpha 0..1.
+---@field cell number Spritesheet cell index the image shows (set per frame for sprite animation).
 
 ---A UI slider's live value (`node:getcomponent(\"UiSlider\")`) — the health-bar hook:
 ---`bar:getcomponent(\"UiSlider\").value = hp` and the Fill/Handle parts follow.

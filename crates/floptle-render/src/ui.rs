@@ -536,7 +536,8 @@ impl Ui {
                     color: q.color,
                     border_color: q.border_color,
                     params: [q.radius * scale, q.border * scale, 0.0, clip_r],
-                    uv: [0.0, 0.0, 1.0, 1.0],
+                    // Spritesheet cell (or the whole texture, [0,0,1,1]).
+                    uv: q.uv,
                     clip,
                 },
             );

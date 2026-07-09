@@ -1240,7 +1240,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
-                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree) {
+                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.texture_settings) {
                         cmd.inspector_changed = true;
                     }
                 }

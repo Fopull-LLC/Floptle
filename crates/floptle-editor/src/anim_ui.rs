@@ -1460,6 +1460,7 @@ const ANIMATABLE_PROPS: &[(&str, &[(&str, PropKind)])] = &[
             ("tintG", PropKind::Float),
             ("tintB", PropKind::Float),
             ("tintA", PropKind::Float),
+            ("cell", PropKind::Float), // spritesheet frame index — key with Step
             ("text", PropKind::Text),
         ],
     ),
@@ -1621,6 +1622,22 @@ impl EditorTabViewer<'_> {
                                     kind,
                                 );
                                 st.clip_dirty = true;
+                            }
+                            // Step (hold each key) vs interpolate. Text tracks are
+                            // always stepped; numeric tracks (opacity, cell…) choose.
+                            if kind == PropKind::Text {
+                                ui.add_enabled(false, egui::Button::new("step"));
+                            } else {
+                                let mut step = doc.channels[ci].properties[ti].step;
+                                if ui
+                                    .selectable_label(step, "step")
+                                    .on_hover_text("hold each key (no blend) — use for spritesheet frames")
+                                    .clicked()
+                                {
+                                    step = !step;
+                                    doc.channels[ci].properties[ti].step = step;
+                                    st.clip_dirty = true;
+                                }
                             }
                             if ui.button("🗑").on_hover_text("remove this track").clicked() {
                                 remove = Some((ci, ti));
@@ -2246,7 +2263,9 @@ fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field:
         field: field.to_string(),
         times: Vec::new(),
         values: Vec::new(),
-        step: prop_kind(component, field) == PropKind::Text,
+        // Text swaps and the spritesheet frame index hold each key (no blend).
+        step: prop_kind(component, field) == PropKind::Text
+            || (component == "UiElement" && field == "cell"),
     });
 }
 

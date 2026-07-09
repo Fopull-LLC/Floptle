@@ -457,6 +457,48 @@ impl<'a> EditorTabViewer<'a> {
             ui.end_row();
         });
         ui.small("Pixelated = crisp · Smooth = bilinear · +Mipmaps = no shimmer at distance.");
+
+        // ---- Spritesheet slicing -------------------------------------------
+        ui.separator();
+        ui.strong("Spritesheet");
+        ui.small("Split this texture into a grid of cells. A UI image can then show one \
+                  cell — animate the cell index for sprite animation.");
+        let (mut cols, mut rows) = (s.sheet_cols.max(1), s.sheet_rows.max(1));
+        ui.horizontal(|ui| {
+            ui.label("columns");
+            ui.add(egui::DragValue::new(&mut cols).range(1..=64));
+            ui.label("rows");
+            ui.add(egui::DragValue::new(&mut rows).range(1..=64));
+            if ui.button("reset").on_hover_text("back to a single image").clicked() {
+                cols = 1;
+                rows = 1;
+            }
+        });
+        // Non-1 grids persist; 1×1 stores 0 (the "no sheet" sentinel).
+        s.sheet_cols = if cols > 1 || rows > 1 { cols } else { 0 };
+        s.sheet_rows = if cols > 1 || rows > 1 { rows } else { 0 };
+        // Preview: the texture with cell grid lines, and the cell count.
+        if cols * rows > 1
+            && let Some(crate::PreviewView::Image(handle, dims)) = &self.preview
+        {
+            let max = 200.0;
+            let (w, h) = (dims[0].max(1) as f32, dims[1].max(1) as f32);
+            let sc = (max / w.max(h)).min(1.0);
+            let size = egui::vec2(w * sc, h * sc);
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            egui::Image::new(handle).paint_at(ui, rect);
+            let p = ui.painter_at(rect);
+            let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 220, 80, 180));
+            for c in 1..cols {
+                let x = rect.left() + rect.width() * c as f32 / cols as f32;
+                p.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], stroke);
+            }
+            for r in 1..rows {
+                let y = rect.top() + rect.height() * r as f32 / rows as f32;
+                p.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], stroke);
+            }
+            ui.small(format!("{}×{} = {} cells (indexed row-major, 0..{})", cols, rows, cols * rows, cols * rows - 1));
+        }
         if s != before {
             self.cmd.set_texture_setting = Some((path.to_string(), s));
         }

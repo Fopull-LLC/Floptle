@@ -235,6 +235,19 @@ pub(crate) struct TexSetting {
     pub(crate) filter: FilterMode,
     #[serde(default)]
     pub(crate) wrap: WrapMode,
+    /// Spritesheet columns (0/1 = not a sheet). Slices the texture into
+    /// `sheet_cols`×`sheet_rows` cells that a UI image can pick individually.
+    #[serde(default)]
+    pub(crate) sheet_cols: u32,
+    #[serde(default)]
+    pub(crate) sheet_rows: u32,
+}
+
+impl TexSetting {
+    /// The spritesheet grid `(cols, rows)`, each ≥1.
+    pub(crate) fn sheet(self) -> (u32, u32) {
+        (self.sheet_cols.max(1), self.sheet_rows.max(1))
+    }
 }
 
 impl TexSetting {

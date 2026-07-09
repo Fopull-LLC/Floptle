@@ -112,6 +112,7 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
             for (k, v) in ["tintR", "tintG", "tintB", "tintA"].iter().zip(img.tint) {
                 f.insert(k.to_string(), v as f64);
             }
+            f.insert("cell".to_string(), img.cell as f64);
         }
         out.insert("UiElement".to_string(), f);
         if let Some(s) = spec.slider {
@@ -250,6 +251,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "tintR" | "tintG" | "tintB" | "tintA" => {
                         if let Some(img) = &mut spec.image {
                             img.tint[rgba_index(field)] = v;
+                        }
+                    }
+                    // Spritesheet cell — animate (stepped) for sprite animation.
+                    "cell" => {
+                        if let Some(img) = &mut spec.image {
+                            img.cell = val.max(0.0) as u32;
                         }
                     }
                     _ => {}
@@ -397,7 +404,7 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                         None => {
                             spec.image = Some(floptle_ui::ImageSpec {
                                 texture: val.to_string(),
-                                tint: [1.0; 4],
+                                ..Default::default()
                             })
                         }
                     },
