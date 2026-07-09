@@ -62,7 +62,9 @@ mod preprocess;
 
 pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
-pub use api::{apply_component_field, apply_component_field_str};
+/// `mirror_components` reads them back (numeric) — the animation recorder diffs
+/// it to auto-key changed properties.
+pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
 
 /// Severity of a captured script log line (the engine Console colors by this).

@@ -85,6 +85,13 @@ pub struct AnimUiState {
     pub record_restore: Vec<(Entity, floptle_core::Transform)>,
     /// Last-seen local TRS of the target's descendants (record-mode diffing).
     pub last_scene_local: HashMap<Entity, TransformTRS>,
+    /// Last-seen numeric component fields of the subtree (record-mode property
+    /// diffing) — entity → component → field → value. A change since last frame
+    /// auto-keys the field (e.g. a spritesheet `cell`).
+    pub last_scene_props: HashMap<Entity, HashMap<String, HashMap<String, f64>>>,
+    /// Pre-record numeric property values, re-applied when ● Record turns off so
+    /// recording authors the CLIP not the scene: (entity, component, field, value).
+    pub record_restore_props: Vec<(Entity, String, String, f64)>,
     /// New-animation name prompt buffer (`Some` = prompt open).
     pub new_anim_buf: Option<String>,
 
@@ -131,6 +138,8 @@ impl Default for AnimUiState {
             key_drag: None,
             record_restore: Vec::new(),
             last_scene_local: HashMap::new(),
+            last_scene_props: HashMap::new(),
+            record_restore_props: Vec::new(),
             new_anim_buf: None,
             prop_node: String::new(),
             prop_comp: "UiElement".into(),
@@ -1185,6 +1194,15 @@ impl EditorTabViewer<'_> {
                                     .map(|t| (*e, *t))
                             })
                             .collect();
+                        // Snapshot pre-record property values too (for restore on stop).
+                        self.anim_ui.record_restore_props = scene_channel_names(self.world, target)
+                            .into_iter()
+                            .flat_map(|(e, _)| {
+                                numeric_props_of(self.world, e)
+                                    .into_iter()
+                                    .map(move |(c, f, v)| (e, c.to_string(), f.to_string(), v))
+                            })
+                            .collect();
                         refresh_record_baseline(self.world, self.anim_ui, target);
                     }
                 }
@@ -2055,7 +2073,13 @@ pub fn stop_record_ui(world: &mut floptle_core::World, st: &mut AnimUiState) {
             *slot = tr;
         }
     }
+    // Re-apply the pre-record property values (cell, opacity, colors…) the same way
+    // transforms are restored — recording authors the clip, never the scene.
+    for (e, comp, field, val) in std::mem::take(&mut st.record_restore_props) {
+        floptle_script::apply_component_field(world, e, &comp, &field, val);
+    }
     st.last_scene_local.clear();
+    st.last_scene_props.clear();
 }
 
 /// Record mode (called from the render loop BEFORE the preview applies): any
@@ -2075,15 +2099,45 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
         if *e != target && chan_name.is_empty() {
             continue;
         }
-        let Some(tr) = world.get::<floptle_core::Transform>(*e) else { continue };
-        let cur = TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale };
-        if let Some(prev) = st.last_scene_local.get(e)
-            && *prev != cur
-                && let Some((_, doc)) = st.clip_doc.as_mut() {
-                    write_key(doc, chan_name, playhead, &cur);
+        // --- transform diff → TRS keys (nodes that carry a Transform) ---
+        if let Some(tr) = world.get::<floptle_core::Transform>(*e) {
+            let cur = TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale };
+            if let Some(prev) = st.last_scene_local.get(e)
+                && *prev != cur
+                && let Some((_, doc)) = st.clip_doc.as_mut()
+            {
+                write_key(doc, chan_name, playhead, &cur);
+                wrote = true;
+            }
+            st.last_scene_local.insert(*e, cur);
+        }
+        // --- property diff → auto-key numeric fields (cell, opacity, colors…) that
+        // changed since the baseline, creating the track on first touch. This is
+        // what makes "record, then change the spritesheet cell" land a key. ---
+        let mir = floptle_script::mirror_components(world, *e);
+        for (comp, fields) in ANIMATABLE_PROPS.iter() {
+            let Some(cm) = mir.get(*comp) else { continue };
+            for (field, kind) in fields.iter() {
+                if *kind != PropKind::Float {
+                    continue;
+                }
+                let Some(&v) = cm.get(*field) else { continue };
+                let prev = st
+                    .last_scene_props
+                    .get(e)
+                    .and_then(|m| m.get(*comp))
+                    .and_then(|m| m.get(*field))
+                    .copied();
+                if let Some(pv) = prev
+                    && (pv - v).abs() > 1e-4
+                    && let Some((_, doc)) = st.clip_doc.as_mut()
+                {
+                    write_property_key(doc, chan_name, comp, field, playhead, v);
                     wrote = true;
                 }
-        st.last_scene_local.insert(*e, cur);
+            }
+        }
+        st.last_scene_props.insert(*e, mir);
     }
     if wrote {
         st.clip_dirty = true;
@@ -2105,7 +2159,27 @@ pub fn refresh_record_baseline(
                 TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
             );
         }
+        // Seed the property baseline too, so the first scan keys only real edits.
+        st.last_scene_props.insert(e, floptle_script::mirror_components(world, e));
     }
+}
+
+/// Numeric animatable fields currently on `e` — the mirror intersected with the
+/// `ANIMATABLE_PROPS` float fields. Used to snapshot pre-record values for restore.
+fn numeric_props_of(world: &floptle_core::World, e: Entity) -> Vec<(&'static str, &'static str, f64)> {
+    let mir = floptle_script::mirror_components(world, e);
+    let mut out = Vec::new();
+    for (comp, fields) in ANIMATABLE_PROPS.iter() {
+        let Some(m) = mir.get(*comp) else { continue };
+        for (field, kind) in fields.iter() {
+            if *kind == PropKind::Float
+                && let Some(&v) = m.get(*field)
+            {
+                out.push((*comp, *field, v));
+            }
+        }
+    }
+    out
 }
 
 /// Squared-ish distance from `p` to segment `ab` (in points).
@@ -2238,6 +2312,54 @@ pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &Tr
     put3(&mut ch.translation, t, trs.t.to_array());
     put4(&mut ch.rotation, t, trs.r.to_array());
     put3(&mut ch.scale, t, trs.s.to_array());
+    if t > doc.duration {
+        doc.duration = t;
+    }
+}
+
+/// Write (or overwrite) a numeric property key on `(chan_name, comp, field)`,
+/// creating the channel and its property track as needed. The recorder's
+/// property counterpart to [`write_key`].
+fn write_property_key(
+    doc: &mut AnimClipDoc,
+    chan_name: &str,
+    comp: &str,
+    field: &str,
+    t: f32,
+    value: f64,
+) {
+    let ci = match doc.channels.iter().position(|c| c.node == chan_name) {
+        Some(i) => i,
+        None => {
+            doc.channels
+                .push(floptle_scene::AnimChannelDoc { node: chan_name.to_string(), ..Default::default() });
+            doc.channels.len() - 1
+        }
+    };
+    let props = &mut doc.channels[ci].properties;
+    let ti = match props.iter().position(|p| p.component == comp && p.field == field) {
+        Some(i) => i,
+        None => {
+            props.push(AnimPropTrackDoc {
+                component: comp.to_string(),
+                field: field.to_string(),
+                times: Vec::new(),
+                values: Vec::new(),
+                // The spritesheet frame index holds each key (no blend).
+                step: comp == "UiElement" && field == "cell",
+            });
+            props.len() - 1
+        }
+    };
+    let pt = &mut props[ti];
+    let v = AnimPropValueDoc::Float(value as f32);
+    if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+        pt.values[i] = v;
+    } else {
+        let at = pt.times.partition_point(|&x| x < t);
+        pt.times.insert(at, t);
+        pt.values.insert(at, v);
+    }
     if t > doc.duration {
         doc.duration = t;
     }

@@ -500,6 +500,12 @@ impl Controller {
         out
     }
 
+    /// True if any state's clip animates a property lane — lets the editor's
+    /// preview skip its property snapshot for the common all-transform controller.
+    pub fn has_properties(&self) -> bool {
+        self.layers.iter().any(|l| l.states.iter().any(|s| s.clip.has_properties()))
+    }
+
     /// Events fired since the last take (function names to call on the node).
     pub fn take_fired(&mut self) -> Vec<FiredEvent> {
         std::mem::take(&mut self.fired)
