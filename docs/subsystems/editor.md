@@ -52,7 +52,7 @@ Each is an `egui_dock` tab over the shared `EditorState`:
 - **Inspector** — a **modular component stack** (Unity-style). The selection shows
   *only the components it actually has* — its **Type** (geometry / camera / light /
   …, mutually exclusive), **Transform**, and any **Material / Rigidbody / Collider /
-  Scripts**, each indented under its header with a **⋮** overflow menu to copy / paste /
+  Scripts**, each indented under its header with a **…** overflow menu to copy / paste /
   remove it (paste targets another component of the same kind). A **➕ Add Component**
   button opens a **searchable menu** (auto-focused for typing) to add the rest or switch
   the Type. Make an **Empty** node and build it up from nothing; physics edits apply

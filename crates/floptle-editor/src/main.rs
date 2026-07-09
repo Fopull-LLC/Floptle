@@ -1691,6 +1691,15 @@ impl ApplicationHandler for Editor {
         self.ui_render = Some(floptle_render::Ui::new(&gpu));
 
         let ctx = egui::Context::default();
+        // egui's proportional fallback (Ubuntu + the two emoji fonts) is
+        // missing many of the arrow/geometry glyphs the editor uses as icons
+        // (→ ● ◌ ⊘ ⊕ …); Hack covers them and already ships with egui, so
+        // append it or those labels render as tofu squares.
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            fam.push("Hack".into());
+        }
+        ctx.set_fonts(fonts);
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,

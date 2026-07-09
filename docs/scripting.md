@@ -686,7 +686,7 @@ node:getcomponent("AudioSource").volume = 0.3   -- live while playing
 
 ### The mixer
 
-Everything audible routes through the **🎚 Mixer** tab: named tracks with a
+Everything audible routes through the **🎧 Mixer** tab: named tracks with a
 fader, pan, mute/solo, an effect chain (parametric EQ with a draggable curve,
 delay, reverb, chorus, flanger, phaser, pitch shift, compressor, limiter,
 distortion, utility), and routing — tracks can output into other tracks

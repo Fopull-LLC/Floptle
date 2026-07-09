@@ -37,7 +37,7 @@ impl EditorTab {
             EditorTab::Animation => "✏ Animating",
             EditorTab::AnimGraph => "◎ Controller",
             EditorTab::Particles => "✨ Particles",
-            EditorTab::Mixer => "🎚 Mixer",
+            EditorTab::Mixer => "🎧 Mixer",
         }
     }
 }
