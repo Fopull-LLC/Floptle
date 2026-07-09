@@ -3234,6 +3234,13 @@ impl Editor {
         // Latch "pointer on a UI overlay interact" for the raw LMB handler (which
         // runs between frames): while set, presses belong to egui, not pick/gizmo.
         self.ui_overlay_hot = cmd.ui_hot;
+        // A UI move/resize drag is one coalesced undo step (banked on the first
+        // frame of the gesture via the pre-edit frame_snapshot; closed when the
+        // pointer releases and `editing` resets). Without this, dragging/resizing
+        // a UI element in the Scene view left no undo point.
+        if cmd.ui_move.is_some() || cmd.ui_resize.is_some() {
+            self.begin_edit();
+        }
         if let Some((idx, d)) = cmd.ui_move {
             let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
             if let Some(e) = ent

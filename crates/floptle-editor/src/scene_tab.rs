@@ -77,13 +77,20 @@ impl EditorTabViewer<'_> {
                     if resp.hovered() || resp.dragged() {
                         self.cmd.ui_hot = true;
                     }
-                    if resp.clicked()
+                    // A click — or the START of a drag on an unselected element —
+                    // selects it. So you can grab ANY element and move it in one
+                    // gesture (no click-to-select first), with any tool including
+                    // Rect. drag_started fires before the first drag delta.
+                    if (resp.clicked() || (resp.drag_started() && !selected))
                         && let Some(e) = ent
                     {
                         self.selection.clear();
                         self.selection.push(e);
                     }
-                    if resp.dragged() && selected {
+                    // Drag the body to move (Free pos / Pin offset, design units).
+                    // Re-checks selection so a just-grabbed element moves this same
+                    // frame; the Rect tool's resize handles sit on top of this.
+                    if resp.dragged() && ent.is_some_and(|e| self.selection.contains(&e)) {
                         let d = resp.drag_delta() / *scale;
                         match &mut self.cmd.ui_move {
                             Some((i, acc)) if *i == *idx => {
