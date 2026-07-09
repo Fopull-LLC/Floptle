@@ -140,10 +140,27 @@ textures. Serialized per channel as `properties: [ (component, field, times,
 values, step) ]` in the `.anim.ron`, omitted when empty (back-compatible). At
 apply time the sampled values flow through `floptle_script::apply_component_field`
 (numbers) and `apply_component_field_str` (paths/text) — the exact setters Lua
-uses, so scripts and animation poke fields identically. Authored in the
-Animating tab's **▦ Property tracks** section: pick node · component · field,
-then key values at the playhead (image fields get a texture picker). Property
-values snap to the top active state (they don't cross-fade like transforms).
+uses, so scripts and animation poke fields identically. Property values snap to
+the top active state (they don't cross-fade like transforms).
+
+**On the dopesheet, not in a numbers panel.** Each property track draws as its
+own lane **indented under its node's transform lane**, sharing the timeline's
+time axis and its draggable diamonds (teal, to read apart from the amber
+transform keys) — a UI element's `cell` shows up as a keyframe under that node,
+not a separate section. Drag a diamond to retime, right-click to delete, click
+to select; the selected key's **value + time are edited inline above the sheet**
+(a texture picker for image lanes, a number otherwise). The **▦ Property tracks**
+strip below is just an add-track builder (node · component · field) plus compact
+per-track controls (＋key at playhead, step toggle, delete track).
+
+**Record captures properties too.** With **● Record** on, changing any exposed
+numeric field on a bound node — a spritesheet `cell`, opacity, a light's
+intensity, colors — auto-keys it at the playhead (creating the track on first
+touch), the same way posing a child auto-keys its transform. `record_scan` diffs
+`floptle_script::mirror_components` each frame; turning record off restores the
+pre-record property values (recording authors the clip, never the scene). The
+scrub preview is likewise non-destructive: it snapshots the UI/light/material
+components it touches and restores them each frame.
 
 ## Notify / animation events
 
