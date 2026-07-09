@@ -93,7 +93,21 @@ impl Editor {
             && *prev == want {
                 return Some(*id);
             }
-        let data = floptle_assets::load_texture(Path::new(path))?;
+        // A texture bigger than the GPU's max 2D dimension would panic
+        // `create_texture` — common with spritesheets. Downscale to fit and warn
+        // rather than crash (UVs are normalized, so it still samples correctly).
+        let max = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
+        let mut data = floptle_assets::load_texture(Path::new(path))?;
+        if data.width > max || data.height > max {
+            let s = max as f32 / data.width.max(data.height) as f32;
+            let w = ((data.width as f32 * s).floor() as u32).max(1);
+            let h = ((data.height as f32 * s).floor() as u32).max(1);
+            log::warn!(
+                "texture {path} is {}×{} — larger than the GPU limit {max}; downscaled to {w}×{h}",
+                data.width, data.height
+            );
+            data = floptle_assets::load_texture_sized(Path::new(path), w, h)?;
+        }
         let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
         let id = raster.register_texture(gpu, &data, want.to_sampling());
         self.texture_registry.insert(path.to_string(), id);

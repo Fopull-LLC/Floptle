@@ -37,7 +37,14 @@ use crate::{Editor, Egui, PreviewTarget, PreviewView, scene_hit};
 /// (`srgb_to_linear` applied twice). A linear view makes egui sample the stored bytes
 /// verbatim, so the docked Game view / camera POV / asset preview match the surface. On a
 /// non-sRGB surface `remove_srgb_suffix()` is a no-op, so this stays correct there too.
-fn make_offscreen_target(gpu: &Gpu, egui: &mut Egui, w: u32, h: u32, label: &str) -> PreviewTarget {
+fn make_offscreen_target(
+    gpu: &Gpu,
+    egui: &mut Egui,
+    w: u32,
+    h: u32,
+    label: &str,
+    filter: wgpu::FilterMode,
+) -> PreviewTarget {
     let (w, h) = (w.max(1), h.max(1));
     let srgb = gpu.surface_format();
     let linear = srgb.remove_srgb_suffix();
@@ -71,8 +78,7 @@ fn make_offscreen_target(gpu: &Gpu, egui: &mut Egui, w: u32, h: u32, label: &str
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let tex_id =
-        egui.renderer.register_native_texture(&gpu.device, &egui_view, wgpu::FilterMode::Linear);
+    let tex_id = egui.renderer.register_native_texture(&gpu.device, &egui_view, filter);
     PreviewTarget { color_view, depth_view, tex_id }
 }
 
@@ -85,7 +91,9 @@ impl Editor {
             return;
         }
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
-        self.preview = Some(make_offscreen_target(gpu, egui, 320, 320, "preview"));
+        // Linear: this small turntable preview is a downscale of a larger render.
+        self.preview =
+            Some(make_offscreen_target(gpu, egui, 320, 320, "preview", wgpu::FilterMode::Linear));
     }
 
     /// (Re)load a selected texture asset into an egui texture handle for preview.
@@ -237,7 +245,8 @@ impl Editor {
             return;
         }
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
-        self.cam_preview = Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview"));
+        self.cam_preview =
+            Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview", wgpu::FilterMode::Linear));
     }
 
     /// Each frame: if a single Camera node is selected, render the scene from its POV
@@ -276,7 +285,12 @@ impl Editor {
         if let Some(old) = self.game_vp.take() {
             egui.renderer.free_texture(&old.tex_id);
         }
-        self.game_vp = Some(make_offscreen_target(gpu, egui, w, h, "game-vp"));
+        // Nearest: the game view is rendered at ~1:1 with its on-screen rect, so a
+        // Nearest blit stays pixel-crisp (a Linear blit softens hard-edged low-res /
+        // pixel-art textures by a sub-pixel — the "blurry despite nearest filtering"
+        // report). The main Scene viewport renders direct-to-surface and was already crisp.
+        self.game_vp =
+            Some(make_offscreen_target(gpu, egui, w, h, "game-vp", wgpu::FilterMode::Nearest));
         self.game_vp_dims = (w, h);
         // Create the viewport's own post chain lazily; its actual size + retro mode are
         // set by `configure` every frame in update_game_viewport (retro composites at the
