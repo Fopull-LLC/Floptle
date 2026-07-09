@@ -23,7 +23,9 @@ pub(crate) fn asset_picker(
     width: f32,
 ) -> Option<Option<String>> {
     let mut picked: Option<Option<String>> = None;
-    egui::ComboBox::from_id_salt(id)
+    // The closed combo is also a DROP TARGET: drag a matching asset from the
+    // Assets tab straight onto it to fill the value (no need to open + search).
+    let combo = egui::ComboBox::from_id_salt(id)
         .selected_text(selected_text.to_string())
         .width(width)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -89,6 +91,24 @@ pub(crate) fn asset_picker(
                 }
             });
         });
+    // Highlight the combo while a compatible asset hovers, and take the drop.
+    let dropping = combo
+        .response
+        .dnd_hover_payload::<crate::assets::AssetPayload>()
+        .is_some_and(|p| accept(&p.path));
+    if dropping {
+        ui.painter().rect_stroke(
+            combo.response.rect,
+            3.0,
+            egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if let Some(payload) = combo.response.dnd_release_payload::<crate::assets::AssetPayload>()
+        && accept(&payload.path)
+    {
+        picked = Some(Some(payload.path.clone()));
+    }
     picked
 }
 
