@@ -185,6 +185,13 @@ pub(crate) fn collect_shadow_proxies(world: &World, cam_world: DVec3, enabled: b
                     let q = wt.rotation;
                     r[n] = [q.x, q.y, q.z, q.w];
                 }
+                floptle_core::Shape::Plane => {
+                    // Flat in Z → a thin oriented box occluder (w = 2.0 = box).
+                    a[n] = [c.x, c.y, c.z, 0.0];
+                    b[n] = [0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0), 2.0];
+                    let q = wt.rotation;
+                    r[n] = [q.x, q.y, q.z, q.w];
+                }
                 floptle_core::Shape::Sphere => {
                     a[n] = [c.x, c.y, c.z, 0.85 * s.max_element()];
                     b[n] = [0.0, 0.0, 0.0, 0.0];

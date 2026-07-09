@@ -1368,6 +1368,14 @@ impl Editor {
                             wt.rotation,
                         );
                     }
+                    floptle_core::Shape::Plane => {
+                        // The plane quad is flat in Z: a thin box collider.
+                        sim.add_static_box(
+                            anchor,
+                            Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)),
+                            wt.rotation,
+                        );
+                    }
                     floptle_core::Shape::Sphere => {
                         sim.add_static_sphere(anchor, 0.85 * s.max_element());
                     }

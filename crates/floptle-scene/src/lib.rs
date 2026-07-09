@@ -487,6 +487,7 @@ pub enum ShapeDoc {
     Cube,
     Sphere,
     Capsule,
+    Plane,
 }
 
 impl From<&Matter> for MatterDoc {
@@ -607,6 +608,7 @@ impl From<Shape> for ShapeDoc {
             Shape::Cube => ShapeDoc::Cube,
             Shape::Sphere => ShapeDoc::Sphere,
             Shape::Capsule => ShapeDoc::Capsule,
+            Shape::Plane => ShapeDoc::Plane,
         }
     }
 }
@@ -616,6 +618,7 @@ impl From<ShapeDoc> for Shape {
             ShapeDoc::Cube => Shape::Cube,
             ShapeDoc::Sphere => Shape::Sphere,
             ShapeDoc::Capsule => Shape::Capsule,
+            ShapeDoc::Plane => Shape::Plane,
         }
     }
 }
