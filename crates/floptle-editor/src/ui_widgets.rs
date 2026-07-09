@@ -23,14 +23,21 @@ pub(crate) fn asset_picker(
     width: f32,
 ) -> Option<Option<String>> {
     let mut picked: Option<Option<String>> = None;
-    // The closed combo is also a DROP TARGET: drag a matching asset from the
-    // Assets tab straight onto it to fill the value (no need to open + search).
-    let combo = egui::ComboBox::from_id_salt(id)
-        .selected_text(selected_text.to_string())
-        .width(width)
+    // The button stays as narrow as its inspector field, but the popup wants
+    // real room to browse — enough for ~4 grid tiles across. A ComboBox can't do
+    // this: its popup width is hard-wired to the button width, and forcing it
+    // wider with `set_min_width` is exactly what made it resize a frame late. So
+    // we drive our own button + `Popup` with an explicit, frame-stable width.
+    let pw = width.max(360.0);
+    let popup_id = id.with("pop");
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let btn = combo_button(ui, width, selected_text, open);
+    egui::Popup::menu(&btn)
+        .id(popup_id)
+        .width(pw)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show_ui(ui, |ui| {
-            ui.set_min_width(width.max(240.0));
+        .show(|ui| {
+            ui.set_min_width(pw);
             let qid = id.with("q");
             let gid = id.with("grid");
             let mut q: String = ui.data(|d| d.get_temp(qid).unwrap_or_default());
@@ -40,7 +47,7 @@ pub(crate) fn asset_picker(
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut q)
                         .hint_text("🔍 search…")
-                        .desired_width(width.max(240.0) - 64.0),
+                        .desired_width(pw - 64.0),
                 );
                 if ui.memory(|m| m.focused().is_none()) {
                     resp.request_focus();
@@ -67,7 +74,7 @@ pub(crate) fn asset_picker(
                 ui.close();
             }
             let ql = q.to_lowercase();
-            egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                 if ql.is_empty() {
                     picker_tree(ui, tree, accept, selected_text, grid, qid, &mut picked);
                 } else {
@@ -91,25 +98,69 @@ pub(crate) fn asset_picker(
                 }
             });
         });
-    // Highlight the combo while a compatible asset hovers, and take the drop.
-    let dropping = combo
-        .response
+    // The closed button is also a DROP TARGET: drag a matching asset from the
+    // Assets tab straight onto it to fill the value (no need to open + search).
+    let dropping = btn
         .dnd_hover_payload::<crate::assets::AssetPayload>()
         .is_some_and(|p| accept(&p.path));
     if dropping {
         ui.painter().rect_stroke(
-            combo.response.rect,
+            btn.rect,
             3.0,
             egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
             egui::StrokeKind::Outside,
         );
     }
-    if let Some(payload) = combo.response.dnd_release_payload::<crate::assets::AssetPayload>()
+    if let Some(payload) = btn.dnd_release_payload::<crate::assets::AssetPayload>()
         && accept(&payload.path)
     {
         picked = Some(Some(payload.path.clone()));
     }
     picked
+}
+
+/// A ComboBox-styled button (framed box, left-aligned selected text clipped so it
+/// can't run under a right-aligned ▼). We roll our own so the dropdown [`Popup`]
+/// can be much wider than this button — see [`asset_picker`].
+fn combo_button(ui: &mut egui::Ui, width: f32, text: &str, open: bool) -> egui::Response {
+    let h = ui.spacing().interact_size.y.max(20.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, h), egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let visuals = if open {
+        ui.visuals().widgets.open
+    } else {
+        *ui.style().interact(&resp)
+    };
+    ui.painter().rect(
+        rect,
+        visuals.corner_radius,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        egui::pos2(rect.right() - 12.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        "⏷",
+        egui::FontId::proportional(12.0),
+        visuals.fg_stroke.color,
+    );
+    // Clip the label to its own sub-rect so a long name is cut off cleanly rather
+    // than overlapping the arrow.
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 8.0, rect.top()),
+        egui::pos2(rect.right() - 22.0, rect.bottom()),
+    );
+    ui.painter_at(text_rect).text(
+        egui::pos2(text_rect.left(), text_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(13.0),
+        visuals.fg_stroke.color,
+    );
+    resp
 }
 
 /// True if `entries` (recursively) hold at least one file passing `accept` — so
