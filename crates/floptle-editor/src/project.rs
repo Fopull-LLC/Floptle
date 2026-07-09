@@ -409,6 +409,55 @@ impl Editor {
         self.asset_tree = build_assets(&self.project_root);
     }
 
+    /// Move asset files/folders into `dest_dir` (both absolute). Skips a source
+    /// that is already there, that would overwrite an existing entry, or that is
+    /// the destination itself / an ancestor of it. Rebuilds the tree once and
+    /// follows the moved paths in the selection + open IDE tabs.
+    pub(crate) fn move_assets(&mut self, sources: &[String], dest_dir: &Path) {
+        if !dest_dir.is_dir() {
+            return;
+        }
+        let mut moved: Vec<(String, String)> = Vec::new();
+        for src in sources {
+            let sp = PathBuf::from(src);
+            let Some(name) = sp.file_name() else { continue };
+            let dst = dest_dir.join(name);
+            // No-op if already in dest; refuse to move a folder into itself/descendant.
+            if sp.parent() == Some(dest_dir) || dst == sp || dest_dir.starts_with(&sp) {
+                continue;
+            }
+            if dst.exists() {
+                eprintln!("  move: {} already exists", dst.display());
+                continue;
+            }
+            if let Err(e) = std::fs::rename(&sp, &dst) {
+                eprintln!("  move failed: {e}");
+                continue;
+            }
+            moved.push((src.clone(), dst.to_string_lossy().to_string()));
+        }
+        if moved.is_empty() {
+            return;
+        }
+        // Follow moved paths in open IDE tabs + the selection.
+        for (from, to) in &moved {
+            for f in &mut self.ide.open {
+                if &f.path == from {
+                    f.path = to.clone();
+                }
+            }
+            if self.selected_asset.as_deref() == Some(from.as_str()) {
+                self.selected_asset = Some(to.clone());
+            }
+            for s in &mut self.asset_selection {
+                if s == from {
+                    *s = to.clone();
+                }
+            }
+        }
+        self.asset_tree = build_assets(&self.project_root);
+    }
+
     /// Delete a file or folder (recursively) and drop any references to it.
     pub(crate) fn delete_asset(&mut self, path: &str) {
         let p = Path::new(path);

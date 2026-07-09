@@ -33,7 +33,7 @@ impl<'a> EditorTabViewer<'a> {
                 *self.assets_grid = true;
             }
             ui.separator();
-            ui.small("right-click for New · double-click a script/folder to open · drag onto the scene");
+            ui.small("Ctrl/Shift-click to multi-select · drag onto a folder to move, onto the scene to spawn, onto a picker to assign · right-click for New");
         });
         ui.separator();
         if *self.assets_grid {
@@ -53,6 +53,46 @@ impl<'a> EditorTabViewer<'a> {
         resp.context_menu(|ui| {
             self.new_asset_menu(ui, &root);
         });
+    }
+
+    /// Handle a click on file `path` in the browser: plain = single-select,
+    /// Ctrl/Cmd = toggle, Shift = range within `order` (the current view's flat
+    /// file list). Keeps `selected_asset` as the primary (drives the preview).
+    fn asset_click(&mut self, ui: &egui::Ui, path: &str, order: &[String]) {
+        let m = ui.input(|i| i.modifiers);
+        if m.command || m.ctrl {
+            if let Some(i) = self.asset_selection.iter().position(|p| p == path) {
+                self.asset_selection.remove(i);
+            } else {
+                self.asset_selection.push(path.to_string());
+            }
+        } else if m.shift
+            && let Some(anchor) = self.selected_asset.clone()
+            && let (Some(a), Some(b)) =
+                (order.iter().position(|p| *p == anchor), order.iter().position(|p| p == path))
+        {
+            let (lo, hi) = (a.min(b), a.max(b));
+            *self.asset_selection = order[lo..=hi].to_vec();
+        } else {
+            *self.asset_selection = vec![path.to_string()];
+        }
+        *self.selected_asset = Some(path.to_string());
+    }
+
+    /// Whether `path` is part of the current browser selection.
+    fn asset_is_selected(&self, path: &str) -> bool {
+        self.selected_asset.as_deref() == Some(path)
+            || self.asset_selection.iter().any(|p| p == path)
+    }
+
+    /// The set of paths a drag starting on `dragged` should move: the whole
+    /// multi-selection when the dragged item is part of it, else just itself.
+    fn move_sources(&self, dragged: &str) -> Vec<String> {
+        if self.asset_selection.iter().any(|p| p == dragged) && self.asset_selection.len() > 1 {
+            self.asset_selection.clone()
+        } else {
+            vec![dragged.to_string()]
+        }
     }
 
     /// Find the asset entries inside `dir` (absolute, under the project root) by
@@ -100,19 +140,29 @@ impl<'a> EditorTabViewer<'a> {
             ui.weak("(empty)");
             return;
         };
+        // Ordered file list of this folder — the range for Shift-select.
+        let order: Vec<String> = entries
+            .iter()
+            .filter_map(|e| match e {
+                AssetEntry::File { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
         let mut enter: Option<PathBuf> = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for entry in entries {
                     match entry {
                         AssetEntry::Dir(name, _) => {
-                            if self.asset_tile(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name.as_str(), None) {
-                                enter = Some(dir.join(name));
+                            let folder = dir.join(name);
+                            let resp = self.folder_tile(ui, name.as_str(), &folder);
+                            if resp.double_clicked() {
+                                enter = Some(folder);
                             }
                         }
                         AssetEntry::File { name, path } => {
                             let (icon, color) = asset_kind_icon(path.as_str());
-                            self.asset_file_tile(ui, icon, color, name.as_str(), path.as_str());
+                            self.asset_file_tile(ui, icon, color, name.as_str(), path.as_str(), &order);
                         }
                     }
                 }
@@ -126,30 +176,34 @@ impl<'a> EditorTabViewer<'a> {
         }
     }
 
-    /// A bare clickable tile (icon + name). Returns true on double-click (used for
-    /// folders ⏵ descend). 84-pt wide so several fit per row.
-    pub(crate) fn asset_tile(
-        &mut self,
-        ui: &mut egui::Ui,
-        icon: &str,
-        color: egui::Color32,
-        name: &str,
-        _path: Option<&str>,
-    ) -> bool {
-        let resp = self.tile_frame(ui, icon, color, name, false);
-        resp.double_clicked()
+    /// A folder tile: double-click to descend, and a DROP TARGET — release a
+    /// dragged asset (or the whole selection) on it to move the files inside.
+    pub(crate) fn folder_tile(&mut self, ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
+        let resp = self.tile_frame(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name, false);
+        if resp.dnd_hover_payload::<AssetPayload>().is_some() {
+            ui.painter().rect_stroke(
+                resp.rect.shrink(2.0),
+                5.0,
+                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
+            self.cmd.move_assets = Some((self.move_sources(&p.path), dir.to_path_buf()));
+        }
+        resp
     }
 
-    /// A file tile: select on click, open on double-click (scripts/markdown), drag a
-    /// payload (models/scripts), and the shared context menu.
-    pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str) {
-        let selected = self.selected_asset.as_deref() == Some(path);
+    /// A file tile: select on click (Ctrl/Shift multi-select via `order`), open on
+    /// double-click (scripts/markdown), drag a payload, and the shared context menu.
+    pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str, order: &[String]) {
+        let selected = self.asset_is_selected(path);
         let resp = self.tile_frame(ui, icon, color, name, selected);
         // Every asset is a drag source — drop a model/script on the scene, or any
         // asset (texture, audio, clip…) onto a matching Inspector picker to fill it.
         resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
         if resp.clicked() {
-            *self.selected_asset = Some(path.to_string());
+            self.asset_click(ui, path, order);
         }
         let openable = is_script(path) || is_markdown(path);
         if resp.double_clicked() {
@@ -268,6 +322,14 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     pub(crate) fn asset_node_ui(&mut self, ui: &mut egui::Ui, entries: &[AssetEntry], dir: &Path) {
+        // This level's file order — the range for Shift-select.
+        let order: Vec<String> = entries
+            .iter()
+            .filter_map(|e| match e {
+                AssetEntry::File { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
         for entry in entries {
             match entry {
                 AssetEntry::Dir(name, children) => {
@@ -277,6 +339,20 @@ impl<'a> EditorTabViewer<'a> {
                         .show(ui, |ui| {
                             self.asset_node_ui(ui, children, &child_dir);
                         });
+                    // Drop a dragged asset (or the selection) here to move it in.
+                    let hr = &header.header_response;
+                    if hr.dnd_hover_payload::<AssetPayload>().is_some() {
+                        ui.painter().rect_stroke(
+                            hr.rect,
+                            2.0,
+                            egui::Stroke::new(1.5, ui.visuals().selection.stroke.color),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    if let Some(p) = hr.dnd_release_payload::<AssetPayload>() {
+                        self.cmd.move_assets =
+                            Some((self.move_sources(&p.path), child_dir.clone()));
+                    }
                     header.header_response.context_menu(|ui| {
                         self.new_asset_menu(ui, &child_dir);
                         ui.separator();
@@ -291,7 +367,7 @@ impl<'a> EditorTabViewer<'a> {
                     // Every asset drags (scene spawn for models/scripts; picker-fill
                     // for textures/audio/clips/…).
                     let draggable = true;
-                    let selected = self.selected_asset.as_deref() == Some(path.as_str());
+                    let selected = self.asset_is_selected(path);
                     let (icon, _) = asset_kind_icon(path);
                     let grip = "¦";
                     let label = format!("{grip} {icon} {name}");
@@ -318,7 +394,7 @@ impl<'a> EditorTabViewer<'a> {
                         ui.selectable_label(selected, label)
                     };
                     if resp.clicked() {
-                        *self.selected_asset = Some(path.clone());
+                        self.asset_click(ui, path, &order);
                     }
                     let openable = script || is_markdown(path);
                     if resp.double_clicked() {

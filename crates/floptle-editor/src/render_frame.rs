@@ -1032,6 +1032,7 @@ impl Editor {
         let script_errors = self.script_errors.as_slice();
         let ide_diag = self.ide_diag.as_ref();
         let selected_asset = &mut self.selected_asset;
+        let asset_selection = &mut self.asset_selection;
         let aspect_mode = &mut self.aspect_mode;
         let viewport_zoom = &mut self.viewport_zoom;
         let scene_rect = &mut self.scene_rect;
@@ -1545,6 +1546,7 @@ impl Editor {
                 assets_grid_dir,
                 project_root,
                 selected_asset,
+                asset_selection,
                 ide,
                 script_errors,
                 ide_diag,
@@ -3780,6 +3782,9 @@ impl Editor {
         }
         if let Some(path) = cmd.do_delete_asset {
             self.delete_asset(&path);
+        }
+        if let Some((sources, dest)) = cmd.move_assets {
+            self.move_assets(&sources, &dest);
         }
         // Pre-warm a model being dragged so its live ghost can render next frame
         // (the gather can't import — gpu/raster are borrowed there).
