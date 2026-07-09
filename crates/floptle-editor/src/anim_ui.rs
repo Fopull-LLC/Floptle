@@ -80,6 +80,11 @@ pub struct AnimUiState {
     /// In-flight key drag: (channel, original time, previewed time). The doc
     /// is only retimed on release, so egui ids stay stable through the drag.
     pub key_drag: Option<(usize, f32, f32)>,
+    /// Selected property key `(channel, track, key index)` — its value is edited
+    /// inline above the dopesheet (a texture picker for image lanes, else a number).
+    pub sel_prop: Option<(usize, usize, usize)>,
+    /// In-flight property-key drag: (channel, track, original time, previewed time).
+    pub prop_key_drag: Option<(usize, usize, f32, f32)>,
     /// Pre-record transforms of the target subtree — restored when ● Record
     /// turns off, so recording authors the CLIP, never the scene.
     pub record_restore: Vec<(Entity, floptle_core::Transform)>,
@@ -136,6 +141,8 @@ impl Default for AnimUiState {
             sel_event: None,
             tab_visible: false,
             key_drag: None,
+            sel_prop: None,
+            prop_key_drag: None,
             record_restore: Vec::new(),
             last_scene_local: HashMap::new(),
             last_scene_props: HashMap::new(),
@@ -1121,6 +1128,7 @@ impl EditorTabViewer<'_> {
                             self.anim_ui.target = Some(*e);
                             self.anim_ui.sel_anim = None;
                             self.anim_ui.clip_doc = None;
+                            self.anim_ui.sel_prop = None;
                             self.anim_ui.last_scene_local.clear();
                         }
                     }
@@ -1137,6 +1145,7 @@ impl EditorTabViewer<'_> {
                             self.anim_ui.clip_doc = None;
                             self.anim_ui.playhead = 0.0;
                             self.anim_ui.sel_event = None;
+                            self.anim_ui.sel_prop = None;
                         }
                     }
                 });
@@ -1333,6 +1342,7 @@ impl EditorTabViewer<'_> {
                 .as_ref()
                 .and_then(|k| Some((k.clone(), self.anim.clip(k)?.clone())));
             self.anim_ui.sel_event = None;
+            self.anim_ui.sel_prop = None;
         }
 
         ui.separator();
@@ -1402,6 +1412,25 @@ const ANIM_ZOOM_MAX: f32 = 3000.0;
 const ANIM_ROW_MIN: f32 = 0.5;
 const ANIM_ROW_MAX: f32 = 4.0;
 const ANIM_LABEL_W: f32 = 130.0;
+/// Property-lane key + label colours — a teal, distinct from the amber transform
+/// keys, so a node's property lanes read apart from its transform lane.
+const PROP_KEY_COLOR: Color32 = Color32::from_rgb(120, 210, 175);
+const PROP_LABEL_COLOR: Color32 = Color32::from_rgb(150, 200, 185);
+
+/// Draw a dopesheet key diamond centred at `c`.
+fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32) {
+    let s = 4.5;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(c.x, c.y - s),
+            Pos2::new(c.x + s, c.y),
+            Pos2::new(c.x, c.y + s),
+            Pos2::new(c.x - s, c.y),
+        ],
+        col,
+        Stroke::new(1.0, Color32::from_black_alpha(120)),
+    ));
+}
 
 /// Scroll-wheel navigation for the dopesheet, mirroring the particle timeline: plain
 /// wheel zooms X about the cursor (keeping the time under the pointer fixed), Alt+wheel
@@ -1538,10 +1567,10 @@ impl EditorTabViewer<'_> {
         out
     }
 
-    /// The "Property tracks" authoring section under the dopesheet: add/remove
-    /// lanes that animate a component field (opacity, colors, a UI **image**
-    /// swapping frame-by-frame…) and key their values at the playhead. Numeric
-    /// fields interpolate; image/text fields step (you don't blend two textures).
+    /// Property-track authoring, paired with the dopesheet above: the currently
+    /// selected key's value is edited HERE (its keys live on the timeline as
+    /// draggable diamonds under their node), plus an add-track builder and compact
+    /// per-track controls. Numeric fields interpolate; image/text fields step.
     fn property_tracks_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
         // Immutable data first, before borrowing the clip doc mutably.
         let tree = self.asset_tree;
@@ -1549,18 +1578,100 @@ impl EditorTabViewer<'_> {
 
         let st = &mut *self.anim_ui;
         let playhead = st.playhead;
-        let (add_node, add_comp, add_field) =
-            (st.prop_node.clone(), st.prop_comp.clone(), st.prop_field.clone());
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let dur = doc.duration.max(0.01);
 
+        // ---- selected key: edit its value + time inline (image picker / number) ----
+        let mut del_selected: Option<(usize, usize, usize)> = None;
+        if let Some((ci, ti, ki)) = st.sel_prop {
+            let valid = doc
+                .channels
+                .get(ci)
+                .and_then(|c| c.properties.get(ti))
+                .is_some_and(|pt| ki < pt.times.len());
+            if !valid {
+                st.sel_prop = None; // the track/key it pointed at is gone
+            } else {
+                let node_label = {
+                    let n = &doc.channels[ci].node;
+                    if n.is_empty() { "(this node)".to_string() } else { n.clone() }
+                };
+                let (comp, field) = {
+                    let pt = &doc.channels[ci].properties[ti];
+                    (pt.component.clone(), pt.field.clone())
+                };
+                let kind = prop_kind(&comp, &field);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(PROP_KEY_COLOR, format!("◆ {node_label} · {comp}.{field}"));
+                        ui.separator();
+                        ui.label("time");
+                        let mut t = doc.channels[ci].properties[ti].times[ki];
+                        if ui
+                            .add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=dur).suffix("s"))
+                            .changed()
+                        {
+                            doc.channels[ci].properties[ti].times[ki] = t;
+                            st.clip_dirty = true;
+                        }
+                        ui.label("value");
+                        match &mut doc.channels[ci].properties[ti].values[ki] {
+                            AnimPropValueDoc::Float(x) => {
+                                // Whole-frame steps feel right for a spritesheet cell.
+                                let speed = if comp == "UiElement" && field == "cell" { 0.25 } else { 0.01 };
+                                if ui.add(egui::DragValue::new(x).speed(speed)).changed() {
+                                    st.clip_dirty = true;
+                                }
+                            }
+                            AnimPropValueDoc::Text(s) => {
+                                if kind == PropKind::Text && field != "text" {
+                                    let label =
+                                        if s.is_empty() { "(pick image)".to_string() } else { s.clone() };
+                                    if let Some(pick) = crate::ui_widgets::asset_picker(
+                                        ui,
+                                        egui::Id::new(("prop-sel-tex", ci, ti)),
+                                        &label,
+                                        Some("(clear)"),
+                                        tree,
+                                        crate::assets::is_texture,
+                                        190.0,
+                                    ) {
+                                        *s = pick.unwrap_or_default();
+                                        st.clip_dirty = true;
+                                    }
+                                } else if ui
+                                    .add(egui::TextEdit::singleline(s).desired_width(160.0))
+                                    .changed()
+                                {
+                                    st.clip_dirty = true;
+                                }
+                            }
+                        }
+                        if ui.button("🗑 key").on_hover_text("delete this key (or press Del)").clicked() {
+                            del_selected = Some((ci, ti, ki));
+                        }
+                    });
+                });
+            }
+        }
+        if let Some((ci, ti, ki)) = del_selected {
+            let t = doc.channels[ci].properties[ti].times[ki];
+            delete_property_key(doc, ci, ti, t);
+            st.sel_prop = None;
+            st.clip_dirty = true;
+        }
+
+        // ---- add / manage tracks ----
+        let (add_node, add_comp, add_field) =
+            (st.prop_node.clone(), st.prop_comp.clone(), st.prop_field.clone());
         egui::CollapsingHeader::new("▦  Property tracks")
             .id_salt("anim-prop-tracks")
             .default_open(true)
             .show(ui, |ui| {
                 ui.small(
                     "Animate a component field — opacity, colors, or a UI image swapping \
-                     frame-by-frame. Image/text keys step; numbers interpolate.",
+                     frame-by-frame. Keys appear on the timeline above under their node; \
+                     click one to edit its value here. (● Record + change a property auto-keys it.)",
                 );
                 // ---- add-track builder row ----
                 let mut do_add = false;
@@ -1598,7 +1709,7 @@ impl EditorTabViewer<'_> {
                         });
                     if ui
                         .button("＋ Add track")
-                        .on_hover_text("add a lane for this field (keys added at the playhead)")
+                        .on_hover_text("add a lane for this field (then ＋ key, or Record)")
                         .clicked()
                     {
                         do_add = true;
@@ -1612,7 +1723,7 @@ impl EditorTabViewer<'_> {
 
                 ui.separator();
 
-                // ---- existing tracks ----
+                // ---- compact per-track rows (keys are edited on the timeline) ----
                 let mut remove: Option<(usize, usize)> = None; // (channel, track)
                 let mut any = false;
                 for ci in 0..doc.channels.len() {
@@ -1628,7 +1739,7 @@ impl EditorTabViewer<'_> {
                         };
                         let kind = prop_kind(&comp, &field);
                         ui.horizontal(|ui| {
-                            ui.strong(format!("{node_label} · {comp}.{field}"));
+                            ui.label(format!("{node_label} · {comp}.{field}"));
                             if ui
                                 .button("＋ key")
                                 .on_hover_text("key the current value at the playhead")
@@ -1641,8 +1752,8 @@ impl EditorTabViewer<'_> {
                                 );
                                 st.clip_dirty = true;
                             }
-                            // Step (hold each key) vs interpolate. Text tracks are
-                            // always stepped; numeric tracks (opacity, cell…) choose.
+                            // Step (hold each key) vs interpolate. Text tracks always
+                            // step; numeric tracks (opacity, cell…) choose.
                             if kind == PropKind::Text {
                                 ui.add_enabled(false, egui::Button::new("step"));
                             } else {
@@ -1657,89 +1768,26 @@ impl EditorTabViewer<'_> {
                                     st.clip_dirty = true;
                                 }
                             }
-                            if ui.button("🗑").on_hover_text("remove this track").clicked() {
+                            let nkeys = doc.channels[ci].properties[ti].times.len();
+                            ui.weak(format!("{nkeys} key{}", if nkeys == 1 { "" } else { "s" }));
+                            if ui.button("🗑").on_hover_text("remove this whole track").clicked() {
                                 remove = Some((ci, ti));
                             }
                         });
-                        // key rows
-                        let pt = &mut doc.channels[ci].properties[ti];
-                        let mut kill_key: Option<usize> = None;
-                        let n_keys = pt.times.len();
-                        for ki in 0..n_keys {
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
-                                let mut t = pt.times[ki];
-                                if ui
-                                    .add(
-                                        egui::DragValue::new(&mut t)
-                                            .speed(0.01)
-                                            .range(0.0..=dur)
-                                            .suffix("s"),
-                                    )
-                                    .changed()
-                                {
-                                    pt.times[ki] = t;
-                                    st.clip_dirty = true;
-                                }
-                                match &mut pt.values[ki] {
-                                    AnimPropValueDoc::Float(x) => {
-                                        if ui.add(egui::DragValue::new(x).speed(0.01)).changed() {
-                                            st.clip_dirty = true;
-                                        }
-                                    }
-                                    AnimPropValueDoc::Text(s) => {
-                                        // Image/texture path → rich asset picker; else text.
-                                        if kind == PropKind::Text && field != "text" {
-                                            let cur = s.clone();
-                                            let label =
-                                                if cur.is_empty() { "(pick image)" } else { cur.as_str() };
-                                            if let Some(pick) = crate::ui_widgets::asset_picker(
-                                                ui,
-                                                egui::Id::new(("prop-tex", ci, ti, ki)),
-                                                label,
-                                                Some("(clear)"),
-                                                tree,
-                                                crate::assets::is_texture,
-                                                160.0,
-                                            ) {
-                                                *s = pick.unwrap_or_default();
-                                                st.clip_dirty = true;
-                                            }
-                                        } else if ui
-                                            .add(egui::TextEdit::singleline(s).desired_width(140.0))
-                                            .changed()
-                                        {
-                                            st.clip_dirty = true;
-                                        }
-                                    }
-                                }
-                                if ui.small_button("✖").on_hover_text("delete key").clicked() {
-                                    kill_key = Some(ki);
-                                }
-                            });
-                        }
-                        if let Some(ki) = kill_key {
-                            pt.times.remove(ki);
-                            pt.values.remove(ki);
-                            st.clip_dirty = true;
-                        }
-                        ui.separator();
                     }
                 }
                 if !any {
-                    ui.weak("No property tracks yet — add one above (try UiElement · image for a sprite swap).");
+                    ui.weak(
+                        "No property tracks yet — add one above (try UiElement · image for a sprite \
+                         swap), or ● Record and change a property.",
+                    );
                 }
 
                 if let Some((ci, ti)) = remove {
                     doc.channels[ci].properties.remove(ti);
-                    // Drop a channel left empty by the removal.
-                    let ch = &doc.channels[ci];
-                    if ch.translation.is_none()
-                        && ch.rotation.is_none()
-                        && ch.scale.is_none()
-                        && ch.properties.is_empty()
-                    {
-                        doc.channels.remove(ci);
+                    drop_empty_channel(doc, ci);
+                    if st.sel_prop.is_some_and(|(sci, sti, _)| sci == ci && sti == ti) {
+                        st.sel_prop = None;
                     }
                     st.clip_dirty = true;
                 }
@@ -1808,8 +1856,8 @@ impl EditorTabViewer<'_> {
             st.clip_dirty = true;
         }
 
-        // Per-node key rows: union of lane times per channel.
-        let n_rows = doc.channels.len();
+        // One lane per channel (its transform union) PLUS one per property track.
+        let n_rows: usize = doc.channels.iter().map(|c| 1 + c.properties.len()).sum();
         let body_h = ruler_h + event_h + (n_rows.max(1) as f32) * lane_h + 8.0;
         let mut area = egui::ScrollArea::both().auto_shrink([false, true]).max_height(ui.available_height());
         if let Some(t) = st.scroll_target.take() {
@@ -1871,6 +1919,7 @@ impl EditorTabViewer<'_> {
                 );
                 if resp.clicked() {
                     st.sel_event = Some(ei);
+                    st.sel_prop = None;
                 }
                 if resp.dragged()
                     && let Some(p) = resp.interact_pointer_pos() {
@@ -1894,73 +1943,81 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
 
-            // ---- channel rows ----
+            // ---- channel + property rows ----
+            // Each channel draws a node lane (the union of its transform keys) then
+            // one lane per property track indented beneath it — every lane shares the
+            // same time axis and the same draggable diamonds, so a spritesheet `cell`
+            // reads as a keyframe under its node, not a separate numeric panel.
             let rows_top = full.top() + ruler_h + event_h;
-            let mut retime: Option<(usize, f32, f32)> = None; // (channel, old t, new t)
+            let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
             let mut delete_key: Option<(usize, f32)> = None;
-            for (ci, ch) in doc.channels.iter().enumerate() {
-                let y = rows_top + ci as f32 * lane_h;
-                let row = Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(full.width(), lane_h));
-                if ci % 2 == 0 {
+            let mut prop_retime: Option<(usize, usize, f32, f32)> = None; // (ci, ti, old, new)
+            let mut prop_delete: Option<(usize, usize, f32)> = None; // (ci, ti, t)
+            let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
+            let mut row_i = 0usize;
+            let stripe = |painter: &egui::Painter, row_i: usize, y: f32, ui: &egui::Ui| {
+                if row_i.is_multiple_of(2) {
                     painter.rect_filled(
                         Rect::from_min_size(Pos2::new(tl_left, y), egui::vec2(dur * px, lane_h)),
                         0.0,
                         ui.visuals().faint_bg_color.gamma_multiply(0.6),
                     );
                 }
-                let label = if ch.node.is_empty() { "(this node)" } else { ch.node.as_str() };
+            };
+            for ci in 0..doc.channels.len() {
+                // --- node lane: label + transform-union diamonds ---
+                let y = rows_top + row_i as f32 * lane_h;
+                stripe(&painter, row_i, y, ui);
+                row_i += 1;
+                let cy = y + lane_h * 0.5;
+                let label = if doc.channels[ci].node.is_empty() {
+                    "(this node)"
+                } else {
+                    doc.channels[ci].node.as_str()
+                };
                 painter.text(
-                    Pos2::new(full.left() + 4.0, row.center().y),
+                    Pos2::new(full.left() + 4.0, cy),
                     Align2::LEFT_CENTER,
                     label,
                     FontId::proportional(11.0),
                     ui.visuals().text_color(),
                 );
-                // Union of key times across the node's lanes.
-                let times = union_times(ch);
+                let times = union_times(&doc.channels[ci]);
                 for (ki, &t) in times.iter().enumerate() {
-                    // A drag previews at the pointer but the doc is only
-                    // retimed on RELEASE — live-resorting under the drag would
-                    // hand the drag to a neighboring key mid-gesture.
+                    // A drag previews at the pointer but the doc is only retimed on
+                    // RELEASE — live-resorting mid-drag would hand it to a neighbour.
                     let dragging_this = st
                         .key_drag
                         .is_some_and(|(dci, ot, _)| dci == ci && (ot - t).abs() < 1e-6);
-                    let draw_t =
-                        if dragging_this { st.key_drag.unwrap().2 } else { t };
-                    let x = time_to_x(draw_t);
-                    let c = Pos2::new(x, row.center().y);
-                    let key_rect = Rect::from_center_size(c, egui::vec2(12.0, 12.0));
+                    let draw_t = if dragging_this { st.key_drag.unwrap().2 } else { t };
+                    let c = Pos2::new(time_to_x(draw_t), cy);
                     let id = ui.id().with(("anim-key", ci, ki));
-                    let resp = ui.interact(key_rect, id, Sense::click_and_drag());
+                    let resp = ui
+                        .interact(Rect::from_center_size(c, egui::vec2(12.0, 12.0)), id, Sense::click_and_drag());
                     let col = if resp.hovered() || dragging_this { ACCENT } else { KEY_COLOR };
-                    // diamond
-                    let s = 4.5;
-                    painter.add(egui::Shape::convex_polygon(
-                        vec![
-                            Pos2::new(c.x, c.y - s),
-                            Pos2::new(c.x + s, c.y),
-                            Pos2::new(c.x, c.y + s),
-                            Pos2::new(c.x - s, c.y),
-                        ],
-                        col,
-                        Stroke::new(1.0, Color32::from_black_alpha(120)),
-                    ));
+                    key_diamond(&painter, c, col);
                     if resp.drag_started() {
                         st.key_drag = Some((ci, t, t));
                     }
                     if resp.dragged()
-                        && let Some(p) = resp.interact_pointer_pos() {
-                            let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
-                            if let Some(kd) = st.key_drag.as_mut()
-                                && kd.0 == ci && (kd.1 - t).abs() < 1e-6 {
-                                    kd.2 = nt;
-                                }
+                        && let Some(p) = resp.interact_pointer_pos()
+                    {
+                        let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                        if let Some(kd) = st.key_drag.as_mut()
+                            && kd.0 == ci
+                            && (kd.1 - t).abs() < 1e-6
+                        {
+                            kd.2 = nt;
                         }
+                    }
                     if resp.drag_stopped()
                         && let Some((dci, ot, nt)) = st.key_drag.take()
-                            && dci == ci && (ot - t).abs() < 1e-6 && (nt - ot).abs() > 1e-6 {
-                                retime = Some((ci, ot, nt));
-                            }
+                        && dci == ci
+                        && (ot - t).abs() < 1e-6
+                        && (nt - ot).abs() > 1e-6
+                    {
+                        retime = Some((ci, ot, nt));
+                    }
                     resp.context_menu(|ui| {
                         if ui.button("🗑 Delete key").clicked() {
                             delete_key = Some((ci, t));
@@ -1968,12 +2025,83 @@ impl EditorTabViewer<'_> {
                         }
                     });
                 }
+                // --- property lanes, indented under the node ---
+                for ti in 0..doc.channels[ci].properties.len() {
+                    let y = rows_top + row_i as f32 * lane_h;
+                    stripe(&painter, row_i, y, ui);
+                    row_i += 1;
+                    let cy = y + lane_h * 0.5;
+                    let plabel = {
+                        let pt = &doc.channels[ci].properties[ti];
+                        format!("   {}.{}", pt.component, pt.field)
+                    };
+                    painter.text(
+                        Pos2::new(full.left() + 10.0, cy),
+                        Align2::LEFT_CENTER,
+                        plabel,
+                        FontId::proportional(10.5),
+                        PROP_LABEL_COLOR,
+                    );
+                    let n_keys = doc.channels[ci].properties[ti].times.len();
+                    for ki in 0..n_keys {
+                        let t = doc.channels[ci].properties[ti].times[ki];
+                        let dragging_this = st.prop_key_drag.is_some_and(|(dci, dti, ot, _)| {
+                            dci == ci && dti == ti && (ot - t).abs() < 1e-6
+                        });
+                        let draw_t = if dragging_this { st.prop_key_drag.unwrap().3 } else { t };
+                        let c = Pos2::new(time_to_x(draw_t), cy);
+                        let id = ui.id().with(("anim-prop-key", ci, ti, ki));
+                        let resp = ui
+                            .interact(Rect::from_center_size(c, egui::vec2(11.0, 11.0)), id, Sense::click_and_drag());
+                        let selected = st.sel_prop == Some((ci, ti, ki));
+                        let col = if resp.hovered() || dragging_this || selected {
+                            ACCENT
+                        } else {
+                            PROP_KEY_COLOR
+                        };
+                        key_diamond(&painter, c, col);
+                        if resp.clicked() {
+                            prop_select = Some((ci, ti, ki));
+                        }
+                        if resp.drag_started() {
+                            st.prop_key_drag = Some((ci, ti, t, t));
+                            prop_select = Some((ci, ti, ki));
+                        }
+                        if resp.dragged()
+                            && let Some(p) = resp.interact_pointer_pos()
+                        {
+                            let nt = crate::timeline::snap_time(x_to_time(p.x), st.snap_fps);
+                            if let Some(kd) = st.prop_key_drag.as_mut()
+                                && kd.0 == ci
+                                && kd.1 == ti
+                                && (kd.2 - t).abs() < 1e-6
+                            {
+                                kd.3 = nt;
+                            }
+                        }
+                        if resp.drag_stopped()
+                            && let Some((dci, dti, ot, nt)) = st.prop_key_drag.take()
+                            && dci == ci
+                            && dti == ti
+                            && (ot - t).abs() < 1e-6
+                            && (nt - ot).abs() > 1e-6
+                        {
+                            prop_retime = Some((ci, ti, ot, nt));
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("🗑 Delete key").clicked() {
+                                prop_delete = Some((ci, ti, t));
+                                ui.close();
+                            }
+                        });
+                    }
+                }
             }
             if doc.channels.is_empty() {
                 painter.text(
                     Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
                     Align2::LEFT_CENTER,
-                    "no keys yet — ● Record, pose child nodes, and keys appear here",
+                    "no keys yet — ● Record, then pose child nodes or change a property",
                     FontId::proportional(11.5),
                     ui.visuals().weak_text_color(),
                 );
@@ -1984,12 +2112,21 @@ impl EditorTabViewer<'_> {
             }
             if let Some((ci, t)) = delete_key {
                 delete_channel_key(&mut doc.channels[ci], t);
-                if doc.channels[ci].translation.is_none()
-                    && doc.channels[ci].rotation.is_none()
-                    && doc.channels[ci].scale.is_none()
-                {
-                    doc.channels.remove(ci);
-                }
+                drop_empty_channel(doc, ci);
+                st.clip_dirty = true;
+            }
+            if let Some(sel) = prop_select {
+                st.sel_prop = Some(sel);
+                st.sel_event = None;
+            }
+            if let Some((ci, ti, old, new)) = prop_retime {
+                retime_property_key(&mut doc.channels[ci].properties[ti], old, new);
+                st.sel_prop = None; // key indices shift after a retime
+                st.clip_dirty = true;
+            }
+            if let Some((ci, ti, t)) = prop_delete {
+                delete_property_key(doc, ci, ti, t);
+                st.sel_prop = None;
                 st.clip_dirty = true;
             }
 
@@ -2029,13 +2166,38 @@ impl EditorTabViewer<'_> {
                 if fit {
                     st.fit_pending = true;
                 }
-                // Delete removes the selected event.
-                if del
-                    && let Some(ei) = st.sel_event.take()
-                    && ei < doc.events.len()
-                {
-                    doc.events.remove(ei);
-                    st.clip_dirty = true;
+                // Delete removes the selected property key first, else the event.
+                if del {
+                    if let Some((ci, ti, ki)) = st.sel_prop.take() {
+                        let removed = doc
+                            .channels
+                            .get_mut(ci)
+                            .and_then(|c| c.properties.get_mut(ti))
+                            .is_some_and(|pt| {
+                                if ki < pt.times.len() {
+                                    pt.times.remove(ki);
+                                    pt.values.remove(ki);
+                                    if pt.times.is_empty() {
+                                        // fall through to track/channel cleanup below
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                        if removed {
+                            if doc.channels[ci].properties[ti].times.is_empty() {
+                                doc.channels[ci].properties.remove(ti);
+                            }
+                            drop_empty_channel(doc, ci);
+                            st.clip_dirty = true;
+                        }
+                    } else if let Some(ei) = st.sel_event.take()
+                        && ei < doc.events.len()
+                    {
+                        doc.events.remove(ei);
+                        st.clip_dirty = true;
+                    }
                 }
             }
 
@@ -2208,6 +2370,51 @@ fn union_times(ch: &floptle_scene::AnimChannelDoc) -> Vec<f32> {
     extend(ch.scale.as_ref().map(|l| &l.times));
     v.sort_by(|a, b| a.total_cmp(b));
     v
+}
+
+/// Remove channel `ci` if it now has no transform lanes and no property tracks.
+fn drop_empty_channel(doc: &mut AnimClipDoc, ci: usize) {
+    if let Some(ch) = doc.channels.get(ci)
+        && ch.translation.is_none()
+        && ch.rotation.is_none()
+        && ch.scale.is_none()
+        && ch.properties.is_empty()
+    {
+        doc.channels.remove(ci);
+    }
+}
+
+/// Move a single property-track key from `old` to `new` (re-sorting; a key already
+/// at `new` is merged). The property counterpart to [`retime_channel`].
+fn retime_property_key(pt: &mut AnimPropTrackDoc, old: f32, new: f32) {
+    if let Some(i) = pt.times.iter().position(|&t| (t - old).abs() < 1e-4) {
+        let v = pt.values.remove(i);
+        pt.times.remove(i);
+        if let Some(j) = pt.times.iter().position(|&t| (t - new).abs() < 1e-4) {
+            pt.values[j] = v; // merge onto the existing key
+            return;
+        }
+        let at = pt.times.partition_point(|&t| t < new);
+        pt.times.insert(at, new);
+        pt.values.insert(at, v);
+    }
+}
+
+/// Delete the property-track key at `t`, dropping an emptied track and then an
+/// emptied channel.
+fn delete_property_key(doc: &mut AnimClipDoc, ci: usize, ti: usize, t: f32) {
+    {
+        let Some(ch) = doc.channels.get_mut(ci) else { return };
+        let Some(pt) = ch.properties.get_mut(ti) else { return };
+        if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            pt.times.remove(i);
+            pt.values.remove(i);
+        }
+        if pt.times.is_empty() {
+            ch.properties.remove(ti);
+        }
+    }
+    drop_empty_channel(doc, ci);
 }
 
 /// Move every lane key at `old` to `new` (keeping lanes sorted). A key already
@@ -2461,4 +2668,63 @@ fn scene_channel_names(world: &floptle_core::World, root: Entity) -> Vec<(Entity
     }
     walk(world, &children, root, true, &mut out, &mut seen);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_clip() -> AnimClipDoc {
+        AnimClipDoc {
+            name: "t".into(),
+            duration: 2.0,
+            source_model: String::new(),
+            channels: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    /// The recorder's property key write, the timeline's drag-retime, and the
+    /// delete path all round-trip on one lane — including dropping the emptied
+    /// track and its now-empty channel.
+    #[test]
+    fn property_key_write_retime_delete_roundtrip() {
+        let mut doc = empty_clip();
+        // Two cell keys auto-create the channel + a STEPPED track (no blending frames).
+        write_property_key(&mut doc, "Hand", "UiElement", "cell", 0.5, 3.0);
+        write_property_key(&mut doc, "Hand", "UiElement", "cell", 1.0, 5.0);
+        assert_eq!(doc.channels.len(), 1);
+        assert_eq!(doc.channels[0].node, "Hand");
+        assert_eq!(doc.channels[0].properties.len(), 1);
+        assert!(doc.channels[0].properties[0].step, "a spritesheet cell lane must step");
+        assert_eq!(doc.channels[0].properties[0].times, vec![0.5, 1.0]);
+
+        // Re-keying an existing time overwrites in place, never doubles it.
+        write_property_key(&mut doc, "Hand", "UiElement", "cell", 0.5, 9.0);
+        assert_eq!(doc.channels[0].properties[0].times, vec![0.5, 1.0]);
+        assert_eq!(doc.channels[0].properties[0].values[0], AnimPropValueDoc::Float(9.0));
+
+        // Dragging the second key before the first re-sorts the lane.
+        retime_property_key(&mut doc.channels[0].properties[0], 1.0, 0.25);
+        assert_eq!(doc.channels[0].properties[0].times, vec![0.25, 0.5]);
+        assert_eq!(doc.channels[0].properties[0].values[0], AnimPropValueDoc::Float(5.0));
+
+        // Deleting both keys drops the emptied track AND the now-empty channel.
+        delete_property_key(&mut doc, 0, 0, 0.25);
+        assert_eq!(doc.channels[0].properties[0].times, vec![0.5]);
+        delete_property_key(&mut doc, 0, 0, 0.5);
+        assert!(doc.channels.is_empty(), "an empty channel is removed");
+    }
+
+    /// A channel that still carries a transform lane is NOT dropped when its last
+    /// property track goes away.
+    #[test]
+    fn drop_empty_channel_spares_transform_lanes() {
+        let mut doc = empty_clip();
+        write_property_key(&mut doc, "N", "PointLight", "intensity", 0.0, 1.0);
+        doc.channels[0].translation = Some(floptle_scene::AnimTrackDoc3::default());
+        doc.channels[0].properties.clear();
+        drop_empty_channel(&mut doc, 0);
+        assert_eq!(doc.channels.len(), 1, "a channel with a transform lane survives");
+    }
 }
