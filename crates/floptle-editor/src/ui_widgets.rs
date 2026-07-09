@@ -237,10 +237,12 @@ fn picker_tile(
     }
 }
 
-/// A cached, downscaled egui thumbnail for a texture path (loaded from disk once,
-/// then kept in egui memory keyed by path so the grid doesn't re-read every frame).
-fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
-    let tid = egui::Id::new(("asset-thumb", path));
+/// A cached, downscaled egui thumbnail (at most `max` px on the long side) for a
+/// texture path — loaded from disk once, then kept in egui memory keyed by
+/// (path, max) so callers don't re-read every frame. Used by the picker grid
+/// (small) and the spritesheet cell picker (larger).
+pub(crate) fn asset_thumb(ui: &egui::Ui, path: &str, max: usize) -> Option<egui::TextureHandle> {
+    let tid = egui::Id::new(("asset-thumb", path, max));
     if let Some(h) = ui.data(|d| d.get_temp::<egui::TextureHandle>(tid)) {
         return Some(h);
     }
@@ -253,13 +255,17 @@ fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
         return None;
     }
     let img = floptle_assets::load_texture(Path::new(path))?;
-    let color = downscale_rgba(&img.pixels, img.width as usize, img.height as usize, 48);
-    let h = ui.ctx().load_texture(format!("thumb:{path}"), color, egui::TextureOptions::LINEAR);
+    let color = downscale_rgba(&img.pixels, img.width as usize, img.height as usize, max);
+    let h = ui.ctx().load_texture(format!("thumb:{max}:{path}"), color, egui::TextureOptions::LINEAR);
     ui.data_mut(|d| {
         d.insert_temp(tid, h.clone());
         d.insert_temp(budget_id, spent + 1);
     });
     Some(h)
+}
+
+fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
+    asset_thumb(ui, path, 48)
 }
 
 /// Box-downscale interleaved RGBA to at most `max` px on the long side — keeps

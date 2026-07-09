@@ -566,6 +566,7 @@ const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("UiElement", "tintG", "Image tint green 0..1."),
     ("UiElement", "tintB", "Image tint blue 0..1."),
     ("UiElement", "tintA", "Image tint alpha 0..1."),
+    ("UiElement", "cell", "Spritesheet cell index shown by the image (assign per frame for sprite animation)."),
     ("UiSlider", "value", "Current value (health-bar hook: bar.value = hp)."),
     ("UiSlider", "min", "Range start."),
     ("UiSlider", "max", "Range end."),
@@ -2260,7 +2261,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
+    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
     ApiEntry { label: "anim:restart", insert: ":restart(", doc: "anim:restart(\"Attack\" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot)." },
@@ -2508,7 +2509,7 @@ UI elements are nodes, so the same handles drive HUDs:
 
   • node.text — a UI element's label (read/write; nil on non-text nodes).
   • getcomponent(\"UiElement\") — visible, opacity, posX/posY, width/height,
-    radius, border, fillR/G/B/A, textSize, textR/G/B/A, tintR/G/B/A.
+    radius, border, fillR/G/B/A, textSize, textR/G/B/A, tintR/G/B/A, cell (spritesheet frame).
   • getcomponent(\"UiSlider\") — value / min / max on a slider track.
   • getcomponent(\"UiLayer\") — enabled / z / designHeight / worldSpace (1 = in-world panel).
 

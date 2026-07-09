@@ -208,15 +208,48 @@ impl Default for TextSpec {
 }
 
 /// Any texture from the project's assets — same paths the Material slot uses.
+/// A texture can be a **spritesheet**: `cols`×`rows` cells, of which the element
+/// shows cell index `cell` (row-major). Default 1×1 = the whole image. Animate
+/// `cell` with a stepped property track for frame-by-frame sprite animation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ImageSpec {
     pub texture: String,
     pub tint: [f32; 4],
+    /// Spritesheet columns (≥1). 1 with `rows` = whole image.
+    #[serde(default = "one_u32")]
+    pub cols: u32,
+    /// Spritesheet rows (≥1).
+    #[serde(default = "one_u32")]
+    pub rows: u32,
+    /// Which cell to show (row-major, clamped into range).
+    #[serde(default)]
+    pub cell: u32,
+}
+
+fn one_u32() -> u32 {
+    1
 }
 
 impl Default for ImageSpec {
     fn default() -> Self {
-        ImageSpec { texture: String::new(), tint: [1.0; 4] }
+        ImageSpec { texture: String::new(), tint: [1.0; 4], cols: 1, rows: 1, cell: 0 }
+    }
+}
+
+impl ImageSpec {
+    /// The UV sub-rect `[min_u, min_v, max_u, max_v]` for the current `cell` in
+    /// the `cols`×`rows` grid — the whole texture `[0,0,1,1]` when 1×1.
+    pub fn cell_uv(&self) -> [f32; 4] {
+        let cols = self.cols.max(1);
+        let rows = self.rows.max(1);
+        let n = cols * rows;
+        if n <= 1 {
+            return [0.0, 0.0, 1.0, 1.0];
+        }
+        let cell = self.cell.min(n - 1);
+        let (cx, cy) = (cell % cols, cell / cols);
+        let (du, dv) = (1.0 / cols as f32, 1.0 / rows as f32);
+        [cx as f32 * du, cy as f32 * dv, (cx + 1) as f32 * du, (cy + 1) as f32 * dv]
     }
 }
 
@@ -650,6 +683,9 @@ pub struct Quad {
     pub border_color: [f32; 4],
     /// Texture asset path (empty = solid fill).
     pub texture: String,
+    /// UV sub-rect `[min_u, min_v, max_u, max_v]` to sample — the whole texture
+    /// `[0,0,1,1]` normally, a single cell for a spritesheet image.
+    pub uv: [f32; 4],
     /// Set when a mask claims this element.
     pub clip: Option<Clip>,
 }
@@ -737,6 +773,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 border: s.border,
                 border_color: bc,
                 texture: String::new(),
+                uv: [0.0, 0.0, 1.0, 1.0],
                 clip,
             });
         }
@@ -752,6 +789,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 border: 0.0,
                 border_color: [0.0; 4],
                 texture: img.texture.clone(),
+                uv: img.cell_uv(),
                 clip,
             });
         }
@@ -994,7 +1032,7 @@ mod tests {
             ElementSpec {
                 size: [Size::Fixed(100.0), Size::Fixed(40.0)],
                 shape: Some(ShapeSpec { fill: [1.0, 0.0, 0.0, 0.8], ..Default::default() }),
-                image: Some(ImageSpec { texture: "textures/Grass.png".into(), tint: [1.0; 4] }),
+                image: Some(ImageSpec { texture: "textures/Grass.png".into(), ..Default::default() }),
                 text: Some(TextSpec { text: "hi".into(), ..Default::default() }),
                 opacity: 0.5,
                 ..Default::default()
@@ -1008,6 +1046,22 @@ mod tests {
         assert_eq!(dl.quads[1].texture, "textures/Grass.png");
         assert_eq!(dl.texts.len(), 1);
         assert!((dl.texts[0].color[3] - 0.5).abs() < 1e-6);
+        // A plain (1×1) image samples the whole texture.
+        assert_eq!(dl.quads[1].uv, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn spritesheet_cell_uv_walks_the_grid() {
+        // 4×2 sheet: cell 0 = top-left quarter-width/half-height, cell 5 = row 1 col 1.
+        let mut img = ImageSpec { texture: "sheet.png".into(), cols: 4, rows: 2, ..Default::default() };
+        assert_eq!(img.cell_uv(), [0.0, 0.0, 0.25, 0.5]);
+        img.cell = 5; // row 1 (5/4), col 1 (5%4)
+        assert_eq!(img.cell_uv(), [0.25, 0.5, 0.5, 1.0]);
+        img.cell = 99; // clamps to the last cell (7)
+        assert_eq!(img.cell_uv(), [0.75, 0.5, 1.0, 1.0]);
+        // 1×1 = whole texture regardless of cell.
+        let plain = ImageSpec { texture: "x".into(), cell: 3, ..Default::default() };
+        assert_eq!(plain.cell_uv(), [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

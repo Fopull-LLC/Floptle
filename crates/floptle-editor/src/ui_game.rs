@@ -631,6 +631,7 @@ impl Editor {
         e: Entity,
         ui: &mut egui::Ui,
         asset_tree: &[crate::assets::AssetEntry],
+        texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
     ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
@@ -933,10 +934,78 @@ impl Editor {
                     crate::assets::is_texture,
                     170.0,
                 ) {
-                    img.texture = pick.unwrap_or_default();
+                    let new = pick.unwrap_or_default();
+                    // Inherit the texture's spritesheet grid (set in its asset
+                    // settings) so a picked sheet slices without extra steps.
+                    let (sc, sr) = texture_settings.get(&new).map(|t| t.sheet()).unwrap_or((1, 1));
+                    img.cols = sc;
+                    img.rows = sr;
+                    img.cell = 0;
+                    img.texture = new;
                     c = true;
                 }
             });
+            // --- spritesheet cell picker (when the texture is a sheet) ---
+            let (sc, sr) =
+                texture_settings.get(&img.texture).map(|t| t.sheet()).unwrap_or((1, 1));
+            // Keep the image's grid in sync if the asset's split changed.
+            if (img.cols, img.rows) != (sc, sr) {
+                img.cols = sc;
+                img.rows = sr;
+                img.cell = img.cell.min((sc * sr).saturating_sub(1));
+                c = true;
+            }
+            if sc * sr > 1 {
+                ui.label(format!("sprite cell ({}×{} sheet)", sc, sr));
+                if let Some(sheet) = crate::ui_widgets::asset_thumb(ui, &img.texture, 256) {
+                    // A clickable grid of the sheet's cells; the current one is ringed.
+                    let cell_px = (240.0 / sc as f32).clamp(16.0, 48.0);
+                    egui::ScrollArea::vertical().max_height(180.0).id_salt(("cells", e.index())).show(ui, |ui| {
+                        for r in 0..sr {
+                            ui.horizontal(|ui| {
+                                for cc in 0..sc {
+                                    let idx = r * sc + cc;
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(cell_px, cell_px),
+                                        egui::Sense::click(),
+                                    );
+                                    let uv = egui::Rect::from_min_max(
+                                        egui::pos2(cc as f32 / sc as f32, r as f32 / sr as f32),
+                                        egui::pos2((cc + 1) as f32 / sc as f32, (r + 1) as f32 / sr as f32),
+                                    );
+                                    egui::Image::new(&sheet).uv(uv).paint_at(ui, rect);
+                                    let ring = if img.cell == idx {
+                                        egui::Color32::from_rgb(255, 200, 60)
+                                    } else if resp.hovered() {
+                                        egui::Color32::from_gray(200)
+                                    } else {
+                                        egui::Color32::from_gray(90)
+                                    };
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        1.0,
+                                        egui::Stroke::new(if img.cell == idx { 2.0 } else { 1.0 }, ring),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    if resp.on_hover_text(format!("cell {idx}")).clicked() {
+                                        img.cell = idx;
+                                        c = true;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("cell");
+                    let mut cell = img.cell;
+                    if ui.add(egui::DragValue::new(&mut cell).range(0..=(sc * sr - 1))).changed() {
+                        img.cell = cell;
+                        c = true;
+                    }
+                    ui.small("animate this (stepped property track) for sprite animation");
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("tint");
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut img.tint).changed();

@@ -22,6 +22,15 @@ hot-reload as everything else. A HUD is a subtree under a `UiRoot` (a canvas in
 screen space); a 3D world-space panel is the *same* subtree parented to a world
 node. This is the single biggest simplification in the design.
 
+> **Spritesheets (shipped).** A texture can be sliced into a `cols`×`rows`
+> grid in its asset settings (persisted per texture). A UI image that references
+> a sheet shows one `cell` (row-major index); pick the cell from a clickable
+> grid in the image inspector, or set `img.cell` from Lua. The renderer samples
+> just that cell's UV sub-rect (`ImageSpec::cell_uv`). **Sprite animation** =
+> animating `cell` with a stepped property track (see
+> [animation.md](animation.md)). Assigning an oversized sheet no longer
+> crashes — textures past the GPU's max dimension are downscaled to fit.
+
 > **Screen vs world space (shipped).** The layer component (`UiLayer`) has a
 > `space` field — `Screen` (default: a flat overlay that fills the window) or
 > `World` (a flat panel living in the 3D scene at the layer node's transform,
