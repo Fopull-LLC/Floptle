@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use floptle_scene::MaterialDoc;
 
 use crate::assets::{
-    asset_kind_icon, asset_rel_path, is_markdown, is_model, is_scene, is_script,
-    reveal_in_explorer, truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
+    asset_kind_icon, asset_rel_path, is_markdown, is_scene, is_script, reveal_in_explorer,
+    truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
 };
 use crate::inspector::material_props_ui;
 use crate::{anim, anim_ui, EditorTabViewer, PreviewView};
@@ -144,11 +144,10 @@ impl<'a> EditorTabViewer<'a> {
     /// payload (models/scripts), and the shared context menu.
     pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str) {
         let selected = self.selected_asset.as_deref() == Some(path);
-        let draggable = is_model(path) || is_script(path) || anim_ui::is_anim_clip(path);
         let resp = self.tile_frame(ui, icon, color, name, selected);
-        if draggable {
-            resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
-        }
+        // Every asset is a drag source — drop a model/script on the scene, or any
+        // asset (texture, audio, clip…) onto a matching Inspector picker to fill it.
+        resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
         if resp.clicked() {
             *self.selected_asset = Some(path.to_string());
         }
@@ -288,12 +287,13 @@ impl<'a> EditorTabViewer<'a> {
                     });
                 }
                 AssetEntry::File { name, path } => {
-                    let model = is_model(path);
                     let script = is_script(path);
-                    let draggable = model || script || anim_ui::is_anim_clip(path);
+                    // Every asset drags (scene spawn for models/scripts; picker-fill
+                    // for textures/audio/clips/…).
+                    let draggable = true;
                     let selected = self.selected_asset.as_deref() == Some(path.as_str());
                     let (icon, _) = asset_kind_icon(path);
-                    let grip = if draggable { "¦" } else { " " };
+                    let grip = "¦";
                     let label = format!("{grip} {icon} {name}");
                     // A single widget that senses BOTH click and drag. (The old
                     // dnd_drag_source layered a drag-sense interaction over the label,
