@@ -157,6 +157,10 @@ pub struct AnimSystem {
     /// Transforms captured before a scene-binding preview wrote them (restored
     /// when the preview retargets/stops so editing never corrupts the scene).
     pub preview_restore: Vec<(Entity, Transform)>,
+    /// Property-carrying components (UI/light/material) captured before a
+    /// property-track preview overwrote them — the counterpart to
+    /// `preview_restore` so scrubbing a cell/opacity lane is also non-destructive.
+    pub preview_restore_props: Vec<(Entity, PropRestore)>,
     /// Pending warnings for the Console (e.g. a script playing an unknown state).
     pub warnings: Vec<String>,
     /// Warning keys already emitted this play session (one warning, not 60/s).
@@ -277,11 +281,28 @@ impl AnimSystem {
         self.restore_preview_now();
     }
 
-    /// Undo a scene-binding preview's transform writes.
+    /// Undo a scene-binding preview's transform + property writes.
     pub fn restore_preview(&mut self, world: &mut World) {
         for (e, tr) in self.preview_restore.drain(..) {
             if let Some(slot) = world.get_mut::<Transform>(e) {
                 *slot = tr;
+            }
+        }
+        for (e, snap) in std::mem::take(&mut self.preview_restore_props) {
+            if let Some(el) = snap.element
+                && let Some(slot) = world.get_mut::<floptle_ui::ElementSpec>(e)
+            {
+                *slot = el;
+            }
+            if let Some(m) = snap.matter
+                && let Some(slot) = world.get_mut::<Matter>(e)
+            {
+                *slot = m;
+            }
+            if let Some(mat) = snap.material
+                && let Some(slot) = world.get_mut::<floptle_core::Material>(e)
+            {
+                *slot = mat;
             }
         }
     }
@@ -290,6 +311,7 @@ impl AnimSystem {
         // (no world here — callers that can restore pass through
         // `restore_preview`; this just forgets, for teardown paths)
         self.preview_restore.clear();
+        self.preview_restore_props.clear();
     }
 }
 
@@ -873,6 +895,16 @@ pub fn bone_world_matrix(
 /// Preview (edit-mode) apply for ONE entity at an explicit time: bind if
 /// needed, seek the base layer, advance(0), apply. Scene bindings snapshot
 /// the transforms they touch so the preview can be undone.
+/// The property-carrying components a preview may overwrite, captured so the
+/// authored scene returns after each preview frame. Cloned only for entities a
+/// property-animating clip actually touches — see [`AnimSystem::preview_restore_props`].
+#[derive(Default)]
+pub struct PropRestore {
+    pub element: Option<floptle_ui::ElementSpec>,
+    pub matter: Option<Matter>,
+    pub material: Option<floptle_core::Material>,
+}
+
 pub fn preview_pose(
     system: &mut AnimSystem,
     world: &mut World,
@@ -901,6 +933,26 @@ pub fn preview_pose(
                     }
             }
         }
+    // ...and the property-carrying components a property lane will overwrite, so
+    // scrubbing a cell/opacity/color track is non-destructive like transforms.
+    // Only for a controller that actually animates properties (skips the common
+    // transform-only rig — no clones, no cost).
+    if system.preview_restore_props.is_empty()
+        && let Some(AnimInstance { binding: AnimBinding::Nodes { entities, .. }, ctl, .. }) =
+            system.instances.get(&e)
+        && ctl.has_properties()
+    {
+        for ent in entities.iter().flatten() {
+            let snap = PropRestore {
+                element: world.get::<floptle_ui::ElementSpec>(*ent).cloned(),
+                matter: world.get::<Matter>(*ent).cloned(),
+                material: world.get::<floptle_core::Material>(*ent).cloned(),
+            };
+            if snap.element.is_some() || snap.matter.is_some() || snap.material.is_some() {
+                system.preview_restore_props.push((*ent, snap));
+            }
+        }
+    }
     if let Some(inst) = system.instances.get_mut(&e)
         && let Some((li, si)) = inst.ctl.find_state(state, None) {
             // Snap straight to the state (no fade) and seek.

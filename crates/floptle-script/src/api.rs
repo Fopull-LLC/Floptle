@@ -16,7 +16,7 @@ use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
 /// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
 /// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
 /// more components / fields.
-pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
+pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
     if let Some(Matter::PointLight { color, intensity, range }) = world.get::<Matter>(e) {
         out.insert(
