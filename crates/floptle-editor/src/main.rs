@@ -263,6 +263,8 @@ struct EditorCmd {
     do_rename: Option<(String, String)>,
     /// Delete this asset file/folder (absolute path).
     delete_asset: Option<String>,
+    /// Move these asset files/folders (absolute paths) into a destination folder.
+    move_assets: Option<(Vec<String>, PathBuf)>,
     /// Extract a model's embedded animation clips to assets/animations/ (a model path).
     extract_anims: Option<String>,
     /// Attach / change / remove a node's AnimationController: (entity, Some(key) | None).
@@ -415,6 +417,7 @@ struct EditorTabViewer<'a> {
     /// The project root — the directory the asset browser is rooted at.
     project_root: &'a Path,
     selected_asset: &'a mut Option<String>,
+    asset_selection: &'a mut Vec<String>,
     ide: &'a mut IdeState,
     /// Errors from the last script frame (shown in the Scripting tab).
     script_errors: &'a [String],
@@ -1291,6 +1294,9 @@ struct Editor {
     ide: IdeState,
     /// The asset selected in the browser (shown in the Inspector); `None` = a node.
     selected_asset: Option<String>,
+    /// The full multi-selection in the browser (Ctrl/Shift-click); the primary is
+    /// `selected_asset`. Used for bulk move/delete.
+    asset_selection: Vec<String>,
     /// Resolution-simulator framing for the Scene tab.
     aspect_mode: AspectMode,
     viewport_zoom: f32,
