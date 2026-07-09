@@ -630,8 +630,7 @@ impl Editor {
         world: &mut floptle_core::World,
         e: Entity,
         ui: &mut egui::Ui,
-        tex_list: &[String],
-        font_list: &[String],
+        asset_tree: &[crate::assets::AssetEntry],
     ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
@@ -895,12 +894,13 @@ impl Editor {
                 } else {
                     t.font.rsplit('/').next().unwrap_or(&t.font).to_string()
                 };
-                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new(("ui_font_pick", e.index())),
                     &current,
                     Some("(default)"),
-                    font_list,
+                    asset_tree,
+                    crate::assets::is_font,
                     170.0,
                 ) {
                     t.font = pick.unwrap_or_default();
@@ -924,12 +924,13 @@ impl Editor {
                 } else {
                     img.texture.rsplit('/').next().unwrap_or(&img.texture).to_string()
                 };
-                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new(("ui_tex_pick", e.index())),
                     &current,
                     Some("(none)"),
-                    tex_list,
+                    asset_tree,
+                    crate::assets::is_texture,
                     170.0,
                 ) {
                     img.texture = pick.unwrap_or_default();

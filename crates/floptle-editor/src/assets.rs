@@ -138,17 +138,6 @@ pub(crate) fn is_font(path: &str) -> bool {
     p.ends_with(".ttf") || p.ends_with(".otf")
 }
 
-/// Collect every font path in the asset tree (for the UI text font picker).
-pub(crate) fn collect_font_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
-    for e in entries {
-        match e {
-            AssetEntry::Dir(_, children) => collect_font_paths(children, out),
-            AssetEntry::File { path, .. } if is_font(path) => out.push(path.clone()),
-            AssetEntry::File { .. } => {}
-        }
-    }
-}
-
 /// Collect every texture image path in the asset tree (for the material picker).
 pub(crate) fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
     for e in entries {
@@ -167,17 +156,6 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
         .strip_prefix(project_root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string())
-}
-
-/// Collect every audio clip path in the asset tree (for the AudioSource clip picker).
-pub(crate) fn collect_audio_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
-    for e in entries {
-        match e {
-            AssetEntry::Dir(_, children) => collect_audio_paths(children, out),
-            AssetEntry::File { path, .. } if is_audio(path) => out.push(path.clone()),
-            AssetEntry::File { .. } => {}
-        }
-    }
 }
 
 /// Collect the path of every importable model (.glb/.gltf) in the asset tree — for the

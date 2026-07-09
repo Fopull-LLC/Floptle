@@ -1525,8 +1525,7 @@ impl EditorTabViewer<'_> {
     /// fields interpolate; image/text fields step (you don't blend two textures).
     fn property_tracks_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
         // Immutable data first, before borrowing the clip doc mutably.
-        let mut tex_list: Vec<String> = Vec::new();
-        crate::assets::collect_texture_paths(self.asset_tree, &mut tex_list);
+        let tree = self.asset_tree;
         let subtree = self.subtree_names(target);
 
         let st = &mut *self.anim_ui;
@@ -1654,17 +1653,18 @@ impl EditorTabViewer<'_> {
                                         }
                                     }
                                     AnimPropValueDoc::Text(s) => {
-                                        // Image/texture path → searchable picker; else text.
+                                        // Image/texture path → rich asset picker; else text.
                                         if kind == PropKind::Text && field != "text" {
                                             let cur = s.clone();
                                             let label =
                                                 if cur.is_empty() { "(pick image)" } else { cur.as_str() };
-                                            if let Some(pick) = crate::ui_widgets::searchable_picker(
+                                            if let Some(pick) = crate::ui_widgets::asset_picker(
                                                 ui,
                                                 egui::Id::new(("prop-tex", ci, ti, ki)),
                                                 label,
                                                 Some("(clear)"),
-                                                &tex_list,
+                                                tree,
+                                                crate::assets::is_texture,
                                                 160.0,
                                             ) {
                                                 *s = pick.unwrap_or_default();

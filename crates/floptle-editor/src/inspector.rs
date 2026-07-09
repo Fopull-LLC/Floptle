@@ -97,7 +97,7 @@ pub(crate) fn material_props_ui(
     ui: &mut egui::Ui,
     m: &mut Material,
     presets: &[(String, floptle_scene::MaterialDoc)],
-    textures: &[String],
+    asset_tree: &[crate::assets::AssetEntry],
     name_buf: &mut String,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
@@ -112,12 +112,13 @@ pub(crate) fn material_props_ui(
             .as_deref()
             .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
             .unwrap_or_else(|| "none".into());
-        if let Some(pick) = crate::ui_widgets::searchable_picker(
+        if let Some(pick) = crate::ui_widgets::asset_picker(
             ui,
             egui::Id::new("mat_tex"),
             if cur.is_empty() { "none" } else { &cur },
             Some("none"),
-            textures,
+            asset_tree,
+            crate::assets::is_texture,
             160.0,
         ) {
             m.texture = pick;
@@ -523,8 +524,7 @@ impl EditorTabViewer<'_> {
                             Matter::Mesh { asset_path } => {
                                 ui.label("imported mesh");
                                 // Swap the model freely — pick any model in the project.
-                                let mut models = Vec::new();
-                                collect_model_paths(self.asset_tree, &mut models);
+                                let tree = self.asset_tree;
                                 let file_label = |p: &str| {
                                     Path::new(p)
                                         .file_name()
@@ -533,12 +533,13 @@ impl EditorTabViewer<'_> {
                                 };
                                 ui.horizontal(|ui| {
                                     ui.label("model");
-                                    if let Some(Some(p)) = crate::ui_widgets::searchable_picker(
+                                    if let Some(Some(p)) = crate::ui_widgets::asset_picker(
                                         ui,
                                         egui::Id::new("mesh-model"),
                                         &file_label(asset_path),
                                         None,
-                                        &models,
+                                        tree,
+                                        is_model,
                                         180.0,
                                     )
                                         && *asset_path != p {
@@ -656,20 +657,20 @@ impl EditorTabViewer<'_> {
                                         cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
                                     });
                                 } else {
-                                    let mut tl = Vec::new();
-                                    collect_texture_paths(self.asset_tree, &mut tl);
+                                    let tree = self.asset_tree;
                                     let cur = texture.clone().unwrap_or_default();
                                     let label = |p: &str| {
                                         Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
                                     };
                                     ui.horizontal(|ui| {
                                         ui.label("texture");
-                                        if let Some(Some(p)) = crate::ui_widgets::searchable_picker(
+                                        if let Some(Some(p)) = crate::ui_widgets::asset_picker(
                                             ui,
                                             egui::Id::new("sky-tex"),
                                             &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
                                             None,
-                                            &tl,
+                                            tree,
+                                            is_texture,
                                             180.0,
                                         ) {
                                             *texture = Some(p);
@@ -883,11 +884,9 @@ impl EditorTabViewer<'_> {
                     if remove {
                         cmd.remove_material = Some(e);
                     }
-                    let mut tex_list = Vec::new();
-                    collect_texture_paths(self.asset_tree, &mut tex_list);
                     ui.indent("material_props", |ui| {
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -980,15 +979,10 @@ impl EditorTabViewer<'_> {
                     if remove {
                         cmd.remove_audio = Some(e);
                     }
-                    // Clip candidates: every audio file, as project-relative keys.
-                    let mut audio_paths = Vec::new();
-                    crate::assets::collect_audio_paths(self.asset_tree, &mut audio_paths);
-                    let clips: Vec<String> = audio_paths
-                        .iter()
-                        .map(|p| {
-                            crate::assets::asset_rel_path(p, self.project_root).replace('\\', "/")
-                        })
-                        .collect();
+                    // Clip candidates: browse the audio files as a foldered tree;
+                    // the picked full path is stored as a project-relative key.
+                    let tree = self.asset_tree;
+                    let root = self.project_root;
                     let track_names: Vec<String> =
                         std::iter::once(floptle_audio::MASTER.to_string())
                             .chain(self.mixer.tracks.iter().map(|t| t.name.clone()))
@@ -999,15 +993,20 @@ impl EditorTabViewer<'_> {
                                 ui.label("Clip");
                                 let sel =
                                     if src.clip.is_empty() { "(none)" } else { src.clip.as_str() };
-                                if let Some(pick) = crate::ui_widgets::searchable_picker(
+                                if let Some(pick) = crate::ui_widgets::asset_picker(
                                     ui,
                                     egui::Id::new(("audio_clip_pick", e)),
                                     sel,
                                     Some("(none)"),
-                                    &clips,
+                                    tree,
+                                    crate::assets::is_audio,
                                     200.0,
                                 ) {
-                                    src.clip = pick.unwrap_or_default();
+                                    src.clip = pick
+                                        .map(|p| {
+                                            crate::assets::asset_rel_path(&p, root).replace('\\', "/")
+                                        })
+                                        .unwrap_or_default();
                                     cmd.inspector_changed = true;
                                 }
                                 if !src.clip.is_empty()
@@ -1241,11 +1240,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
-                    let mut ui_tex_list = Vec::new();
-                    crate::assets::collect_texture_paths(self.asset_tree, &mut ui_tex_list);
-                    let mut ui_font_list = Vec::new();
-                    crate::assets::collect_font_paths(self.asset_tree, &mut ui_font_list);
-                    if crate::Editor::ui_inspector(world, e, ui, &ui_tex_list, &ui_font_list) {
+                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree) {
                         cmd.inspector_changed = true;
                     }
                 }
@@ -1895,10 +1890,8 @@ impl EditorTabViewer<'_> {
                             .unwrap_or_default();
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
-                        let mut tex_list = Vec::new();
-                        collect_texture_paths(self.asset_tree, &mut tex_list);
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, &tex_list, self.mat_name_buf);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
