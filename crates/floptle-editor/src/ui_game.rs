@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 
-use floptle_core::{Entity, Parent, Transform};
+use floptle_core::math::{Vec3, Vec4};
+use floptle_core::{Entity, Matter, Parent, Transform};
+use floptle_render::{Projection, RenderCamera};
 use floptle_scene::MatterDoc;
 use floptle_ui::{
     Align, Anchor, Dir, ElementSpec, ImageSpec, Justify, MaskSpec, Place, ShapeSpec, Size,
@@ -19,6 +21,30 @@ use floptle_ui::{
 };
 
 use crate::Editor;
+
+/// The camera the game is being viewed through while playing: the scene's
+/// active `Camera` node, or the editor fly-cam if none is marked active. Used
+/// to cast the pointer ray for world-space UI interaction.
+fn play_camera(world: &floptle_core::World, fallback: RenderCamera) -> RenderCamera {
+    let active = world
+        .query::<Matter>()
+        .find_map(|(e, m)| matches!(m, Matter::Camera { active: true, .. }).then_some(e));
+    match active {
+        Some(e) => {
+            let fov_y = match world.get::<Matter>(e) {
+                Some(Matter::Camera { fov_y, .. }) => *fov_y,
+                _ => 60f32.to_radians(),
+            };
+            let wt = floptle_core::world_transform(world, e);
+            RenderCamera::new(
+                wt.translation,
+                wt.rotation,
+                Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+            )
+        }
+        None => fallback,
+    }
+}
 
 
 
@@ -134,8 +160,8 @@ impl Editor {
         let mut layers: Vec<(i32, Vec<floptle_ui::Node>, f32)> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-            if !layer.enabled {
-                continue;
+            if !layer.enabled || layer.is_world() {
+                continue; // world-space layers render in the scene, not as an overlay
             }
             let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
             let roots: Vec<_> = kids
@@ -172,15 +198,21 @@ impl Editor {
         out
     }
 
-    /// Scene-view authoring: each UI layer as a WORLD CANVAS at its node's
-    /// transform — origin = translation (canvas top-left), plane axes from its
-    /// rotation, [`UI_WORLD_SCALE`] world units per design unit. Returns per
-    /// layer: (draw list, solved rects in design units, origin, right, down).
-    /// The layer node itself is arranged with the normal move/rotate gizmos.
+    /// UI layers rendered as WORLD CANVASES — a flat quad at each layer node's
+    /// transform: origin = translation (canvas top-left), plane axes from its
+    /// rotation, `canvas_scale` world units per design unit. Returns per layer:
+    /// (draw list, solved rects in design units, origin, right, down, design_vp).
+    ///
+    /// `include_screen` picks which layers qualify:
+    /// - `true` (Scene authoring view): EVERY enabled layer, so a screen-space
+    ///   layer still shows as a movable hologram you can arrange.
+    /// - `false` (in-game): only [`UiSpace::World`] layers — screen-space ones
+    ///   are drawn as the flat overlay instead.
     #[allow(clippy::type_complexity)]
     pub(crate) fn gather_ui_world(
         &mut self,
         window_aspect: f32,
+        include_screen: bool,
     ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3], [f32; 2])>
     {
         self.ensure_ui_fonts();
@@ -209,7 +241,7 @@ impl Editor {
         let mut textures: Vec<String> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-            if !layer.enabled {
+            if !layer.enabled || (!include_screen && !layer.is_world()) {
                 continue;
             }
             let roots: Vec<_> = kids
@@ -289,10 +321,15 @@ impl Editor {
             return;
         }
         let pointer = self.ui_pointer();
-        // Collect every interactive element's solved rect, in draw order
-        // (later = on top): (id, rect design-units, scale, slider spec).
-        let mut items: Vec<(u32, [f32; 4], f32, Option<SliderSpec>)> = Vec::new();
-        if let Some((_, viewport)) = pointer
+        // Collect every interactive element in draw order (later = on top). Each
+        // item carries the pointer's position IN THAT LAYER'S design units, so
+        // screen-space (pointer px / scale) and world-space (camera ray → panel
+        // plane) hit-test through one uniform `contains`: (id, rect, pointer
+        // design-units or None if off-panel, slider spec).
+        // (id, rect design-units, pointer in design-units or None if off-panel, slider).
+        type InteractItem = (u32, [f32; 4], Option<[f32; 2]>, Option<SliderSpec>);
+        let mut items: Vec<InteractItem> = Vec::new();
+        if let Some((ptr_px, viewport)) = pointer
             && viewport[0] > 1.0
             && viewport[1] > 1.0
         {
@@ -316,25 +353,74 @@ impl Editor {
                     .unwrap_or_default();
                 Some(floptle_ui::Node { id: e.index(), spec, children })
             }
-            let mut layers: Vec<(i32, Vec<floptle_ui::Node>, f32)> = Vec::new();
+            // Camera-relative pointer ray (for world-space panels). ADR-0015:
+            // the world is offset to the camera, so the ray origin is ~0.
+            let cam = play_camera(&self.world, self.camera.render_camera());
+            let aspect = viewport[0] / viewport[1];
+            let inv = cam.view_proj(aspect).inverse();
+            let ndc = [ptr_px[0] / viewport[0] * 2.0 - 1.0, 1.0 - ptr_px[1] / viewport[1] * 2.0];
+            let near = inv * Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
+            let far = inv * Vec4::new(ndc[0], ndc[1], 1.0, 1.0);
+            let ro = near.truncate() / near.w;
+            let rd = (far.truncate() / far.w - ro).normalize();
+
+            // (z, roots, layer) in draw order.
+            let mut layers: Vec<(i32, Vec<floptle_ui::Node>, UiLayer, Entity)> = Vec::new();
             for e in &order {
                 let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
                 if !layer.enabled {
                     continue;
                 }
-                let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
                 let roots: Vec<_> = kids
                     .get(&e.index())
                     .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
                     .unwrap_or_default();
                 if !roots.is_empty() {
-                    layers.push((layer.z, roots, scale));
+                    layers.push((layer.z, roots, layer, *e));
                 }
             }
             layers.sort_by_key(|(z, ..)| *z);
             if let Some(uir) = self.ui_render.as_ref() {
-                for (_, roots, scale) in &layers {
-                    let design_vp = [viewport[0] / scale, viewport[1] / scale];
+                for (_, roots, layer, e) in &layers {
+                    // Design viewport + the pointer's position within it.
+                    let (design_vp, ptr_design) = if layer.is_world() {
+                        // Ray → panel plane; design coords along right/down axes.
+                        let dh = layer.design_height;
+                        let dvp = [dh * aspect.max(0.1), dh];
+                        let wt = floptle_core::world_transform(&self.world, *e);
+                        let ws = layer.canvas_scale.max(0.0001);
+                        let right = wt.rotation * Vec3::X * ws;
+                        let down = wt.rotation * (-Vec3::Y) * ws;
+                        let origin = Vec3::new(
+                            (wt.translation.x - cam.world_position.x) as f32,
+                            (wt.translation.y - cam.world_position.y) as f32,
+                            (wt.translation.z - cam.world_position.z) as f32,
+                        );
+                        let n = right.cross(down);
+                        let denom = rd.dot(n);
+                        let pd = if denom.abs() > 1e-6 {
+                            let t = (origin - ro).dot(n) / denom;
+                            if t > 0.0 {
+                                let hit = ro + rd * t;
+                                let rel = hit - origin;
+                                Some([
+                                    rel.dot(right) / right.length_squared(),
+                                    rel.dot(down) / down.length_squared(),
+                                ])
+                            } else {
+                                None // panel is behind the camera
+                            }
+                        } else {
+                            None // ray parallel to the panel
+                        };
+                        (dvp, pd)
+                    } else {
+                        let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
+                        (
+                            [viewport[0] / scale, viewport[1] / scale],
+                            Some([ptr_px[0] / scale, ptr_px[1] / scale]),
+                        )
+                    };
                     let measure = |t: &TextSpec| uir.measure_spec(t);
                     let placed = floptle_ui::solve(roots, design_vp, &measure);
                     fn specs<'a>(n: &'a floptle_ui::Node, m: &mut HashMap<u32, &'a ElementSpec>) {
@@ -351,7 +437,7 @@ impl Editor {
                         let Some(spec) = spec_of.get(&pl.id) else { continue };
                         let slider = spec.slider.filter(|s| s.interact);
                         if spec.button || slider.is_some() {
-                            items.push((pl.id, pl.rect, *scale, slider));
+                            items.push((pl.id, pl.rect, ptr_design, slider));
                         }
                     }
                 }
@@ -360,14 +446,12 @@ impl Editor {
         let contains = |r: &[f32; 4], p: &[f32; 2]| {
             p[0] >= r[0] && p[1] >= r[1] && p[0] <= r[0] + r[2] && p[1] <= r[1] + r[3]
         };
-        // Topmost interactive element under the pointer.
-        let hover = pointer.and_then(|(p, _)| {
-            items
-                .iter()
-                .rev()
-                .find(|(_, rect, scale, _)| contains(rect, &[p[0] / scale, p[1] / scale]))
-                .map(|(id, ..)| *id)
-        });
+        // Topmost interactive element under the pointer (per-item design pointer).
+        let hover = items
+            .iter()
+            .rev()
+            .find(|(_, rect, pd, _)| pd.is_some_and(|p| contains(rect, &p)))
+            .map(|(id, ..)| *id);
         if hover != self.ui_hover {
             if let Some(old) = self.ui_hover {
                 self.ui_events.push((old, "hoverEnd"));
@@ -382,17 +466,19 @@ impl Editor {
             self.ui_events.push((h, "pressed"));
         }
         // A grabbed interactive slider follows the pointer while held —
-        // even when it wanders off the track (normal drag feel).
+        // even when it wanders off the track (normal drag feel). The pointer is
+        // already in the panel's design units (screen or world) from gathering.
         if down
-            && let (Some(a), Some((p, _))) = (self.ui_active, pointer)
-            && let Some((id, rect, scale, Some(s))) =
-                items.iter().find(|(id, ..)| *id == a).copied()
+            && self.ui_active.is_some()
+            && let Some((id, rect, Some(pd), Some(s))) = items
+                .iter()
+                .find(|(id, ..)| Some(*id) == self.ui_active)
+                .copied()
         {
             let axis = match s.dir {
                 Dir::Row => 0,
                 Dir::Column => 1,
             };
-            let pd = [p[0] / scale, p[1] / scale];
             let mut t = ((pd[axis] - rect[axis]) / rect[axis + 2].max(1e-3)).clamp(0.0, 1.0);
             if s.flip {
                 t = 1.0 - t;
@@ -549,9 +635,36 @@ impl Editor {
     ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
+            use floptle_ui::UiSpace;
             ui.separator();
             ui.label("🖼 UI Layer");
-            ui.small("screen-space canvas — in game it always fills the window");
+            // ---- screen vs world space ----------------------------------
+            ui.horizontal(|ui| {
+                ui.label("space");
+                egui::ComboBox::from_id_salt(("ui_space", e))
+                    .selected_text(match layer.space {
+                        UiSpace::Screen => "Screen",
+                        UiSpace::World => "World",
+                    })
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(&mut layer.space, UiSpace::Screen, "Screen")
+                            .on_hover_text("a flat overlay that fills the window (HUD, menus)")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut layer.space, UiSpace::World, "World")
+                            .on_hover_text(
+                                "a flat panel inside the 3D world at this node's transform \
+                                 (diegetic screens, in-world signage) — move/rotate the node \
+                                 to place it, scale it with 'canvas size' below",
+                            )
+                            .changed();
+                    });
+            });
+            ui.small(match layer.space {
+                UiSpace::Screen => "screen-space overlay — in game it fills the window",
+                UiSpace::World => "world-space panel — lives in the scene at this node",
+            });
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut layer.enabled, "enabled")
@@ -579,9 +692,14 @@ impl Editor {
                         egui::Slider::new(&mut layer.canvas_scale, 0.001..=0.1)
                             .logarithmic(true),
                     )
-                    .on_hover_text(
-                        "Scene-view only: how big the authoring canvas stands in the                          world (world units per design unit). Gameplay rendering is                          unaffected. Move/rotate this node to place the canvas.",
-                    )
+                    .on_hover_text(if layer.is_world() {
+                        "how big this world panel stands in the scene (world units per \
+                         design unit). Move/rotate the node to place it."
+                    } else {
+                        "size of the Scene-view authoring hologram (world units per design \
+                         unit). Screen-space gameplay is unaffected; switch 'space' to World \
+                         to make this the real in-game size."
+                    })
                     .changed();
             });
             if changed {

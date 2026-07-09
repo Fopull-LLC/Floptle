@@ -123,6 +123,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field enabled number Master switch (1/0; assign true/false) — an off layer draws nothing.
 ---@field z number Draw order: lowest z first.
 ---@field designHeight number Design units that span the window height.
+---@field worldSpace number 1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.

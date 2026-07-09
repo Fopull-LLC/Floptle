@@ -352,9 +352,23 @@ impl Default for ElementSpec {
     }
 }
 
-/// A UI layer root (screen-space canvas). Lives on a scene node; its element
-/// children form the tree. The layer scales uniformly so `design_height`
-/// design units always span the window height (resolution independence).
+/// Where a [`UiLayer`] lives when the game runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiSpace {
+    /// A flat overlay that fills the window, on top of the 3D scene (HUD,
+    /// menus). Resolution-independent via `design_height`.
+    #[default]
+    Screen,
+    /// A flat quad living *inside* the 3D world at the layer node's transform
+    /// (diegetic panels, in-world signage). Scaled by `canvas_scale`
+    /// (world units per design unit); move/rotate the node to place it.
+    World,
+}
+
+/// A UI layer root. Lives on a scene node; its element children form the tree.
+/// The layer scales uniformly so `design_height` design units always span the
+/// canvas height (resolution independence in screen space; the design box's
+/// height in world space).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiLayer {
     /// Resolution independence: this many design units ALWAYS span the window
@@ -366,8 +380,12 @@ pub struct UiLayer {
     /// Master switch: an off layer draws nothing (in-game and in-editor).
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Scene-view authoring only: world units per design unit for the canvas
-    /// hologram (gameplay always fills the screen regardless). 0.01 → a
+    /// Screen overlay vs a quad in the 3D world. Screen-space by default so
+    /// existing layers are unchanged.
+    #[serde(default)]
+    pub space: UiSpace,
+    /// World units per design unit for a [`UiSpace::World`] canvas (and the
+    /// Scene-view authoring hologram of a screen-space layer). 0.01 → a
     /// 720-design layer stands 7.2 world units tall.
     #[serde(default = "default_canvas_scale")]
     pub canvas_scale: f32,
@@ -377,9 +395,23 @@ fn default_canvas_scale() -> f32 {
     0.01
 }
 
+impl UiLayer {
+    /// A world-space layer renders as a quad in the scene at runtime, not a
+    /// screen overlay.
+    pub fn is_world(&self) -> bool {
+        matches!(self.space, UiSpace::World)
+    }
+}
+
 impl Default for UiLayer {
     fn default() -> Self {
-        UiLayer { design_height: 720.0, z: 0, enabled: true, canvas_scale: 0.01 }
+        UiLayer {
+            design_height: 720.0,
+            z: 0,
+            enabled: true,
+            space: UiSpace::Screen,
+            canvas_scale: 0.01,
+        }
     }
 }
 

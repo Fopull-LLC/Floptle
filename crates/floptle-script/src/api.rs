@@ -141,6 +141,8 @@ pub(crate) fn mirror_components(world: &World, e: Entity) -> HashMap<String, Has
                 ("enabled".to_string(), if l.enabled { 1.0 } else { 0.0 }),
                 ("z".to_string(), l.z as f64),
                 ("designHeight".to_string(), l.design_height as f64),
+                // 0 = Screen overlay, 1 = World-space panel.
+                ("worldSpace".to_string(), if l.is_world() { 1.0 } else { 0.0 }),
             ]),
         );
     }
@@ -281,6 +283,13 @@ pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, 
                     "enabled" => l.enabled = val != 0.0,
                     "z" => l.z = val as i32,
                     "designHeight" => l.design_height = (val as f32).max(1.0),
+                    "worldSpace" => {
+                        l.space = if val != 0.0 {
+                            floptle_ui::UiSpace::World
+                        } else {
+                            floptle_ui::UiSpace::Screen
+                        };
+                    }
                     _ => {}
                 }
             }
