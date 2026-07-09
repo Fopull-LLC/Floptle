@@ -15,8 +15,8 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2 
 use floptle_anim::TransformTRS;
 use floptle_core::{AnimController, Entity, Matter, Name};
 use floptle_scene::{
-    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4,
-    AnimTransitionDoc, ANIM_CLIP_EXT,
+    AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc, AnimStateDoc,
+    AnimTrackDoc3, AnimTrackDoc4, AnimTransitionDoc, ANIM_CLIP_EXT,
 };
 
 use crate::anim;
@@ -87,6 +87,13 @@ pub struct AnimUiState {
     pub last_scene_local: HashMap<Entity, TransformTRS>,
     /// New-animation name prompt buffer (`Some` = prompt open).
     pub new_anim_buf: Option<String>,
+
+    // ---- Property-track builder (Animating tab) ----
+    /// The "add property track" picker's node name ("" = the animated node).
+    pub prop_node: String,
+    /// The picker's component + field.
+    pub prop_comp: String,
+    pub prop_field: String,
 }
 
 impl Default for AnimUiState {
@@ -125,6 +132,9 @@ impl Default for AnimUiState {
             record_restore: Vec::new(),
             last_scene_local: HashMap::new(),
             new_anim_buf: None,
+            prop_node: String::new(),
+            prop_comp: "UiElement".into(),
+            prop_field: "image".into(),
         }
     }
 }
@@ -1310,6 +1320,7 @@ impl EditorTabViewer<'_> {
         ui.separator();
         if self.anim_ui.clip_doc.is_some() {
             self.timeline_ui(ui, target);
+            self.property_tracks_ui(ui, target);
         } else {
             ui.weak(
                 "This animation is embedded in the model. ⬇ Extract animations (select the model \
@@ -1412,7 +1423,294 @@ fn handle_anim_wheel(ui: &egui::Ui, st: &mut AnimUiState, dur: f32) {
     ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
 }
 
+/// The value editor a property field needs.
+#[derive(Clone, Copy, PartialEq)]
+enum PropKind {
+    Float,
+    /// A path/text field — image swap (the headline case), material texture, text.
+    Text,
+}
+
+/// The component fields the Animating tab can key with a property track, grouped
+/// by component. Mirrors the ECS setters in `floptle_script::apply_component_field`
+/// (+ `_str`); a field here must have a matching arm there or the key is inert.
+const ANIMATABLE_PROPS: &[(&str, &[(&str, PropKind)])] = &[
+    (
+        "UiElement",
+        &[
+            ("image", PropKind::Text), // sprite-swap: the texture path, frame by frame
+            ("opacity", PropKind::Float),
+            ("visible", PropKind::Float),
+            ("posX", PropKind::Float),
+            ("posY", PropKind::Float),
+            ("width", PropKind::Float),
+            ("height", PropKind::Float),
+            ("radius", PropKind::Float),
+            ("border", PropKind::Float),
+            ("fillR", PropKind::Float),
+            ("fillG", PropKind::Float),
+            ("fillB", PropKind::Float),
+            ("fillA", PropKind::Float),
+            ("textSize", PropKind::Float),
+            ("textR", PropKind::Float),
+            ("textG", PropKind::Float),
+            ("textB", PropKind::Float),
+            ("textA", PropKind::Float),
+            ("tintR", PropKind::Float),
+            ("tintG", PropKind::Float),
+            ("tintB", PropKind::Float),
+            ("tintA", PropKind::Float),
+            ("text", PropKind::Text),
+        ],
+    ),
+    (
+        "UiSlider",
+        &[("value", PropKind::Float), ("min", PropKind::Float), ("max", PropKind::Float)],
+    ),
+    (
+        "PointLight",
+        &[
+            ("intensity", PropKind::Float),
+            ("range", PropKind::Float),
+            ("r", PropKind::Float),
+            ("g", PropKind::Float),
+            ("b", PropKind::Float),
+        ],
+    ),
+    ("Material", &[("texture", PropKind::Text)]),
+    ("Camera", &[("fovY", PropKind::Float)]),
+];
+
+fn prop_kind(component: &str, field: &str) -> PropKind {
+    ANIMATABLE_PROPS
+        .iter()
+        .find(|(c, _)| *c == component)
+        .and_then(|(_, fs)| fs.iter().find(|(f, _)| *f == field))
+        .map(|(_, k)| *k)
+        .unwrap_or(PropKind::Float)
+}
+
+fn fields_for(component: &str) -> &'static [(&'static str, PropKind)] {
+    ANIMATABLE_PROPS.iter().find(|(c, _)| *c == component).map(|(_, fs)| *fs).unwrap_or(&[])
+}
+
 impl EditorTabViewer<'_> {
+    /// Node names in `target`'s subtree (itself + descendants), for the property
+    /// track's node picker. The animated node ("") maps to the subtree root.
+    fn subtree_names(&self, target: Entity) -> Vec<String> {
+        let mut kids: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        for (e, p) in self.world.query::<floptle_core::Parent>() {
+            kids.entry(p.0).or_default().push(e);
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![target];
+        while let Some(e) = stack.pop() {
+            if let Some(n) = self.world.get::<Name>(e)
+                && !n.0.is_empty()
+                && !out.contains(&n.0)
+            {
+                out.push(n.0.clone());
+            }
+            if let Some(cs) = kids.get(&e) {
+                stack.extend(cs.iter().copied());
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The "Property tracks" authoring section under the dopesheet: add/remove
+    /// lanes that animate a component field (opacity, colors, a UI **image**
+    /// swapping frame-by-frame…) and key their values at the playhead. Numeric
+    /// fields interpolate; image/text fields step (you don't blend two textures).
+    fn property_tracks_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
+        // Immutable data first, before borrowing the clip doc mutably.
+        let mut tex_list: Vec<String> = Vec::new();
+        crate::assets::collect_texture_paths(self.asset_tree, &mut tex_list);
+        let subtree = self.subtree_names(target);
+
+        let st = &mut *self.anim_ui;
+        let playhead = st.playhead;
+        let (add_node, add_comp, add_field) =
+            (st.prop_node.clone(), st.prop_comp.clone(), st.prop_field.clone());
+        let Some((_, doc)) = st.clip_doc.as_mut() else { return };
+        let dur = doc.duration.max(0.01);
+
+        egui::CollapsingHeader::new("▦  Property tracks")
+            .id_salt("anim-prop-tracks")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.small(
+                    "Animate a component field — opacity, colors, or a UI image swapping \
+                     frame-by-frame. Image/text keys step; numbers interpolate.",
+                );
+                // ---- add-track builder row ----
+                let mut do_add = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("node");
+                    egui::ComboBox::from_id_salt("prop-node")
+                        .selected_text(if add_node.is_empty() { "(animated node)" } else { add_node.as_str() })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut st.prop_node, String::new(), "(animated node)");
+                            for n in &subtree {
+                                ui.selectable_value(&mut st.prop_node, n.clone(), n);
+                            }
+                        });
+                    ui.label("component");
+                    egui::ComboBox::from_id_salt("prop-comp")
+                        .selected_text(&add_comp)
+                        .show_ui(ui, |ui| {
+                            for (c, _) in ANIMATABLE_PROPS {
+                                if ui.selectable_value(&mut st.prop_comp, c.to_string(), *c).clicked()
+                                {
+                                    // Reset the field to the new component's first.
+                                    if let Some((f, _)) = fields_for(c).first() {
+                                        st.prop_field = f.to_string();
+                                    }
+                                }
+                            }
+                        });
+                    ui.label("field");
+                    egui::ComboBox::from_id_salt("prop-field")
+                        .selected_text(&add_field)
+                        .show_ui(ui, |ui| {
+                            for (f, _) in fields_for(&st.prop_comp) {
+                                ui.selectable_value(&mut st.prop_field, f.to_string(), *f);
+                            }
+                        });
+                    if ui
+                        .button("＋ Add track")
+                        .on_hover_text("add a lane for this field (keys added at the playhead)")
+                        .clicked()
+                    {
+                        do_add = true;
+                    }
+                });
+
+                if do_add {
+                    add_property_track(doc, &st.prop_node, &st.prop_comp, &st.prop_field);
+                    st.clip_dirty = true;
+                }
+
+                ui.separator();
+
+                // ---- existing tracks ----
+                let mut remove: Option<(usize, usize)> = None; // (channel, track)
+                let mut any = false;
+                for ci in 0..doc.channels.len() {
+                    let node_label = {
+                        let n = &doc.channels[ci].node;
+                        if n.is_empty() { "(animated node)".to_string() } else { n.clone() }
+                    };
+                    for ti in 0..doc.channels[ci].properties.len() {
+                        any = true;
+                        let (comp, field) = {
+                            let pt = &doc.channels[ci].properties[ti];
+                            (pt.component.clone(), pt.field.clone())
+                        };
+                        let kind = prop_kind(&comp, &field);
+                        ui.horizontal(|ui| {
+                            ui.strong(format!("{node_label} · {comp}.{field}"));
+                            if ui
+                                .button("＋ key")
+                                .on_hover_text("key the current value at the playhead")
+                                .clicked()
+                            {
+                                key_property_at(
+                                    &mut doc.channels[ci].properties[ti],
+                                    playhead.min(dur),
+                                    kind,
+                                );
+                                st.clip_dirty = true;
+                            }
+                            if ui.button("🗑").on_hover_text("remove this track").clicked() {
+                                remove = Some((ci, ti));
+                            }
+                        });
+                        // key rows
+                        let pt = &mut doc.channels[ci].properties[ti];
+                        let mut kill_key: Option<usize> = None;
+                        let n_keys = pt.times.len();
+                        for ki in 0..n_keys {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                let mut t = pt.times[ki];
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut t)
+                                            .speed(0.01)
+                                            .range(0.0..=dur)
+                                            .suffix("s"),
+                                    )
+                                    .changed()
+                                {
+                                    pt.times[ki] = t;
+                                    st.clip_dirty = true;
+                                }
+                                match &mut pt.values[ki] {
+                                    AnimPropValueDoc::Float(x) => {
+                                        if ui.add(egui::DragValue::new(x).speed(0.01)).changed() {
+                                            st.clip_dirty = true;
+                                        }
+                                    }
+                                    AnimPropValueDoc::Text(s) => {
+                                        // Image/texture path → searchable picker; else text.
+                                        if kind == PropKind::Text && field != "text" {
+                                            let cur = s.clone();
+                                            let label =
+                                                if cur.is_empty() { "(pick image)" } else { cur.as_str() };
+                                            if let Some(pick) = crate::ui_widgets::searchable_picker(
+                                                ui,
+                                                egui::Id::new(("prop-tex", ci, ti, ki)),
+                                                label,
+                                                Some("(clear)"),
+                                                &tex_list,
+                                                160.0,
+                                            ) {
+                                                *s = pick.unwrap_or_default();
+                                                st.clip_dirty = true;
+                                            }
+                                        } else if ui
+                                            .add(egui::TextEdit::singleline(s).desired_width(140.0))
+                                            .changed()
+                                        {
+                                            st.clip_dirty = true;
+                                        }
+                                    }
+                                }
+                                if ui.small_button("✖").on_hover_text("delete key").clicked() {
+                                    kill_key = Some(ki);
+                                }
+                            });
+                        }
+                        if let Some(ki) = kill_key {
+                            pt.times.remove(ki);
+                            pt.values.remove(ki);
+                            st.clip_dirty = true;
+                        }
+                        ui.separator();
+                    }
+                }
+                if !any {
+                    ui.weak("No property tracks yet — add one above (try UiElement · image for a sprite swap).");
+                }
+
+                if let Some((ci, ti)) = remove {
+                    doc.channels[ci].properties.remove(ti);
+                    // Drop a channel left empty by the removal.
+                    let ch = &doc.channels[ci];
+                    if ch.translation.is_none()
+                        && ch.rotation.is_none()
+                        && ch.scale.is_none()
+                        && ch.properties.is_empty()
+                    {
+                        doc.channels.remove(ci);
+                    }
+                    st.clip_dirty = true;
+                }
+            });
+    }
+
     /// The full dopesheet for an editable clip doc.
     fn timeline_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
         let playing = self.playing;
@@ -1925,6 +2223,56 @@ pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &Tr
     put3(&mut ch.scale, t, trs.s.to_array());
     if t > doc.duration {
         doc.duration = t;
+    }
+}
+
+/// Add a property track for `(node, component, field)` if one doesn't exist,
+/// creating the node's channel as needed. Image/text fields are stepped.
+fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field: &str) {
+    let ci = match doc.channels.iter().position(|c| c.node == node) {
+        Some(i) => i,
+        None => {
+            doc.channels
+                .push(floptle_scene::AnimChannelDoc { node: node.to_string(), ..Default::default() });
+            doc.channels.len() - 1
+        }
+    };
+    let props = &mut doc.channels[ci].properties;
+    if props.iter().any(|p| p.component == component && p.field == field) {
+        return; // already present — don't duplicate
+    }
+    props.push(AnimPropTrackDoc {
+        component: component.to_string(),
+        field: field.to_string(),
+        times: Vec::new(),
+        values: Vec::new(),
+        step: prop_kind(component, field) == PropKind::Text,
+    });
+}
+
+/// Insert (or overwrite) a key at time `t` on a property track, seeding a
+/// sensible default value for its kind (edit it inline afterwards).
+fn key_property_at(pt: &mut AnimPropTrackDoc, t: f32, kind: PropKind) {
+    let value = match kind {
+        PropKind::Float => {
+            // Carry the previous key's value forward so a new key doesn't jump.
+            let at = pt.times.partition_point(|&x| x < t);
+            pt.values
+                .get(at.saturating_sub(1))
+                .cloned()
+                .unwrap_or(AnimPropValueDoc::Float(0.0))
+        }
+        PropKind::Text => {
+            let at = pt.times.partition_point(|&x| x < t);
+            pt.values.get(at.saturating_sub(1)).cloned().unwrap_or(AnimPropValueDoc::Text(String::new()))
+        }
+    };
+    if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+        pt.values[i] = value;
+    } else {
+        let at = pt.times.partition_point(|&x| x < t);
+        pt.times.insert(at, t);
+        pt.values.insert(at, value);
     }
 }
 

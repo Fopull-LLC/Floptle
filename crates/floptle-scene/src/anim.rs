@@ -47,6 +47,38 @@ pub struct AnimChannelDoc {
     pub rotation: Option<AnimTrackDoc4>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<AnimTrackDoc3>,
+    /// Generic component-property lanes (opacity, colors, image swaps…). Empty
+    /// for a plain transform clip; skipped in RON when so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<AnimPropTrackDoc>,
+}
+
+/// A keyed lane that animates one component field on the node. `value` keys are
+/// either numbers or strings (a UI image path, a material texture…). `step`
+/// holds each key with no blend — always the case for string lanes.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct AnimPropTrackDoc {
+    /// Component name (e.g. "UiElement", "PointLight", "Material").
+    pub component: String,
+    /// Field name (e.g. "opacity", "image", "intensity").
+    pub field: String,
+    pub times: Vec<f32>,
+    pub values: Vec<AnimPropValueDoc>,
+    #[serde(default)]
+    pub step: bool,
+}
+
+/// One property keyframe value: a number or a string (path/text).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum AnimPropValueDoc {
+    Float(f32),
+    Text(String),
+}
+
+impl Default for AnimPropValueDoc {
+    fn default() -> Self {
+        AnimPropValueDoc::Float(0.0)
+    }
 }
 
 /// A keyed vec3 lane. `step = true` holds each key (no interpolation).
@@ -217,12 +249,36 @@ mod tests {
                     step: true,
                 }),
                 scale: None,
+                // A numeric lane + a stepped image-swap lane.
+                properties: vec![
+                    AnimPropTrackDoc {
+                        component: "UiElement".into(),
+                        field: "opacity".into(),
+                        times: vec![0.0, 1.5],
+                        values: vec![AnimPropValueDoc::Float(0.0), AnimPropValueDoc::Float(1.0)],
+                        step: false,
+                    },
+                    AnimPropTrackDoc {
+                        component: "UiElement".into(),
+                        field: "image".into(),
+                        times: vec![0.0, 0.5],
+                        values: vec![
+                            AnimPropValueDoc::Text("textures/a.png".into()),
+                            AnimPropValueDoc::Text("textures/b.png".into()),
+                        ],
+                        step: true,
+                    },
+                ],
             }],
             events: vec![AnimEventDoc { t: 0.7, func: "onFootstep".into() }],
         };
         let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
         let back: AnimClipDoc = ron::from_str(&text).unwrap();
         assert_eq!(doc, back);
+        // A transform-only channel omits `properties` in RON (serde skip).
+        let plain = AnimChannelDoc { node: "Leg".into(), ..Default::default() };
+        let ptext = ron::ser::to_string_pretty(&plain, Default::default()).unwrap();
+        assert!(!ptext.contains("properties"), "empty properties must not serialize");
     }
 
     #[test]
