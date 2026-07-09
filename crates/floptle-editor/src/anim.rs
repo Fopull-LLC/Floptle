@@ -19,13 +19,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use floptle_anim::{Clip, Controller, Interp, Layer, NodeChannels, SkelNode, Skeleton, State, Track, TransformTRS};
+use floptle_anim::{
+    Clip, Controller, Interp, Layer, NodeChannels, PropValue, PropertyTrack, SkelNode, Skeleton,
+    State, Track, TransformTRS,
+};
 use floptle_core::math::{DMat4, Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
-    AnimChannelDoc, AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimTrackDoc3, AnimTrackDoc4,
-    ANIM_CLIP_EXT, ANIM_CTL_EXT,
+    AnimChannelDoc, AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc,
+    AnimTrackDoc3, AnimTrackDoc4, ANIM_CLIP_EXT, ANIM_CTL_EXT,
 };
 
 use crate::MeshAsset;
@@ -316,6 +319,7 @@ pub fn clip_from_doc(doc: &AnimClipDoc, skeleton: &Skeleton) -> Clip {
             translation: ch.translation.as_ref().map(track3_from_doc),
             rotation: ch.rotation.as_ref().map(track4_from_doc),
             scale: ch.scale.as_ref().map(track3_from_doc),
+            properties: ch.properties.iter().map(prop_track_from_doc).collect(),
         });
     }
     channels.sort_by_key(|c| c.node);
@@ -344,6 +348,25 @@ fn track4_from_doc(d: &AnimTrackDoc4) -> Track<Quat> {
     }
 }
 
+fn prop_value_from_doc(v: &AnimPropValueDoc) -> PropValue {
+    match v {
+        AnimPropValueDoc::Float(x) => PropValue::Float(*x),
+        AnimPropValueDoc::Text(s) => PropValue::Text(s.clone()),
+    }
+}
+
+fn prop_track_from_doc(d: &AnimPropTrackDoc) -> PropertyTrack {
+    // String lanes never blend; force Step so a mis-set flag can't try to lerp.
+    let is_text = d.values.iter().any(|v| matches!(v, AnimPropValueDoc::Text(_)));
+    PropertyTrack {
+        component: d.component.clone(),
+        field: d.field.clone(),
+        times: d.times.clone(),
+        values: d.values.iter().map(prop_value_from_doc).collect(),
+        interp: if d.step || is_text { Interp::Step } else { Interp::Linear },
+    }
+}
+
 /// Bake a bound runtime clip back into a name-keyed doc (extraction).
 pub fn bake_clip_doc(clip: &Clip, skeleton: &Skeleton, source_model: &str) -> AnimClipDoc {
     let channels = clip
@@ -356,6 +379,7 @@ pub fn bake_clip_doc(clip: &Clip, skeleton: &Skeleton, source_model: &str) -> An
                 translation: ch.translation.as_ref().map(track3_to_doc),
                 rotation: ch.rotation.as_ref().map(track4_to_doc),
                 scale: ch.scale.as_ref().map(track3_to_doc),
+                properties: ch.properties.iter().map(prop_track_to_doc).collect(),
             })
         })
         .collect();
@@ -384,6 +408,23 @@ fn track4_to_doc(t: &Track<Quat>) -> AnimTrackDoc4 {
     AnimTrackDoc4 {
         times: t.times.clone(),
         values: t.values.iter().map(|v| v.to_array()).collect(),
+        step: t.interp == Interp::Step,
+    }
+}
+
+fn prop_value_to_doc(v: &PropValue) -> AnimPropValueDoc {
+    match v {
+        PropValue::Float(x) => AnimPropValueDoc::Float(*x),
+        PropValue::Text(s) => AnimPropValueDoc::Text(s.clone()),
+    }
+}
+
+fn prop_track_to_doc(t: &PropertyTrack) -> AnimPropTrackDoc {
+    AnimPropTrackDoc {
+        component: t.component.clone(),
+        field: t.field.clone(),
+        times: t.times.clone(),
+        values: t.values.iter().map(prop_value_to_doc).collect(),
         step: t.interp == Interp::Step,
     }
 }
@@ -742,6 +783,21 @@ pub fn apply_instance(
                     tr.translation = p.t.as_dvec3();
                     tr.rotation = p.r;
                     tr.scale = p.s;
+                }
+            }
+            // Generic property lanes (opacity, colors, image swaps…) applied
+            // through the same live ECS setters Lua uses, so animation and
+            // scripts poke fields identically. Cheap no-op for transform clips.
+            for s in inst.ctl.sample_properties() {
+                let Some(Some(ent)) = entities.get(s.node) else { continue };
+                let ent = *ent;
+                match s.value {
+                    PropValue::Float(x) => {
+                        floptle_script::apply_component_field(world, ent, &s.component, &s.field, x as f64)
+                    }
+                    PropValue::Text(t) => {
+                        floptle_script::apply_component_field_str(world, ent, &s.component, &s.field, &t)
+                    }
                 }
             }
         }
@@ -1135,6 +1191,7 @@ mod tests {
                     }),
                     rotation: None,
                     scale: None,
+                    properties: Vec::new(),
                 }],
                 events: vec![floptle_scene::AnimEventDoc {
                     t: 0.5,

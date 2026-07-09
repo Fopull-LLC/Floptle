@@ -119,6 +119,32 @@ Two mechanisms, both cheap, composed into one final pose per frame:
 The pose pipeline each frame: `evaluate active state(s)` → `crossfade if mid-transition`
 → `apply additive layers (masked)` → `compose skinning palette`.
 
+## Property tracks (shipped)
+
+Beside the three transform lanes (translation/rotation/scale), a channel can
+carry **property tracks** that animate an arbitrary component field — the same
+`(component, field)` addressing Lua's `getcomponent` uses. A key value is either
+a **number** (opacity, colors, light intensity, slider value…) or a **string**
+(a path/text field). The headline case is a UI element's `image` **swapping its
+texture frame-by-frame** — sprite animation — but any exposed field works.
+
+```rust
+// floptle-anim
+enum PropValue { Float(f32), Text(String) }
+struct PropertyTrack { component: String, field: String,
+                       times: Vec<f32>, values: Vec<PropValue>, interp: Interp }
+```
+
+Numeric lanes lerp (or step); **string lanes always step** — you don't blend two
+textures. Serialized per channel as `properties: [ (component, field, times,
+values, step) ]` in the `.anim.ron`, omitted when empty (back-compatible). At
+apply time the sampled values flow through `floptle_script::apply_component_field`
+(numbers) and `apply_component_field_str` (paths/text) — the exact setters Lua
+uses, so scripts and animation poke fields identically. Authored in the
+Animating tab's **▦ Property tracks** section: pick node · component · field,
+then key values at the playhead (image fields get a texture picker). Property
+values snap to the top active state (they don't cross-fade like transforms).
+
 ## Notify / animation events
 
 A clip carries **events on its timeline** — the bridge from animation to gameplay.

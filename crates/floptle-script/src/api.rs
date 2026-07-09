@@ -198,7 +198,7 @@ fn rgba_index(field: &str) -> usize {
 
 /// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
 /// [`mirror_components`]). Unknown component/field names are ignored.
-pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
+pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
     match comp {
         "UiElement" => {
             if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
@@ -374,6 +374,47 @@ pub(crate) fn apply_component_field(world: &mut World, ent: Entity, comp: &str, 
                     "lock_rot_z" => rb.lock_rot[2] = val != 0.0,
                     _ => {}
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply a STRING-valued component field — the string counterpart of
+/// [`apply_component_field`], for path/text fields that a number can't express.
+/// The headline use is animating a UI image's texture (sprite frame-swapping);
+/// also covers a Material's texture and a text element's string. Used by the
+/// animation system's property tracks (and available for future Lua setters).
+pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, field: &str, val: &str) {
+    match comp {
+        "UiElement" => {
+            if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
+                match field {
+                    // Swap the image's texture; create the image slot on demand
+                    // so a track can turn a bare element into a sprite.
+                    "image" | "texture" => match &mut spec.image {
+                        Some(img) => img.texture = val.to_string(),
+                        None => {
+                            spec.image = Some(floptle_ui::ImageSpec {
+                                texture: val.to_string(),
+                                tint: [1.0; 4],
+                            })
+                        }
+                    },
+                    "text" => {
+                        if let Some(t) = &mut spec.text {
+                            t.text = val.to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "Material" => {
+            if field == "texture"
+                && let Some(m) = world.get_mut::<floptle_core::Material>(ent)
+            {
+                m.texture = if val.is_empty() { None } else { Some(val.to_string()) };
             }
         }
         _ => {}

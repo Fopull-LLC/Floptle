@@ -61,6 +61,8 @@ mod net_api;
 mod preprocess;
 
 pub(crate) use api::install_handle_api;
+/// Live ECS field appliers, reused by the animation system's property tracks.
+pub use api::{apply_component_field, apply_component_field_str};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -1904,5 +1906,29 @@ mod tests {
             host.drain_logs().iter().any(|l| l.msg.contains("no lag-comp context")),
             "the fallback must be loud"
         );
+    }
+
+    #[test]
+    fn string_field_applier_swaps_ui_image() {
+        // The animation system's property tracks apply through these. A UI
+        // image swap is the headline case (sprite frame-swapping).
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_ui::ElementSpec::default());
+
+        // No image slot yet → the applier creates one.
+        crate::apply_component_field_str(&mut world, e, "UiElement", "image", "textures/a.png");
+        let img = world.get::<floptle_ui::ElementSpec>(e).unwrap().image.clone().unwrap();
+        assert_eq!(img.texture, "textures/a.png");
+
+        // A later frame swaps the texture on the existing slot.
+        crate::apply_component_field_str(&mut world, e, "UiElement", "image", "textures/b.png");
+        let img = world.get::<floptle_ui::ElementSpec>(e).unwrap().image.clone().unwrap();
+        assert_eq!(img.texture, "textures/b.png");
+
+        // The numeric applier still drives opacity on the same element.
+        crate::apply_component_field(&mut world, e, "UiElement", "opacity", 0.5);
+        assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.5);
     }
 }

@@ -185,6 +185,73 @@ impl Track<Quat> {
     }
 }
 
+impl Track<f32> {
+    pub fn sample(&self, t: f32) -> Option<f32> {
+        let (a, b, k) = self.bracket(t)?;
+        Some(self.values[a] + (self.values[b] - self.values[a]) * k)
+    }
+}
+
+/// A value a [`PropertyTrack`] keyframe can hold. Numbers cover the bulk of
+/// animatable component fields (opacity, positions, colors, light intensity…);
+/// text covers path-like fields — the headline case being a UI image swapping
+/// its texture frame-by-frame (sprite animation).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PropValue {
+    Float(f32),
+    Text(String),
+}
+
+/// A lane that animates one `(component, field)` on a node — the generic
+/// property channel beside the fixed transform lanes. A lane can drive a
+/// numeric field (lerp or step) or a string field like an image path (always
+/// effectively stepped — you don't blend two textures).
+#[derive(Clone, Debug)]
+pub struct PropertyTrack {
+    /// Component name as addressed by the ECS field applier ("UiElement",
+    /// "PointLight", "Material"…).
+    pub component: String,
+    /// Field name ("opacity", "image", "intensity"…).
+    pub field: String,
+    /// Parallel to `values`, ascending.
+    pub times: Vec<f32>,
+    pub values: Vec<PropValue>,
+    pub interp: Interp,
+}
+
+impl PropertyTrack {
+    /// The value at `t` (holds the ends; step or lerp between keys). Text values
+    /// — and any Step lane — hold the earlier key; numeric Linear lanes lerp.
+    pub fn sample(&self, t: f32) -> Option<PropValue> {
+        if self.times.is_empty() || self.values.len() != self.times.len() {
+            return None;
+        }
+        let n = self.times.len();
+        let hi = self.times.partition_point(|&k| k <= t);
+        let a = hi.saturating_sub(1).min(n - 1);
+        if hi == 0 || hi >= n || self.interp == Interp::Step {
+            return Some(self.values[a].clone());
+        }
+        let b = hi;
+        let (ta, tb) = (self.times[a], self.times[b]);
+        let k = if tb > ta { ((t - ta) / (tb - ta)).clamp(0.0, 1.0) } else { 0.0 };
+        match (&self.values[a], &self.values[b]) {
+            (PropValue::Float(x), PropValue::Float(y)) => Some(PropValue::Float(x + (y - x) * k)),
+            // Text (or mismatched) values can't blend — hold the earlier key.
+            _ => Some(self.values[a].clone()),
+        }
+    }
+}
+
+/// One sampled property value, ready to apply: which node, which field, what to.
+#[derive(Clone, Debug)]
+pub struct PropSample {
+    pub node: usize,
+    pub component: String,
+    pub field: String,
+    pub value: PropValue,
+}
+
 /// All animated lanes for one skeleton node.
 #[derive(Clone, Debug, Default)]
 pub struct NodeChannels {
@@ -192,6 +259,9 @@ pub struct NodeChannels {
     pub translation: Option<Track<Vec3>>,
     pub rotation: Option<Track<Quat>>,
     pub scale: Option<Track<Vec3>>,
+    /// Generic property lanes (component fields, image swaps). Empty for the
+    /// common transform-only clip.
+    pub properties: Vec<PropertyTrack>,
 }
 
 /// A named point on a clip's timeline that calls a Lua function on the
@@ -236,6 +306,30 @@ impl Clip {
         v.sort_unstable();
         v.dedup();
         v
+    }
+
+    /// Sample every property lane at `t`, appending the resolved values to
+    /// `out`. Separate from `sample_into` because property values can't ride the
+    /// transform pose (a texture path doesn't lerp) — they're applied directly
+    /// to the ECS after the pose is composited.
+    pub fn sample_properties(&self, t: f32, out: &mut Vec<PropSample>) {
+        for ch in &self.channels {
+            for pt in &ch.properties {
+                if let Some(value) = pt.sample(t) {
+                    out.push(PropSample {
+                        node: ch.node,
+                        component: pt.component.clone(),
+                        field: pt.field.clone(),
+                        value,
+                    });
+                }
+            }
+        }
+    }
+
+    /// True if any channel has a property lane (skip the sample when none do).
+    pub fn has_properties(&self) -> bool {
+        self.channels.iter().any(|c| !c.properties.is_empty())
     }
 }
 
@@ -382,6 +476,28 @@ impl Controller {
     /// The composited local pose from the last `advance`.
     pub fn pose(&self) -> &[TransformTRS] {
         &self.pose
+    }
+
+    /// Collect this frame's property-lane values across all layers. Properties
+    /// don't blend, so each layer contributes its currently-playing state's
+    /// values; lower layers first, higher (priority) layers last, so a later
+    /// write wins — matching how transform layers override. Returns nothing for
+    /// the common all-transform controller.
+    pub fn sample_properties(&self) -> Vec<PropSample> {
+        let mut out = Vec::new();
+        for layer in &self.layers {
+            if layer.weight <= 0.0 {
+                continue;
+            }
+            // The current (or fade-incoming) playback; properties snap to it.
+            if let Some(pb) = layer.cur {
+                let clip = &layer.states[pb.state].clip;
+                if clip.has_properties() {
+                    clip.sample_properties(pb.t, &mut out);
+                }
+            }
+        }
+        out
     }
 
     /// Events fired since the last take (function names to call on the node).
@@ -845,6 +961,7 @@ mod tests {
                 }),
                 rotation: None,
                 scale: None,
+                properties: Vec::new(),
             }],
             events: Vec::new(),
         }
@@ -868,6 +985,57 @@ mod tests {
         assert_eq!(tr.sample(9.0), Some(Vec3::new(2.0, 0.0, 0.0)));
         let st = Track { interp: Interp::Step, ..tr };
         assert_eq!(st.sample(0.99), Some(Vec3::ZERO));
+    }
+
+    #[test]
+    fn property_track_steps_text_and_lerps_floats() {
+        // A text (image-swap) lane holds the current key — never blends.
+        let img = PropertyTrack {
+            component: "UiElement".into(),
+            field: "image".into(),
+            times: vec![0.0, 0.5, 1.0],
+            values: vec![
+                PropValue::Text("a.png".into()),
+                PropValue::Text("b.png".into()),
+                PropValue::Text("c.png".into()),
+            ],
+            interp: Interp::Step,
+        };
+        assert_eq!(img.sample(0.0), Some(PropValue::Text("a.png".into())));
+        assert_eq!(img.sample(0.49), Some(PropValue::Text("a.png".into())));
+        assert_eq!(img.sample(0.5), Some(PropValue::Text("b.png".into())));
+        assert_eq!(img.sample(9.0), Some(PropValue::Text("c.png".into())));
+
+        // A numeric Linear lane interpolates.
+        let op = PropertyTrack {
+            component: "UiElement".into(),
+            field: "opacity".into(),
+            times: vec![0.0, 1.0],
+            values: vec![PropValue::Float(0.0), PropValue::Float(1.0)],
+            interp: Interp::Linear,
+        };
+        assert_eq!(op.sample(0.25), Some(PropValue::Float(0.25)));
+    }
+
+    #[test]
+    fn controller_samples_active_state_properties() {
+        let mut clip = move_clip("Swap", 0, 0.0, 0.0, 1.0);
+        clip.channels[0].properties.push(PropertyTrack {
+            component: "UiElement".into(),
+            field: "image".into(),
+            times: vec![0.0, 0.5],
+            values: vec![PropValue::Text("a.png".into()), PropValue::Text("b.png".into())],
+            interp: Interp::Step,
+        });
+        let mut c = one_layer_ctl(vec![State::new("Swap".into(), clip)], Some(0));
+        c.advance(0.1);
+        let s = c.sample_properties();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].component, "UiElement");
+        assert_eq!(s[0].value, PropValue::Text("a.png".into()));
+        c.advance(0.5); // cross the 0.5 key
+        let s = c.sample_properties();
+        assert_eq!(s[0].value, PropValue::Text("b.png".into()));
     }
 
     #[test]
