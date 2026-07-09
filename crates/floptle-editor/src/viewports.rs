@@ -103,8 +103,25 @@ impl Editor {
         }
         let Some(egui) = self.egui.as_ref() else { return };
         if let Some(img) = floptle_assets::load_texture(Path::new(path)) {
+            // TRUE dimensions — shown as the "N×N px" label and used for aspect.
             let dims = [img.width as usize, img.height as usize];
-            let color = egui::ColorImage::from_rgba_unmultiplied(dims, &img.pixels);
+            // A texture larger than the GPU's max 2D dimension (e.g. an 8400px-wide
+            // sprite sheet) would PANIC egui's wgpu upload the instant it's selected.
+            // A preview only ever displays at a few hundred px, so upload a
+            // downscaled copy while keeping the true dims for the label.
+            const PREVIEW_MAX: u32 = 2048;
+            let upload = if img.width > PREVIEW_MAX || img.height > PREVIEW_MAX {
+                let s = PREVIEW_MAX as f32 / img.width.max(img.height) as f32;
+                let w = ((img.width as f32 * s).floor() as u32).max(1);
+                let h = ((img.height as f32 * s).floor() as u32).max(1);
+                floptle_assets::load_texture_sized(Path::new(path), w, h).unwrap_or(img)
+            } else {
+                img
+            };
+            let color = egui::ColorImage::from_rgba_unmultiplied(
+                [upload.width as usize, upload.height as usize],
+                &upload.pixels,
+            );
             let handle = egui.ctx.load_texture(
                 format!("preview:{path}"),
                 color,
