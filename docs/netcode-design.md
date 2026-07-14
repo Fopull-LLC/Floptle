@@ -94,6 +94,7 @@ struct Replicated {
     owner:     Option<PeerId>,    // whose inputs drive it (predicted mode)
     transform: bool,              // sync position/rotation (+ interpolate on remotes)
     physics:   bool,              // sync velocity too (better extrapolation/prediction)
+    animator:  bool,              // sync AnimController playback (default on; off = client-sided)
     interp:    bool,              // smooth remote entities between snapshots (default on)
 }
 
@@ -151,6 +152,30 @@ client ──▶ Rpc            { name, args }                                  
 - `intents[]` are the client→server RPCs that piggyback the input stream (e.g. `swing`,
   `parry`) so a combat action and the movement of the same tick arrive together and are judged
   against the same rewound state (§7).
+
+### 5.1b Animator replication (implemented)
+
+Animators replicate **playback state, never poses**: per networked animator, the controller's
+global speed plus per layer a state **index** (both peers load the same `.actl.ron`, so an
+index + a time reproduce the whole pose locally), clip time in 10 ms units, and blend weight —
+~10 bytes/layer, no bones, no strings. Snapshots carry an animator entry only when the
+send-side predictor is *surprised* (a transition, a speed/weight edit, a seek); a steady walk
+loop costs **zero bytes** after its transition, so per-player animator bandwidth is
+transition-rate-bound, not tick-bound. Keyframes carry full state (loss healing + the late-join
+reliable baseline).
+
+The **server runs real controllers** (state machines only — nothing samples poses headlessly):
+`anim:play` in server scripts transitions them, scene-binding clips move real transforms (which
+replicate as transforms), and clip events fire into server scripts — hit windows are
+server-authoritative. Clients apply received states through the controller's own fade rules
+(a transition blends, a late joiner lands mid-clip at phase), drift-correct only beyond 250 ms
+(wrap-aware on loops), extrapolate freely between updates, and schedule updates on the same
+interp-delayed timeline as transforms so a jump animation lands with its jump arc. The owner's
+predicted avatar ignores inbound animator state — its own scripts drive it, ahead of the server.
+
+Per-node opt-out: `Replicated.animator = false` (the "sync animator" checkbox) makes that
+animator **client-sided** — each machine drives it locally (pure cosmetics, or Lua reacting to
+already-replicated state).
 
 ### 5.2 Interest management (the player-count feature)
 
