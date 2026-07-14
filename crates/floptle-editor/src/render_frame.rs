@@ -931,11 +931,14 @@ impl Editor {
             }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
-        // and/or the combined terrain volume. The globals are built either way — on
-        // frames with nothing to raymarch they're still uploaded (not drawn) so the
-        // raster pass's field bind group has this frame's shadow/proxy data.
+        // and/or the combined terrain volume — and it's ALSO what draws a textured
+        // skybox (rays that miss every bound sample the sky, zero march steps), so a
+        // scene with no terrain/blobs still runs it when the sky has a texture; a
+        // solid-color sky is just the raster clear. The globals are built either way
+        // — on frames with nothing to raymarch they're still uploaded (not drawn) so
+        // the raster pass's field bind group has this frame's shadow/proxy data.
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm_draw = show_blobs || !self.terrains.is_empty();
+        let rm_draw = show_blobs || !self.terrains.is_empty() || sky_params[0] >= 0.5;
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
@@ -4420,7 +4423,9 @@ impl Editor {
         let (_, rm_ao_params) = post_process_uniforms(&self.world);
         let terrain_mat = self.terrain_material();
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm_draw = show_blobs || !self.terrains.is_empty();
+        // A textured skybox is DRAWN by the raymarch pass (missed rays sample the
+        // sky) — keep it running even with no terrain/blobs in the scene.
+        let rm_draw = show_blobs || !self.terrains.is_empty() || sky_params[0] >= 0.5;
         let rm = {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
