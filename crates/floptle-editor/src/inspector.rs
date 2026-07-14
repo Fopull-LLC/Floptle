@@ -1352,6 +1352,23 @@ impl EditorTabViewer<'_> {
                             });
                         }
                     });
+                    // Trigger: the BODY becomes a sensor — it never blocks or gets
+                    // blocked (and rays skip it), but overlap fires the trigger
+                    // hooks. Moving pickups, sweeping zones, pass-through projectiles.
+                    let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
+                    if ui
+                        .checkbox(&mut trig, "trigger")
+                        .on_hover_text(
+                            "events only, no blocking: the body passes through everything \
+                             and nothing pushes back, but overlap fires onTriggerEnter / \
+                             onTriggerStay / onTriggerExit on both nodes' scripts. A \
+                             Dynamic trigger still falls — use Kinematic (or gravity off) \
+                             for pickups and zones that stay put",
+                        )
+                        .changed()
+                    {
+                        cmd.set_trigger = Some((e, trig));
+                    }
                     // The body shape doubles as the node's sun-shadow proxy (see the
                     // Lighting node) — casting is the default; the component only
                     // exists to record an opt-out.
@@ -1477,7 +1494,7 @@ impl EditorTabViewer<'_> {
                             "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
                         ));
                         if world.get::<floptle_core::RigidBody>(e).is_some() {
-                            ui.small("⚠ This node also has a Rigidbody, so its body owns the physics and this static Collider is ignored. To make it a solid obstacle, set the Rigidbody's mode to Static (a baked collider in the body's shape) — or remove the Rigidbody to use this geometry-shaped collider instead.");
+                            ui.small("⚠ This node also has a Rigidbody, so its body owns the physics and this static Collider is ignored — the trigger checkbox lives on the Rigidbody above. To make it a solid obstacle, set the Rigidbody's mode to Static (a baked collider in the body's shape) — or remove the Rigidbody to use this geometry-shaped collider instead.");
                         } else {
                             // The collider doubles as the node's sun-shadow caster:
                             // primitives stand in as analytic proxy shapes, and a

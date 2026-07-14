@@ -62,6 +62,12 @@ pub struct Body {
     /// follows it). Dynamic bodies collide WITH it via
     /// `PhysicsWorld::kin_hulls` — moving platforms that push the player.
     pub kinematic: bool,
+    /// SENSOR (a `Trigger` on a rigidbody node): the body never blocks or gets
+    /// blocked — it passes through everything and nothing pushes back — but
+    /// overlap still fires the trigger hooks. A dynamic sensor still falls
+    /// (pair with gravity-off or Kinematic for pickups/zones that stay put).
+    /// Sensors are also invisible to raycasts, like static trigger colliders.
+    pub sensor: bool,
 }
 
 impl Body {
@@ -83,6 +89,7 @@ impl Body {
             active: true,
             layer: 0,
             kinematic: false,
+            sensor: false,
         }
     }
 

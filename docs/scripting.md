@@ -170,6 +170,12 @@ node:getcomponent("RigidBody").kinematic = true   -- freeze + carry it
 node:getcomponent("RigidBody").kinematic = false  -- drop it (wakes at rest)
 ```
 
+Every mode can also be a **trigger** (the Rigidbody's trigger checkbox): the
+body becomes a sensor that never blocks anything but fires the
+`onTriggerEnter/Stay/Exit` hooks on overlap — Kinematic + trigger is the
+moving pickup / sweeping damage zone (see
+[§20 Triggers](#20-collision--trigger-events)).
+
 Static is authoring-time (it's a collider, not a body — switch it in the
 Inspector; the live sim rebuilds instantly). All three modes ride the scene
 format, so replicated/spawned nodes behave identically over the network — a
@@ -1306,6 +1312,15 @@ function onTriggerEnter(node, other, hit) end
 function onTriggerStay(node, other, hit) end
 function onTriggerExit(node, other, hit) end
 ```
+
+Triggers work on **rigidbody nodes too** — the trigger checkbox sits on the
+Rigidbody component there, and it turns the *body* into a sensor: it never
+blocks or gets blocked (and rays skip it), but overlap fires the hooks on both
+nodes. A **Kinematic + trigger** rigidbody is the moving pickup / sweeping
+damage zone: scripts move it, players pass through it, `onTriggerEnter` fires.
+A **Dynamic + trigger** body still falls — it drops straight through solid
+geometry (firing trigger events against everything it crosses), so pair
+triggers with Kinematic or gravity-off for things that should stay put.
 
 The full portal — **one script, any number of portals**, each with its own
 destination via a [string param](#6-globals-params-time-dt-log):

@@ -394,9 +394,12 @@ impl PhysicsWorld {
             // Resolve penetration against every collider (relaxation passes), sampling
             // each of the body's collision spheres (2 for a capsule). The collision
             // matrix filters pairs: a body on layer i skips colliders whose layer bit
-            // isn't set in matrix[i] (all-collide by default).
+            // isn't set in matrix[i] (all-collide by default). A SENSOR body skips
+            // resolution entirely — it passes through everything (overlap is detected
+            // separately for the trigger hooks), so it only integrates above.
             let row = self.matrix[self.bodies[bi].layer as usize];
-            for _ in 0..2 {
+            let passes = if self.bodies[bi].sensor { 0 } else { 2 };
+            for _ in 0..passes {
                 for ci in 0..self.colliders.len() {
                     if (row >> self.colliders[ci].layer) & 1 == 0 {
                         continue;
