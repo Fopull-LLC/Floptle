@@ -190,6 +190,12 @@ pub struct ScriptHost {
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
     mouse_lock: Rc<RefCell<Option<bool>>>,
+    /// `params.X = value` writes queued this pass — (entity, script kind, key,
+    /// value). Flushed to the node's stored `ScriptInst` params so tunables are
+    /// TWO-WAY: the write persists across frames and shows live in the
+    /// Inspector (and reverts on Stop like every play-mode change). Only
+    /// DECLARED tunables persist (a key in `defaults` or the stored params).
+    param_writes: RefCell<Vec<(u32, String, String, f32)>>,
     /// A pending `scene.load(...)` request (last call this frame wins). The
     /// driver drains it and performs the switch between frames — locally when
     /// offline/hosting, over the wire to every client in a session.
@@ -511,6 +517,46 @@ mod tests {
         let tr = world.get::<Transform>(e).unwrap();
         let (yaw, _, _) = tr.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "yaw was {yaw}");
+    }
+
+    /// `params` is TWO-WAY: a script's `params.x = ...` write persists across
+    /// frames (the next seed reads it back) and lands in the node's stored
+    /// ScriptInst — the Inspector shows it live. Undeclared keys stay
+    /// frame-local (they must not silently grow the Inspector).
+    #[test]
+    fn param_writes_persist_and_reach_the_stored_params() {
+        let dir = std::env::temp_dir().join("floptle_script_test_param_write");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "zoom",
+            "defaults = { d = 6 }\nfunction update(node, dt)\n  params.d = params.d - 1\n  params.ghost = 42\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "zoom".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        host.run(&mut world, &dir, 0.016, 0.016);
+        host.run(&mut world, &dir, 0.016, 0.032);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let scripts = world.get::<Scripts>(e).unwrap();
+        let stored = &scripts.0[0].params;
+        let d = stored.iter().find(|(k, _)| k == "d").map(|(_, v)| *v);
+        assert_eq!(d, Some(3.0), "the write must persist and decrement each frame: {stored:?}");
+        assert!(
+            !stored.iter().any(|(k, _)| k == "ghost"),
+            "undeclared keys stay frame-local: {stored:?}"
+        );
     }
 
     /// `lateUpdate` — the camera pass: runs when the driver says (after
