@@ -251,7 +251,7 @@ impl Editor {
         }
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
-        self.scene_name = name;
+        self.set_scene_file(&path);
         self.adopt_terrain();
         self.selection.clear();
         self.history = History::default();
@@ -280,7 +280,7 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.migrate_legacy_post(&doc);
-        self.scene_name = Self::scene_name_of(p);
+        self.set_scene_file(p);
         self.adopt_terrain();
         self.register_scene_meshes();
         self.selection.clear();
@@ -502,11 +502,21 @@ impl Editor {
         floptle_scene::load_materials(&self.materials_dir())
     }
 
-    /// Load the project's active scene + the file it came from: `scenes/first.ron`
-    /// if present, else the first `.ron` in `scenes/`, else a tiny built-in default.
+    /// Load the project's active scene + the file it came from: the project's
+    /// chosen ENTRY scene (project.ron `entry_scene` — the same scene a build
+    /// boots into, so what you open is what ships), else `scenes/first.ron`,
+    /// else the first `.ron` in `scenes/`, else a tiny built-in default.
     /// The returned path's stem becomes `scene_name`, so edits save back to the same
     /// file even if the scene's internal name differs.
     pub(crate) fn load_active_scene(&self) -> (PathBuf, floptle_scene::SceneDoc) {
+        let cfg = floptle_scene::load_project(&self.project_cfg_path());
+        if let Some(entry) = cfg.entry_scene.as_deref() {
+            let p = self.project_root.join(entry);
+            match floptle_scene::load(&p) {
+                Ok(doc) => return (p, doc),
+                Err(e) => eprintln!("  entry scene {entry} failed to load ({e}); falling back"),
+            }
+        }
         let first = self.project_root.join("scenes/first.ron");
         if let Ok(doc) = floptle_scene::load(&first) {
             return (first, doc);
@@ -528,6 +538,26 @@ impl Editor {
         (first, default_scene())
     }
 
+    /// Track the open scene file: its stem (the name edits save under) plus its
+    /// project-root-relative path (what multiplayer sessions name scenes by on
+    /// the wire — `scene_rel`).
+    pub(crate) fn set_scene_file(&mut self, path: &Path) {
+        self.scene_name = Self::scene_name_of(path);
+        self.scene_rel = path
+            .strip_prefix(&self.project_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| format!("scenes/{}.ron", self.scene_name));
+    }
+
+    /// `scene_rel`, or the `scenes/<name>.ron` convention if it was never set.
+    pub(crate) fn scene_rel_or_default(&self) -> String {
+        if self.scene_rel.is_empty() {
+            format!("scenes/{}.ron", self.scene_name)
+        } else {
+            self.scene_rel.clone()
+        }
+    }
+
     /// The scene-file stem (the name edits save under).
     pub(crate) fn scene_name_of(path: &std::path::Path) -> String {
         path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into())
@@ -539,7 +569,7 @@ impl Editor {
         self.project_root = root;
         self.seed_project_dirs();
         let (path, doc) = self.load_active_scene();
-        self.scene_name = Self::scene_name_of(&path);
+        self.set_scene_file(&path);
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
@@ -597,6 +627,7 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
         self.scene_name = "untitled".into();
+        self.scene_rel = String::new();
         self.terrains.clear();
         self.active_terrain = None;
         self.terrain_slots.clear();
@@ -784,6 +815,29 @@ impl Editor {
 }
 
 /// Open `path` in the OS file manager (xdg-open / open / explorer).
+/// Every scene file in the project, as `scenes/...ron` project-root-relative
+/// paths (recursive, sorted) — the entry-scene picker's option list. A free
+/// function over the root so callers holding other `Editor` field borrows can
+/// still use it.
+pub(crate) fn scene_files_in(project_root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, root, out);
+            } else if p.extension().is_some_and(|x| x == "ron")
+                && let Ok(rel) = p.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&project_root.join("scenes"), project_root, &mut out);
+    out.sort();
+    out
+}
+
 pub(crate) fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "linux")]
     let cmd = "xdg-open";

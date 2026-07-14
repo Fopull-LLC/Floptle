@@ -190,6 +190,12 @@ pub struct ScriptHost {
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
     mouse_lock: Rc<RefCell<Option<bool>>>,
+    /// A pending `scene.load(...)` request (last call this frame wins). The
+    /// driver drains it and performs the switch between frames — locally when
+    /// offline/hosting, over the wire to every client in a session.
+    scene_request: Rc<RefCell<Option<String>>>,
+    /// The running scene's name, fed by the driver — what `scene.current()` reads.
+    scene_name: Rc<RefCell<String>>,
     /// Animator state per entity (layers/states/time), fed by the editor before `run`
     /// so scripts can read `anim:state()`, `anim:time()`, `anim:clips()`, ….
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,

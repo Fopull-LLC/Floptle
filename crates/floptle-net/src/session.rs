@@ -163,6 +163,21 @@ pub struct NetSession {
     /// Runtime spawns alive right now, for late-joiner catch-up.
     spawned_docs: HashMap<u64, (String, Option<PeerId>)>,
     snap_count: u32,
+    /// The scene GENERATION: bumped by every [`Self::switch_scene`], carried on
+    /// scene-scoped messages (snapshots/spawns/despawns) so old-scene state
+    /// still in flight can't apply to the new scene's same-numbered NetIds.
+    /// Clients adopt it from `Welcome` / `Scene`.
+    scene_epoch: u8,
+    /// The running scene, as a project-root-relative path — what `Welcome`
+    /// tells late joiners. Set by the driver ([`Self::set_scene`]).
+    scene: String,
+    /// Client: a scene the server told us to be in (from `Scene` or a
+    /// `Welcome` naming one), awaiting the driver's load + rebind.
+    scene_switch_in: Option<String>,
+    /// Client: a switch is announced but [`Self::rebind_scene`] hasn't run —
+    /// scene-scoped messages are dropped until the driver rebinds (the old
+    /// id map must never eat the new scene's snapshots).
+    scene_pending: bool,
     /// Live body states fed by the driver each tick (velocity + grounded per
     /// physics-synced entity) — carried in snapshots for prediction.
     body_states: HashMap<Entity, ([f32; 3], bool)>,
@@ -281,6 +296,10 @@ impl NetSession {
             synced_now: Vec::new(),
             spawned_docs: HashMap::new(),
             snap_count: 0,
+            scene_epoch: 0,
+            scene: String::new(),
+            scene_switch_in: None,
+            scene_pending: false,
             body_states: HashMap::new(),
             late_inputs: 0,
             peer_inputs: HashMap::new(),
@@ -353,6 +372,69 @@ impl NetSession {
                 self.interp.insert(id, InterpBuf::new(rep));
             }
         }
+    }
+
+    /// Driver, at session start: the scene the session is running, as a
+    /// project-root-relative path — what `Welcome` tells late joiners to load.
+    pub fn set_scene(&mut self, scene: &str) {
+        self.scene = scene.to_string();
+    }
+
+    /// The current scene generation (tests / diagnostics).
+    pub fn scene_epoch(&self) -> u8 {
+        self.scene_epoch
+    }
+
+    /// Server: the session is switching scenes. Bumps the epoch and announces
+    /// the new scene to every client (reliable). The driver loads the scene
+    /// into its own world, then calls [`Self::rebind_scene`].
+    pub fn switch_scene(&mut self, scene: &str) {
+        debug_assert_eq!(self.role, NetRole::Server, "only the server switches scenes");
+        self.scene = scene.to_string();
+        self.scene_epoch = self.scene_epoch.wrapping_add(1);
+        let msg = Msg::Scene { epoch: self.scene_epoch, scene: self.scene.clone() }.encode();
+        for &p in &self.peers {
+            self.transport.send(p, Channel::Reliable, &msg);
+        }
+    }
+
+    /// Both roles, right after the driver loaded the (new) scene into `world`:
+    /// drop every id binding and scene-scoped buffer from the old scene, then
+    /// assign fresh deterministic NetIds against the new one. Peer links,
+    /// input timing, and pending events survive — only scene-scoped state
+    /// resets. The next server snapshot is a keyframe (the new baseline).
+    pub fn rebind_scene(&mut self, world: &World) {
+        self.net_to_ent.clear();
+        self.ent_to_net.clear();
+        self.next_id = 1;
+        // Server baselines.
+        self.last_sent.clear();
+        self.last_synced.clear();
+        self.spawned_docs.clear();
+        self.body_states.clear();
+        self.anims_now.clear();
+        self.last_anim.clear();
+        self.snap_count = 0;
+        // Client buffers.
+        self.interp.clear();
+        self.anim_bufs.clear();
+        self.anim_started.clear();
+        self.anims_due.clear();
+        self.predicted_in.clear();
+        self.spawned_in.clear();
+        self.despawned_in.clear();
+        self.synced_in.clear();
+        self.scene_pending = false;
+        self.register_scene(world);
+    }
+
+    /// Client: a scene the server told us to be in (a mid-session `Scene`
+    /// switch, or the `Welcome` naming the session's current scene), drained
+    /// once. The driver loads it locally (if it isn't already the running
+    /// scene), then MUST call [`Self::rebind_scene`] — scene-scoped messages
+    /// stay dropped until it does.
+    pub fn take_scene_switch(&mut self) -> Option<String> {
+        self.scene_switch_in.take()
     }
 
     /// The entity a `NetId` maps to locally (if it exists here).
@@ -618,7 +700,7 @@ impl NetSession {
         self.ent_to_net.insert(e, id);
         let ron = ron::to_string(node).unwrap_or_default();
         self.spawned_docs.insert(id, (ron.clone(), owner));
-        let msg = Msg::Spawn { id, node_ron: ron, owner }.encode();
+        let msg = Msg::Spawn { epoch: self.scene_epoch, id, node_ron: ron, owner }.encode();
         for &p in &self.peers {
             self.transport.send(p, Channel::Reliable, &msg);
         }
@@ -644,7 +726,7 @@ impl NetSession {
         self.last_sent.remove(&id);
         self.last_anim.retain(|(aid, _), _| *aid != id);
         world.despawn(e);
-        let msg = Msg::Despawn { id }.encode();
+        let msg = Msg::Despawn { epoch: self.scene_epoch, id }.encode();
         for &p in &self.peers {
             self.transport.send(p, Channel::Reliable, &msg);
         }
@@ -731,8 +813,13 @@ impl NetSession {
                 }
                 self.peers.push(from);
                 self.events.push(NetEvent::PeerJoined(from));
-                let welcome =
-                    Msg::Welcome { peer: from, tick, snapshot_every: SNAPSHOT_EVERY };
+                let welcome = Msg::Welcome {
+                    peer: from,
+                    tick,
+                    snapshot_every: SNAPSHOT_EVERY,
+                    scene: self.scene.clone(),
+                    epoch: self.scene_epoch,
+                };
                 self.transport.send(from, Channel::Reliable, &welcome.encode());
                 // Tell everyone else, and tell the joiner about existing peers.
                 let joined = Msg::PeerJoined { peer: from }.encode();
@@ -748,6 +835,7 @@ impl NetSession {
                     .spawned_docs
                     .iter()
                     .map(|(&id, (ron, owner))| Msg::Spawn {
+                        epoch: self.scene_epoch,
                         id,
                         node_ron: ron.clone(),
                         owner: *owner,
@@ -842,7 +930,7 @@ impl NetSession {
         if entries.is_empty() && synced.is_empty() && anims.is_empty() && !keyframe {
             return None;
         }
-        Some(Msg::Snapshot { tick, keyframe, entries, synced, anims })
+        Some(Msg::Snapshot { epoch: self.scene_epoch, tick, keyframe, entries, synced, anims })
     }
 
     /// Encode the animator states that need sending: everything on a keyframe,
@@ -960,7 +1048,14 @@ impl NetSession {
         if entries.is_empty() && synced.is_empty() && anims.is_empty() {
             return None;
         }
-        Some(Msg::Snapshot { tick, keyframe: true, entries, synced, anims })
+        Some(Msg::Snapshot {
+            epoch: self.scene_epoch,
+            tick,
+            keyframe: true,
+            entries,
+            synced,
+            anims,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1041,17 +1136,41 @@ impl NetSession {
 
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
-            Msg::Welcome { peer, tick, .. } => {
+            Msg::Welcome { peer, tick, scene, epoch, .. } => {
                 self.connected = true;
                 self.my_peer = Some(peer);
                 self.welcome_tick = Some(tick);
+                self.scene_epoch = epoch;
+                if !scene.is_empty() {
+                    // The session's scene: the driver compares against what it
+                    // has loaded, switches if needed, and rebinds either way.
+                    self.scene = scene.clone();
+                    self.scene_switch_in = Some(scene);
+                    self.scene_pending = true;
+                }
                 self.events.push(NetEvent::Connected);
             }
             Msg::Refused { reason } => {
                 self.connected = false;
                 self.events.push(NetEvent::Disconnected(reason));
             }
-            Msg::Spawn { id, node_ron, owner } => {
+            Msg::Scene { epoch, scene } => {
+                self.scene_epoch = epoch;
+                self.scene = scene.clone();
+                self.scene_switch_in = Some(scene);
+                // Everything buffered belongs to the OLD scene; scene-scoped
+                // messages stay dropped until the driver rebinds.
+                self.scene_pending = true;
+                self.interp.clear();
+                self.anim_bufs.clear();
+                self.anim_started.clear();
+                self.anims_due.clear();
+                self.predicted_in.clear();
+            }
+            Msg::Spawn { epoch, id, node_ron, owner } => {
+                if epoch != self.scene_epoch || self.scene_pending {
+                    return; // another scene's spawn — stale or early
+                }
                 if self.net_to_ent.contains_key(&id) {
                     return; // duplicate catch-up
                 }
@@ -1067,7 +1186,10 @@ impl NetSession {
                 self.interp.insert(id, InterpBuf::new(&rep));
                 self.spawned_in.push((id, e, owner));
             }
-            Msg::Despawn { id } => {
+            Msg::Despawn { epoch, id } => {
+                if epoch != self.scene_epoch || self.scene_pending {
+                    return;
+                }
                 if let Some(e) = self.net_to_ent.remove(&id) {
                     self.ent_to_net.remove(&e);
                     self.interp.remove(&id);
@@ -1077,7 +1199,10 @@ impl NetSession {
                     world.despawn(e);
                 }
             }
-            Msg::Snapshot { tick, entries, synced, anims, .. } => {
+            Msg::Snapshot { epoch, tick, entries, synced, anims, .. } => {
+                if epoch != self.scene_epoch || self.scene_pending {
+                    return; // another scene's state — the id map doesn't apply
+                }
                 if tick <= self.latest_server_tick && tick != 0 && !entries.is_empty() {
                     // Sequenced channel already drops stale, but the reliable
                     // late-join keyframe can race a newer unreliable snapshot.

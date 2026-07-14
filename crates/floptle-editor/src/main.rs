@@ -1040,6 +1040,17 @@ fn export_game_with(
     if out_c.starts_with(&proj) {
         return Err("the export folder can't be inside the project (it would copy itself)".into());
     }
+    // A build that can't find its chosen entry scene is dead on arrival — catch
+    // it at export time, not on a player's machine.
+    let cfg = floptle_scene::load_project(&proj.join("project.ron"));
+    if let Some(entry) = cfg.entry_scene.as_deref()
+        && !proj.join(entry).is_file()
+    {
+        return Err(format!(
+            "the project's entry scene ({entry}) doesn't exist — pick one in \
+             Edit ⏵ Project Settings"
+        ));
+    }
     // Binary name from the title: filesystem-safe, the TARGET's suffix.
     let stem: String = title
         .chars()
@@ -1602,6 +1613,17 @@ struct Editor {
     /// Accumulated play-mode seconds (advances only while playing and not paused).
     play_t: f32,
     play_snapshot: Option<SceneDoc>,
+    /// The open scene file as a project-root-relative path ("scenes/first.ron")
+    /// — what multiplayer sessions name scenes by on the wire. Kept in lockstep
+    /// with `scene_name` by [`Self::set_scene_file`].
+    scene_rel: String,
+    /// (name, rel) when Play started. A mid-play `scene.load(...)` renames the
+    /// scene for the session; Stop restores both alongside the snapshot so the
+    /// editor's scene saves back to its own file, not the played one's.
+    play_scene_name: Option<(String, String)>,
+    /// A `scene.load(...)` a script queued this frame — performed at the top of
+    /// the NEXT frame (never mid-frame under the running scripts).
+    pending_scene: Option<String>,
     /// The Lua VM that runs node scripts in play mode (ADR-0003).
     script_host: ScriptHost,
     /// Animation: clip/controller registries + live per-entity runtimes.
@@ -1787,7 +1809,7 @@ impl ApplicationHandler for Editor {
         // project settings, materials and asset tree from `project_root`.
         self.seed_project_dirs();
         let (scene_file, doc) = self.load_active_scene();
-        self.scene_name = Self::scene_name_of(&scene_file);
+        self.set_scene_file(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
         if !self.player_mode {

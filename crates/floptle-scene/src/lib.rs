@@ -751,6 +751,15 @@ pub struct ProjectConfigDoc {
     pub retro: bool,
     pub retro_height: u32,
     pub matter: bool,
+    /// The game's title: names exported builds (their binary + window title).
+    /// `None` = untitled (exports fall back to the project folder's name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The scene a BUILD boots into, as a project-root-relative path
+    /// (e.g. `scenes/first.ron`). The editor opens it on project load too, so
+    /// what you see is what ships. `None` = the `scenes/first.ron` convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_scene: Option<String>,
     /// The engine version this project targets — written by the Hub / `--new`, read by
     /// the Hub to launch the matching install. Advisory (the editor doesn't enforce it);
     /// `None` on projects created before the Hub existed.
@@ -801,6 +810,8 @@ impl ProjectConfigDoc {
             retro: true,
             retro_height: 240,
             matter: true,
+            title: None,
+            entry_scene: None,
             engine_version: None,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,

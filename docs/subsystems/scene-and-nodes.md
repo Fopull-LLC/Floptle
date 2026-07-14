@@ -190,3 +190,19 @@ ECS; the tree is rebuilt/patched from `Hierarchy`, never held as a parallel trut
   runtime crate.
 - **A full undo-graph / ECS command journal as a public API** — the editor has undo;
   scripts mutate directly.
+
+## Scene management (2026-07-14)
+
+A project has an **entry scene** (Edit ⏵ Project Settings ⏵ Game → `project.ron`'s
+`entry_scene`): the scene a build boots into, and the scene the editor opens on
+project load — what you see is what ships. The same panel holds the game
+**title** (names exported builds).
+
+Runtime transitions are script-driven — `scene.load(name)` (plus
+`scene.current()` / `scene.list()`), performed at a frame boundary: the world
+swaps to the new scene, physics/animators/particles/audio rebuild, every
+script's `start` re-fires. In the editor, Stop still restores the scene you
+were editing (name and all). In multiplayer only the server switches; clients
+follow via the wire protocol's scene epoch (docs/netcode-design.md §5.2b), and
+late joiners land in the session's current scene from the Welcome handshake.
+Full guide: docs/scripting.md §17.

@@ -305,6 +305,29 @@ impl Editor {
             let _ = c.take_synced();
             let _ = c.take_anim_updates();
         }
+        // The ghost follows scene switches exactly like a remote client:
+        // reload the scene from DISK into its hidden world, rebind NetIds.
+        let ghost_switch = self.net_client.as_mut().and_then(|(c, _)| c.take_scene_switch());
+        if let Some(scene) = ghost_switch {
+            let loaded = self
+                .resolve_scene_request(&scene)
+                .and_then(|p| floptle_scene::load(&p).ok());
+            match (loaded, self.net_client.as_mut()) {
+                (Some(doc), Some((c, cw))) => {
+                    *cw = World::default();
+                    floptle_scene::spawn_into(&doc, cw);
+                    c.rebind_scene(cw);
+                }
+                _ => {
+                    self.net_client = None;
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("ghost client left — it couldn't load \"{scene}\""),
+                        None,
+                    );
+                }
+            }
+        }
         // --- mirror session state into Lua (net.role()/peers()/ping()/isMine) ---
         let state = if let Some(s) = &self.net_server {
             NetState {
@@ -344,6 +367,7 @@ impl Editor {
         let hub = floptle_net::MemoryHub::new();
         let mut s = NetSession::server(Box::new(hub.server_endpoint()));
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
+        s.set_scene(&self.scene_rel_or_default());
         s.register_scene(&self.world);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.net_hub = Some(hub);
@@ -533,6 +557,48 @@ impl Editor {
         self.script_host.set_script_filter(skip);
     }
 
+    /// A queued `scene.load(...)` from a script, routed by session role:
+    /// offline = plain switch; HOSTING = switch locally, announce to every
+    /// client (they load + rebind), rebuild the session against the new scene;
+    /// a JOINED client = refused (the server drives scenes — ask it via an
+    /// RPC). Runs at the top of a frame, never mid-frame under the scripts.
+    pub(crate) fn perform_scene_request(&mut self, req: &str) {
+        if self.net_play_client.is_some() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "scene.load(\"{req}\"): only the server switches scenes in a session — \
+                     send it an RPC (net.send) and let ITS script call scene.load"
+                ),
+                None,
+            );
+            return;
+        }
+        let Some(rel) = self.switch_scene_during_play(req) else { return };
+        if self.net_server.is_some() {
+            // Re-run the host's per-scene session setup against the new world:
+            // slot ownership, script filters, fresh NetIds, a clean lag-comp
+            // ring — and the announcement that makes every client follow.
+            Self::net_assign_scene_owners(&mut self.world);
+            let remote: Vec<(Entity, u64)> = self
+                .world
+                .query::<floptle_core::Replicated>()
+                .filter(|(_, r)| r.mode == ReplicationMode::Predicted)
+                .filter_map(|(e, r)| r.owner.map(|p| (e, p)))
+                .collect();
+            self.net_remote_predicted = remote;
+            self.net_apply_host_filters();
+            self.net_history = floptle_net::LagHistory::new();
+            if let Some(s) = self.net_server.as_mut() {
+                s.switch_scene(&rel);
+                s.rebind_scene(&self.world);
+            }
+            self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
+        } else {
+            self.net_apply_offline_slots();
+        }
+    }
+
     /// Host a REAL session on a UDP port (QUIC): other machines running the
     /// same project join with `net.join("quic://<ip>:port")`. The play world
     /// is the authoritative server — and scene-authored Predicted nodes belong
@@ -627,6 +693,7 @@ impl Editor {
         self.net_apply_host_filters();
         let mut s = NetSession::server(transport);
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
+        s.set_scene(&self.scene_rel_or_default()); // joiners land in OUR scene
         s.register_scene(&self.world);
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
@@ -1043,6 +1110,15 @@ impl Editor {
         let _ = hs.host.take_spawn_effects();
         let _ = hs.host.take_model_changes();
         let _ = hs.host.take_mouse_lock();
+        if hs.host.take_scene_request().is_some() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "[server] scene.load isn't supported in the in-editor remote-player harness \
+                 yet — host a real (LAN) session to test scene switching"
+                    .into(),
+                None,
+            );
+        }
         // Surface server-side script output in the Console, tagged.
         for log in hs.host.drain_logs() {
             self.console.push(log.level, format!("[server] {}", log.msg), log.source);
@@ -1109,6 +1185,7 @@ impl Editor {
         let spawned = cs.take_spawned();
         let despawned = cs.take_despawned();
         let my_peer = cs.my_peer();
+        let scene_switch = cs.take_scene_switch();
         for (delta, margin) in lead_events {
             self.console.push(
                 floptle_script::LogLevel::Debug,
@@ -1354,6 +1431,27 @@ impl Editor {
         }
         if dispatching && let Some(sim) = self.sim.as_mut() {
             sim.world.colliders = self.script_host.take_colliders();
+        }
+        // The server put the session in a scene (a mid-session switch, or the
+        // Welcome naming one we're not in): load it from OUR project, rebind
+        // NetIds against it, and re-bind our avatar/prediction. Until the
+        // rebind, the session drops scene-scoped traffic — nothing from the
+        // new scene can land on the old world's entities.
+        if let Some(scene) = scene_switch {
+            if self.switch_scene_during_play(&scene).is_some() {
+                Self::net_assign_scene_owners(&mut self.world);
+                // Stale prediction history must not survive into the new scene.
+                self.net_predictor = None;
+                if let Some(cs) = self.net_play_client.as_mut() {
+                    cs.rebind_scene(&self.world);
+                }
+                let owner = if self.net_hub.is_some() { Some(1) } else { my_peer };
+                self.net_client_side_setup(owner, false);
+            } else {
+                // We can't load what the server is playing — leaving is the
+                // only honest option (staying = a frozen desynced world).
+                self.net_stop("the server switched to a scene this project doesn't have");
+            }
         }
         // Smooth the visual correction.
         if let Some((_, pred)) = self.net_predictor.as_mut() {
