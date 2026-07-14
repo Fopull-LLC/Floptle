@@ -1290,12 +1290,19 @@ impl EditorTabViewer<'_> {
                 self.cmd.open_in_editor = Some(self.ide.open[i].path.clone());
             }
             ui.menu_button("Insert snippet", |ui| {
-                for (label, snippet) in LUA_SNIPPETS {
-                    if ui.button(*label).clicked() {
-                        self.ide.open[i].text.push_str(snippet);
-                        self.ide.open[i].dirty = true;
-                        ui.close();
-                    }
+                ui.small("ready-made patterns — appended to the end of the file");
+                for (category, snippets) in LUA_SNIPPETS {
+                    ui.menu_button(*category, |ui| {
+                        // Wide enough that snippet names read comfortably.
+                        ui.set_min_width(280.0);
+                        for (label, snippet) in *snippets {
+                            if ui.button(*label).clicked() {
+                                self.ide.open[i].text.push_str(snippet);
+                                self.ide.open[i].dirty = true;
+                                ui.close();
+                            }
+                        }
+                    });
                 }
             });
             // Ln/Col (+ selection size) from the editor's stored cursor state.
@@ -2041,39 +2048,228 @@ pub(crate) fn script_template(name: &str) -> String {
     )
 }
 
-/// Insert-menu snippets for the in-engine IDE: (label, Lua to append).
-const LUA_SNIPPETS: &[(&str, &str)] = &[
+/// Insert-menu snippets for the in-engine IDE, grouped into submenus:
+/// `(category, [(label, Lua to append)])`. Every snippet is a self-contained,
+/// working pattern — the things devs write over and over (portals, pickups,
+/// health, platforms, chase AI, HUD counters…), each showing the intended API
+/// (string params, vec3 math, trigger hooks, handles) so it doubles as a
+/// by-example reference. Keep them in step with `docs/scripting.md`.
+const LUA_SNIPPETS: &[(&str, &[(&str, &str)])] = &[
     (
-        "update",
-        "\nfunction update(node, dt)\n  \nend\n",
+        "Lifecycle",
+        &[
+            (
+                "script skeleton (defaults + start + update)",
+                "\ndefaults = { speed = 1.0 }\n\nfunction start(node)\n  -- runs once when Play begins\nend\n\nfunction update(node, dt)\n  -- runs every rendered frame\nend\n",
+            ),
+            ("start", "\nfunction start(node)\n  \nend\n"),
+            ("update (every frame)", "\nfunction update(node, dt)\n  \nend\n"),
+            (
+                "fixedUpdate (gameplay tick — movement/physics)",
+                "\nfunction fixedUpdate(node, dt)\n  \nend\n",
+            ),
+            (
+                "lateUpdate (after physics — cameras/followers)",
+                "\nfunction lateUpdate(node, dt)\n  \nend\n",
+            ),
+        ],
     ),
     (
-        "start",
-        "\nfunction start(node)\n  \nend\n",
+        "Collision & triggers",
+        &[
+            (
+                "collision hooks (enter / exit)",
+                "\nfunction onCollisionEnter(node, other, hit)\n  -- other = the node we touched; hit = { x, y, z, nx, ny, nz }\n  log(\"touched \" .. (other.name or \"?\"))\nend\n\nfunction onCollisionExit(node, other, hit)\nend\n",
+            ),
+            (
+                "trigger zone (enter / exit)",
+                "\n-- Attach to a Collidable node with the 'trigger' switch ON:\n-- bodies pass through, these hooks still fire.\nfunction onTriggerEnter(node, other, hit)\n  if other:hasTag(\"player\") then\n    log(\"player entered \" .. node.name)\n  end\nend\n\nfunction onTriggerExit(node, other, hit)\nend\n",
+            ),
+            (
+                "portal (string param + scene.load)",
+                "\n-- One script, many portals: each instance sets its own destination\n-- in the Inspector (a string default = a text field).\ndefaults = { destination = \"hub\" }\n\nfunction onTriggerEnter(node, other, hit)\n  if other:hasTag(\"player\") then\n    scene.load(params.destination)\n  end\nend\n",
+            ),
+            (
+                "pickup / collectible",
+                "\n-- Trigger node: first player touch hides it and awards the manager.\nlocal taken = false\n\nfunction onTriggerEnter(node, other, hit)\n  if taken or not other:hasTag(\"player\") then return end\n  taken = true\n  node.visible = false\n  spawnEffect(\"vfx/Pickup\", node.x, node.y, node.z)\n  local mgr = findScript(\"game_manager\")\n  if mgr then mgr.addScore(1) end\nend\n",
+            ),
+            (
+                "kill plane / respawn",
+                "\n-- A huge flat trigger under the map: falling into it respawns you.\ndefaults = { spawn = \"Spawn\" }\n\nfunction onTriggerEnter(node, other, hit)\n  local spawn = find(params.spawn)\n  if spawn and other:hasTag(\"player\") then\n    other.pos = spawn.pos\n    other.vx, other.vy, other.vz = 0, 0, 0\n  end\nend\n",
+            ),
+            (
+                "jump pad (boost on contact)",
+                "\ndefaults = { boost = 14.0 }\n\nfunction onCollisionEnter(node, other, hit)\n  if other.vy ~= nil then -- only bodies have velocity\n    other.vy = params.boost\n  end\nend\n",
+            ),
+        ],
     ),
     (
-        "fixedUpdate",
-        "\nfunction fixedUpdate(node, dt)\n  \nend\n",
+        "Movement & objects",
+        &[
+            (
+                "spin (yaw)",
+                "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+            ),
+            (
+                "pulse (scale)",
+                "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
+            ),
+            (
+                "bob / float (hover in place)",
+                "\ndefaults = { height = 0.5, speed = 2.0 }\nlocal baseY\n\nfunction start(node)\n  baseY = node.y\nend\n\nfunction update(node, dt)\n  node.y = baseY + math.sin(time * params.speed) * params.height\nend\n",
+            ),
+            (
+                "moving platform (ping-pong to an offset)",
+                "\n-- Slides between its start pose and start + (dx, dy, dz), forever.\ndefaults = { dx = 0.0, dy = 0.0, dz = 6.0, speed = 0.5 }\nlocal from\n\nfunction start(node)\n  from = node.pos\nend\n\nfunction update(node, dt)\n  local to = from + vec3(params.dx, params.dy, params.dz)\n  local t = (math.sin(time * params.speed * math.pi * 2) + 1) * 0.5\n  node.pos = from:lerp(to, t)\nend\n",
+            ),
+            (
+                "chase target (simple follow AI)",
+                "\n-- Chases the node named `target` while it's inside aggro range.\ndefaults = { target = \"Player\", speed = 3.0, aggro = 12.0, keep = 1.5 }\n\nfunction update(node, dt)\n  local prey = find(params.target)\n  if not prey then return end\n  local d = distance(node, prey)\n  if d < params.aggro and d > params.keep then\n    local dir = (prey.pos - node.pos):normalized()\n    node.pos = node.pos + dir * params.speed * dt\n    node.yaw = math.atan2(-dir.x, -dir.z) -- face the prey (forward = -Z)\n  end\nend\n",
+            ),
+            (
+                "patrol waypoints (named nodes)",
+                "\n-- Walks Point1 -> Point2 -> ... -> PointN -> Point1. Name your\n-- waypoint nodes and list them here (or in a string param).\ndefaults = { speed = 2.0, reach = 0.3 }\nlocal points = { \"Point1\", \"Point2\", \"Point3\" }\nlocal at = 1\n\nfunction update(node, dt)\n  local wp = find(points[at])\n  if not wp then return end\n  if distance(node, wp) < params.reach then\n    at = (at % #points) + 1\n    return\n  end\n  local dir = (wp.pos - node.pos):normalized()\n  node.pos = node.pos + dir * params.speed * dt\nend\n",
+            ),
+        ],
     ),
     (
-        "lateUpdate (camera pass)",
-        "\nfunction lateUpdate(node, dt)\n  \nend\n",
+        "Combat & health",
+        &[
+            (
+                "health (damage / heal via handles)",
+                "\n-- Other scripts reach this via a handle:\n--   local hp = hit.node:getscript(\"health\")\n--   if hp then hp.damage(25) end\ndefaults = { max = 100 }\nhp = 100\n\nfunction start(node)\n  hp = params.max\nend\n\nfunction damage(amount)\n  hp = math.max(0, hp - amount)\n  if hp == 0 then die() end\nend\n\nfunction heal(amount)\n  hp = math.min(params.max, hp + amount)\nend\n\nfunction die()\n  node.visible = false -- swap for a death anim / respawn\nend\n",
+            ),
+            (
+                "hitscan shot (raycast + tag filter)",
+                "\ndefaults = { range = 60.0, power = 25 }\n\nfunction update(node, dt)\n  if input.clicked(0) then\n    local yaw, pitch = node.yaw, node.pitch\n    local cp = math.cos(pitch)\n    local dx, dy, dz = -math.sin(yaw) * cp, math.sin(pitch), -math.cos(yaw) * cp\n    local h = raycast(node.x, node.y, node.z, dx, dy, dz, params.range)\n    if h then\n      spawnEffect(\"vfx/Impact\", h.x, h.y, h.z)\n      if h.node and h.node:hasTag(\"enemy\") then\n        local hp = h.node:getscript(\"health\")\n        if hp then hp.damage(params.power) end\n      end\n    end\n  end\nend\n",
+            ),
+            (
+                "melee swing (short reach, forward)",
+                "\ndefaults = { reach = 2.5, power = 40 }\n\nfunction update(node, dt)\n  if input.clicked(0) then\n    local dx, dz = -math.sin(node.yaw), -math.cos(node.yaw)\n    local h = raycast(node.x, node.y, node.z, dx, 0, dz, params.reach)\n    if h and h.node and h.node:hasTag(\"enemy\") then\n      local hp = h.node:getscript(\"health\")\n      if hp then hp.damage(params.power) end\n    end\n  end\nend\n",
+            ),
+        ],
     ),
     (
-        "networked door (rpc + synced)",
-        "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
+        "Camera & input",
+        &[
+            (
+                "smooth follow camera (lateUpdate)",
+                "\n-- Attach to the active Camera. Follows `target` at an offset,\n-- smoothed — lateUpdate reads the target's FINAL pose (no jitter).\ndefaults = { target = \"Player\", ox = 0.0, oy = 4.0, oz = 8.0, smooth = 8.0 }\n\nfunction lateUpdate(node, dt)\n  local t = find(params.target)\n  if not t then return end\n  local want = t.pos + vec3(params.ox, params.oy, params.oz)\n  node.pos = node.pos:lerp(want, math.min(1, params.smooth * dt))\nend\n",
+            ),
+            (
+                "WASD planar movement (rigidbody)",
+                "\n-- Needs a Rigidbody (lock its rotation). Moves along the node's yaw.\ndefaults = { speed = 5.0, jump = 7.0 }\n\nfunction fixedUpdate(node, dt)\n  local f = input.axis(\"s\", \"w\")\n  local s = input.axis(\"a\", \"d\")\n  local cy, sy = math.cos(node.yaw), math.sin(node.yaw)\n  local vy = node.vy\n  if node.grounded and input.pressed(\"space\") then vy = params.jump end\n  node.vx = (-sy * f + cy * s) * params.speed\n  node.vz = (-cy * f - sy * s) * params.speed\n  node.vy = vy\nend\n",
+            ),
+            (
+                "toggle on key press",
+                "\ndefaults = { key = \"t\" }\nenabled = false\n\nfunction update(node, dt)\n  if input.pressed(params.key) then\n    enabled = not enabled\n    log(node.name .. \": \" .. (enabled and \"on\" or \"off\"))\n  end\nend\n",
+            ),
+            (
+                "double-tap detection",
+                "\ndefaults = { key = \"w\", window = 0.3 }\nlocal lastTap = -10\n\nfunction update(node, dt)\n  if input.pressed(params.key) then\n    if time - lastTap < params.window then\n      log(\"double tap!\")\n    end\n    lastTap = time\n  end\nend\n",
+            ),
+        ],
     ),
     (
-        "lag-compensated swing (net.rewind)",
-        "\n-- client: fire the intent stamped with the tick you were SEEING\nfunction update(node, dt)\n  if net.isClient() and input.clicked(0) then\n    local yaw = input.aimYaw() or node.yaw\n    net.rpc(\"swing\", { dx = math.sin(yaw), dz = math.cos(yaw) }, { withInput = true })\n  end\nend\n\n-- server: judge it against the world as that player perceived it\nonRpc = {}\nfunction onRpc.swing(args, peer)\n  if not net.isServer() then return end\n  net.rewind(peer, function()\n    local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)\n    if hit and hit.node then\n      local combat = hit.node:getscript(\"combat\")\n      if combat and combat.synced.parrying then\n        net.rpc(\"parried\", {}, { to = peer })\n      else\n        log(\"hit \" .. hit.node.name)\n      end\n    end\n  end)\nend\n",
+        "Game state & scenes",
+        &[
+            (
+                "game manager (score, the manager pattern)",
+                "\n-- Attach ONCE to any node (e.g. an Empty named GameManager).\n-- Everyone else reaches it: local mgr = findScript(\"game_manager\")\nscore = 0\n\nfunction addScore(n)\n  score = score + n\n  local label = find(\"ScoreLabel\")\n  if label then label.text = score end\nend\n",
+            ),
+            (
+                "scene switch on key",
+                "\ndefaults = { scene = \"arena\", key = \"n\" }\n\nfunction update(node, dt)\n  if input.pressed(params.key) then\n    scene.load(params.scene)\n  end\nend\n",
+            ),
+            (
+                "checkpoint (remember + respawn)",
+                "\n-- Trigger node: touching it stores the respawn point on the manager.\nfunction onTriggerEnter(node, other, hit)\n  if other:hasTag(\"player\") then\n    local mgr = findScript(\"game_manager\")\n    if mgr then mgr.checkpoint = node.pos end\n  end\nend\n",
+            ),
+            (
+                "timer / cooldown",
+                "\ndefaults = { cooldown = 2.0 }\nlocal readyAt = 0\n\nfunction update(node, dt)\n  if input.clicked(0) and time >= readyAt then\n    readyAt = time + params.cooldown\n    log(\"fired! next in \" .. params.cooldown .. \"s\")\n  end\nend\n",
+            ),
+        ],
     ),
     (
-        "spin (yaw)",
-        "\ndefaults = { speed = 45 }\nfunction update(node, dt)\n  node.yaw = node.yaw + math.rad(params.speed) * dt\nend\n",
+        "Animation, VFX & audio",
+        &[
+            (
+                "drive animator from speed",
+                "\n-- Idle/Walk/Run from the body's real velocity (works with any\n-- Animation Controller carrying those states).\ndefaults = { walkAt = 0.4, runAt = 6.0 }\n\nfunction update(node, dt)\n  local anim = node:animator()\n  if not anim then return end\n  local speed = math.sqrt((node.vx or 0)^2 + (node.vz or 0)^2)\n  if speed > params.runAt then\n    anim:play(\"Run\")\n  elseif speed > params.walkAt then\n    anim:play(\"Walk\")\n  else\n    anim:play(\"Idle\")\n  end\nend\n",
+            ),
+            (
+                "one-shot effect at a point",
+                "\n-- Fire-and-forget: plays once, despawns itself.\nspawnEffect(\"vfx/Explosion\", node.x, node.y, node.z)\n",
+            ),
+            (
+                "particles on this node (play / stop)",
+                "\nfunction update(node, dt)\n  local fx = node:particles()\n  if fx then\n    if input.pressed(\"e\") then fx:restart() end\n    if input.pressed(\"q\") then fx:stop() end\n  end\nend\n",
+            ),
+            (
+                "play a sound (3D, through the mixer)",
+                "\naudio.play(\"audio/hit.ogg\", node.x, node.y, node.z, { maxDistance = 35, track = \"SFX\" })\n",
+            ),
+            (
+                "footsteps while moving",
+                "\ndefaults = { stride = 0.4 }\nlocal nextStep = 0\n\nfunction update(node, dt)\n  local speed = math.sqrt((node.vx or 0)^2 + (node.vz or 0)^2)\n  if node.grounded and speed > 0.5 and time >= nextStep then\n    nextStep = time + params.stride\n    audio.play(\"audio/step.ogg\", node, { volume = 0.6, track = \"SFX\" })\n  end\nend\n",
+            ),
+        ],
     ),
     (
-        "pulse (scale)",
-        "\ndefaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }\nfunction update(node, dt)\n  node.scale = math.max(params.base * (1.0 + params.amplitude * math.sin(params.speed * time)), 0.01)\nend\n",
+        "UI & HUD",
+        &[
+            (
+                "HUD counter (write a label)",
+                "\n-- Attach anywhere; writes the UI Text element named \"ScoreLabel\".\nscore = 0\n\nfunction update(node, dt)\n  local label = find(\"ScoreLabel\")\n  if label then label.text = score end\nend\n",
+            ),
+            (
+                "health bar (drive a UiSlider)",
+                "\n-- Attach to the Bar element (a UiSlider). Reads the player's health.\nfunction update(node, dt)\n  local hp = findScript(\"health\")\n  local bar = node:getcomponent(\"UiSlider\")\n  if hp and bar then bar.value = hp.hp end\nend\n",
+            ),
+            (
+                "button hooks (clicked / hover)",
+                "\n-- Attach to a UI element with 'button' ON. Style your own states.\nfunction clicked(node)\n  log(\"clicked \" .. node.name)\nend\n\nfunction hoverStart(node)\n  local el = node:getcomponent(\"UiElement\")\n  if el then el.opacity = 1.0 end\nend\n\nfunction hoverEnd(node)\n  local el = node:getcomponent(\"UiElement\")\n  if el then el.opacity = 0.8 end\nend\n",
+            ),
+        ],
+    ),
+    (
+        "Networking",
+        &[
+            (
+                "synced variable (server → everyone)",
+                "\n-- `synced` replicates server → all clients, changed-only.\nsynced = { phase = \"lobby\" }\n\nfunction update(node, dt)\n  if net.isServer() and input.pressed(\"enter\") then\n    synced.phase = \"playing\"\n  end\nend\n",
+            ),
+            (
+                "RPC round trip (client asks, server decides)",
+                "\n-- Client fires an intent; the SERVER validates and answers.\nfunction update(node, dt)\n  if net.isClient() and input.pressed(\"b\") then\n    net.rpc(\"buy\", { item = \"sword\" })\n  end\nend\n\nonRpc = {}\nfunction onRpc.buy(args, sender)\n  if not net.isServer() then return end\n  log(\"peer \" .. sender .. \" buys \" .. tostring(args.item))\n  net.rpc(\"bought\", { item = args.item }, { to = sender })\nend\nfunction onRpc.bought(args, sender)\n  log(\"purchase confirmed: \" .. tostring(args.item))\nend\n",
+            ),
+            (
+                "networked door (rpc + synced)",
+                "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
+            ),
+            (
+                "lag-compensated swing (net.rewind)",
+                "\n-- client: fire the intent stamped with the tick you were SEEING\nfunction update(node, dt)\n  if net.isClient() and input.clicked(0) then\n    local yaw = input.aimYaw() or node.yaw\n    net.rpc(\"swing\", { dx = math.sin(yaw), dz = math.cos(yaw) }, { withInput = true })\n  end\nend\n\n-- server: judge it against the world as that player perceived it\nonRpc = {}\nfunction onRpc.swing(args, peer)\n  if not net.isServer() then return end\n  net.rewind(peer, function()\n    local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)\n    if hit and hit.node then\n      local combat = hit.node:getscript(\"combat\")\n      if combat and combat.synced.parrying then\n        net.rpc(\"parried\", {}, { to = peer })\n      else\n        log(\"hit \" .. hit.node.name)\n      end\n    end\n  end)\nend\n",
+            ),
+        ],
+    ),
+    (
+        "Debug & utilities",
+        &[
+            (
+                "debug ray (gizmo)",
+                "\n-- One-frame debug shapes, Scene view only. Call every frame.\nfunction update(node, dt)\n  gizmo.ray(node.x, node.y, node.z, -math.sin(node.yaw), 0, -math.cos(node.yaw), 3.0, 0.3, 1.0, 0.4)\nend\n",
+            ),
+            (
+                "mark tagged nodes (gizmo spheres)",
+                "\nfunction update(node, dt)\n  for _, n in ipairs(findTagged(\"enemy\")) do\n    gizmo.sphere(n.x, n.y, n.z, 1.0, 1.0, 0.3, 0.3)\n  end\nend\n",
+            ),
+            (
+                "distance check (aggro gate)",
+                "\ndefaults = { target = \"Player\", range = 10.0 }\n\nfunction update(node, dt)\n  local t = find(params.target)\n  if t and distance(node, t) < params.range then\n    -- in range\n  end\nend\n",
+            ),
+        ],
     ),
 ];
 
