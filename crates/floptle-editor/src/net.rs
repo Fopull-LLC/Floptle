@@ -220,7 +220,7 @@ impl Editor {
             // Networked animators: the host's play loop already advanced every
             // controller — ship each one's (state, time, weight) per layer for
             // snapshot diffing (transitions cost bytes; steady loops cost none).
-            let anims = anim::collect_net_states(&self.world, &self.anim);
+            let anims = anim::collect_net_states(&self.world, &self.mesh_registry, &self.anim);
             if let Some(s) = self.net_server.as_mut() {
                 s.update_synced(synced);
                 s.update_body_states(bstates);
@@ -1017,7 +1017,8 @@ impl Editor {
             .map(|(e, vel, _, grounded, _)| (e, [vel.x, vel.y, vel.z], grounded))
             .collect();
         hs.session.update_body_states(bstates);
-        hs.session.update_anim_states(anim::collect_net_states(&hs.world, &hs.anim));
+        hs.session
+            .update_anim_states(anim::collect_net_states(&hs.world, &self.mesh_registry, &hs.anim));
         hs.session.tick_server(&hs.world, st);
         // Received events dispatch into the SERVER's scripts. (RPCs are NOT
         // dispatched here — they wait for the next tick's start, where the

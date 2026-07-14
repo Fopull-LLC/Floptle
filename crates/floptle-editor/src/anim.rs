@@ -977,48 +977,121 @@ pub fn preview_pose(
 /// this — corrections should be rare (a hitch, a missed packet burst).
 const NET_ANIM_DRIFT: f32 = 0.25;
 
-/// Gather every networked animator's replicable state — nodes whose
-/// `Replicated.animator` is on and that have a live controller instance —
-/// for the session's snapshot diffing (`docs/netcode-design.md`). Cheap:
-/// a Vec of (state index, time, weight) per layer, no poses, no strings.
-pub fn collect_net_states(world: &World, system: &AnimSystem) -> floptle_net::AnimStates {
+/// The animator-carrying entities under `root` (root first, then descendants),
+/// in a DETERMINISTIC order — children by entity index, which matches across
+/// peers because both machines spawn the same scene doc in node order. This is
+/// how a networked node addresses its subtree's animators on the wire (the
+/// `sub` index): the standard avatar is a Networked capsule with the rigged
+/// Model as a CHILD, and the child carries the controller.
+pub fn anim_subtree(
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    root: Entity,
+) -> Vec<Entity> {
+    anim_subtree_in(&children_map(world), world, mesh_registry, root)
+}
+
+/// The world's parent→children map (built once, walked many times — the
+/// per-tick gather walks every networked node's subtree).
+fn children_map(world: &World) -> HashMap<Entity, Vec<Entity>> {
+    let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+    for (e, p) in world.query::<floptle_core::Parent>() {
+        children.entry(p.0).or_default().push(e);
+    }
+    for kids in children.values_mut() {
+        // Index order = scene-doc node order, identical on every peer.
+        kids.sort_unstable_by_key(|e| e.index());
+    }
+    children
+}
+
+fn anim_subtree_in(
+    children: &HashMap<Entity, Vec<Entity>>,
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    root: Entity,
+) -> Vec<Entity> {
+    let is_animated = |e: Entity| {
+        world.get::<AnimController>(e).is_some()
+            || matches!(world.get::<Matter>(e), Some(Matter::Mesh { asset_path })
+                if mesh_registry.get(asset_path).is_some_and(|a| a.rig.is_some()))
+    };
     let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(e) = stack.pop() {
+        if is_animated(e) {
+            out.push(e);
+        }
+        if let Some(kids) = children.get(&e) {
+            // Reversed so the lowest-index child pops first (stack order).
+            stack.extend(kids.iter().rev().copied());
+        }
+    }
+    out
+}
+
+/// Gather every networked animator's replicable state for the session's
+/// snapshot diffing (`docs/netcode-design.md`): each `Replicated.animator`
+/// node contributes its own animator AND its subtree's (addressed by the
+/// deterministic `sub` walk index). Cheap: (state index, time, weight) per
+/// layer, no poses, no strings.
+pub fn collect_net_states(
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    system: &AnimSystem,
+) -> floptle_net::AnimStates {
+    let mut out = Vec::new();
+    let children = children_map(world);
     for (e, rep) in world.query::<floptle_core::Replicated>() {
         if !rep.animator {
             continue; // client-sided animator: each machine drives its own
         }
-        let Some(inst) = system.instances.get(&e) else { continue };
-        let ns = inst.ctl.net_state();
-        out.push((
-            e,
-            ns.speed,
-            ns.layers
-                .iter()
-                .map(|l| floptle_net::AnimSrcLayer {
-                    state: l.state,
-                    t: l.t,
-                    weight: l.weight,
-                    dur: l.dur,
-                    looped: l.looped,
-                    rate: l.rate,
-                })
-                .collect(),
-        ));
+        for (sub, ent) in
+            anim_subtree_in(&children, world, mesh_registry, e).into_iter().enumerate()
+        {
+            if sub > u8::MAX as usize {
+                break; // wire addressing is u8 — a 256-animator avatar is a bug
+            }
+            let Some(inst) = system.instances.get(&ent) else { continue };
+            let ns = inst.ctl.net_state();
+            out.push((
+                e,
+                sub as u8,
+                ns.speed,
+                ns.layers
+                    .iter()
+                    .map(|l| floptle_net::AnimSrcLayer {
+                        state: l.state,
+                        t: l.t,
+                        weight: l.weight,
+                        dur: l.dur,
+                        looped: l.looped,
+                        rate: l.rate,
+                    })
+                    .collect(),
+            ));
+        }
     }
     out
 }
 
 /// Apply received animator entries onto the local runtimes (a client's remote
-/// proxies). Lazy-binds like `advance_animators`, so a proxy that hasn't
-/// animated yet still takes its first state; entities with no controller here
-/// (asset skew, or the component was removed) are skipped, never panic.
+/// proxies): resolve each entry's `sub` index through the same deterministic
+/// subtree walk the sender used, lazy-bind like `advance_animators`, apply.
+/// Unresolvable subs / entities with no controller here (asset skew, removed
+/// components) are skipped, never panic.
 pub fn apply_net_states(
     system: &mut AnimSystem,
     world: &mut World,
     mesh_registry: &HashMap<String, MeshAsset>,
     updates: Vec<(Entity, floptle_net::AnimEntry)>,
 ) {
-    for (e, en) in updates {
+    for (root, en) in updates {
+        let Some(e) =
+            anim_subtree(world, mesh_registry, root).get(en.sub as usize).copied()
+        else {
+            continue;
+        };
         if needs_bind(system, world, e) {
             match bind_entity(system, world, mesh_registry, e) {
                 Some(inst) => {
@@ -1222,6 +1295,31 @@ pub fn new_clip_key(project_root: &Path, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The standard avatar shape — a Networked CAPSULE whose CHILD Model
+    /// carries the Animation Controller — must be addressable for animator
+    /// replication: the subtree walk finds the child (Ty's LAN test failed
+    /// exactly here — the gather only looked at the Replicated node itself),
+    /// deterministically, root-first when the root also animates.
+    #[test]
+    fn anim_subtree_finds_child_animators_deterministically() {
+        let mut w = World::new();
+        let registry: HashMap<String, MeshAsset> = HashMap::new();
+        let capsule = w.spawn();
+        w.insert(capsule, Transform::default());
+        let model = w.spawn();
+        w.insert(model, Transform::default());
+        w.insert(model, floptle_core::Parent(capsule));
+        w.insert(model, AnimController { asset: "animation_controllers/PlayerR6".into() });
+        let sibling = w.spawn(); // un-animated child: not in the walk
+        w.insert(sibling, Transform::default());
+        w.insert(sibling, floptle_core::Parent(capsule));
+
+        assert_eq!(anim_subtree(&w, &registry, capsule), vec![model], "child controller found");
+        // Root carrying its own controller comes FIRST (sub 0), child after.
+        w.insert(capsule, AnimController { asset: "animation_controllers/Root".into() });
+        assert_eq!(anim_subtree(&w, &registry, capsule), vec![capsule, model]);
+    }
 
     /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
