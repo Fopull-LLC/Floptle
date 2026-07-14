@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 6;
+pub const PROTO_VERSION: u16 = 7;
 
 /// One controller layer's playback in a snapshot, quantized for the wire:
 /// state index (`u16::MAX` = the layer is stopped/released), clip time in
@@ -52,13 +52,18 @@ impl AnimLayerWire {
     }
 }
 
-/// One replicated entity's animator state in a snapshot: the controller-wide
-/// speed (signed 1/256ths — covers reverse playback) + its layers. Sent only
-/// on CHANGE (a transition, a weight/speed edit, or unpredictable time — a
-/// looping clip's time is predicted, not re-sent), plus keyframes.
+/// One animator's state in a snapshot: the controller-wide speed (signed
+/// 1/256ths — covers reverse playback) + its layers. `sub` addresses WHICH
+/// animator under the networked node: 0 = the node itself, N = the Nth
+/// animator-carrying descendant in the deterministic subtree walk — the
+/// standard avatar is a Networked capsule whose CHILD Model carries the
+/// controller. Sent only on CHANGE (a transition, a weight/speed edit, or
+/// unpredictable time — a looping clip's time is predicted, not re-sent),
+/// plus keyframes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnimEntry {
     pub id: u64, // NetId
+    pub sub: u8,
     pub speed: i16,
     pub layers: Vec<AnimLayerWire>,
 }
@@ -202,6 +207,7 @@ mod tests {
             }],
             anims: vec![AnimEntry {
                 id: 7,
+                sub: 1,
                 speed: AnimEntry::quantize_speed(1.0),
                 layers: vec![
                     AnimLayerWire::quantize(Some(3), 1.25, 1.0),
@@ -222,7 +228,7 @@ mod tests {
         let stopped = AnimLayerWire::quantize(None, 99.0, 1.0);
         assert_eq!(stopped.state_opt(), None);
         // Speed covers reverse playback and survives the fixed-point trip.
-        let s = AnimEntry { id: 1, speed: AnimEntry::quantize_speed(-1.5), layers: vec![] };
+        let s = AnimEntry { id: 1, sub: 0, speed: AnimEntry::quantize_speed(-1.5), layers: vec![] };
         assert!((s.speed_f() + 1.5).abs() < 1.0 / 256.0);
         // Times beyond the u16 range clamp instead of wrapping to nonsense.
         let long = AnimLayerWire::quantize(Some(0), 1e6, 1.0);

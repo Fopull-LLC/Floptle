@@ -485,6 +485,7 @@ mod tests {
             t_anim = (t_anim + dt).rem_euclid(2.0);
             server.update_anim_states(vec![(
                 se[0],
+                0,
                 1.0,
                 vec![AnimSrcLayer {
                     state: Some(state),

@@ -91,9 +91,13 @@ pub struct AnimSrcLayer {
     pub rate: f32,
 }
 
-/// Per-entity animator states fed by the driver each tick:
-/// (entity, controller-global speed, layers).
-pub type AnimStates = Vec<(Entity, f32, Vec<AnimSrcLayer>)>;
+/// Per-animator states fed by the driver each tick: (networked entity, sub
+/// index — which animator under that node, see `wire::AnimEntry::sub` —
+/// controller-global speed, layers).
+pub type AnimStates = Vec<(Entity, u8, f32, Vec<AnimSrcLayer>)>;
+
+/// One buffered inbound animator entry: (server tick, local arrival tick, entry).
+type AnimBufEntry = (u64, u64, AnimEntry);
 
 /// What the server last sent for one animator — the change predictor's base.
 struct AnimSent {
@@ -165,8 +169,8 @@ pub struct NetSession {
     /// Current animator states, refreshed by the driver each tick (diffed here
     /// against `last_anim`'s time prediction).
     anims_now: AnimStates,
-    /// Per-NetId last-sent animator state — the change predictor's base.
-    last_anim: HashMap<u64, AnimSent>,
+    /// Per-(NetId, sub) last-sent animator state — the change predictor's base.
+    last_anim: HashMap<(u64, u8), AnimSent>,
     /// Gameplay-tick length in seconds (the time predictor's clock); the
     /// driver sets it at session start. Default 60 Hz.
     tick_dt: f32,
@@ -234,12 +238,12 @@ pub struct NetSession {
     /// traffic is sparse (a still NPC emoting sends nothing else, so the
     /// server-tick clock stalls): an entry applies at most `delay` local
     /// ticks after it arrived.
-    anim_bufs: HashMap<u64, VecDeque<(u64, u64, AnimEntry)>>,
+    anim_bufs: HashMap<(u64, u8), VecDeque<AnimBufEntry>>,
     /// Local tick_client call counter (the sparse-traffic aging clock above).
     client_ticks: u64,
-    /// NetIds whose first animator state was already applied (the first one
+    /// (NetId, sub)s whose first animator state was already applied (the first
     /// skips the interp delay — a late joiner's baseline shows immediately).
-    anim_started: HashSet<u64>,
+    anim_started: HashSet<(u64, u8)>,
     /// Animator updates due this tick, for the driver's apply step.
     anims_due: Vec<(Entity, AnimEntry)>,
     // --- both ---
@@ -638,7 +642,7 @@ impl NetSession {
         self.net_to_ent.remove(&id);
         self.spawned_docs.remove(&id);
         self.last_sent.remove(&id);
-        self.last_anim.remove(&id);
+        self.last_anim.retain(|(aid, _), _| *aid != id);
         world.despawn(e);
         let msg = Msg::Despawn { id }.encode();
         for &p in &self.peers {
@@ -847,7 +851,7 @@ impl NetSession {
     /// looping animation costs zero bytes here.
     fn collect_anim_entries(&mut self, tick: u64, keyframe: bool) -> Vec<AnimEntry> {
         let mut out = Vec::new();
-        for (e, speed, layers) in &self.anims_now {
+        for (e, sub, speed, layers) in &self.anims_now {
             let Some(&id) = self.ent_to_net.get(e) else { continue };
             let speed_q = AnimEntry::quantize_speed(*speed);
             let wire: Vec<AnimLayerWire> = layers
@@ -855,7 +859,7 @@ impl NetSession {
                 .take(MAX_ANIM_LAYERS)
                 .map(|l| AnimLayerWire::quantize(l.state, l.t, l.weight))
                 .collect();
-            let dirty = match self.last_anim.get(&id) {
+            let dirty = match self.last_anim.get(&(id, *sub)) {
                 None => true,
                 Some(sent) => {
                     sent.speed != speed_q
@@ -891,7 +895,7 @@ impl NetSession {
             };
             if keyframe || dirty {
                 self.last_anim.insert(
-                    id,
+                    (id, *sub),
                     AnimSent {
                         tick,
                         speed: speed_q,
@@ -902,7 +906,7 @@ impl NetSession {
                             .collect(),
                     },
                 );
-                out.push(AnimEntry { id, speed: speed_q, layers: wire });
+                out.push(AnimEntry { id, sub: *sub, speed: speed_q, layers: wire });
             }
         }
         out
@@ -939,10 +943,11 @@ impl NetSession {
         let anims = self
             .anims_now
             .iter()
-            .filter_map(|(e, speed, layers)| {
+            .filter_map(|(e, sub, speed, layers)| {
                 let &id = self.ent_to_net.get(e)?;
                 Some(AnimEntry {
                     id,
+                    sub: *sub,
                     speed: AnimEntry::quantize_speed(*speed),
                     layers: layers
                         .iter()
@@ -1006,13 +1011,13 @@ impl NetSession {
     fn collect_due_anims(&mut self) {
         let latest = self.latest_server_tick;
         let now = self.client_ticks;
-        self.anim_bufs.retain(|id, buf| {
-            let Some(&e) = self.net_to_ent.get(id) else {
+        self.anim_bufs.retain(|key, buf| {
+            let Some(&e) = self.net_to_ent.get(&key.0) else {
                 return false; // entity gone — drop the buffer
             };
             let delay = self
                 .interp
-                .get(id)
+                .get(&key.0)
                 .map(|b| b.delay)
                 .unwrap_or(Replicated::DEFAULT_INTERP_DELAY as u64);
             let target = latest.saturating_sub(delay);
@@ -1023,11 +1028,11 @@ impl NetSession {
             {
                 due = buf.pop_front().map(|(_, _, en)| en);
             }
-            if due.is_none() && !self.anim_started.contains(id) && !buf.is_empty() {
+            if due.is_none() && !self.anim_started.contains(key) && !buf.is_empty() {
                 due = buf.pop_front().map(|(_, _, en)| en);
             }
             if let Some(en) = due {
-                self.anim_started.insert(*id);
+                self.anim_started.insert(*key);
                 self.anims_due.push((e, en));
             }
             true
@@ -1066,8 +1071,8 @@ impl NetSession {
                 if let Some(e) = self.net_to_ent.remove(&id) {
                     self.ent_to_net.remove(&e);
                     self.interp.remove(&id);
-                    self.anim_bufs.remove(&id);
-                    self.anim_started.remove(&id);
+                    self.anim_bufs.retain(|(bid, _), _| *bid != id);
+                    self.anim_started.retain(|(bid, _)| *bid != id);
                     self.despawned_in.push(e.index());
                     world.despawn(e);
                 }
@@ -1092,7 +1097,7 @@ impl NetSession {
                     {
                         continue;
                     }
-                    let buf = self.anim_bufs.entry(an.id).or_default();
+                    let buf = self.anim_bufs.entry((an.id, an.sub)).or_default();
                     buf.push_back((tick, self.client_ticks, an));
                     while buf.len() > MAX_SAMPLES {
                         buf.pop_front();
