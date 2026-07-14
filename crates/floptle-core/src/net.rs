@@ -57,6 +57,11 @@ pub struct Replicated {
     /// Sync velocity too (better extrapolation, and required for prediction
     /// of a physics body).
     pub physics: bool,
+    /// Sync the Animation Controller's playback (state + time per layer, a few
+    /// bytes per TRANSITION — poses are sampled locally on every peer). Off =
+    /// client-sided: each machine drives this node's animator itself (pure
+    /// cosmetics, or Lua driving it from already-replicated state).
+    pub animator: bool,
     /// Smooth remote entities between snapshots (off = snap — for teleporty
     /// things where interpolation would look like motion).
     pub interp: bool,
@@ -79,6 +84,7 @@ impl Default for Replicated {
             owner: None,
             transform: true,
             physics: false,
+            animator: true,
             interp: true,
             interp_delay: Self::DEFAULT_INTERP_DELAY,
         }
@@ -100,6 +106,6 @@ mod tests {
     fn replicated_defaults_are_the_safe_ones() {
         let r = Replicated::default();
         assert_eq!(r.mode, ReplicationMode::Authority);
-        assert!(r.transform && r.interp && !r.physics && r.owner.is_none());
+        assert!(r.transform && r.interp && r.animator && !r.physics && r.owner.is_none());
     }
 }

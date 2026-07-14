@@ -1294,6 +1294,15 @@ impl EditorTabViewer<'_> {
                                 .on_hover_text("replicate velocity too — better extrapolation, required to predict a rigidbody")
                                 .changed();
                             cmd.inspector_changed |= ui
+                                .checkbox(&mut rep.animator, "sync animator")
+                                .on_hover_text(
+                                    "replicate the Animation Controller's playback (which state + \
+                                     where in it, per layer) — a few bytes per TRANSITION; every \
+                                     machine samples the pose locally. Off = client-sided: each \
+                                     client drives this node's animator itself",
+                                )
+                                .changed();
+                            cmd.inspector_changed |= ui
                                 .checkbox(&mut rep.interp, "interpolate")
                                 .on_hover_text("smooth remote copies between snapshots (off = snap, for teleporty things)")
                                 .changed();

@@ -14,7 +14,64 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 5;
+pub const PROTO_VERSION: u16 = 6;
+
+/// One controller layer's playback in a snapshot, quantized for the wire:
+/// state index (`u16::MAX` = the layer is stopped/released), clip time in
+/// 10 ms units (655 s max — clamped), blend weight in 1/255ths. Both peers
+/// load the same controller asset, so an index + a time reproduce the whole
+/// pose locally — no bones, no strings.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnimLayerWire {
+    pub state: u16,
+    pub t10: u16,
+    pub weight: u8,
+}
+
+impl AnimLayerWire {
+    pub const STOPPED: u16 = u16::MAX;
+
+    pub fn quantize(state: Option<u16>, t: f32, weight: f32) -> Self {
+        Self {
+            state: state.unwrap_or(Self::STOPPED),
+            t10: ((t.max(0.0) * 100.0).round() as u32).min(u16::MAX as u32) as u16,
+            weight: (weight.clamp(0.0, 1.0) * 255.0).round() as u8,
+        }
+    }
+
+    pub fn state_opt(self) -> Option<u16> {
+        (self.state != Self::STOPPED).then_some(self.state)
+    }
+
+    pub fn t_secs(self) -> f32 {
+        self.t10 as f32 / 100.0
+    }
+
+    pub fn weight_f(self) -> f32 {
+        self.weight as f32 / 255.0
+    }
+}
+
+/// One replicated entity's animator state in a snapshot: the controller-wide
+/// speed (signed 1/256ths — covers reverse playback) + its layers. Sent only
+/// on CHANGE (a transition, a weight/speed edit, or unpredictable time — a
+/// looping clip's time is predicted, not re-sent), plus keyframes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AnimEntry {
+    pub id: u64, // NetId
+    pub speed: i16,
+    pub layers: Vec<AnimLayerWire>,
+}
+
+impl AnimEntry {
+    pub fn speed_f(&self) -> f32 {
+        self.speed as f32 / 256.0
+    }
+
+    pub fn quantize_speed(s: f32) -> i16 {
+        (s.clamp(-127.0, 127.0) * 256.0).round() as i16
+    }
+}
 
 /// One replicated entity's transform state in a snapshot. Position is absolute
 /// world f64 (floating-origin safe); rotation a quaternion; velocity/grounded
@@ -79,8 +136,15 @@ pub enum Msg {
     /// Server → clients: a replicated node despawned.
     Despawn { id: u64 },
     /// Server → clients, at the snapshot cadence: changed transforms + synced
-    /// vars. `keyframe` marks a periodic full-state snapshot (loss healing).
-    Snapshot { tick: u64, keyframe: bool, entries: Vec<SnapEntry>, synced: Vec<SyncedEntry> },
+    /// vars + changed animator states. `keyframe` marks a periodic full-state
+    /// snapshot (loss healing).
+    Snapshot {
+        tick: u64,
+        keyframe: bool,
+        entries: Vec<SnapEntry>,
+        synced: Vec<SyncedEntry>,
+        anims: Vec<AnimEntry>,
+    },
     /// Client → server, every tick: the last few ticks' inputs (redundant
     /// window, so one lost packet doesn't lose a tick's input).
     Input { entries: Vec<InputCmd> },
@@ -136,8 +200,32 @@ mod tests {
                 script: "combat".into(),
                 vars: vec![("parrying".into(), NetValue::Bool(true))],
             }],
+            anims: vec![AnimEntry {
+                id: 7,
+                speed: AnimEntry::quantize_speed(1.0),
+                layers: vec![
+                    AnimLayerWire::quantize(Some(3), 1.25, 1.0),
+                    AnimLayerWire::quantize(None, 0.0, 0.5),
+                ],
+            }],
         };
         assert_eq!(Msg::decode(&m.encode()), Some(m));
         assert_eq!(Msg::decode(b"garbage\xff\xff"), None);
+    }
+
+    #[test]
+    fn anim_wire_quantization_round_trips() {
+        let l = AnimLayerWire::quantize(Some(12), 3.774, 0.5);
+        assert_eq!(l.state_opt(), Some(12));
+        assert!((l.t_secs() - 3.77).abs() < 0.006, "10 ms resolution");
+        assert!((l.weight_f() - 0.5).abs() < 0.003);
+        let stopped = AnimLayerWire::quantize(None, 99.0, 1.0);
+        assert_eq!(stopped.state_opt(), None);
+        // Speed covers reverse playback and survives the fixed-point trip.
+        let s = AnimEntry { id: 1, speed: AnimEntry::quantize_speed(-1.5), layers: vec![] };
+        assert!((s.speed_f() + 1.5).abs() < 1.0 / 256.0);
+        // Times beyond the u16 range clamp instead of wrapping to nonsense.
+        let long = AnimLayerWire::quantize(Some(0), 1e6, 1.0);
+        assert_eq!(long.t10, u16::MAX);
     }
 }

@@ -972,6 +972,83 @@ pub fn preview_pose(
     apply_instance(system, world, mesh_registry, e);
 }
 
+/// How far a replicated animator's clock may drift from the authority before
+/// the local copy hard-seeks (seconds). Local advance covers everything under
+/// this — corrections should be rare (a hitch, a missed packet burst).
+const NET_ANIM_DRIFT: f32 = 0.25;
+
+/// Gather every networked animator's replicable state — nodes whose
+/// `Replicated.animator` is on and that have a live controller instance —
+/// for the session's snapshot diffing (`docs/netcode-design.md`). Cheap:
+/// a Vec of (state index, time, weight) per layer, no poses, no strings.
+pub fn collect_net_states(world: &World, system: &AnimSystem) -> floptle_net::AnimStates {
+    let mut out = Vec::new();
+    for (e, rep) in world.query::<floptle_core::Replicated>() {
+        if !rep.animator {
+            continue; // client-sided animator: each machine drives its own
+        }
+        let Some(inst) = system.instances.get(&e) else { continue };
+        let ns = inst.ctl.net_state();
+        out.push((
+            e,
+            ns.speed,
+            ns.layers
+                .iter()
+                .map(|l| floptle_net::AnimSrcLayer {
+                    state: l.state,
+                    t: l.t,
+                    weight: l.weight,
+                    dur: l.dur,
+                    looped: l.looped,
+                    rate: l.rate,
+                })
+                .collect(),
+        ));
+    }
+    out
+}
+
+/// Apply received animator entries onto the local runtimes (a client's remote
+/// proxies). Lazy-binds like `advance_animators`, so a proxy that hasn't
+/// animated yet still takes its first state; entities with no controller here
+/// (asset skew, or the component was removed) are skipped, never panic.
+pub fn apply_net_states(
+    system: &mut AnimSystem,
+    world: &mut World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    updates: Vec<(Entity, floptle_net::AnimEntry)>,
+) {
+    for (e, en) in updates {
+        if needs_bind(system, world, e) {
+            match bind_entity(system, world, mesh_registry, e) {
+                Some(inst) => {
+                    system.instances.insert(e, inst);
+                }
+                None => continue,
+            }
+        }
+        let Some(inst) = system.instances.get_mut(&e) else { continue };
+        let ns = floptle_anim::NetAnimState {
+            speed: en.speed_f(),
+            layers: en
+                .layers
+                .iter()
+                .map(|l| floptle_anim::NetLayerState {
+                    state: l.state_opt(),
+                    t: l.t_secs(),
+                    weight: l.weight_f(),
+                    // Send-side prediction fields — the receive side reads its
+                    // own clips instead.
+                    dur: 0.0,
+                    looped: false,
+                    rate: 0.0,
+                })
+                .collect(),
+        };
+        inst.ctl.apply_net_state(&ns, NET_ANIM_DRIFT);
+    }
+}
+
 /// Mirror each live animator's state to the script host (`anim:state()` etc.).
 pub fn build_info(system: &AnimSystem) -> HashMap<u32, floptle_script::AnimInfo> {
     let mut out = HashMap::new();

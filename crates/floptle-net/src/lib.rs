@@ -28,8 +28,11 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
-pub use session::{BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget, SyncedVars};
-pub use wire::{InputCmd, NetInput};
+pub use session::{
+    AnimSrcLayer, AnimStates, BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
+    SyncedVars,
+};
+pub use wire::{AnimEntry, AnimLayerWire, InputCmd, NetInput};
 pub use transport::{
     Channel, Incoming, LinkStats, MemoryHub, MemoryTransport, PeerId, Transport, SERVER,
 };
@@ -455,5 +458,66 @@ mod tests {
         server.tick_server(&sw, 10);
         assert!(server.take_events().contains(&NetEvent::PeerLeft(1)));
         assert!(server.peers().is_empty());
+    }
+
+    #[test]
+    fn animator_replicates_transitions_not_ticking_clocks() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (sw, se) = world_with(1);
+        let (mut cw, ce) = world_with(1);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        // A looping 2 s Idle whose clock just advances, with ONE transition to
+        // state 1 at tick 100. The send-side predictor must cover the steady
+        // clock (zero non-keyframe sends), and the transition must arrive on
+        // the interp-delayed timeline.
+        let dt = 1.0 / 60.0;
+        let mut updates: Vec<(u64, AnimEntry)> = Vec::new();
+        let (mut t_anim, mut state) = (0.0f32, 0u16);
+        for t in 1..=200u64 {
+            hub.set_now(t);
+            if t == 100 {
+                state = 1;
+                t_anim = 0.0;
+            }
+            t_anim = (t_anim + dt).rem_euclid(2.0);
+            server.update_anim_states(vec![(
+                se[0],
+                1.0,
+                vec![AnimSrcLayer {
+                    state: Some(state),
+                    t: t_anim,
+                    weight: 1.0,
+                    dur: 2.0,
+                    looped: true,
+                    rate: 1.0,
+                }],
+            )]);
+            server.tick_server(&sw, t);
+            client.tick_client(&mut cw);
+            for (e, en) in client.take_anim_updates() {
+                assert_eq!(e, ce[0], "updates resolve to the right entity");
+                updates.push((t, en));
+            }
+        }
+        // The baseline applies promptly (a joiner doesn't idle out the delay)…
+        assert!(updates.first().is_some_and(|(t, _)| *t <= 10), "baseline arrived late");
+        // …the steady loop then sends NOTHING between keyframes (the join
+        // baseline + the tick-2 cadence keyframe both land before ~10)…
+        let quiet = updates.iter().filter(|(t, _)| (12..59).contains(t)).count();
+        assert_eq!(quiet, 0, "an undisturbed loop must cost zero non-keyframe sends");
+        assert!(updates.len() < 10, "got {} updates for one transition", updates.len());
+        // …and the transition lands, delayed like the transforms around it.
+        let hit = updates
+            .iter()
+            .find(|(_, en)| en.layers.first().is_some_and(|l| l.state_opt() == Some(1)))
+            .expect("the transition must replicate");
+        assert!(
+            (100..=120).contains(&hit.0),
+            "transition applies on the interp-delayed timeline, got tick {}",
+            hit.0
+        );
     }
 }

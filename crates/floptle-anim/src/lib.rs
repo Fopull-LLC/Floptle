@@ -442,6 +442,33 @@ impl Layer {
 /// A queued or reported event: which function to call on the node's scripts.
 pub type FiredEvent = String;
 
+/// One layer's replicable playback state (see [`Controller::net_state`]).
+/// Both peers load the same controller asset, so a state INDEX + a time fully
+/// describe what's playing — no strings or poses on the wire.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NetLayerState {
+    /// Playing state index within the layer (`None` = stopped/released).
+    pub state: Option<u16>,
+    /// Clip time in seconds.
+    pub t: f32,
+    /// Layer blend weight, 0..1.
+    pub weight: f32,
+    /// The playing clip's duration (send-side change prediction; 0 if stopped).
+    pub dur: f32,
+    /// Whether the playing state loops (send-side change prediction).
+    pub looped: bool,
+    /// Effective time rate of `t` (global speed × state speed) — how far the
+    /// sender's clock moves per real second (send-side change prediction).
+    pub rate: f32,
+}
+
+/// A whole controller's replicable state: global speed + per-layer playback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetAnimState {
+    pub speed: f32,
+    pub layers: Vec<NetLayerState>,
+}
+
 /// The layered animation controller runtime for one node instance.
 pub struct Controller {
     pub layers: Vec<Layer>,
@@ -683,6 +710,106 @@ impl Controller {
                 cur.finished = false;
                 l.fade = None;
             }
+    }
+
+    /// This controller's replicable playback state — what animator networking
+    /// ships instead of poses: per layer, the playing state index, clip time,
+    /// and blend weight (plus the global speed). Each peer runs the same
+    /// controller asset, so an index and a time reproduce the pose locally.
+    /// `dur`/`looped`/`rate` ride along for the SENDER's change detection (a
+    /// looping clip's time is predictable, so it needn't be re-sent every
+    /// snapshot); they're ignored on apply, which reads its own clips.
+    pub fn net_state(&self) -> NetAnimState {
+        NetAnimState {
+            speed: self.speed,
+            layers: self
+                .layers
+                .iter()
+                .map(|l| NetLayerState {
+                    state: l.cur.map(|c| c.state.min(u16::MAX as usize - 1) as u16),
+                    t: l.cur.map(|c| c.t).unwrap_or(0.0),
+                    weight: l.weight,
+                    dur: l
+                        .cur
+                        .map(|c| l.states[c.state].clip.duration)
+                        .unwrap_or(0.0),
+                    looped: l.cur.map(|c| l.states[c.state].looped).unwrap_or(false),
+                    rate: l
+                        .cur
+                        .map(|c| self.speed * l.states[c.state].speed)
+                        .unwrap_or(0.0),
+                })
+                .collect(),
+        }
+    }
+
+    /// Apply a replicated [`NetAnimState`] (a remote peer's authoritative
+    /// animator) onto this controller:
+    ///
+    /// - a **state change** transitions through the SAME fade rules a local
+    ///   `play()` would use, then lands mid-clip at the replicated time with
+    ///   the fade preserved — a late joiner sees a walk loop blend in at the
+    ///   right phase, not snap;
+    /// - the **same state** only corrects time drift beyond
+    ///   `drift_tolerance` seconds (wrap-aware for looping clips, so the
+    ///   seam of a loop never reads as drift) — between updates the local
+    ///   controller extrapolates by advancing normally;
+    /// - out-of-range indices (mismatched controller assets between peers)
+    ///   and extra layers are ignored, never panic.
+    pub fn apply_net_state(&mut self, ns: &NetAnimState, drift_tolerance: f32) {
+        self.speed = ns.speed;
+        for (li, nl) in ns.layers.iter().enumerate() {
+            if li >= self.layers.len() {
+                break; // asset mismatch: fewer layers here — ignore the rest
+            }
+            self.layers[li].weight = nl.weight.clamp(0.0, 1.0);
+            match nl.state {
+                None => {
+                    // Remotely released. (A layer with a default state never
+                    // reports None — stop() transitions to the default — so
+                    // this is the fade-out-and-release path.)
+                    if self.layers[li].cur.is_some() {
+                        self.stop_layer(li, None);
+                    }
+                }
+                Some(si) => {
+                    let si = si as usize;
+                    let l = &self.layers[li];
+                    if si >= l.states.len() {
+                        continue; // asset mismatch: unknown state — ignore
+                    }
+                    let dur = l.states[si].clip.duration.max(1e-6);
+                    let looped = l.states[si].looped;
+                    let target_t = nl.t.clamp(0.0, dur);
+                    match l.cur {
+                        Some(c) if c.state == si => {
+                            // Same state: drift-correct only. Distance is
+                            // wrap-aware on loops (0.02 vs dur-0.01 is 30 ms
+                            // apart, not a whole clip).
+                            let lin = (c.t - target_t).abs();
+                            let dist = if looped { lin.min(dur - lin) } else { lin };
+                            if dist > drift_tolerance {
+                                self.seek(li, target_t);
+                            }
+                        }
+                        _ => {
+                            // Transition with the state's own fade rules, then
+                            // land at the replicated time KEEPING the fade
+                            // (seek() would kill it — that's for scrubbing).
+                            self.play(li, si, None);
+                            if let Some(cur) = self.layers[li].cur.as_mut() {
+                                cur.t = target_t;
+                                cur.finished = !looped && target_t >= dur - 1e-4;
+                                // Entry events already fired on the authority;
+                                // a replica joining mid-clip must not re-fire
+                                // the t=0 events.
+                                cur.fresh = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Quantized sample time for the retro stepped look. Real time flows
@@ -1381,5 +1508,101 @@ mod tests {
         c.advance(0.1);
         let (name, _, _) = c.layers[0].current().unwrap();
         assert_eq!(name, "Idle", "one-shot returns to the default state");
+    }
+
+    // ---- animator networking (net_state / apply_net_state) -----------------
+
+    fn net_pair() -> (Controller, Controller) {
+        // "Server" and "client" load the SAME controller asset.
+        let mk = || {
+            one_layer_ctl(
+                vec![
+                    State::new("Idle".into(), move_clip("Idle", 0, 0.0, 1.0, 1.0)),
+                    State::new("Run".into(), move_clip("Run", 0, 0.0, 2.0, 2.0)),
+                ],
+                Some(0),
+            )
+        };
+        (mk(), mk())
+    }
+
+    #[test]
+    fn net_state_round_trips_onto_a_replica() {
+        let (mut server, mut client) = net_pair();
+        server.advance(0.1); // enters Idle
+        server.play(0, 1, None);
+        server.advance(0.75);
+        server.speed = 1.5;
+        client.advance(0.1); // replica idles at the default
+
+        client.apply_net_state(&server.net_state(), 0.25);
+        let (name, t, _) = client.layers[0].current().unwrap();
+        assert_eq!(name, "Run");
+        assert!((t - 0.75).abs() < 1e-4, "lands mid-clip at the replicated time, got {t}");
+        assert_eq!(client.speed, 1.5, "global speed replicates");
+        // Mid-clip entry keeps the transition fade alive (seek would kill it)
+        // and never re-fires the authority's entry events.
+        assert!(client.layers[0].fade.is_some(), "blends in, doesn't snap");
+        assert!(!client.layers[0].cur.unwrap().fresh);
+    }
+
+    #[test]
+    fn net_apply_same_state_corrects_only_real_drift() {
+        let (mut server, mut client) = net_pair();
+        for c in [&mut server, &mut client] {
+            c.play(0, 1, None);
+            c.advance(0.5);
+        }
+        // 40 ms apart — inside tolerance: the replica's own advance stands.
+        server.advance(0.04);
+        client.apply_net_state(&server.net_state(), 0.25);
+        let (_, t, _) = client.layers[0].current().unwrap();
+        assert!((t - 0.5).abs() < 1e-4, "small drift is left alone, got {t}");
+        // 600 ms apart — beyond tolerance: hard-corrected.
+        server.advance(0.6);
+        client.apply_net_state(&server.net_state(), 0.25);
+        let (_, t, _) = client.layers[0].current().unwrap();
+        assert!((t - 1.14).abs() < 1e-3, "large drift seeks, got {t}");
+    }
+
+    #[test]
+    fn net_apply_drift_is_wrap_aware_on_loops() {
+        let (mut server, mut client) = net_pair();
+        // Both loop Idle (1.0 s); phases 0.98 vs 0.02 are 40 ms apart through
+        // the seam, not 960 ms — no correction.
+        server.play(0, 0, None);
+        client.play(0, 0, None);
+        server.advance(0.98);
+        client.advance(1.02); // wraps to 0.02
+        client.apply_net_state(&server.net_state(), 0.25);
+        let (_, t, _) = client.layers[0].current().unwrap();
+        assert!((t - 0.02).abs() < 1e-4, "loop-seam phase gap is not drift, got {t}");
+    }
+
+    #[test]
+    fn net_apply_survives_mismatched_assets() {
+        let (mut server, mut client) = net_pair();
+        client.play(0, 1, None);
+        client.advance(0.3);
+        // A state index this build doesn't have, plus an extra layer: both
+        // ignored — the replica keeps playing what it has, no panic.
+        let bogus = NetAnimState {
+            speed: 1.0,
+            layers: vec![
+                NetLayerState { state: Some(99), t: 0.5, weight: 1.0, dur: 1.0, looped: true, rate: 1.0 },
+                NetLayerState { state: Some(0), t: 0.1, weight: 0.5, dur: 1.0, looped: true, rate: 1.0 },
+            ],
+        };
+        client.apply_net_state(&bogus, 0.25);
+        let (name, t, _) = client.layers[0].current().unwrap();
+        assert_eq!((name, (t * 10.0).round() as i32), ("Run", 3));
+        // And a stopped layer replicates as None → the replica releases too.
+        server.layers[0].default_state = None;
+        server.play(0, 0, None);
+        server.advance(0.1);
+        server.stop_layer(0, Some(0.0));
+        client.layers[0].default_state = None;
+        client.apply_net_state(&server.net_state(), 0.25);
+        assert!(client.layers[0].cur.is_none(), "released remotely → released here");
     }
 }

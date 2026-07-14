@@ -12,7 +12,7 @@
 //! v1 scope (phase 2b): server-authoritative replication only — prediction
 //! (2c) and lag compensation (2d) layer on top of exactly these seams.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use floptle_core::math::{DVec3, Quat};
 use floptle_core::transform::Transform;
@@ -21,7 +21,9 @@ use floptle_core::{Entity, Replicated, World};
 use crate::predict::PredictedState;
 use crate::transport::{Channel, Incoming, LinkStats, PeerId, Transport, SERVER};
 use crate::value::NetValue;
-use crate::wire::{InputCmd, Msg, NetInput, SnapEntry, SyncedEntry, PROTO_VERSION};
+use crate::wire::{
+    AnimEntry, AnimLayerWire, InputCmd, Msg, NetInput, SnapEntry, SyncedEntry, PROTO_VERSION,
+};
 
 /// Which side of the wire this session is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,41 @@ pub type SyncedVars = Vec<(Entity, String, Vec<(String, NetValue)>)>;
 /// Per-entity live physics state fed by the driver each tick (velocity +
 /// grounded), so physics-synced snapshot entries carry what prediction needs.
 pub type BodyStates = Vec<(Entity, [f32; 3], bool)>;
+
+/// One controller layer's live playback as fed by the driver (pre-quantization).
+/// Mirrors `floptle_anim::NetLayerState` without coupling this crate to it.
+/// `dur`/`looped`/`rate` never hit the wire — they power the SEND-side change
+/// predictor: a playing clip's time is foreseeable (t + elapsed·rate, wrapped
+/// on loops), so an undisturbed animation costs ZERO bytes after its
+/// transition. Only surprises (transitions, seeks, speed/weight edits, drift)
+/// are sent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnimSrcLayer {
+    pub state: Option<u16>,
+    pub t: f32,
+    pub weight: f32,
+    pub dur: f32,
+    pub looped: bool,
+    pub rate: f32,
+}
+
+/// Per-entity animator states fed by the driver each tick:
+/// (entity, controller-global speed, layers).
+pub type AnimStates = Vec<(Entity, f32, Vec<AnimSrcLayer>)>;
+
+/// What the server last sent for one animator — the change predictor's base.
+struct AnimSent {
+    tick: u64,
+    speed: i16,
+    layers: Vec<(AnimLayerWire, f32, bool, f32)>, // (+ dur, looped, rate)
+}
+
+/// Bandwidth guardrail: layers per animator on the wire (controllers with more
+/// are pathological; the tail is silently untracked).
+const MAX_ANIM_LAYERS: usize = 8;
+/// Send-side time-prediction tolerance, seconds — beyond this the sender
+/// re-syncs the layer's clock (a seek, a hitch, a rate the predictor missed).
+const ANIM_TIME_TOLERANCE: f32 = 0.1;
 
 /// How many recent input ticks ride in every input packet (redundancy: a lost
 /// packet doesn't lose a tick's input — later packets re-carry it). Inputs are
@@ -125,6 +162,14 @@ pub struct NetSession {
     /// Live body states fed by the driver each tick (velocity + grounded per
     /// physics-synced entity) — carried in snapshots for prediction.
     body_states: HashMap<Entity, ([f32; 3], bool)>,
+    /// Current animator states, refreshed by the driver each tick (diffed here
+    /// against `last_anim`'s time prediction).
+    anims_now: AnimStates,
+    /// Per-NetId last-sent animator state — the change predictor's base.
+    last_anim: HashMap<u64, AnimSent>,
+    /// Gameplay-tick length in seconds (the time predictor's clock); the
+    /// driver sets it at session start. Default 60 Hz.
+    tick_dt: f32,
     /// Server diagnostics: ticks where a peer's exact input hadn't arrived and
     /// repeat-last was used. Nonzero while moving = clock skew too tight
     /// (mispredictions on the owner) — the harness surfaces it.
@@ -182,6 +227,21 @@ pub struct NetSession {
     spawned_in: Vec<(u64, Entity, Option<PeerId>)>,
     /// Entities despawned since the last drain (their bodies must go too).
     despawned_in: Vec<u32>,
+    /// Received animator entries per NetId, buffered as (server tick, local
+    /// arrival tick, entry) so they apply on the SAME delayed timeline as the
+    /// transforms they accompany — a jump animation lands with the jump arc,
+    /// not `interp_delay` early. The local arrival tick bounds the wait when
+    /// traffic is sparse (a still NPC emoting sends nothing else, so the
+    /// server-tick clock stalls): an entry applies at most `delay` local
+    /// ticks after it arrived.
+    anim_bufs: HashMap<u64, VecDeque<(u64, u64, AnimEntry)>>,
+    /// Local tick_client call counter (the sparse-traffic aging clock above).
+    client_ticks: u64,
+    /// NetIds whose first animator state was already applied (the first one
+    /// skips the interp delay — a late joiner's baseline shows immediately).
+    anim_started: HashSet<u64>,
+    /// Animator updates due this tick, for the driver's apply step.
+    anims_due: Vec<(Entity, AnimEntry)>,
     // --- both ---
     events: Vec<NetEvent>,
     rpcs_in: Vec<ReceivedRpc>,
@@ -239,10 +299,17 @@ impl NetSession {
             predicted_in: Vec::new(),
             spawned_in: Vec::new(),
             despawned_in: Vec::new(),
+            anim_bufs: HashMap::new(),
+            anim_started: HashSet::new(),
+            anims_due: Vec::new(),
+            client_ticks: 0,
             events: Vec::new(),
             rpcs_in: Vec::new(),
             rpcs_out: Vec::new(),
             synced_in: Vec::new(),
+            anims_now: Vec::new(),
+            last_anim: HashMap::new(),
+            tick_dt: 1.0 / 60.0,
         }
     }
 
@@ -355,6 +422,28 @@ impl NetSession {
     /// entity) — carried in snapshot entries so owners can reconcile predictions.
     pub fn update_body_states(&mut self, states: BodyStates) {
         self.body_states = states.into_iter().map(|(e, v, g)| (e, (v, g))).collect();
+    }
+
+    /// Server: refresh live animator states (the driver reads each networked
+    /// controller each tick; the session diffs against its time prediction and
+    /// sends only surprises — see [`AnimSrcLayer`]).
+    pub fn update_anim_states(&mut self, states: AnimStates) {
+        self.anims_now = states;
+    }
+
+    /// The gameplay-tick length in seconds — the animator time predictor's
+    /// clock. Set once at session start (defaults to 60 Hz).
+    pub fn set_tick_dt(&mut self, dt: f32) {
+        if dt > 0.0 {
+            self.tick_dt = dt;
+        }
+    }
+
+    /// Client: animator updates that came due this tick (per entity, already
+    /// delayed onto the same timeline as interpolated transforms). The driver
+    /// applies them to its animation system.
+    pub fn take_anim_updates(&mut self) -> Vec<(Entity, AnimEntry)> {
+        std::mem::take(&mut self.anims_due)
     }
 
     /// Client: our peer id, once welcomed.
@@ -549,6 +638,7 @@ impl NetSession {
         self.net_to_ent.remove(&id);
         self.spawned_docs.remove(&id);
         self.last_sent.remove(&id);
+        self.last_anim.remove(&id);
         world.despawn(e);
         let msg = Msg::Despawn { id }.encode();
         for &p in &self.peers {
@@ -744,10 +834,78 @@ impl NetSession {
                 synced.push(SyncedEntry { id, script: script.clone(), vars: changed_vars });
             }
         }
-        if entries.is_empty() && synced.is_empty() && !keyframe {
+        let anims = self.collect_anim_entries(tick, keyframe);
+        if entries.is_empty() && synced.is_empty() && anims.is_empty() && !keyframe {
             return None;
         }
-        Some(Msg::Snapshot { tick, keyframe, entries, synced })
+        Some(Msg::Snapshot { tick, keyframe, entries, synced, anims })
+    }
+
+    /// Encode the animator states that need sending: everything on a keyframe,
+    /// else only the SURPRISED ones — a changed state/weight/speed, or a clock
+    /// the time predictor couldn't foresee (a seek, a hitch). An undisturbed
+    /// looping animation costs zero bytes here.
+    fn collect_anim_entries(&mut self, tick: u64, keyframe: bool) -> Vec<AnimEntry> {
+        let mut out = Vec::new();
+        for (e, speed, layers) in &self.anims_now {
+            let Some(&id) = self.ent_to_net.get(e) else { continue };
+            let speed_q = AnimEntry::quantize_speed(*speed);
+            let wire: Vec<AnimLayerWire> = layers
+                .iter()
+                .take(MAX_ANIM_LAYERS)
+                .map(|l| AnimLayerWire::quantize(l.state, l.t, l.weight))
+                .collect();
+            let dirty = match self.last_anim.get(&id) {
+                None => true,
+                Some(sent) => {
+                    sent.speed != speed_q
+                        || sent.layers.len() != wire.len()
+                        || sent.layers.iter().zip(wire.iter().zip(layers.iter())).any(
+                            |((sw, dur, looped, rate), (w, src))| {
+                                if sw.state != w.state || sw.weight != w.weight {
+                                    return true;
+                                }
+                                if w.state == AnimLayerWire::STOPPED {
+                                    return false;
+                                }
+                                // Where should its clock be, from what we last
+                                // sent? (Wrapped on loops, clamped one-shots.)
+                                let elapsed =
+                                    tick.saturating_sub(sent.tick) as f32 * self.tick_dt;
+                                let mut pt = sw.t_secs() + elapsed * rate;
+                                if *looped && *dur > 1e-6 {
+                                    pt = pt.rem_euclid(*dur);
+                                } else if *dur > 1e-6 {
+                                    pt = pt.clamp(0.0, *dur);
+                                }
+                                let lin = (pt - src.t).abs();
+                                let dist = if *looped && *dur > 1e-6 {
+                                    lin.min(*dur - lin)
+                                } else {
+                                    lin
+                                };
+                                dist > ANIM_TIME_TOLERANCE
+                            },
+                        )
+                }
+            };
+            if keyframe || dirty {
+                self.last_anim.insert(
+                    id,
+                    AnimSent {
+                        tick,
+                        speed: speed_q,
+                        layers: wire
+                            .iter()
+                            .zip(layers.iter())
+                            .map(|(w, l)| (*w, l.dur, l.looped, l.rate))
+                            .collect(),
+                    },
+                );
+                out.push(AnimEntry { id, speed: speed_q, layers: wire });
+            }
+        }
+        out
     }
 
     /// A full-state snapshot regardless of change detection (late-join baseline).
@@ -778,10 +936,26 @@ impl NetSession {
                 Some(SyncedEntry { id, script: script.clone(), vars: vars.clone() })
             })
             .collect::<Vec<_>>();
-        if entries.is_empty() && synced.is_empty() {
+        let anims = self
+            .anims_now
+            .iter()
+            .filter_map(|(e, speed, layers)| {
+                let &id = self.ent_to_net.get(e)?;
+                Some(AnimEntry {
+                    id,
+                    speed: AnimEntry::quantize_speed(*speed),
+                    layers: layers
+                        .iter()
+                        .take(MAX_ANIM_LAYERS)
+                        .map(|l| AnimLayerWire::quantize(l.state, l.t, l.weight))
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() && synced.is_empty() && anims.is_empty() {
             return None;
         }
-        Some(Msg::Snapshot { tick, keyframe: true, entries, synced })
+        Some(Msg::Snapshot { tick, keyframe: true, entries, synced, anims })
     }
 
     // -----------------------------------------------------------------------
@@ -819,6 +993,45 @@ impl NetSession {
             self.transport.send(SERVER, Channel::UnreliableSequenced, &msg.encode());
         }
         self.apply_interpolation(world);
+        self.client_ticks += 1;
+        self.collect_due_anims();
+    }
+
+    /// Move buffered animator entries whose tick has come due (latest − that
+    /// node's interp delay, OR `delay` local ticks after arrival — whichever
+    /// first) into the drain list, newest-due winning — animator changes land
+    /// on the SAME delayed timeline as the transforms around them, and never
+    /// stall behind sparse traffic. A node's FIRST state applies immediately:
+    /// a late joiner's baseline pose must not idle out the interp delay.
+    fn collect_due_anims(&mut self) {
+        let latest = self.latest_server_tick;
+        let now = self.client_ticks;
+        self.anim_bufs.retain(|id, buf| {
+            let Some(&e) = self.net_to_ent.get(id) else {
+                return false; // entity gone — drop the buffer
+            };
+            let delay = self
+                .interp
+                .get(id)
+                .map(|b| b.delay)
+                .unwrap_or(Replicated::DEFAULT_INTERP_DELAY as u64);
+            let target = latest.saturating_sub(delay);
+            let mut due = None;
+            while buf
+                .front()
+                .is_some_and(|(t, arrived, _)| *t <= target || now.saturating_sub(*arrived) >= delay)
+            {
+                due = buf.pop_front().map(|(_, _, en)| en);
+            }
+            if due.is_none() && !self.anim_started.contains(id) && !buf.is_empty() {
+                due = buf.pop_front().map(|(_, _, en)| en);
+            }
+            if let Some(en) = due {
+                self.anim_started.insert(*id);
+                self.anims_due.push((e, en));
+            }
+            true
+        });
     }
 
     fn client_message(&mut self, world: &mut World, msg: Msg) {
@@ -853,11 +1066,13 @@ impl NetSession {
                 if let Some(e) = self.net_to_ent.remove(&id) {
                     self.ent_to_net.remove(&e);
                     self.interp.remove(&id);
+                    self.anim_bufs.remove(&id);
+                    self.anim_started.remove(&id);
                     self.despawned_in.push(e.index());
                     world.despawn(e);
                 }
             }
-            Msg::Snapshot { tick, entries, synced, .. } => {
+            Msg::Snapshot { tick, entries, synced, anims, .. } => {
                 if tick <= self.latest_server_tick && tick != 0 && !entries.is_empty() {
                     // Sequenced channel already drops stale, but the reliable
                     // late-join keyframe can race a newer unreliable snapshot.
@@ -866,6 +1081,23 @@ impl NetSession {
                     }
                 }
                 self.latest_server_tick = self.latest_server_tick.max(tick);
+                for an in anims {
+                    // OUR OWN predicted node's animator is locally driven (its
+                    // scripts run here, ahead of the server) — never overwrite.
+                    if let Some(&e) = self.net_to_ent.get(&an.id)
+                        && let Some(rep) = world.get::<Replicated>(e)
+                        && rep.mode == floptle_core::ReplicationMode::Predicted
+                        && rep.owner.is_some()
+                        && rep.owner == self.my_peer
+                    {
+                        continue;
+                    }
+                    let buf = self.anim_bufs.entry(an.id).or_default();
+                    buf.push_back((tick, self.client_ticks, an));
+                    while buf.len() > MAX_SAMPLES {
+                        buf.pop_front();
+                    }
+                }
                 for en in entries {
                     // OUR OWN predicted node never interpolates — its
                     // authoritative states go to the reconcile queue instead

@@ -13,7 +13,7 @@ use floptle_net::{NetEvent, NetSession, PredictedState, RpcTarget};
 use floptle_physics::BodySnapshot;
 use floptle_script::{NetCmd, NetRoleState, NetState};
 
-use crate::Editor;
+use crate::{anim, Editor};
 
 /// The rewound world for a stamped combat intent (`docs/netcode-design.md`
 /// §7): every networked node's pose (+ its scripts' `synced` vars) at the
@@ -67,6 +67,11 @@ pub(crate) struct HiddenServer {
     /// of authoritative poses + synced vars, per networked node — what
     /// `net.rewind` re-poses combat queries to.
     pub history: floptle_net::LagHistory,
+    /// The server's OWN animator runtimes: server scripts' `anim:play(...)`
+    /// drives real controllers here (state machines + scene-binding transform
+    /// writes + gameplay events — hit windows are server-authoritative), and
+    /// their (state, time) per layer is what replicates to clients.
+    pub anim: crate::anim::AnimSystem,
 }
 
 impl Editor {
@@ -212,9 +217,14 @@ impl Editor {
                         .collect()
                 })
                 .unwrap_or_default();
+            // Networked animators: the host's play loop already advanced every
+            // controller — ship each one's (state, time, weight) per layer for
+            // snapshot diffing (transitions cost bytes; steady loops cost none).
+            let anims = anim::collect_net_states(&self.world, &self.anim);
             if let Some(s) = self.net_server.as_mut() {
                 s.update_synced(synced);
                 s.update_body_states(bstates);
+                s.update_anim_states(anims);
                 s.tick_server(&self.world, tick);
                 (s.take_rpcs(), s.take_events())
             } else {
@@ -293,6 +303,7 @@ impl Editor {
             let _ = c.take_rpcs();
             let _ = c.take_events();
             let _ = c.take_synced();
+            let _ = c.take_anim_updates();
         }
         // --- mirror session state into Lua (net.role()/peers()/ping()/isMine) ---
         let state = if let Some(s) = &self.net_server {
@@ -332,6 +343,7 @@ impl Editor {
         }
         let hub = floptle_net::MemoryHub::new();
         let mut s = NetSession::server(Box::new(hub.server_endpoint()));
+        s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.register_scene(&self.world);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.net_hub = Some(hub);
@@ -614,6 +626,7 @@ impl Editor {
         self.net_remote_predicted = remote;
         self.net_apply_host_filters();
         let mut s = NetSession::server(transport);
+        s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.register_scene(&self.world);
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
@@ -803,6 +816,14 @@ impl Editor {
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
+        server.set_tick_dt(self.game_tick.step);
+        // The hidden server runs REAL animators (state machines, no rendering):
+        // same clip/controller registries as the editor, its own instances.
+        let sanim = {
+            let mut a = crate::anim::AnimSystem::default();
+            a.rescan(&self.project_root);
+            a
+        };
         self.net_hidden = Some(HiddenServer {
             session: server,
             world: sworld,
@@ -811,6 +832,7 @@ impl Editor {
             peer: 1,
             next_tick: 0,
             history: floptle_net::LagHistory::new(),
+            anim: sanim,
         });
         self.net_play_client = Some(client);
         self.net_hub = Some(hub);
@@ -896,8 +918,30 @@ impl Editor {
         }
         let dir = self.project_root.join("scripts");
         let t = st as f32 * step;
+        // Server scripts can query animator state (`anim:state()` etc.).
+        hs.host.set_anim_info(anim::build_info(&hs.anim));
         hs.host.run(&mut hs.world, &dir, step, t);
         hs.host.run_fixed(&mut hs.world, step, t);
+        // Animation runs server-side for real (scripts → anim → physics, the
+        // same order as the play loop): `anim:play` transitions actual
+        // controllers, scene-binding clips move actual transforms (they
+        // replicate as transforms), and clip events fire into SERVER scripts —
+        // hit windows are server-authoritative. Poses aren't rendered; the
+        // (state, time) per layer replicates and every client samples locally.
+        let anim_cmds = hs.host.take_anim_commands();
+        let fired = anim::advance_animators(
+            &mut hs.anim,
+            &mut hs.world,
+            &self.mesh_registry,
+            step,
+            anim_cmds,
+        );
+        for (eid, func) in fired {
+            hs.host.call_function(&mut hs.world, eid, &func);
+        }
+        for msg in hs.anim.warnings.drain(..) {
+            self.console.push(floptle_script::LogLevel::Warn, format!("[server] {msg}"), None);
+        }
         hs.sim.world.colliders = hs.host.take_colliders();
         // Apply writes, step physics one tick, publish transforms.
         hs.sim.world.gravity = Self::build_gravity_field(&hs.world, hs.sim.world.origin);
@@ -973,6 +1017,7 @@ impl Editor {
             .map(|(e, vel, _, grounded, _)| (e, [vel.x, vel.y, vel.z], grounded))
             .collect();
         hs.session.update_body_states(bstates);
+        hs.session.update_anim_states(anim::collect_net_states(&hs.world, &hs.anim));
         hs.session.tick_server(&hs.world, st);
         // Received events dispatch into the SERVER's scripts. (RPCs are NOT
         // dispatched here — they wait for the next tick's start, where the
@@ -989,9 +1034,9 @@ impl Editor {
                 _ => {}
             }
         }
-        // The hidden server renders nothing: drain its cosmetic queues so
-        // they don't grow unboundedly (anim:play per tick, gizmos, effects).
-        let _ = hs.host.take_anim_commands();
+        // The hidden server renders nothing: drain its cosmetic queues so they
+        // don't grow unboundedly. (Animator commands are REAL now — consumed
+        // by the advance above, not drained.)
         let _ = hs.host.take_vfx_commands();
         let _ = hs.host.take_gizmos();
         let _ = hs.host.take_spawn_effects();
@@ -1035,6 +1080,13 @@ impl Editor {
         for (e, kind, vars) in cs.take_synced() {
             self.script_host.apply_synced(e.index(), &kind, &vars);
         }
+        // Networked animators: remote proxies take the server's (state, time)
+        // per layer, already delayed onto the interpolation timeline — the
+        // local controllers then extrapolate by advancing normally until the
+        // next update. Our own predicted node never appears here (its scripts
+        // drive its animator locally).
+        let anim_updates = cs.take_anim_updates();
+        anim::apply_net_states(&mut self.anim, &mut self.world, &self.mesh_registry, anim_updates);
         // Reconcile our own node against authoritative states. On a real link
         // the server ticks in ITS OWN clock domain: translate each state's
         // tick back through the exact stamp→local map (correct even across

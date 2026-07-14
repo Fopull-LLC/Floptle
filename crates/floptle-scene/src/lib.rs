@@ -129,6 +129,10 @@ pub struct ReplicatedDoc {
     /// Sync velocity too (default false).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub physics: bool,
+    /// Sync the Animation Controller's playback (default true; off =
+    /// client-sided animator).
+    #[serde(default = "true_bool")]
+    pub animator: bool,
     /// Smooth remote entities between snapshots (default true).
     #[serde(default = "true_bool")]
     pub interp: bool,
@@ -155,6 +159,7 @@ impl ReplicatedDoc {
             owner: None, // session state, assigned at runtime
             transform: self.transform,
             physics: self.physics,
+            animator: self.animator,
             interp: self.interp,
             interp_delay: self.interp_delay,
         }
@@ -165,6 +170,7 @@ impl ReplicatedDoc {
             predicted: r.mode == floptle_core::ReplicationMode::Predicted,
             transform: r.transform,
             physics: r.physics,
+            animator: r.animator,
             interp: r.interp,
             interp_delay: r.interp_delay,
         }
@@ -1278,6 +1284,7 @@ mod tests {
                         predicted: true, // exercise the non-default round-trip
                         transform: true,
                         physics: true,
+                        animator: false, // exercise the non-default round-trip
                         interp: false,
                         interp_delay: 12, // exercise the non-default round-trip
                     }),
