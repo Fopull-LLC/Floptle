@@ -272,16 +272,35 @@ impl Editor {
                     self.cursor_lock_soft = grab_cursor(window, false);
                 }
             }
-            if let Some(snap) = self.play_snapshot.take() {
-                self.restore(snap);
-            }
             // A mid-play `scene.load(...)` renamed the scene for the session —
-            // the restored world is the PRE-PLAY scene, so its name comes back
-            // too (or saves would write it under the played scene's file).
+            // the restored world is the PRE-PLAY scene, so its name must come
+            // back BEFORE `restore()` runs: restore's `adopt_terrain()` loads
+            // terrain fields by scene name, and doing this after it once made
+            // Stop fill the editor scene's terrain nodes with the PLAYED
+            // scene's fields (the next save then overwrote the real terrain
+            // on disk — real lost work).
             self.pending_scene = None;
             if let Some((name, rel)) = self.play_scene_name.take() {
                 self.scene_name = name;
                 self.scene_rel = rel;
+            }
+            if let Some(snap) = self.play_snapshot.take() {
+                self.restore(snap);
+            }
+            // Terrain fields live OUTSIDE the scene doc, so the snapshot above
+            // doesn't carry them — bring back the exact pre-Play fields (+
+            // texture palette). Disk can't stand in: it may be behind unsaved
+            // sculpts, and a mid-play scene switch swapped the live fields for
+            // the played scene's.
+            if let Some((fields, palette)) = self.play_terrains.take() {
+                for (id, t) in fields {
+                    if let Some(e) = self.terrain_entity_of_id(id) {
+                        self.terrains.insert(e, t);
+                    }
+                }
+                self.terrain_textures = palette;
+                self.terrain_textures_dirty = true;
+                self.terrain_gpu_dirty = !self.terrains.is_empty();
             }
         } else {
             // Scripts run from what's on DISK — flush unsaved IDE edits first so
@@ -295,6 +314,20 @@ impl Editor {
             }
             self.play_snapshot = Some(self.snapshot());
             self.play_scene_name = Some((self.scene_name.clone(), self.scene_rel.clone()));
+            // Snapshot the live terrain fields (id-keyed) + texture palette so
+            // Stop restores them exactly — unsaved sculpts survive Play, and a
+            // mid-play scene switch can never leak another scene's terrain
+            // into this one (see Stop above).
+            self.play_terrains = Some((
+                self.terrains
+                    .iter()
+                    .filter_map(|(&e, t)| match self.world.get::<floptle_core::Matter>(e) {
+                        Some(floptle_core::Matter::Terrain { id }) => Some((*id, t.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                self.terrain_textures.clone(),
+            ));
             self.pending_scene = None;
             self.play_t = 0.0;
             self.paused = false;

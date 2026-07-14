@@ -91,6 +91,10 @@ pub(crate) type UiResize = (u32, [f32; 2], [bool; 2], [f32; 2]);
 /// A script's declared defaults: (numeric params, reference params + kinds).
 pub(crate) type ScriptDefaults = floptle_script::ScriptDefaults;
 
+/// What Stop restores that the scene doc doesn't carry: the terrain fields
+/// (keyed by terrain id) and the terrain texture palette.
+pub(crate) type PlayTerrains = (Vec<(u32, floptle_field::Terrain)>, Vec<String>);
+
 #[derive(Default)]
 struct EditorCmd {
     add: Option<MatterDoc>,
@@ -1657,6 +1661,11 @@ struct Editor {
     /// scene for the session; Stop restores both alongside the snapshot so the
     /// editor's scene saves back to its own file, not the played one's.
     play_scene_name: Option<(String, String)>,
+    /// The terrain fields (id-keyed) + texture palette when Play started.
+    /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
+    /// it — Stop restores from here so unsaved sculpts survive Play and a
+    /// mid-play scene switch can't leak another scene's terrain into this one.
+    play_terrains: Option<PlayTerrains>,
     /// A `scene.load(...)` a script queued this frame — performed at the top of
     /// the NEXT frame (never mid-frame under the running scripts).
     pending_scene: Option<String>,

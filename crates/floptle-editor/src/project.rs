@@ -647,6 +647,18 @@ impl Editor {
     /// (the old path printed to stderr and callers cleared `scene_dirty`
     /// unconditionally, which could silently lose work).
     pub(crate) fn save_scene(&mut self) -> bool {
+        // NEVER save during Play: the world holds simulation state (moved
+        // bodies, script spawns), and a mid-play `scene.load(...)` may have
+        // swapped in ANOTHER scene entirely — writing that over the edited
+        // scene's file (and its terrain) is exactly how work gets lost.
+        if self.playing {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "💾 not saved — can't save the scene during Play (Stop first; Play changes aren't kept)".into(),
+                None,
+            );
+            return false;
+        }
         let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
         let path = self.scene_path();
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);

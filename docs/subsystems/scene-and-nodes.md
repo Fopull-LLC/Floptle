@@ -286,3 +286,36 @@ gravity toggles:
 Serialized as `RigidBodyDoc.mode` (RON enum, omitted when Dynamic) — spawns,
 clipboard, and replication carry it automatically. Inspector greys out
 bounce/friction/gravity/locks for non-Dynamic modes.
+
+## Trigger rigidbodies + Play-mode terrain safety (2026-07-14)
+
+**Trigger + RigidBody**: a `Trigger` component on a rigidbody node sets
+`Body.sensor` — the body integrates but skips ALL contact resolution (passes
+through everything, nothing pushes back), stays out of `kin_hulls` (a
+kinematic trigger never pushes) and out of the lent raycast hulls (rays skip
+it, like static trigger colliders). Touch events: body-vs-body overlap
+involving a sensor body reports `sensor: true` (trigger hooks), and a
+dedicated `detect_touches` pass tests sensor bodies against SOLID static
+colliders (the solver skipped them) so a trigger sweeping through a wall
+still events. Static-mode rigidbody + Trigger bakes a sensor collider. The
+Inspector's trigger checkbox lives on the Rigidbody component for body nodes
+(the Collider section's checkbox remains for pure-collidable nodes); toggles
+sync live via `sync_dynamic_params`. Test: `trigger_rigidbodies_are_sensors`.
+
+**Terrain could be overwritten across scene switches** (real lost work):
+terrain fields live OUTSIDE the scene doc (`terrain/<scene>.<id>.tfield`,
+keyed by `scene_name`), and Stop restored the world BEFORE restoring the
+pre-Play scene name — so after a mid-play `scene.load(...)`,
+`restore() → adopt_terrain()` filled the editor scene's terrain nodes with
+the PLAYED scene's fields, and the next save wrote them over the real
+terrain. Fixes (all in concert):
+
+- Stop restores `scene_name`/`scene_rel` BEFORE `restore()` runs.
+- Play snapshots the live terrain fields (id-keyed) + texture palette
+  (`Editor.play_terrains`); Stop restores them — unsaved sculpts now survive
+  Play (they used to be silently re-read from disk), and no disk re-read can
+  leak another scene's terrain in.
+- `save_scene` refuses to run during Play (loud Console warning) — the world
+  holds simulation state and possibly another scene entirely.
+- Opening a scene from the editor while playing stops Play first, so the
+  unsaved-changes prompt and its save operate on real edit state.
