@@ -221,6 +221,10 @@ impl Sim {
         b.lock_pos = rb.lock_pos;
         b.layer = layers.index_for(ecs, e);
         b.kinematic = rb.mode == floptle_core::BodyMode::Kinematic;
+        // A Trigger on a rigidbody node makes the BODY a sensor: it never
+        // blocks or gets blocked, but overlap fires the trigger hooks —
+        // moving pickups, projectiles that pass through, sweeping zones.
+        b.sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
         let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
         (b, rot0)
     }
@@ -238,6 +242,9 @@ impl Sim {
     ) {
         let wt = world_transform(ecs, e);
         let (layer, eid) = (layers.index_for(ecs, e), Some(e.index()));
+        // A Trigger alongside a Static-mode rigidbody = a baked SENSOR in the
+        // body's shape: never blocks, overlap fires the trigger hooks.
+        let sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
         let r = rb.radius.max(0.01);
         match rb.kind {
             BodyKind::Sphere => {
@@ -246,7 +253,7 @@ impl Sim {
                     Box::new(SphereShape { center: Vec3::ZERO, radius: r }),
                     layer,
                     eid,
-                    false,
+                    sensor,
                 );
             }
             BodyKind::Capsule => {
@@ -257,7 +264,7 @@ impl Sim {
                     Box::new(CapsuleShape { a: -u * half, b: u * half, radius: r }),
                     layer,
                     eid,
-                    false,
+                    sensor,
                 );
             }
             BodyKind::Box => {
@@ -272,7 +279,7 @@ impl Sim {
                     )),
                     layer,
                     eid,
-                    false,
+                    sensor,
                 );
             }
         }
@@ -570,6 +577,32 @@ impl Sim {
                 }
             }
         }
+        // 2b. A trigger BODY overlapping SOLID static geometry — the solver
+        // skips sensors entirely (they never block), so a kinematic trigger
+        // sweeping through a wall/terrain still gets its events here.
+        for (bi, body) in self.world.bodies.iter().enumerate() {
+            if !body.sensor || !body.active {
+                continue;
+            }
+            let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
+            for col in self.world.colliders.iter().filter(|c| !c.sensor) {
+                let Some(b_eid) = col.eid else { continue };
+                if (self.world.matrix[body.layer as usize] >> col.layer) & 1 == 0 {
+                    continue;
+                }
+                let (centers, n_c, radius) = body.sample_centers();
+                for &c in &centers[..n_c] {
+                    if col.distance(c) < radius {
+                        record(
+                            *a_eid,
+                            b_eid,
+                            TouchInfo { point: to_world(c), normal: col.normal(c), sensor: true },
+                        );
+                        break;
+                    }
+                }
+            }
+        }
         // 3. Body-vs-body overlap (detection only; no physical response).
         for i in 0..self.world.bodies.len() {
             let Some(Some(a_eid)) = body_eid.get(i).copied() else { continue };
@@ -600,7 +633,10 @@ impl Sim {
                             TouchInfo {
                                 point: to_world(c),
                                 normal: hull.normal(c),
-                                sensor: false,
+                                // Either body being a trigger makes the pair a
+                                // trigger event (player walks into a sensor
+                                // pickup → onTriggerEnter, not onCollisionEnter).
+                                sensor: a.sensor || b.sensor,
                             },
                         );
                         break;
@@ -737,6 +773,10 @@ impl Sim {
     pub fn body_hulls(&self, ecs: &World) -> Vec<BodyHull> {
         self.map
             .iter()
+            // Sensor (trigger) bodies are invisible to rays, exactly like
+            // static trigger colliders — a ray through a pickup zone hits
+            // what's behind it.
+            .filter(|l| !self.world.bodies[l.body].sensor)
             .map(|l| {
                 let b = &self.world.bodies[l.body];
                 let pos = if b.active {
@@ -816,6 +856,8 @@ impl Sim {
                 });
                 let b = &mut self.world.bodies[bidx];
                 b.layer = layer;
+                // Live trigger toggles (the Inspector checkbox while playing).
+                b.sensor = ecs.get::<floptle_core::Trigger>(ent).is_some();
                 if b.kinematic && !kinematic {
                     // Waking up into Dynamic: start from rest at the tracked pose.
                     b.vel = Vec3::ZERO;
@@ -850,13 +892,14 @@ impl Sim {
             }
         }
         // Refresh the kinematic hulls dynamic bodies collide against (poses
-        // were just synced above). Cheap: kinematic bodies are few.
+        // were just synced above). Cheap: kinematic bodies are few. A sensor
+        // (trigger) kinematic never pushes anything, so it stays out.
         self.world.kin_hulls = self
             .world
             .bodies
             .iter()
             .enumerate()
-            .filter(|(_, b)| b.kinematic)
+            .filter(|(_, b)| b.kinematic && !b.sensor)
             .filter_map(|(bi, b)| {
                 let eid = self.map.iter().find(|l| l.body == bi)?.entity.index();
                 Some(BodyHull {
@@ -1233,6 +1276,81 @@ mod runtime_body_tests {
             }
         }
         assert!(body_pair, "two bodies meeting must fire a body-vs-body Enter");
+    }
+
+    /// A `Trigger` on a RIGIDBODY node makes the body a sensor: a kinematic
+    /// trigger never blocks the player but their overlap fires trigger
+    /// events, and a dynamic trigger falls straight THROUGH solid geometry
+    /// while still firing trigger events against it.
+    #[test]
+    fn trigger_rigidbodies_are_sensors() {
+        let mut ecs = World::default();
+        // The player: a plain dynamic body that falls onto the floor.
+        let player = ecs.spawn();
+        ecs.insert(player, Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)));
+        ecs.insert(player, RigidBody { gravity: true, ..Default::default() });
+        // A pickup: kinematic rigidbody + Trigger, hanging where the player lands.
+        let coin = ecs.spawn();
+        ecs.insert(coin, Transform::from_translation(DVec3::new(0.0, 1.0, 0.0)));
+        ecs.insert(
+            coin,
+            RigidBody { mode: floptle_core::BodyMode::Kinematic, ..Default::default() },
+        );
+        ecs.insert(coin, floptle_core::Trigger);
+        // A ghost: DYNAMIC rigidbody + Trigger — must fall through the floor.
+        let ghost = ecs.spawn();
+        ecs.insert(ghost, Transform::from_translation(DVec3::new(5.0, 3.0, 0.0)));
+        ecs.insert(ghost, RigidBody { gravity: true, ..Default::default() });
+        ecs.insert(ghost, floptle_core::Trigger);
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        sim.add_static_box(
+            DVec3::new(0.0, 0.0, 0.0),
+            Vec3::new(50.0, 0.5, 50.0),
+            Quat::IDENTITY,
+            StaticTag { layer: 0, eid: 100, sensor: false },
+        );
+        // Sensor bodies are invisible to script raycasts, like static triggers —
+        // only the player's hull remains (coin and ghost are both triggers).
+        assert_eq!(sim.body_hulls(&ecs).len(), 1, "trigger bodies must not be raycastable");
+        assert!(
+            sim.world.kin_hulls.is_empty(),
+            "a kinematic TRIGGER must never push dynamic bodies"
+        );
+        let (mut coin_touch, mut ghost_floor) = (false, false);
+        for _ in 0..180 {
+            sim.sync_dynamic_params(&ecs);
+            sim.step_tick(1.0 / 60.0, None);
+            assert!(sim.world.kin_hulls.is_empty());
+            for ev in sim.take_touch_events() {
+                let pair = (ev.a.min(ev.b), ev.a.max(ev.b));
+                let key = |x: u32, y: u32| (x.min(y), x.max(y));
+                if pair == key(player.index(), coin.index()) {
+                    assert!(ev.sensor, "player-vs-coin must be a TRIGGER event");
+                    coin_touch = true;
+                }
+                if pair == key(ghost.index(), 100) {
+                    assert!(ev.sensor, "trigger body vs solid floor must be a TRIGGER event");
+                    ghost_floor = true;
+                }
+            }
+        }
+        assert!(coin_touch, "overlapping the kinematic trigger must fire the hooks");
+        assert!(ghost_floor, "the dynamic trigger must event against the floor it crosses");
+        let player_y = sim.body_snapshot(player.index()).unwrap().pos.y;
+        assert!(
+            (0.9..1.2).contains(&player_y),
+            "the coin must not block the player off the floor (rested at y = {player_y})"
+        );
+        let ghost_y = sim.body_snapshot(ghost.index()).unwrap().pos.y;
+        assert!(ghost_y < -5.0, "the dynamic trigger must fall THROUGH the floor, at y = {ghost_y}");
+        let coin_y = sim.body_snapshot(coin.index()).unwrap().pos.y;
+        assert!((coin_y - 1.0).abs() < 1e-3, "the kinematic trigger stays put, at y = {coin_y}");
     }
 
     /// The floating-origin rebase must be INVISIBLE to rendering: a body

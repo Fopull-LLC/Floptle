@@ -2476,7 +2476,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "distance", insert: "distance(", doc: "distance(a, b) — distance between two points: vec3/vec2 values, {x=,y=,z=} tables, or NODE handles (distance(node, target) just works). Also distance(x1,y1,z1, x2,y2,z2) for raw numbers." },
     ApiEntry { label: "onCollisionEnter", insert: "function onCollisionEnter(node, other, hit)\n  \nend", doc: "function onCollisionEnter(node, other, hit) — fires the tick this node's body STARTS touching something solid (a collider or another body). `other` = the other node's handle (check other:hasTag(\"...\") / other.name); hit = { x, y, z, nx, ny, nz } (world contact point + normal). Also onCollisionStay (every tick while touching) and onCollisionExit (on separation)." },
     ApiEntry { label: "onCollisionExit", insert: "function onCollisionExit(node, other, hit)\n  \nend", doc: "function onCollisionExit(node, other, hit) — fires the tick the touch ends (hit = the last known contact)." },
-    ApiEntry { label: "onTriggerEnter", insert: "function onTriggerEnter(node, other, hit)\n  \nend", doc: "function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRIGGER (a Collider with the \"trigger\" switch: bodies pass through, events still fire). The portal/pickup/checkpoint hook — pair with a string param: scene.load(params.destination). Also onTriggerStay / onTriggerExit." },
+    ApiEntry { label: "onTriggerEnter", insert: "function onTriggerEnter(node, other, hit)\n  \nend", doc: "function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRIGGER (the \"trigger\" switch on a Collider or Rigidbody: it stops blocking, events still fire — a Kinematic trigger rigidbody = a moving pickup). The portal/pickup/checkpoint hook — pair with a string param: scene.load(params.destination). Also onTriggerStay / onTriggerExit." },
     ApiEntry { label: "onTriggerExit", insert: "function onTriggerExit(node, other, hit)\n  \nend", doc: "function onTriggerExit(node, other, hit) — fires the tick a body leaves the trigger." },
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
@@ -2782,6 +2782,11 @@ STRAIGHT THROUGH it (rays too) — but overlap still fires:
   function onTriggerEnter(node, other, hit)
   function onTriggerStay(node, other, hit)
   function onTriggerExit(node, other, hit)
+
+Rigidbody nodes can be triggers too — the checkbox sits on the Rigidbody
+there, and the BODY becomes the sensor: it never blocks or gets blocked.
+Kinematic + trigger = the moving pickup / sweeping damage zone. (A Dynamic
+trigger still falls — straight through floors — so pin things that stay put.)
 
 The portal recipe — one script, many portals (string param per instance):
 
