@@ -693,10 +693,20 @@ impl Editor {
         let t = &EXPORT_TARGETS[target];
         match t.kind {
             ExportKind::SelfBinary => {
-                let result = std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
-                    export_game_with(&self.project_root, Path::new(&dir), &title, &exe, t)
-                });
-                self.finish_export(result);
+                // A `cargo run` (debug) editor must not ship ITSELF — a debug
+                // binary is huge (~600 MB) and slow. With the source checkout
+                // around, build the release binary in the background exactly
+                // like a cross target. A release editor (a Hub install, where
+                // no checkout exists) IS the shipping binary: export directly.
+                if cfg!(debug_assertions) && repo_root().is_some() {
+                    self.begin_export_build(None, dir, title, target);
+                } else {
+                    let result =
+                        std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
+                            export_game_with(&self.project_root, Path::new(&dir), &title, &exe, t)
+                        });
+                    self.finish_export(result);
+                }
             }
             ExportKind::Prebuilt(rel) => {
                 let result = repo_root()
@@ -722,31 +732,37 @@ impl Editor {
                 self.finish_export(result);
             }
             ExportKind::CargoCross(triple) => {
-                if self.export_build.is_some() {
-                    self.export_status = Some("a target build is already running…".into());
-                    return;
-                }
-                let log = std::env::temp_dir().join("floptle-export-build.log");
-                match spawn_cross_build(triple, &log) {
-                    Ok(child) => {
-                        self.export_status = Some(format!(
-                            "🔨 building the {} binary — the export finishes when it's done \
-                             (first build takes minutes; log: {})",
-                            t.label,
-                            log.display()
-                        ));
-                        self.export_build = Some(ExportBuild {
-                            child,
-                            out_dir: dir,
-                            title,
-                            target,
-                            log,
-                            started: Instant::now(),
-                        });
-                    }
-                    Err(e) => self.finish_export(Err(e)),
-                }
+                self.begin_export_build(Some(triple), dir, title, target);
             }
+        }
+    }
+
+    /// Spawn the background release build an export waits on (a cross target,
+    /// or the host release binary when a debug editor exports "This machine").
+    fn begin_export_build(
+        &mut self,
+        triple: Option<&'static str>,
+        out_dir: String,
+        title: String,
+        target: usize,
+    ) {
+        if self.export_build.is_some() {
+            self.export_status = Some("a target build is already running…".into());
+            return;
+        }
+        let log = std::env::temp_dir().join("floptle-export-build.log");
+        match spawn_export_build(triple, &log) {
+            Ok(child) => {
+                self.export_status = Some(format!(
+                    "🔨 building the release {} binary — the export finishes when it's done \
+                     (first build takes minutes; log: {})",
+                    EXPORT_TARGETS[target].label,
+                    log.display()
+                ));
+                self.export_build =
+                    Some(ExportBuild { child, out_dir, title, target, log, started: Instant::now() });
+            }
+            Err(e) => self.finish_export(Err(e)),
         }
     }
 
@@ -774,7 +790,15 @@ impl Editor {
         if p.is_absolute() {
             return p.to_path_buf();
         }
-        self.project_root.parent().unwrap_or(&self.project_root).join(p)
+        // A relative project root (the default `assets/`) would make the result
+        // CWD-relative after all — pin it to the CWD explicitly so the resolved
+        // path we display is the path we actually write.
+        let root = if self.project_root.is_absolute() {
+            self.project_root.clone()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(&self.project_root)
+        };
+        root.parent().map(Path::to_path_buf).unwrap_or(root).join(p)
     }
 
     /// Once per frame: reap a finished cross-target build and complete its
@@ -796,7 +820,7 @@ impl Editor {
         };
         let result = match status {
             Ok(s) if s.success() => {
-                match triple.and_then(|tr| cross_binary_path(tr, t.exe_suffix)) {
+                match export_binary_path(triple, t.exe_suffix) {
                     Some(bin) if bin.is_file() => export_game_with(
                         &self.project_root,
                         Path::new(&b.out_dir),
@@ -894,14 +918,19 @@ struct ExportBuild {
     started: Instant,
 }
 
-/// Where a cross-compiled engine binary lands: `<target-dir>/<triple>/release/`.
+/// Where an export's background-built binary lands: `<target-dir>/<triple>/release/`
+/// for a cross target, `<target-dir>/release/` for the host (`triple: None`).
 /// The running binary is `<target-dir>/<profile>/floptle`, so the target dir is
 /// two levels up — true for `cargo run` and plain `cargo build` alike.
-fn cross_binary_path(triple: &str, exe_suffix: &str) -> Option<PathBuf> {
+fn export_binary_path(triple: Option<&str>, exe_suffix: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let target_dir = exe.parent()?.parent()?;
     let name = exe.file_stem()?.to_string_lossy().into_owned();
-    Some(target_dir.join(triple).join("release").join(format!("{name}{exe_suffix}")))
+    let release = match triple {
+        Some(tr) => target_dir.join(tr).join("release"),
+        None => target_dir.join("release"),
+    };
+    Some(release.join(format!("{name}{exe_suffix}")))
 }
 
 /// The mingw cross toolchain for Windows exports: system-wide (PATH) or the
@@ -935,20 +964,23 @@ fn repo_root() -> Option<PathBuf> {
     repo.join("Cargo.toml").is_file().then(|| repo.to_path_buf())
 }
 
-/// Spawn the background `cargo build` for a cross-target export. Needs the
-/// engine source checkout and the target's rustup + C toolchains.
-fn spawn_cross_build(triple: &str, log: &Path) -> Result<std::process::Child, String> {
+/// Spawn the background release `cargo build` for an export: the host binary
+/// (`triple: None`) or a cross target. Needs the engine source checkout and,
+/// for cross targets, the rustup + C toolchains.
+fn spawn_export_build(triple: Option<&str>, log: &Path) -> Result<std::process::Child, String> {
     let repo = repo_root().ok_or_else(|| {
-        "cross-target exports need the engine source checkout this editor was built from"
-            .to_string()
+        "built exports need the engine source checkout this editor was built from".to_string()
     })?;
     let logfile = std::fs::File::create(log).map_err(|e| format!("build log: {e}"))?;
     let mut cmd = std::process::Command::new("cargo");
     cmd.current_dir(repo)
-        .args(["build", "--release", "-p", "floptle-editor", "--target", triple])
+        .args(["build", "--release", "-p", "floptle-editor"])
         .stdout(logfile.try_clone().map_err(|e| e.to_string())?)
         .stderr(logfile)
         .stdin(std::process::Stdio::null());
+    if let Some(tr) = triple {
+        cmd.args(["--target", tr]);
+    }
     // Build into the SAME target dir `cross_binary_path` reads (the running
     // editor's). Without this the child cargo used whatever CARGO_TARGET_DIR
     // the environment happened to have — launched differently, the build
@@ -960,7 +992,7 @@ fn spawn_cross_build(triple: &str, log: &Path) -> Result<std::process::Child, St
     {
         cmd.env("CARGO_TARGET_DIR", td);
     }
-    if triple == "x86_64-pc-windows-gnu" {
+    if triple == Some("x86_64-pc-windows-gnu") {
         if let Some(bin) = windows_toolchain_bin()? {
             let path = std::env::var_os("PATH").unwrap_or_default();
             let mut paths = vec![bin.clone()];
@@ -1015,7 +1047,36 @@ fn export_game_with(
         .collect();
     let stem = stem.trim_matches('_');
     let stem = if stem.is_empty() { "game" } else { stem };
-    let exe_name = format!("{stem}{exe_suffix}");
+    let mut exe_name = format!("{stem}{exe_suffix}");
+    // The shipped project folder is literally named `assets` — an exe resolving
+    // to that same name (a project rooted at `assets/`, exported for a
+    // suffix-less target) would collide with it and corrupt the build.
+    if exe_name == "assets" {
+        exe_name = "game".into();
+    }
+    // The build's `assets/` copy is wholly owned by the export: clear the
+    // previous one so files deleted from the project don't linger in shipped
+    // builds (and a stale FILE named `assets` — the old broken-export
+    // artifact — doesn't block the copy).
+    let ship_assets = out_c.join("assets");
+    if ship_assets.is_dir() {
+        std::fs::remove_dir_all(&ship_assets).map_err(|e| format!("clear old assets copy: {e}"))?;
+    } else if ship_assets.exists() {
+        std::fs::remove_file(&ship_assets).map_err(|e| format!("clear old assets copy: {e}"))?;
+    }
+    // Everything the game needs ships BEFORE the binary, and the binary ships
+    // LAST — a failed export must never leave a runnable-looking exe that,
+    // missing its floptle-game.ron, silently boots as the EDITOR.
+    let files = copy_tree(&proj, &ship_assets).map_err(|e| format!("copy assets: {e}"))?;
+    if let Some(tpl) = target.readme {
+        std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
+            .map_err(|e| format!("write README: {e}"))?;
+    }
+    let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
+    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
+        .map_err(|e| format!("manifest: {e}"))?;
+    std::fs::write(out_c.join("floptle-game.ron"), text)
+        .map_err(|e| format!("write manifest: {e}"))?;
     let shipped = out_c.join(&exe_name);
     std::fs::copy(binary, &shipped).map_err(|e| format!("copy binary: {e}"))?;
     // A CI artifact may have lost its executable bit in transit — restore it
@@ -1025,16 +1086,6 @@ fn export_game_with(
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&shipped, std::fs::Permissions::from_mode(0o755));
     }
-    if let Some(tpl) = target.readme {
-        std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
-            .map_err(|e| format!("write README: {e}"))?;
-    }
-    let files = copy_tree(&proj, &out_c.join("assets")).map_err(|e| format!("copy assets: {e}"))?;
-    let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
-    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
-        .map_err(|e| format!("manifest: {e}"))?;
-    std::fs::write(out_c.join("floptle-game.ron"), text)
-        .map_err(|e| format!("write manifest: {e}"))?;
     Ok((format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display()), out_c))
 }
 
@@ -2294,6 +2345,47 @@ mod export_tests {
 
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// The trap behind "the build opens the editor": a project rooted at
+    /// `assets/` exported with the default title on a suffix-less target named
+    /// the exe `assets` — colliding with the shipped assets FOLDER, killing the
+    /// export halfway and leaving a manifest-less binary that boots as the
+    /// editor. The exe must dodge the reserved name, a re-export must clean up
+    /// the old broken artifact, and the binary must ship LAST so a failed
+    /// export never leaves anything runnable.
+    #[test]
+    fn export_never_collides_the_exe_with_the_assets_folder() {
+        let proj = temp("proj-collide");
+        std::fs::write(proj.join("project.ron"), "()").unwrap();
+        let out = temp("out-collide");
+        // Ty's exact broken state: a previous half-export left a FILE named
+        // `assets` (the binary) in the build folder.
+        std::fs::write(out.join("assets"), "old broken binary").unwrap();
+
+        let me = std::env::current_exe().unwrap();
+        let bare = super::ExportTarget {
+            label: "test",
+            kind: super::ExportKind::SelfBinary,
+            exe_suffix: "", // suffix-less target = the collision case
+            readme: None,
+        };
+        export_game_with(&proj, &out, "assets", &me, &bare).expect("collision export succeeds");
+        assert!(out.join("assets").is_dir(), "assets must be the project folder, not the exe");
+        assert!(out.join("game").is_file(), "the exe dodges the reserved name");
+        assert!(out.join("floptle-game.ron").is_file(), "the build is a GAME (manifest present)");
+
+        // Binary ships LAST: a copy failure (bogus source binary) errors out
+        // without leaving a runnable exe in the build folder.
+        let out2 = temp("out-nobin");
+        let err = export_game_with(&proj, &out2, "Cool", &me.join("nope"), &bare)
+            .expect_err("bogus binary must fail");
+        assert!(err.contains("copy binary"), "fails at the binary step: {err}");
+        assert!(!out2.join("Cool").exists(), "no runnable exe after a failed export");
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&out);
+        let _ = std::fs::remove_dir_all(&out2);
     }
 }
 
