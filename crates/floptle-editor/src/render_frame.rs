@@ -989,6 +989,24 @@ impl Editor {
                 _ => None,
             })
             .collect();
+        // Prefill the export title from the project's title (Project Settings
+        // ⏵ Game); the folder name is a poor fallback (the conventional root is
+        // just `assets`, which also collides with the shipped assets folder).
+        if self.export_title.is_empty() {
+            self.export_title = self.project.title.clone().unwrap_or_else(|| {
+                self.project_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .filter(|n| n != "assets")
+                    .unwrap_or_default()
+            });
+        }
+        // The entry-scene picker's options (only scanned while the window is up).
+        let scene_files = if self.show_project_settings {
+            crate::project::scene_files_in(&self.project_root)
+        } else {
+            Vec::new()
+        };
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
         let selection = &mut self.selection;
@@ -1165,13 +1183,6 @@ impl Editor {
         let export_done = self.export_done.clone();
         let autosave_prompt = self.autosave_prompt.clone();
         let scene_name_now = self.scene_name.clone();
-        if export_title.is_empty() {
-            *export_title = self
-                .project_root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-        }
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
         let net_ghosts = &mut self.net_ghosts;
@@ -1801,6 +1812,54 @@ impl Editor {
                 .resizable(false)
                 .default_width(280.0)
                 .show(ui.ctx(), |ui| {
+                    ui.label("Game — what a build ships as");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("title");
+                        let mut t = project.title.clone().unwrap_or_default();
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut t)
+                                    .desired_width(170.0)
+                                    .hint_text("My Game"),
+                            )
+                            .changed()
+                        {
+                            project.title = (!t.trim().is_empty()).then_some(t);
+                            want_save_project = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("entry scene");
+                        let current = project
+                            .entry_scene
+                            .clone()
+                            .unwrap_or_else(|| "scenes/first.ron".into());
+                        let stem = |s: &str| {
+                            std::path::Path::new(s)
+                                .file_stem()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| s.to_string())
+                        };
+                        egui::ComboBox::from_id_salt("entry_scene_pick")
+                            .width(170.0)
+                            .selected_text(stem(&current))
+                            .show_ui(ui, |ui| {
+                                for s in &scene_files {
+                                    if ui
+                                        .selectable_label(current == *s, stem(s))
+                                        .on_hover_text(s)
+                                        .clicked()
+                                    {
+                                        project.entry_scene = Some(s.clone());
+                                        want_save_project = true;
+                                    }
+                                }
+                            });
+                    });
+                    ui.small("the scene a build boots into — the editor opens it on project load too");
+
+                    ui.add_space(8.0);
                     ui.label("Rendering — applies to every scene");
                     ui.separator();
                     if ui.checkbox(&mut project.retro, "retro pixelization").changed() {
@@ -2808,6 +2867,12 @@ impl Editor {
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
+            // A scene transition a script queued LAST frame happens first —
+            // at a frame boundary, never mid-frame under the scripts that
+            // asked for it (offline/host = switch; joined client = refused).
+            if let Some(req) = self.pending_scene.take() {
+                self.perform_scene_request(&req);
+            }
             // Pausing freezes the clock AND the frame delta scripts see, so
             // dt-driven motion stops too (not just `time`-driven motion).
             let sdt = if self.paused { 0.0 } else { dt };
@@ -2882,6 +2947,8 @@ impl Editor {
             // Lend the asset root (for `assets.getFile/getContents`) and the material
             // presets (so `node.material = "Gold"` resolves) for this frame's scripts.
             self.script_host.set_project_root(self.project_root.clone());
+            // The running scene's name, for `scene.current()`.
+            self.script_host.set_scene_name(&self.scene_name);
             self.script_host.set_materials(
                 self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
             );
@@ -2907,6 +2974,11 @@ impl Editor {
                 if let Some(window) = self.window.as_ref() {
                     self.cursor_lock_soft = grab_cursor(window, want);
                 }
+            }
+            // A `scene.load(...)` from this frame's scripts: queued, performed
+            // at the top of the next frame (see above).
+            if let Some(req) = self.script_host.take_scene_request() {
+                self.pending_scene = Some(req);
             }
             // GPU-load any models a script swapped via `node.model` (the Matter is
             // already updated by run; re-importing here means the new mesh renders

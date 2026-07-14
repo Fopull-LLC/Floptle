@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 7;
+pub const PROTO_VERSION: u16 = 8;
 
 /// One controller layer's playback in a snapshot, quantized for the wire:
 /// state index (`u16::MAX` = the layer is stopped/released), clip time in
@@ -131,19 +131,28 @@ pub struct SyncedEntry {
 pub enum Msg {
     /// Client → server, first message on connect.
     Hello { proto: u16 },
-    /// Server → client: accepted; your peer id, the current tick, and the
-    /// snapshot cadence (ticks between snapshots).
-    Welcome { peer: PeerId, tick: u64, snapshot_every: u8 },
+    /// Server → client: accepted; your peer id, the current tick, the snapshot
+    /// cadence (ticks between snapshots), and the CURRENT scene (project-root-
+    /// relative path + its epoch) — a late joiner lands in the scene the
+    /// session is actually in, not whatever it had open.
+    Welcome { peer: PeerId, tick: u64, snapshot_every: u8, scene: String, epoch: u8 },
     /// Server → client: refused (wrong proto / full).
     Refused { reason: String },
+    /// Server → clients (reliable): the session switched scenes. Clients load
+    /// `scene` from their local project, re-register NetIds against it, and
+    /// drop any old-epoch state still in flight.
+    Scene { epoch: u8, scene: String },
     /// Server → clients: a runtime-spawned replicated node (RON `NodeDoc`).
-    Spawn { id: u64, node_ron: String, owner: Option<PeerId> },
+    Spawn { epoch: u8, id: u64, node_ron: String, owner: Option<PeerId> },
     /// Server → clients: a replicated node despawned.
-    Despawn { id: u64 },
+    Despawn { epoch: u8, id: u64 },
     /// Server → clients, at the snapshot cadence: changed transforms + synced
     /// vars + changed animator states. `keyframe` marks a periodic full-state
-    /// snapshot (loss healing).
+    /// snapshot (loss healing). `epoch` is the scene generation: NetIds only
+    /// mean anything within one scene, so a stale snapshot racing a scene
+    /// switch must be dropped, not applied to same-numbered strangers.
     Snapshot {
+        epoch: u8,
         tick: u64,
         keyframe: bool,
         entries: Vec<SnapEntry>,
@@ -191,6 +200,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let m = Msg::Snapshot {
+            epoch: 3,
             tick: 424242,
             keyframe: true,
             entries: vec![SnapEntry {

@@ -195,6 +195,30 @@ Per client, per snapshot, the server builds the **relevant set**:
 This is what raises the per-instance ceiling honestly: bandwidth per client stays flat as the
 *world's* population grows, because each client only pays for its neighbourhood.
 
+### 5.2b Scene switching (implemented)
+
+The server owns the scene. A host-side `scene.load(...)` performs the switch locally, then:
+
+- **`Msg::Scene { epoch, scene }`** (reliable) tells every client which project-relative scene
+  file to load. Each client loads it from its OWN project files (builds ship every scene) and
+  re-registers NetIds against it — same deterministic node-order walk as session start.
+- **The scene epoch** (a wrapping `u8`) is carried on every scene-scoped message (`Snapshot`,
+  `Spawn`, `Despawn`). NetIds only mean anything within one scene, so state racing a switch —
+  a stale snapshot arriving late, or a new-scene snapshot arriving before the client rebinds —
+  is *dropped by epoch mismatch*, never applied to same-numbered strangers. Between the `Scene`
+  announcement and the client's rebind, scene-scoped traffic is dropped wholesale.
+- **`Welcome` names the current scene + epoch**, so a late joiner (or a client that had a
+  different scene open) is put into the session's actual scene by the handshake.
+- On both ends the switch resets scene-scoped session state only: id maps, snapshot/synced/
+  animator baselines, interpolation + animator buffers, prediction history, the lag-comp ring.
+  Peer links, input timing (stamp offset, auto-lead), and pending events survive — a switch is
+  not a reconnect. The first post-switch snapshot is a keyframe (the new baseline).
+- A **joined client** calling `scene.load` is refused with a Console pointer to the RPC
+  pattern (client intent → server decides). Server-side scripts fire fresh `start`s in the new
+  scene, exactly like a boot.
+
+A switch to the *same* scene is a scene **restart** (fresh world from disk, same rules).
+
 ### 5.3 Transport
 
 The trait from `networking-future.md` §4, unchanged in spirit:
@@ -390,6 +414,14 @@ Server builds: Phase 2 hosts from the editor (listen-server) and from `floptle-r
 --headless` once its loop learns to run the real play step — the loop extraction from
 `render_frame.rs` into a shared driver is scheduled inside Phase 2e, because dedicated servers
 (and Ty's MMO ambitions) are pointless without it.
+
+**Dedicated-server packaging (planned, slot reserved).** File ⏵ Export Game… already stamps
+`binary + assets/ + floptle-game.ron`; a dedicated server export is the SAME layout with a
+`server` flag in the manifest (plus a `--server [port]` CLI override) — the binary boots the
+headless driver instead of a window: load project → entry scene → run the tick loop + a
+`NetSession::server` on the configured port. Scene switching, entry-scene selection, and the
+epoch machinery above are all role-agnostic already, so the server build inherits them
+unchanged. This is the artifact Floptle Cloud runs per instance (ADR-0022).
 
 ## 10. `floptle-relay` (open, self-hostable)
 

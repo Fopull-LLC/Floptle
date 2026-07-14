@@ -25,6 +25,7 @@ it up immediately.
 14. [The in-engine IDE](#14-the-in-engine-ide)
 15. [Tips & gotchas](#15-tips--gotchas)
 16. [Networking: `net.*`, `synced`, `onRpc`](#16-networking-net-synced-onrpc)
+17. [Scenes: `scene.load` & the entry scene](#17-scenes-sceneload--the-entry-scene)
 
 ---
 
@@ -985,3 +986,63 @@ The fine print, so you can reason about fairness:
 - `net.rewind` outside a server-side `onRpc` handler for a `withInput` rpc
   (or with the wrong peer) warns and runs the closure at server time — your
   logic still works, it's just not compensated.
+
+---
+
+## 17. Scenes: `scene.load` & the entry scene
+
+A game is usually more than one scene — a menu, a lobby, arenas, levels. Two
+pieces make that work:
+
+**The entry scene** (Edit ⏵ Project Settings ⏵ Game) is the scene a build
+boots into. The editor opens it on project load too, so what you see is what
+ships. It's saved in `project.ron` as `entry_scene`.
+
+**`scene.load(name)`** switches scenes from code:
+
+```lua
+function update(node, dt)
+    if input.pressed("return") then
+        scene.load("arena")            -- scenes/arena.ron
+    end
+end
+```
+
+- Accepts a name (`"arena"`), a scenes-relative path (`"arenas/desert"`), or a
+  project-relative path (`"scenes/arena.ron"`).
+- The switch happens at the next **frame boundary**, never mid-frame under the
+  scripts that asked for it. The world swaps to the new scene; physics,
+  animators, particles, and audio rebuild against it; every script's `start`
+  re-fires — exactly like the scene booting fresh.
+- In the editor, Stop still restores **the scene you were editing** — a
+  mid-play transition never touches your open file.
+- `scene.current()` is the running scene's name; `scene.list()` enumerates
+  every scene in the project (names `scene.load` accepts).
+
+### Multiplayer
+
+Only the **server** switches scenes. When the host's script calls
+`scene.load`, the engine announces the switch to every client; each client
+loads the same scene from its own project files and re-registers its networked
+nodes — automatically, no client code needed. A **late joiner** is put into
+the session's current scene by the welcome handshake (even if it had a
+different scene open).
+
+A joined client calling `scene.load` gets a Console warning and no switch —
+if a player action should change the scene, send the server an RPC
+(`net.send`) and let the server's script decide:
+
+```lua
+-- client
+net.send("requestNextMap")
+
+-- server
+onRpc("requestNextMap", function(sender)
+    if isAdmin(sender) then scene.load("arena2") end
+end)
+```
+
+State that must survive a scene change (scores, inventory) lives in your
+scripts' hands: stash it via an RPC/`synced` pattern before switching, or keep
+it on the server's manager script — node state itself does not survive (the
+old scene's nodes are gone).

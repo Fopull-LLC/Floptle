@@ -521,4 +521,64 @@ mod tests {
             hit.0
         );
     }
+
+    /// The scene-switch handshake end to end: the Welcome names the session's
+    /// scene, a mid-session switch is announced, old-epoch state in flight is
+    /// DROPPED (never applied to the new scene's same-numbered ids), and after
+    /// the client rebinds, replication resumes against the new scene.
+    #[test]
+    fn scene_switch_rebinds_and_drops_stale_epochs() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_scene("scenes/first.ron");
+        let (mut sw, se) = world_with(2);
+        let (mut cw, ce) = world_with(2);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        // Join: the Welcome tells the client which scene the session runs.
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 10, |_, _| {});
+        assert!(client.is_connected());
+        assert_eq!(client.take_scene_switch().as_deref(), Some("scenes/first.ron"));
+        // The driver is already in that scene — it rebinds and traffic flows.
+        client.rebind_scene(&cw);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 40, |w, tick| {
+            if let Some(tr) = w.get_mut::<Transform>(se[0]) {
+                tr.translation.x = tick as f64 * 0.1;
+            }
+        });
+        let moved = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        assert!(moved > 0.5, "pre-switch replication works, got {moved}");
+
+        // SWITCH: the server flips to a different scene (different shape too).
+        let (mut sw2, se2) = world_with(1);
+        server.switch_scene("scenes/arena.ron");
+        server.rebind_scene(&sw2);
+        // Server ticks keep flowing while the client hasn't rebound yet: NONE
+        // of the new scene's state may land on the OLD world's entities.
+        let frozen = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        let t = run(&hub, &mut server, &mut sw2, &mut client, &mut cw, t, 20, |w, tick| {
+            if let Some(tr) = w.get_mut::<Transform>(se2[0]) {
+                tr.translation.x = 500.0 + tick as f64;
+            }
+        });
+        assert_eq!(client.take_scene_switch().as_deref(), Some("scenes/arena.ron"));
+        let still = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        assert!(
+            (still - frozen).abs() < 1e-9,
+            "old-scene entities must freeze once the switch is announced, {frozen} → {still}"
+        );
+
+        // The client loads the new scene locally and rebinds: replication
+        // resumes against the NEW ids (keyframes heal anything dropped).
+        let (mut cw2, ce2) = world_with(1);
+        client.rebind_scene(&cw2);
+        let _ = run(&hub, &mut server, &mut sw2, &mut client, &mut cw2, t, 80, |w, tick| {
+            if let Some(tr) = w.get_mut::<Transform>(se2[0]) {
+                tr.translation.x = 500.0 + tick as f64;
+            }
+        });
+        let nx = cw2.get::<Transform>(ce2[0]).unwrap().translation.x;
+        assert!(nx > 400.0, "post-switch replication resumes in the new scene, got {nx}");
+    }
 }

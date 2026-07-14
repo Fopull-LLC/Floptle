@@ -3,6 +3,7 @@
 
 use floptle_core::Entity;
 use floptle_core::Matter;
+use floptle_core::World;
 use floptle_core::ScriptInst;
 use floptle_core::Scripts;
 use floptle_core::math::DVec3;
@@ -224,6 +225,14 @@ impl Editor {
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
+            // A mid-play `scene.load(...)` renamed the scene for the session —
+            // the restored world is the PRE-PLAY scene, so its name comes back
+            // too (or saves would write it under the played scene's file).
+            self.pending_scene = None;
+            if let Some((name, rel)) = self.play_scene_name.take() {
+                self.scene_name = name;
+                self.scene_rel = rel;
+            }
         } else {
             // Scripts run from what's on DISK — flush unsaved IDE edits first so
             // Play always tests the code you're looking at.
@@ -235,6 +244,8 @@ impl Editor {
                 }
             }
             self.play_snapshot = Some(self.snapshot());
+            self.play_scene_name = Some((self.scene_name.clone(), self.scene_rel.clone()));
+            self.pending_scene = None;
             self.play_t = 0.0;
             self.paused = false;
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
@@ -292,6 +303,88 @@ impl Editor {
         if self.playing {
             self.paused = !self.paused;
         }
+    }
+
+    /// Resolve a `scene.load(...)` argument to a scene file: a name ("arena"),
+    /// a scenes-relative name ("arenas/desert"), or a project-relative path
+    /// ("scenes/arena.ron"). Escapes are REJECTED — in multiplayer the string
+    /// arrives over the wire, so it must never reach outside the project.
+    pub(crate) fn resolve_scene_request(&self, req: &str) -> Option<std::path::PathBuf> {
+        let r = req.trim().replace('\\', "/");
+        if r.is_empty() || r.contains("..") || r.starts_with('/') || r.contains(':') {
+            return None;
+        }
+        let with_ext = if r.ends_with(".ron") { r.clone() } else { format!("{r}.ron") };
+        [with_ext.clone(), format!("scenes/{with_ext}")]
+            .into_iter()
+            .map(|c| self.project_root.join(c))
+            .find(|p| p.is_file())
+    }
+
+    /// Perform a scene transition while Play runs: swap the world to the new
+    /// scene and rebuild every play-session runtime (scripts, physics, anim,
+    /// vfx, audio) against it — `start` re-fires everywhere, exactly like the
+    /// scene booting fresh. The editor's own scene (play snapshot + name) is
+    /// untouched: Stop still restores exactly what you were editing. Returns
+    /// the new scene's project-relative path (what a server announces).
+    ///
+    /// Session roles (filters, prediction, NetId rebinds) are the CALLER's job
+    /// — see [`Self::perform_scene_request`].
+    pub(crate) fn switch_scene_during_play(&mut self, req: &str) -> Option<String> {
+        let Some(path) = self.resolve_scene_request(req) else {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!("scene.load(\"{req}\"): no such scene (looked in scenes/)"),
+                None,
+            );
+            return None;
+        };
+        let doc = match floptle_scene::load(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("scene.load(\"{req}\"): {e}"),
+                    None,
+                );
+                return None;
+            }
+        };
+        // Tear down the old scene's play runtimes…
+        self.reset_anim_bindings();
+        self.anim.clear_instances();
+        self.vfx.clear_instances();
+        self.script_host.clear_anim_state();
+        self.script_host.reset_instances();
+        self.script_gizmos.clear();
+        let mixer = self.project.mixer.clone();
+        self.audio.stop_play(&mixer);
+        // …swap the world…
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.set_scene_file(&path);
+        self.adopt_terrain();
+        self.register_scene_meshes();
+        self.selection.clear();
+        self.grabbed = None;
+        self.drag = None;
+        // …and rebuild the play session against it (the same steps as Play).
+        let origin = self.sim_origin_hint();
+        let gravity = Self::build_gravity_field(&self.world, origin);
+        let terrain_vols = self.terrain_volumes();
+        let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
+        drop(terrain_vols);
+        self.add_static_colliders(&mut sim);
+        self.sim = Some(sim);
+        self.vfx.start_play(&self.world);
+        let root = self.project_root.clone();
+        self.audio.start_play(&self.world, &root, &mixer);
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("⏵ scene → {}", self.scene_name),
+            None,
+        );
+        Some(self.scene_rel_or_default())
     }
 
     /// A script's declared `defaults`, cached by file mtime so we only re-parse the Lua
@@ -383,5 +476,40 @@ impl Editor {
         } else {
             self.world.insert(e, Scripts(vec![inst]));
         }
+    }
+}
+
+#[cfg(test)]
+mod scene_request_tests {
+    use crate::Editor;
+
+    /// `scene.load` strings resolve inside the project only: names,
+    /// scenes-relative paths, and project-relative paths all work; escapes
+    /// never do — in multiplayer the string arrives over the WIRE, so it must
+    /// not be able to name anything outside the project.
+    #[test]
+    fn scene_requests_resolve_safely() {
+        let root =
+            std::env::temp_dir().join(format!("floptle-scene-req-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scenes/arenas")).unwrap();
+        std::fs::write(root.join("scenes/first.ron"), "()").unwrap();
+        std::fs::write(root.join("scenes/arenas/desert.ron"), "()").unwrap();
+        let ed = Editor { project_root: root.clone(), ..Default::default() };
+
+        let first = root.join("scenes/first.ron");
+        assert_eq!(ed.resolve_scene_request("first").as_deref(), Some(first.as_path()));
+        assert_eq!(ed.resolve_scene_request("first.ron").as_deref(), Some(first.as_path()));
+        assert_eq!(ed.resolve_scene_request("scenes/first.ron").as_deref(), Some(first.as_path()));
+        let desert = root.join("scenes/arenas/desert.ron");
+        assert_eq!(ed.resolve_scene_request("arenas/desert").as_deref(), Some(desert.as_path()));
+
+        assert!(ed.resolve_scene_request("nope").is_none(), "missing scenes are None");
+        assert!(ed.resolve_scene_request("../first").is_none(), "no escaping the project");
+        assert!(ed.resolve_scene_request("/etc/passwd").is_none(), "no absolute paths");
+        assert!(ed.resolve_scene_request("C:\\x").is_none(), "no Windows drives");
+        assert!(ed.resolve_scene_request("").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

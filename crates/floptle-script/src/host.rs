@@ -420,6 +420,69 @@ impl ScriptHost {
             let _ = lua.globals().set("assets", t);
         }
 
+        // `scene.*` — scene management: `scene.load(name)` queues a transition
+        // the engine performs between frames (in multiplayer only the SERVER
+        // may switch — clients follow automatically); `scene.current()` is the
+        // running scene's name; `scene.list()` enumerates the project's scenes.
+        let scene_request: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let scene_name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        if let Ok(t) = lua.create_table() {
+            let q = scene_request.clone();
+            let _ = t.set(
+                "load",
+                lua.create_function(move |_, name: String| {
+                    // Last call this frame wins — one transition per frame.
+                    *q.borrow_mut() = Some(name);
+                    Ok(())
+                })
+                .ok(),
+            );
+            let sn = scene_name.clone();
+            let _ = t.set(
+                "current",
+                lua.create_function(move |lua, ()| {
+                    lua.create_string(sn.borrow().as_bytes())
+                })
+                .ok(),
+            );
+            let pr = project_root.clone();
+            let _ = t.set(
+                "list",
+                lua.create_function(move |lua, ()| {
+                    // Scene names relative to `scenes/`, extension dropped,
+                    // subfolders kept ("arenas/desert") — exactly what
+                    // `scene.load` accepts.
+                    let base = pr.borrow().join("scenes");
+                    let mut names: Vec<String> = Vec::new();
+                    let mut stack = vec![base.clone()];
+                    while let Some(d) = stack.pop() {
+                        if let Ok(rd) = std::fs::read_dir(&d) {
+                            for entry in rd.flatten() {
+                                let p = entry.path();
+                                if p.is_dir() {
+                                    stack.push(p);
+                                } else if p.extension().is_some_and(|x| x == "ron")
+                                    && let Ok(rel) = p.strip_prefix(&base)
+                                {
+                                    let mut s = rel.to_string_lossy().replace('\\', "/");
+                                    s.truncate(s.len().saturating_sub(4));
+                                    names.push(s);
+                                }
+                            }
+                        }
+                    }
+                    names.sort();
+                    let arr = lua.create_table()?;
+                    for (i, n) in names.iter().enumerate() {
+                        arr.set(i + 1, lua.create_string(n.as_bytes())?)?;
+                    }
+                    Ok(arr)
+                })
+                .ok(),
+            );
+            let _ = lua.globals().set("scene", t);
+        }
+
         // `spawnEffect(key, x, y, z)` — fire a one-shot particle effect at a world
         // point, no node required. The editor spawns a detached instance that plays
         // once and auto-despawns (the fire-and-forget path for hits, pickups, poofs).
@@ -500,6 +563,8 @@ impl ScriptHost {
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             mouse_lock,
+            scene_request,
+            scene_name,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -514,6 +579,33 @@ impl ScriptHost {
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
         }
+    }
+
+    /// Feed the running scene's name (before `run`) — what `scene.current()` reads.
+    pub fn set_scene_name(&self, name: &str) {
+        let mut cur = self.scene_name.borrow_mut();
+        if *cur != name {
+            *cur = name.to_string();
+        }
+    }
+
+    /// Drain a `scene.load(...)` request queued by a script this frame (last call
+    /// wins). The driver performs the switch between frames.
+    pub fn take_scene_request(&mut self) -> Option<String> {
+        self.scene_request.borrow_mut().take()
+    }
+
+    /// Drop every per-(node, script) environment plus its net handlers and
+    /// synced stores — a SCENE SWITCH: the next `run` rebuilds fresh instances
+    /// against the new world, and every `start` re-fires. Compiled sources stay
+    /// cached (rebuilding is per-instance, not per-file).
+    pub fn reset_instances(&mut self) {
+        let all: Vec<_> = self.instances.drain().collect();
+        for (k, inst) in all {
+            let _ = self.lua.remove_registry_value(inst.env);
+            self.drop_net_instance(&k);
+        }
+        self.envs.borrow_mut().clear();
     }
 
     /// Feed each animated entity's controller state for this frame (before `run`),
