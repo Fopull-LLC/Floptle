@@ -99,13 +99,6 @@ pub struct AnimUiState {
     pub record_restore_props: Vec<(Entity, String, String, f64)>,
     /// New-animation name prompt buffer (`Some` = prompt open).
     pub new_anim_buf: Option<String>,
-
-    // ---- Property-track builder (Animating tab) ----
-    /// The "add property track" picker's node name ("" = the animated node).
-    pub prop_node: String,
-    /// The picker's component + field.
-    pub prop_comp: String,
-    pub prop_field: String,
 }
 
 impl Default for AnimUiState {
@@ -148,9 +141,6 @@ impl Default for AnimUiState {
             last_scene_props: HashMap::new(),
             record_restore_props: Vec::new(),
             new_anim_buf: None,
-            prop_node: String::new(),
-            prop_comp: "UiElement".into(),
-            prop_field: "image".into(),
         }
     }
 }
@@ -1124,6 +1114,12 @@ impl EditorTabViewer<'_> {
                 .show_ui(ui, |ui| {
                     for (e, n) in &candidates {
                         if ui.selectable_label(*e == target, n).clicked() && *e != target {
+                            // A live recording is bound to the OLD target's subtree —
+                            // stop it (restoring the pre-record scene) before switching.
+                            if self.anim_ui.record {
+                                stop_record_ui(self.world, self.anim_ui);
+                                self.anim.forget_preview();
+                            }
                             self.anim.restore_preview(self.world);
                             self.anim_ui.target = Some(*e);
                             self.anim_ui.sel_anim = None;
@@ -1141,6 +1137,12 @@ impl EditorTabViewer<'_> {
                     for (n, _) in &states {
                         if ui.selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), n).clicked()
                         {
+                            // Recording writes into the CURRENT clip — stop it before
+                            // switching so keys can't land in the wrong animation.
+                            if self.anim_ui.record {
+                                stop_record_ui(self.world, self.anim_ui);
+                                self.anim.forget_preview();
+                            }
                             self.anim_ui.sel_anim = Some(n.clone());
                             self.anim_ui.clip_doc = None;
                             self.anim_ui.playhead = 0.0;
@@ -1166,10 +1168,11 @@ impl EditorTabViewer<'_> {
                     self.anim_ui.playhead = 0.0;
                 }
                 let play_lbl = if self.anim_ui.preview_playing { "⏸" } else { "⏵" };
-                if ui.button(play_lbl).on_hover_text("preview play/pause").clicked() {
+                if ui.button(play_lbl).on_hover_text("preview play/pause (Space)").clicked() {
                     self.anim_ui.preview_playing = !self.anim_ui.preview_playing;
                     if self.anim_ui.preview_playing && self.anim_ui.record {
                         stop_record_ui(self.world, self.anim_ui);
+                        self.anim.forget_preview();
                     }
                 }
                 if ui.button("⏹").on_hover_text("stop preview (restore the scene pose)").clicked() {
@@ -1177,20 +1180,29 @@ impl EditorTabViewer<'_> {
                     self.anim_ui.playhead = 0.0;
                     if self.anim_ui.record {
                         stop_record_ui(self.world, self.anim_ui);
+                        self.anim.forget_preview();
                     }
                     self.anim.restore_preview(self.world);
                     self.anim.poses.remove(&target);
                 }
+                // ● Record: red while armed — the standard "you are recording" cue.
+                let rec_text = if self.anim_ui.record {
+                    egui::RichText::new("● REC").color(RECORD_RED).strong()
+                } else {
+                    egui::RichText::new("● Record")
+                };
                 let rec = ui
-                    .selectable_label(self.anim_ui.record, "● Record")
+                    .selectable_label(self.anim_ui.record, rec_text)
                     .on_hover_text(
-                        "key on move: pose this node's children with the gizmo/Inspector and keys \
-                         are written at the playhead. Scrubbing previews what you've keyed; turning \
-                         record off restores the scene pose (recording edits the CLIP, not the scene).",
+                        "key on change: while recording, the scene shows the clip at the playhead — \
+                         move a node or edit a property (a spritesheet cell, opacity…) and it's keyed \
+                         there. Turning record off restores the scene (recording edits the CLIP, \
+                         never the scene).",
                     );
                 if rec.clicked() {
                     if self.anim_ui.record {
                         stop_record_ui(self.world, self.anim_ui);
+                        self.anim.forget_preview();
                     } else {
                         self.anim_ui.record = true;
                         self.anim_ui.preview_playing = false;
@@ -1217,7 +1229,16 @@ impl EditorTabViewer<'_> {
                 }
             });
             ui.separator();
-            ui.label(format!("{:.2}s", self.anim_ui.playhead));
+            // Time readout — with the frame number when snapping (24fps: "0.50s · f12").
+            if self.anim_ui.snap_fps > 0.0 {
+                ui.label(format!(
+                    "{:.2}s · f{}",
+                    self.anim_ui.playhead,
+                    (self.anim_ui.playhead * self.anim_ui.snap_fps).round() as i64
+                ));
+            } else {
+                ui.label(format!("{:.2}s", self.anim_ui.playhead));
+            }
             ui.label("snap");
             egui::ComboBox::from_id_salt("anim-snap")
                 .selected_text(if self.anim_ui.snap_fps <= 0.0 {
@@ -1234,17 +1255,17 @@ impl EditorTabViewer<'_> {
                         }
                     }
                 });
-            ui.add(
-                egui::Slider::new(&mut self.anim_ui.zoom, ANIM_ZOOM_MIN..=ANIM_ZOOM_MAX)
-                    .logarithmic(true)
-                    .show_value(false)
-                    .text("zoom"),
-            )
-            .on_hover_text(
-                "over the dopesheet: scroll = zoom · Alt+scroll = row height · Shift+scroll = pan · \
-                 Space play · ←/→ step · Home/End · F fit · Del remove event",
-            );
-            if ui.button("Fit").on_hover_text("zoom to fit the whole clip (F)").clicked() {
+            // (Zoom lives on the wheel — the old slider duplicated it and ate bar space.)
+            if ui
+                .button("Fit")
+                .on_hover_text(
+                    "zoom to fit the whole clip (F)\n\nover the dopesheet: scroll = zoom · \
+                     Alt+scroll = row height · Shift+scroll = pan · Space play · ←/→ step · \
+                     Home/End · double-click a lane = key there · right-click a lane label = \
+                     its menu · Del = delete the selected key/event",
+                )
+                .clicked()
+            {
                 self.anim_ui.fit_pending = true;
             }
         });
@@ -1416,6 +1437,11 @@ const ANIM_LABEL_W: f32 = 130.0;
 /// keys, so a node's property lanes read apart from its transform lane.
 const PROP_KEY_COLOR: Color32 = Color32::from_rgb(120, 210, 175);
 const PROP_LABEL_COLOR: Color32 = Color32::from_rgb(150, 200, 185);
+/// The ● REC armed colour + the dopesheet's recording border tint.
+const RECORD_RED: Color32 = Color32::from_rgb(235, 80, 80);
+
+/// One ＋ Property menu entry: (channel name, display name, [(component, field)]).
+type NodeFieldMenu = (String, String, Vec<(String, String)>);
 
 /// Draw a dopesheet key diamond centred at `c`.
 fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32) {
@@ -1538,46 +1564,16 @@ fn prop_kind(component: &str, field: &str) -> PropKind {
         .unwrap_or(PropKind::Float)
 }
 
-fn fields_for(component: &str) -> &'static [(&'static str, PropKind)] {
-    ANIMATABLE_PROPS.iter().find(|(c, _)| *c == component).map(|(_, fs)| *fs).unwrap_or(&[])
-}
-
 impl EditorTabViewer<'_> {
-    /// Node names in `target`'s subtree (itself + descendants), for the property
-    /// track's node picker. The animated node ("") maps to the subtree root.
-    fn subtree_names(&self, target: Entity) -> Vec<String> {
-        let mut kids: HashMap<Entity, Vec<Entity>> = HashMap::new();
-        for (e, p) in self.world.query::<floptle_core::Parent>() {
-            kids.entry(p.0).or_default().push(e);
-        }
-        let mut out = Vec::new();
-        let mut stack = vec![target];
-        while let Some(e) = stack.pop() {
-            if let Some(n) = self.world.get::<Name>(e)
-                && !n.0.is_empty()
-                && !out.contains(&n.0)
-            {
-                out.push(n.0.clone());
-            }
-            if let Some(cs) = kids.get(&e) {
-                stack.extend(cs.iter().copied());
-            }
-        }
-        out.sort();
-        out
-    }
-
-    /// Property-track authoring, paired with the dopesheet above: the currently
-    /// selected key's value is edited HERE (its keys live on the timeline as
-    /// draggable diamonds under their node), plus an add-track builder and compact
-    /// per-track controls. Numeric fields interpolate; image/text fields step.
-    fn property_tracks_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
+    /// The selected property key's inline editor, shown under the dopesheet.
+    /// Everything else about property tracks lives ON the timeline: lanes under
+    /// their node, ＋ Property in the header, and the lane-label context menus —
+    /// this strip is only "here's the key you clicked, set its value".
+    fn property_tracks_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
         // Immutable data first, before borrowing the clip doc mutably.
         let tree = self.asset_tree;
-        let subtree = self.subtree_names(target);
 
         let st = &mut *self.anim_ui;
-        let playhead = st.playhead;
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let dur = doc.duration.max(0.01);
 
@@ -1660,143 +1656,73 @@ impl EditorTabViewer<'_> {
             st.sel_prop = None;
             st.clip_dirty = true;
         }
-
-        // ---- add / manage tracks ----
-        let (add_node, add_comp, add_field) =
-            (st.prop_node.clone(), st.prop_comp.clone(), st.prop_field.clone());
-        egui::CollapsingHeader::new("▦  Property tracks")
-            .id_salt("anim-prop-tracks")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.small(
-                    "Animate a component field — opacity, colors, or a UI image swapping \
-                     frame-by-frame. Keys appear on the timeline above under their node; \
-                     click one to edit its value here. (● Record + change a property auto-keys it.)",
-                );
-                // ---- add-track builder row ----
-                let mut do_add = false;
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("node");
-                    egui::ComboBox::from_id_salt("prop-node")
-                        .selected_text(if add_node.is_empty() { "(animated node)" } else { add_node.as_str() })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut st.prop_node, String::new(), "(animated node)");
-                            for n in &subtree {
-                                ui.selectable_value(&mut st.prop_node, n.clone(), n);
-                            }
-                        });
-                    ui.label("component");
-                    egui::ComboBox::from_id_salt("prop-comp")
-                        .selected_text(&add_comp)
-                        .show_ui(ui, |ui| {
-                            for (c, _) in ANIMATABLE_PROPS {
-                                if ui.selectable_value(&mut st.prop_comp, c.to_string(), *c).clicked()
-                                {
-                                    // Reset the field to the new component's first.
-                                    if let Some((f, _)) = fields_for(c).first() {
-                                        st.prop_field = f.to_string();
-                                    }
-                                }
-                            }
-                        });
-                    ui.label("field");
-                    egui::ComboBox::from_id_salt("prop-field")
-                        .selected_text(&add_field)
-                        .show_ui(ui, |ui| {
-                            for (f, _) in fields_for(&st.prop_comp) {
-                                ui.selectable_value(&mut st.prop_field, f.to_string(), *f);
-                            }
-                        });
-                    if ui
-                        .button("＋ Add track")
-                        .on_hover_text("add a lane for this field (then ＋ key, or Record)")
-                        .clicked()
-                    {
-                        do_add = true;
-                    }
-                });
-
-                if do_add {
-                    add_property_track(doc, &st.prop_node, &st.prop_comp, &st.prop_field);
-                    st.clip_dirty = true;
-                }
-
-                ui.separator();
-
-                // ---- compact per-track rows (keys are edited on the timeline) ----
-                let mut remove: Option<(usize, usize)> = None; // (channel, track)
-                let mut any = false;
-                for ci in 0..doc.channels.len() {
-                    let node_label = {
-                        let n = &doc.channels[ci].node;
-                        if n.is_empty() { "(animated node)".to_string() } else { n.clone() }
-                    };
-                    for ti in 0..doc.channels[ci].properties.len() {
-                        any = true;
-                        let (comp, field) = {
-                            let pt = &doc.channels[ci].properties[ti];
-                            (pt.component.clone(), pt.field.clone())
-                        };
-                        let kind = prop_kind(&comp, &field);
-                        ui.horizontal(|ui| {
-                            ui.label(format!("{node_label} · {comp}.{field}"));
-                            if ui
-                                .button("＋ key")
-                                .on_hover_text("key the current value at the playhead")
-                                .clicked()
-                            {
-                                key_property_at(
-                                    &mut doc.channels[ci].properties[ti],
-                                    playhead.min(dur),
-                                    kind,
-                                );
-                                st.clip_dirty = true;
-                            }
-                            // Step (hold each key) vs interpolate. Text tracks always
-                            // step; numeric tracks (opacity, cell…) choose.
-                            if kind == PropKind::Text {
-                                ui.add_enabled(false, egui::Button::new("step"));
-                            } else {
-                                let mut step = doc.channels[ci].properties[ti].step;
-                                if ui
-                                    .selectable_label(step, "step")
-                                    .on_hover_text("hold each key (no blend) — use for spritesheet frames")
-                                    .clicked()
-                                {
-                                    step = !step;
-                                    doc.channels[ci].properties[ti].step = step;
-                                    st.clip_dirty = true;
-                                }
-                            }
-                            let nkeys = doc.channels[ci].properties[ti].times.len();
-                            ui.weak(format!("{nkeys} key{}", if nkeys == 1 { "" } else { "s" }));
-                            if ui.button("🗑").on_hover_text("remove this whole track").clicked() {
-                                remove = Some((ci, ti));
-                            }
-                        });
-                    }
-                }
-                if !any {
-                    ui.weak(
-                        "No property tracks yet — add one above (try UiElement · image for a sprite \
-                         swap), or ● Record and change a property.",
-                    );
-                }
-
-                if let Some((ci, ti)) = remove {
-                    doc.channels[ci].properties.remove(ti);
-                    drop_empty_channel(doc, ci);
-                    if st.sel_prop.is_some_and(|(sci, sti, _)| sci == ci && sti == ti) {
-                        st.sel_prop = None;
-                    }
-                    st.clip_dirty = true;
-                }
-            });
     }
 
     /// The full dopesheet for an editable clip doc.
-    fn timeline_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
+    fn timeline_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
         let playing = self.playing;
+        // Live per-node data for timeline interactions, gathered BEFORE the clip-doc
+        // borrow: current local TRS (double-click / "key pose here"), current numeric
+        // field values (keying a property writes what's on the node right now, like
+        // record does), and which animatable fields each node actually has (the
+        // ＋ Property menus list only real components, Unity-style).
+        let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
+        let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
+        let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
+        for (e, chan) in scene_channel_names(self.world, target) {
+            if e != target && chan.is_empty() {
+                continue; // unnamed children can't be addressed by a channel
+            }
+            if let Some(tr) = self.world.get::<floptle_core::Transform>(e) {
+                live_trs.insert(
+                    chan.clone(),
+                    TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
+                );
+            }
+            let mir = floptle_script::mirror_components(self.world, e);
+            let mut fields: Vec<(String, String)> = Vec::new();
+            for (comp, fs) in ANIMATABLE_PROPS {
+                for (f, kind) in fs.iter() {
+                    let present = match kind {
+                        // The mirror is already presence-filtered (cell/tints only
+                        // when the element has an image, textSize with text…).
+                        PropKind::Float => {
+                            if let Some(&v) = mir.get(*comp).and_then(|m| m.get(*f)) {
+                                live_vals.insert(
+                                    (chan.clone(), comp.to_string(), f.to_string()),
+                                    v,
+                                );
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        PropKind::Text => match (*comp, *f) {
+                            ("UiElement", "image") => {
+                                self.world.get::<floptle_ui::ElementSpec>(e).is_some()
+                            }
+                            ("UiElement", "text") => self
+                                .world
+                                .get::<floptle_ui::ElementSpec>(e)
+                                .is_some_and(|s| s.text.is_some()),
+                            ("Material", "texture") => {
+                                self.world.get::<floptle_core::Material>(e).is_some()
+                            }
+                            _ => false,
+                        },
+                    };
+                    if present {
+                        fields.push((comp.to_string(), f.to_string()));
+                    }
+                }
+            }
+            if !fields.is_empty() {
+                let disp =
+                    if chan.is_empty() { "(this node)".to_string() } else { chan.clone() };
+                node_fields.push((chan.clone(), disp, fields));
+            }
+        }
+
         let st = &mut *self.anim_ui;
         // Read `dur` and run the wheel handler BEFORE borrowing `clip_doc` mutably (the
         // handler needs &mut st, which would alias the `doc` borrow).
@@ -1811,6 +1737,8 @@ impl EditorTabViewer<'_> {
         let lane_h = 20.0 * st.row_scale;
         let ruler_h = 22.0;
         let event_h = 20.0;
+        // Where a "key at playhead" lands, on the snap grid like record.
+        let ph = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
 
         // Header row: duration + event add + selected-event editor.
         let mut kill_event: Option<usize> = None;
@@ -1821,6 +1749,41 @@ impl EditorTabViewer<'_> {
                 doc.duration = d;
                 st.clip_dirty = true;
             }
+            // ＋ Property: node ▸ field cascade listing only components actually on
+            // each node (Unity's "Add Property"). Adds an empty lane to key into.
+            ui.menu_button("＋ Property", |ui| {
+                if node_fields.is_empty() {
+                    ui.weak("no animatable components in this subtree");
+                }
+                for (chan, disp, fields) in &node_fields {
+                    ui.menu_button(disp, |ui| {
+                        for (comp, field) in fields {
+                            let exists = doc.channels.iter().any(|c| {
+                                &c.node == chan
+                                    && c.properties
+                                        .iter()
+                                        .any(|p| &p.component == comp && &p.field == field)
+                            });
+                            if ui
+                                .add_enabled(
+                                    !exists,
+                                    egui::Button::new(format!("{comp}.{field}")),
+                                )
+                                .clicked()
+                            {
+                                add_property_track(doc, chan, comp, field);
+                                st.clip_dirty = true;
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            })
+            .response
+            .on_hover_text(
+                "add a property lane (opacity, spritesheet cell, image…) under a node — \
+                 then key it, or just ● Record and change the value",
+            );
             if ui.button("⚑ Add event at playhead").on_hover_text("events call a Lua function (by name) on this node's scripts when the playhead crosses them").clicked() {
                 doc.events.push(AnimEventDoc { t: st.playhead.min(doc.duration), func: "onAnimEvent".into() });
                 doc.events.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -1865,7 +1828,15 @@ impl EditorTabViewer<'_> {
         }
         let out = area.show(ui, |ui| {
             let want_w = (label_w + dur * px + 140.0).max(ui.available_width());
-            let (full, _) = ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::hover());
+            // The body is itself a click target, registered FIRST so every lane/key
+            // widget layered on top wins the pointer — a click that reaches it hit
+            // empty space, which deselects (like clicking off in any editor).
+            let (full, bg_resp) =
+                ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::click());
+            if bg_resp.clicked() {
+                st.sel_prop = None;
+                st.sel_event = None;
+            }
             let painter = ui.painter_at(full);
             let tl_left = full.left() + label_w;
             let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
@@ -1948,12 +1919,23 @@ impl EditorTabViewer<'_> {
             // one lane per property track indented beneath it — every lane shares the
             // same time axis and the same draggable diamonds, so a spritesheet `cell`
             // reads as a keyframe under its node, not a separate numeric panel.
+            //
+            // Lane interactions (registered under the keys, so keys win the pointer):
+            //   · double-click a lane strip = key there (pose / current value)
+            //   · right-click a LABEL = the lane's menu (key, add property, step, delete)
+            //   · single-click empty lane = deselect
             let rows_top = full.top() + ruler_h + event_h;
             let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
             let mut delete_key: Option<(usize, f32)> = None;
             let mut prop_retime: Option<(usize, usize, f32, f32)> = None; // (ci, ti, old, new)
             let mut prop_delete: Option<(usize, usize, f32)> = None; // (ci, ti, t)
             let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
+            let mut pose_key_at: Option<(usize, f32)> = None; // key the LIVE pose on channel ci at t
+            let mut prop_key_at: Option<(usize, usize, f32)> = None; // key the live/carried value
+            let mut prop_step_toggle: Option<(usize, usize)> = None;
+            let mut prop_remove: Option<(usize, usize)> = None;
+            let mut chan_delete: Option<usize> = None;
+            let mut add_track_for: Option<(String, String, String)> = None; // (chan, comp, field)
             let mut row_i = 0usize;
             let stripe = |painter: &egui::Painter, row_i: usize, y: f32, ui: &egui::Ui| {
                 if row_i.is_multiple_of(2) {
@@ -1970,18 +1952,88 @@ impl EditorTabViewer<'_> {
                 stripe(&painter, row_i, y, ui);
                 row_i += 1;
                 let cy = y + lane_h * 0.5;
-                let label = if doc.channels[ci].node.is_empty() {
-                    "(this node)"
-                } else {
-                    doc.channels[ci].node.as_str()
-                };
+                let chan_name = doc.channels[ci].node.clone();
+                let label =
+                    if chan_name.is_empty() { "(this node)" } else { chan_name.as_str() };
+                // Label: right-click menu for the node's lane.
+                let label_rect =
+                    Rect::from_min_size(Pos2::new(full.left(), y), egui::vec2(label_w, lane_h));
+                let lresp =
+                    ui.interact(label_rect, ui.id().with(("chan-label", ci)), Sense::click());
+                {
+                    let existing: Vec<(String, String)> = doc.channels[ci]
+                        .properties
+                        .iter()
+                        .map(|p| (p.component.clone(), p.field.clone()))
+                        .collect();
+                    lresp.context_menu(|ui| {
+                        if live_trs.contains_key(&chan_name)
+                            && ui.button("⏺ Key pose at playhead").clicked()
+                        {
+                            pose_key_at = Some((ci, ph));
+                            ui.close();
+                        }
+                        if let Some((_, _, fields)) =
+                            node_fields.iter().find(|(c, _, _)| *c == chan_name)
+                        {
+                            ui.menu_button("＋ Add property", |ui| {
+                                for (comp, field) in fields {
+                                    let has = existing
+                                        .iter()
+                                        .any(|(c, f)| c == comp && f == field);
+                                    if ui
+                                        .add_enabled(
+                                            !has,
+                                            egui::Button::new(format!("{comp}.{field}")),
+                                        )
+                                        .clicked()
+                                    {
+                                        add_track_for = Some((
+                                            chan_name.clone(),
+                                            comp.clone(),
+                                            field.clone(),
+                                        ));
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                        if ui.button("🗑 Delete node track").clicked() {
+                            chan_delete = Some(ci);
+                            ui.close();
+                        }
+                    });
+                }
                 painter.text(
                     Pos2::new(full.left() + 4.0, cy),
                     Align2::LEFT_CENTER,
                     label,
                     FontId::proportional(11.0),
-                    ui.visuals().text_color(),
+                    if lresp.hovered() {
+                        ui.visuals().strong_text_color()
+                    } else {
+                        ui.visuals().text_color()
+                    },
                 );
+                // Lane strip: double-click keys the node's CURRENT pose there;
+                // a plain click on empty lane deselects.
+                let lane_strip = Rect::from_min_size(
+                    Pos2::new(tl_left, y),
+                    egui::vec2(dur * px, lane_h),
+                );
+                let sresp =
+                    ui.interact(lane_strip, ui.id().with(("chan-lane", ci)), Sense::click());
+                if sresp.clicked() {
+                    st.sel_prop = None;
+                    st.sel_event = None;
+                }
+                if sresp.double_clicked()
+                    && live_trs.contains_key(&chan_name)
+                    && let Some(p) = sresp.interact_pointer_pos()
+                {
+                    pose_key_at =
+                        Some((ci, crate::timeline::snap_time(x_to_time(p.x), st.snap_fps)));
+                }
                 let times = union_times(&doc.channels[ci]);
                 for (ki, &t) in times.iter().enumerate() {
                     // A drag previews at the pointer but the doc is only retimed on
@@ -2031,17 +2083,79 @@ impl EditorTabViewer<'_> {
                     stripe(&painter, row_i, y, ui);
                     row_i += 1;
                     let cy = y + lane_h * 0.5;
-                    let plabel = {
+                    let (comp, field, step) = {
                         let pt = &doc.channels[ci].properties[ti];
-                        format!("   {}.{}", pt.component, pt.field)
+                        (pt.component.clone(), pt.field.clone(), pt.step)
                     };
+                    // Label: right-click menu for this property lane.
+                    let label_rect = Rect::from_min_size(
+                        Pos2::new(full.left(), y),
+                        egui::vec2(label_w, lane_h),
+                    );
+                    let plresp = ui.interact(
+                        label_rect,
+                        ui.id().with(("prop-label", ci, ti)),
+                        Sense::click(),
+                    );
+                    plresp.context_menu(|ui| {
+                        if ui
+                            .button("＋ Key current value at playhead")
+                            .on_hover_text("writes the value the node has right now")
+                            .clicked()
+                        {
+                            prop_key_at = Some((ci, ti, ph));
+                            ui.close();
+                        }
+                        if prop_kind(&comp, &field) != PropKind::Text
+                            && ui
+                                .selectable_label(step, "Step (hold each key)")
+                                .on_hover_text(
+                                    "no blending between keys — right for spritesheet frames",
+                                )
+                                .clicked()
+                        {
+                            prop_step_toggle = Some((ci, ti));
+                            ui.close();
+                        }
+                        if ui.button("🗑 Delete track").clicked() {
+                            prop_remove = Some((ci, ti));
+                            ui.close();
+                        }
+                    });
                     painter.text(
                         Pos2::new(full.left() + 10.0, cy),
                         Align2::LEFT_CENTER,
-                        plabel,
+                        format!("   {comp}.{field}"),
                         FontId::proportional(10.5),
-                        PROP_LABEL_COLOR,
+                        if plresp.hovered() {
+                            PROP_LABEL_COLOR.gamma_multiply(1.4)
+                        } else {
+                            PROP_LABEL_COLOR
+                        },
                     );
+                    // Lane strip: double-click = key the current value at that time.
+                    let lane_strip = Rect::from_min_size(
+                        Pos2::new(tl_left, y),
+                        egui::vec2(dur * px, lane_h),
+                    );
+                    let presp = ui.interact(
+                        lane_strip,
+                        ui.id().with(("prop-lane", ci, ti)),
+                        Sense::click(),
+                    );
+                    if presp.clicked() {
+                        st.sel_prop = None;
+                        st.sel_event = None;
+                    }
+                    if presp.double_clicked()
+                        && let Some(p) = presp.interact_pointer_pos()
+                    {
+                        prop_key_at = Some((
+                            ci,
+                            ti,
+                            crate::timeline::snap_time(x_to_time(p.x), st.snap_fps),
+                        ));
+                    }
                     let n_keys = doc.channels[ci].properties[ti].times.len();
                     for ki in 0..n_keys {
                         let t = doc.channels[ci].properties[ti].times[ki];
@@ -2101,7 +2215,7 @@ impl EditorTabViewer<'_> {
                 painter.text(
                     Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
                     Align2::LEFT_CENTER,
-                    "no keys yet — ● Record, then pose child nodes or change a property",
+                    "no keys yet — ● Record then pose nodes / change properties, or ＋ Property to add a lane",
                     FontId::proportional(11.5),
                     ui.visuals().weak_text_color(),
                 );
@@ -2126,6 +2240,55 @@ impl EditorTabViewer<'_> {
             }
             if let Some((ci, ti, t)) = prop_delete {
                 delete_property_key(doc, ci, ti, t);
+                st.sel_prop = None;
+                st.clip_dirty = true;
+            }
+            // Deferred lane actions (context menus / double-clicks).
+            if let Some((ci, t)) = pose_key_at {
+                let name = doc.channels[ci].node.clone();
+                if let Some(trs) = live_trs.get(&name) {
+                    write_key(doc, &name, t, trs);
+                    st.clip_dirty = true;
+                }
+            }
+            if let Some((ci, ti, t)) = prop_key_at {
+                let (chan, comp, field) = {
+                    let pt = &doc.channels[ci].properties[ti];
+                    (doc.channels[ci].node.clone(), pt.component.clone(), pt.field.clone())
+                };
+                let kind = prop_kind(&comp, &field);
+                let live = live_vals.get(&(chan, comp, field)).copied();
+                let ki = key_property_current(
+                    &mut doc.channels[ci].properties[ti],
+                    t,
+                    kind,
+                    live,
+                );
+                // Select the fresh key so its value is instantly editable below.
+                st.sel_prop = Some((ci, ti, ki));
+                st.sel_event = None;
+                if t > doc.duration {
+                    doc.duration = t;
+                }
+                st.clip_dirty = true;
+            }
+            if let Some((chan, comp, field)) = add_track_for {
+                add_property_track(doc, &chan, &comp, &field);
+                st.clip_dirty = true;
+            }
+            if let Some((ci, ti)) = prop_step_toggle {
+                let pt = &mut doc.channels[ci].properties[ti];
+                pt.step = !pt.step;
+                st.clip_dirty = true;
+            }
+            if let Some((ci, ti)) = prop_remove {
+                doc.channels[ci].properties.remove(ti);
+                drop_empty_channel(doc, ci);
+                st.sel_prop = None;
+                st.clip_dirty = true;
+            }
+            if let Some(ci) = chan_delete {
+                doc.channels.remove(ci);
                 st.sel_prop = None;
                 st.clip_dirty = true;
             }
@@ -2203,15 +2366,29 @@ impl EditorTabViewer<'_> {
 
             // ---- playhead over everything ----
             let xp = time_to_x(st.playhead.min(dur));
+            let ph_col = if st.record { RECORD_RED } else { PLAYHEAD };
             painter.line_segment(
                 [Pos2::new(xp, full.top()), Pos2::new(xp, full.bottom())],
-                Stroke::new(1.5, PLAYHEAD),
+                Stroke::new(1.5, ph_col),
             );
             let xe = time_to_x(dur);
             painter.line_segment(
                 [Pos2::new(xe, full.top()), Pos2::new(xe, full.bottom())],
                 Stroke::new(1.0, Color32::from_rgb(150, 150, 170)),
             );
+            // Recording: a red frame around the sheet — the second half of the
+            // ● REC cue, so it's unmissable that edits are being keyed.
+            if st.record {
+                painter.rect_stroke(
+                    Rect::from_min_size(
+                        Pos2::new(tl_left, full.top()),
+                        egui::vec2(dur * px, full.height()),
+                    ),
+                    0.0,
+                    Stroke::new(1.5, RECORD_RED.gamma_multiply(0.6)),
+                    egui::StrokeKind::Inside,
+                );
+            }
             // ruler ticks over the top strip
             draw_ruler(&painter, Rect::from_min_size(Pos2::new(tl_left, full.top()), egui::vec2(dur * px, ruler_h)), dur, st.playhead.min(dur), px);
         });
@@ -2596,6 +2773,27 @@ fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field:
         step: prop_kind(component, field) == PropKind::Text
             || (component == "UiElement" && field == "cell"),
     });
+}
+
+/// Key a property at `t` with the node's LIVE value when we have one (numeric
+/// fields — what record would write), else fall back to carry-forward
+/// ([`key_property_at`]). Returns the key's index so callers can select it.
+fn key_property_current(
+    pt: &mut AnimPropTrackDoc,
+    t: f32,
+    kind: PropKind,
+    live: Option<f64>,
+) -> usize {
+    key_property_at(pt, t, kind);
+    let i = pt
+        .times
+        .iter()
+        .position(|&x| (x - t).abs() < 1e-4)
+        .unwrap_or(0);
+    if let (Some(v), PropKind::Float) = (live, kind) {
+        pt.values[i] = AnimPropValueDoc::Float(v as f32);
+    }
+    i
 }
 
 /// Insert (or overwrite) a key at time `t` on a property track, seeding a
