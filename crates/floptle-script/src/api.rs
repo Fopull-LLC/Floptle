@@ -155,6 +155,12 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("friction".to_string(), rb.friction as f64),
                 ("restitution".to_string(), rb.restitution as f64),
                 ("gravity".to_string(), b(rb.gravity)),
+                // Kinematic (1/0): transform-driven, never falls/pushed, but
+                // pushes dynamic bodies. Assignable live (Dynamic ↔ Kinematic
+                // — grab an object, ride an elevator). Static mode is
+                // authoring-time (the Inspector dropdown; it's a baked
+                // collider, not a body, so there's nothing here to toggle).
+                ("kinematic".to_string(), b(rb.mode == floptle_core::BodyMode::Kinematic)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
                 // Shape kind: 0 = sphere, 1 = capsule, 2 = box.
@@ -361,6 +367,18 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "friction" => rb.friction = val as f32,
                     "restitution" => rb.restitution = val as f32,
                     "gravity" => rb.gravity = val != 0.0,
+                    // Live Dynamic ↔ Kinematic (the sim re-reads the mode each
+                    // tick). Never touches a Static body — that's a baked
+                    // collider with no live body to switch.
+                    "kinematic" => {
+                        if rb.mode != floptle_core::BodyMode::Static {
+                            rb.mode = if val != 0.0 {
+                                floptle_core::BodyMode::Kinematic
+                            } else {
+                                floptle_core::BodyMode::Dynamic
+                            };
+                        }
+                    }
                     "radius" => rb.radius = val as f32,
                     "height" => rb.height = val as f32,
                     "shape" => {

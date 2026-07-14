@@ -86,11 +86,33 @@ pub enum BodyKind {
     Box,
 }
 
-/// Marks an entity as a dynamic physics body, centered on the entity's world
+/// How a [`RigidBody`] participates in the simulation — the one dropdown that
+/// replaces hand-freezing axes and disabling gravity:
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyMode {
+    /// Fully simulated: gravity, velocity, collisions push it around.
+    #[default]
+    Dynamic,
+    /// TRANSFORM-DRIVEN: never falls or gets pushed — scripts/animation move
+    /// the node and the body follows. Dynamic bodies collide WITH it (moving
+    /// platforms, elevators, doors that shove the player), raycasts hit it,
+    /// and touch events fire. Costs almost nothing per tick (no integration).
+    Kinematic,
+    /// Baked STATIC geometry: no body at all — just an immovable collider in
+    /// the shape below (walls, floors, props). Zero per-tick cost; the
+    /// cheapest way to make something solid. (Same as Collidable, but sized
+    /// by the body shape instead of the node's visual geometry.)
+    Static,
+}
+
+/// Marks an entity as a physics body, centered on the entity's world
 /// translation. Read by `floptle-physics` to build the sim each Play.
+/// [`BodyMode`] picks how it simulates (dynamic / kinematic / static).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RigidBody {
     pub kind: BodyKind,
+    /// Dynamic (simulated) / Kinematic (transform-driven) / Static (baked).
+    pub mode: BodyMode,
     pub radius: f32,
     /// Total capsule height (ignored for a sphere).
     pub height: f32,
@@ -113,6 +135,7 @@ impl Default for RigidBody {
     fn default() -> Self {
         Self {
             kind: BodyKind::Sphere,
+            mode: BodyMode::Dynamic,
             radius: 0.5,
             height: 2.0,
             half_extents: [0.5, 0.5, 0.5],

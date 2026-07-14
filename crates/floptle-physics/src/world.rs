@@ -70,6 +70,16 @@ pub struct PhysicsWorld {
     /// (`!0` everywhere); the sim overwrites it from the project's
     /// `floptle_core::Layers` each Play.
     pub matrix: [u32; 32],
+    /// Hulls of the KINEMATIC bodies (refreshed by the sim each tick, sim
+    /// frame). Dynamic bodies depenetrate from these like moving colliders —
+    /// platforms/elevators push what stands on them. Only kinematic bodies
+    /// appear here, and kinematic bodies skip the step, so nothing
+    /// self-collides.
+    pub kin_hulls: Vec<BodyHull>,
+    /// Contacts a dynamic body resolved against a kinematic hull this step:
+    /// `(body index, kinematic entity, point, normal)` — cleared each step,
+    /// consumed by the sim's touch-event diff.
+    pub kin_contacts: Vec<(usize, u32, Vec3, Vec3)>,
 }
 
 impl Default for PhysicsWorld {
@@ -81,6 +91,8 @@ impl Default for PhysicsWorld {
             contacts: Vec::new(),
             origin: DVec3::ZERO,
             matrix: [!0u32; 32],
+            kin_hulls: Vec::new(),
+            kin_contacts: Vec::new(),
         }
     }
 }
@@ -303,6 +315,12 @@ impl PhysicsWorld {
         for c in &mut self.contacts {
             c.point += delta;
         }
+        for h in &mut self.kin_hulls {
+            h.pos += delta;
+        }
+        for (_, _, p, _) in &mut self.kin_contacts {
+            *p += delta;
+        }
         for s in &mut self.gravity.sources {
             if let GravitySource::Point { center, .. } = s {
                 *center += delta;
@@ -331,6 +349,7 @@ impl PhysicsWorld {
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
         self.contacts.clear();
+        self.kin_contacts.clear();
         for bi in 0..self.bodies.len() {
             self.step_body(bi, dt);
         }
@@ -346,6 +365,13 @@ impl PhysicsWorld {
         let dt = dt.clamp(0.0, 0.1);
         if !self.bodies[bi].active {
             return; // snapshot-driven (networked authority on a client)
+        }
+        if self.bodies[bi].kinematic {
+            // Transform-driven: no gravity, no depenetration, no locks — the
+            // sim just tracks the node (poses arrive via the kinematic sync).
+            // That's the compute saving: a kinematic body costs ~nothing.
+            self.bodies[bi].prev_pos = self.bodies[bi].pos;
+            return;
         }
         {
             self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
@@ -412,6 +438,39 @@ impl PhysicsWorld {
                             point: c - n * radius,
                             normal: n,
                         });
+                    }
+                }
+                // …and against the KINEMATIC bodies' hulls — moving platforms
+                // and elevators push dynamic bodies exactly like static
+                // geometry would (only kinematic bodies live in `kin_hulls`,
+                // and kinematic bodies skip the step, so nothing self-hits).
+                for hi in 0..self.kin_hulls.len() {
+                    let hull = self.kin_hulls[hi];
+                    if (row >> hull.layer) & 1 == 0 {
+                        continue;
+                    }
+                    let (centers, n_c, radius) = self.bodies[bi].sample_centers();
+                    for &c in &centers[..n_c] {
+                        let pen = radius - hull.distance(c);
+                        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                        if !(pen > 0.0) {
+                            continue;
+                        }
+                        let n = hull.normal(c);
+                        self.bodies[bi].pos += n * pen;
+                        let vn = self.bodies[bi].vel.dot(n);
+                        if vn < 0.0 {
+                            let fr = (1.0 - self.bodies[bi].friction).clamp(0.0, 1.0);
+                            let rest = self.bodies[bi].restitution;
+                            let vt = self.bodies[bi].vel - n * vn;
+                            self.bodies[bi].vel = vt * fr - n * vn * rest;
+                        }
+                        self.bodies[bi].contact = Some(n);
+                        let gd = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+                        if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
+                            self.bodies[bi].grounded = true;
+                        }
+                        self.kin_contacts.push((bi, hull.eid, c - n * radius, n));
                     }
                 }
             }

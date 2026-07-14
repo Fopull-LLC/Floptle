@@ -222,6 +222,11 @@ pub struct RigidBodyDoc {
     /// true = box (sized by `half_extents`). Takes priority over `capsule`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub boxed: bool,
+    /// How the body simulates: `Dynamic` (default, omitted), `Kinematic`
+    /// (transform-driven, pushes dynamic bodies), or `Static` (a baked
+    /// immovable collider — no body at all). See [`floptle_core::BodyMode`].
+    #[serde(default, skip_serializing_if = "is_dynamic")]
+    pub mode: BodyModeDoc,
     #[serde(default = "half_f32")]
     pub radius: f32,
     #[serde(default = "two_f32")]
@@ -247,6 +252,36 @@ fn true_bool() -> bool {
 fn is_true(b: &bool) -> bool {
     *b
 }
+
+/// Serializable [`floptle_core::BodyMode`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodyModeDoc {
+    #[default]
+    Dynamic,
+    Kinematic,
+    Static,
+}
+
+fn is_dynamic(m: &BodyModeDoc) -> bool {
+    *m == BodyModeDoc::Dynamic
+}
+
+impl BodyModeDoc {
+    fn to_mode(self) -> floptle_core::BodyMode {
+        match self {
+            BodyModeDoc::Dynamic => floptle_core::BodyMode::Dynamic,
+            BodyModeDoc::Kinematic => floptle_core::BodyMode::Kinematic,
+            BodyModeDoc::Static => floptle_core::BodyMode::Static,
+        }
+    }
+    fn from_mode(m: floptle_core::BodyMode) -> Self {
+        match m {
+            floptle_core::BodyMode::Dynamic => BodyModeDoc::Dynamic,
+            floptle_core::BodyMode::Kinematic => BodyModeDoc::Kinematic,
+            floptle_core::BodyMode::Static => BodyModeDoc::Static,
+        }
+    }
+}
 fn half_f32() -> f32 {
     0.5
 }
@@ -270,6 +305,7 @@ impl RigidBodyDoc {
             } else {
                 BodyKind::Sphere
             },
+            mode: self.mode.to_mode(),
             radius: self.radius,
             height: self.height,
             half_extents: self.half_extents,
@@ -284,6 +320,7 @@ impl RigidBodyDoc {
         Self {
             capsule: rb.kind == BodyKind::Capsule,
             boxed: rb.kind == BodyKind::Box,
+            mode: BodyModeDoc::from_mode(rb.mode),
             radius: rb.radius,
             height: rb.height,
             half_extents: rb.half_extents,
@@ -1328,6 +1365,7 @@ mod tests {
                     rigidbody: Some(RigidBodyDoc {
                         capsule: true,
                         boxed: false,
+                        mode: BodyModeDoc::Kinematic, // exercise the mode round-trip
                         radius: 0.6,
                         height: 2.4,
                         half_extents: [0.5, 0.5, 0.5],

@@ -141,6 +141,41 @@ The body's **tunables** — friction, bounciness, gravity on/off, shape/size, ax
 locks — are scriptable too, via `node:getcomponent("RigidBody")` (see
 [§7](#7-assets--swapping-models--materials)).
 
+### Body modes: Dynamic, Kinematic, Static
+
+The Rigidbody's **mode** dropdown replaces hand-freezing axes and disabling
+gravity:
+
+| Mode | What it does | Cost |
+|---|---|---|
+| **Dynamic** | Fully simulated: gravity, velocity, collisions push it around. | normal |
+| **Kinematic** | **Transform-driven**: never falls or gets pushed — your scripts/animation move the node and the body follows. Dynamic bodies collide **with** it (a moving platform *carries and pushes* the player), raycasts hit it, touch events fire. | near zero |
+| **Static** | **Baked collider** in the body's shape — no body at all. The cheapest way to make something solid (walls, floors, props). | zero per tick |
+
+```lua
+-- a moving platform: Kinematic mode + plain transform writes
+defaults = { dz = 6.0, speed = 0.5 }
+local from
+function start(node) from = node.pos end
+function update(node, dt)
+  local t = (math.sin(time * params.speed * math.pi * 2) + 1) * 0.5
+  node.pos = from:lerp(from + vec3(0, 0, params.dz), t)
+end
+```
+
+Scripts can flip **Dynamic ↔ Kinematic live** (grab an object, dock a vehicle):
+
+```lua
+node:getcomponent("RigidBody").kinematic = true   -- freeze + carry it
+node:getcomponent("RigidBody").kinematic = false  -- drop it (wakes at rest)
+```
+
+Static is authoring-time (it's a collider, not a body — switch it in the
+Inspector; the live sim rebuilds instantly). All three modes ride the scene
+format, so replicated/spawned nodes behave identically over the network — a
+server-moved Kinematic platform replicates its transform like any node, and
+clients keep its collision hull where the players *see* it.
+
 ## 5. `input` — keyboard & mouse
 
 Available while playing.

@@ -260,3 +260,29 @@ static colliders bake their bit at sim build (layer edits rebuild the sim).
   and raycasts pass through, events still fire. Static colliders now carry
   `eid` + `sensor` (`StaticTag`); `Contact` records its collider index.
   Prediction replays (`step_body_tick`) never produce events.
+
+## Rigidbody modes (2026-07-14)
+
+`RigidBody.mode: BodyMode` — the one dropdown replacing hand-frozen axes +
+gravity toggles:
+
+- **Dynamic** — simulated, as before.
+- **Kinematic** — `Body.kinematic`: the step skips it entirely (near-zero
+  cost); `Sim::sync_dynamic_params` drives its pose FROM the node transform
+  each tick (origin-relative f64 → exact far out; on net clients the
+  interpolated snapshot transform keeps the hull where players see it) and
+  refreshes `PhysicsWorld::kin_hulls`. Dynamic bodies depenetrate from those
+  hulls inside the solver's relaxation passes (matrix-gated) — moving
+  platforms carry/push players — and `kin_contacts` feeds the touch-event
+  diff. Live-switchable Dynamic ↔ Kinematic (`rig.kinematic = true`, or the
+  Inspector; waking into Dynamic zeroes velocity).
+- **Static** — no body at all: `Sim::build`/`add_body_for` bake an immovable
+  collider in the body's shape (sphere/capsule/box, `StaticTag` with the
+  node's eid + layer). Zero per-tick cost; touch events still name the node.
+  Structural — the Inspector dropdown rebuilds the live sim
+  (`cmd.rebuild_physics`); `remove_body` also drops eid-tagged colliders so
+  net despawns clean up.
+
+Serialized as `RigidBodyDoc.mode` (RON enum, omitted when Dynamic) — spawns,
+clipboard, and replication carry it automatically. Inspector greys out
+bounce/friction/gravity/locks for non-Dynamic modes.

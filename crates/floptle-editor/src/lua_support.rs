@@ -65,6 +65,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field friction number Surface friction 0..1 (0 = frictionless).
 ---@field restitution number Bounciness 0..1 (0 = no bounce).
 ---@field gravity number Gravity pull on this body (1/0; assign true/false).
+---@field kinematic number Transform-driven mode (1/0; assign true/false, live): never falls or gets pushed, but PUSHES dynamic bodies — platforms, elevators, grabbed objects. (Static mode is the Inspector dropdown — a baked collider, nothing to toggle here.)
 ---@field shape number Body shape: 0 = sphere, 1 = capsule, 2 = box.
 ---@field radius number Sphere/capsule radius.
 ---@field height number Capsule total height.
