@@ -174,6 +174,29 @@ before every gather (so scrubbing shows live in the Scene view, Game view, and
 docked viewports) and restores the authored components after the frame's draw
 data is built.
 
+## Networked animators (multiplayer)
+
+A node with both an **Animation Controller** and a **Networked** component syncs its animator
+by default ("sync animator" on the Networked component). What replicates is **playback state,
+never poses**: per layer, the playing state index + clip time + blend weight (plus the global
+speed) — every machine loads the same controller asset and samples the pose locally, so a
+whole character costs ~10 bytes per **transition** and zero bytes while a loop just plays.
+
+- The **server is the authority**: server scripts' `anim:play(...)` drives real controllers
+  there, and clip **events fire server-side** (authoritative hit windows). Scene-binding
+  clips (doors) move real transforms on the server and replicate as transforms.
+- **Remote players** on a client transition through the controller's own fade rules, land
+  mid-clip at the replicated time (a late joiner sees the walk loop blend in at phase), and
+  free-run between updates; only drift beyond 250 ms is corrected (wrap-aware on loops).
+- **Your own avatar** (Predicted) ignores inbound animator state — your scripts drive it
+  locally, instantly.
+- Animator changes apply on the same interp-delayed timeline as movement, so a jump
+  animation lands with the jump arc.
+- Uncheck **sync animator** for a **client-sided** animator: each machine drives it itself —
+  right for pure cosmetics, or when Lua animates from already-replicated state (`synced` vars).
+- Mismatched controller assets between builds degrade safely: unknown state indices are
+  ignored (no crash); ship matching assets for correct visuals.
+
 ## Notify / animation events
 
 A clip carries **events on its timeline** — the bridge from animation to gameplay.
