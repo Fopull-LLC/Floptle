@@ -2056,6 +2056,10 @@ const LUA_SNIPPETS: &[(&str, &str)] = &[
         "\nfunction fixedUpdate(node, dt)\n  \nend\n",
     ),
     (
+        "lateUpdate (camera pass)",
+        "\nfunction lateUpdate(node, dt)\n  \nend\n",
+    ),
+    (
         "networked door (rpc + synced)",
         "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
     ),
@@ -2107,7 +2111,7 @@ pub(crate) const LUA_KEYWORDS: &[&str] = &[
 
 /// Identifiers highlighted as engine/builtin API (teal).
 pub(crate) const LUA_API_WORDS: &[&str] = &[
-    "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "input", "math",
+    "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio",
@@ -2178,7 +2182,8 @@ struct ApiEntry {
 /// page's reference). Lua stdlib highlights are included so completion is useful.
 const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "update", insert: "update", doc: "function update(node, dt) — runs every frame while playing." },
-    ApiEntry { label: "fixedUpdate", insert: "fixedUpdate", doc: "function fixedUpdate(node, dt) — runs every GAMEPLAY TICK (60 Hz, constant dt). Movement/gameplay/physics writes belong here; cameras & cosmetics in update. Same cadence physics steps at — frame-rate independent." },
+    ApiEntry { label: "fixedUpdate", insert: "fixedUpdate", doc: "function fixedUpdate(node, dt) — runs every GAMEPLAY TICK (60 Hz, constant dt). Movement/gameplay/physics writes belong here; cameras & followers in lateUpdate; other cosmetics in update. Same cadence physics steps at — frame-rate independent." },
+    ApiEntry { label: "lateUpdate", insert: "lateUpdate", doc: "function lateUpdate(node, dt) — runs once per frame AFTER physics and the interpolated transform writeback: the CAMERA pass. Anything that follows something else (orbit cameras, name tags, listeners) belongs here so it samples this frame's FINAL poses. Following from update reads LAST frame's pose — a velocity × dt lag that turns frame-time noise into visible jitter." },
     ApiEntry { label: "start", insert: "start", doc: "function start(node) — runs once when play begins." },
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
     ApiEntry { label: "input.aimYaw", insert: "input.aimYaw()", doc: "The ACTIVE camera's world yaw (radians), captured with the input snapshot — use it for camera-relative movement (in multiplayer it rides the input command, so server + prediction replay see exactly your view angle). nil without an active camera." },
@@ -2334,6 +2339,14 @@ A script defines plain functions and a `defaults` table:
     function update(node, dt)          -- every frame while playing
       node.yaw = node.yaw + math.rad(params.speed) * dt
     end
+
+Two more hooks round out the frame: `fixedUpdate(node, dt)` runs every
+GAMEPLAY TICK (60 Hz, constant dt — movement/gameplay/physics writes), and
+`lateUpdate(node, dt)` runs once per frame AFTER physics and the interpolated
+transform writeback — the CAMERA pass. Anything that follows another node
+(orbit cameras, name tags) belongs in lateUpdate so it samples this frame's
+FINAL pose; following from update reads last frame's pose and turns frame-time
+noise into visible jitter.
 
 Each script keeps its own state across frames (set a variable in start, read it
 in update) and hot-reloads the moment you save the file. `+=  -=  *=  /=  ..=`

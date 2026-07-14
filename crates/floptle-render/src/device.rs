@@ -75,11 +75,17 @@ impl Gpu {
         let caps = surface.get_capabilities(&adapter);
         let format =
             caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // Fifo (classic vsync), DELIBERATELY — not Mailbox. Fifo presents every
+        // rendered frame in order at the monitor's cadence, so the loop blocks
+        // in present and frame times lock to the refresh: simulation sampling
+        // and screen time stay in step. Mailbox renders uncapped and the
+        // display grabs whichever frame is newest at each vsync — the frames
+        // that reach glass sample the simulation at points unrelated to when
+        // they're shown, which reads as speed-proportional movement judder.
+        // Worse, Mailbox availability varies by windowed/fullscreen/compositor/
+        // driver, so the judder came and went with window mode ("sometimes it
+        // jitters" — Ty's bug). Fifo is universally supported and predictable.
+        let present_mode = wgpu::PresentMode::Fifo;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,

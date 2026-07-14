@@ -29,6 +29,17 @@ use crate::{
     VfxCmd, VfxInfo,
 };
 
+/// Which lifecycle pass a script run is: the per-frame pass (`start`/`update`),
+/// the per-gameplay-tick pass (`fixedUpdate`), or the post-physics camera pass
+/// (`lateUpdate` — after the interpolated transform writeback, so followers
+/// sample this frame's FINAL poses instead of last frame's).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Frame,
+    Fixed,
+    Late,
+}
+
 impl Default for ScriptHost {
     fn default() -> Self {
         Self::new()
@@ -1025,7 +1036,7 @@ impl ScriptHost {
             }
         }
         // Pass 2: run each script's start/update.
-        self.run_pass(world, &work, dt, time, false);
+        self.run_pass(world, &work, dt, time, Pass::Frame);
         self.flush_writes(world);
 
         // Drop environments whose (node, script) no longer exists.
@@ -1055,7 +1066,22 @@ impl ScriptHost {
         self.sync_scene(world);
         let work: Vec<(Entity, Scripts)> =
             world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
-        self.run_pass(world, &work, dt, time, true);
+        self.run_pass(world, &work, dt, time, Pass::Fixed);
+        self.flush_writes(world);
+    }
+
+    /// Run every script's `lateUpdate(node, dt)` — the CAMERA pass. The driver
+    /// calls it once per frame AFTER scripts, animation, physics, and the
+    /// interpolated transform writeback, so a follower (orbit camera, name
+    /// tag, listener) samples this frame's FINAL poses. Positioning a camera
+    /// in `update` reads the PREVIOUS frame's pose — a follow error of
+    /// `velocity × dt` that turns frame-time noise into visible jitter.
+    pub fn run_late(&mut self, world: &mut World, dt: f32, time: f32) {
+        // Re-mirror: physics writeback just moved transforms.
+        self.sync_scene(world);
+        let work: Vec<(Entity, Scripts)> =
+            world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        self.run_pass(world, &work, dt, time, Pass::Late);
         self.flush_writes(world);
     }
 
@@ -1089,7 +1115,7 @@ impl ScriptHost {
             std::mem::take(&mut self.script_skip),
             std::mem::take(&mut self.frame_skip),
         );
-        self.run_pass(world, &work, dt, time, fixed);
+        self.run_pass(world, &work, dt, time, if fixed { Pass::Fixed } else { Pass::Frame });
         self.script_skip = skip;
         self.frame_skip = fskip;
         self.flush_writes(world);
@@ -1109,14 +1135,15 @@ impl ScriptHost {
         self.frame_skip = skip;
     }
 
-    /// One lifecycle pass over `work`: the per-frame pass (`start`/`update`) or the
-    /// per-tick pass (`fixedUpdate`), with the same self-move write-back rules.
-    fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, fixed: bool) {
+    /// One lifecycle pass over `work`: per-frame (`start`/`update`), per-tick
+    /// (`fixedUpdate`), or post-physics (`lateUpdate`), with the same self-move
+    /// write-back rules.
+    fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, pass: Pass) {
         for (e, scripts) in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
             }
-            if !fixed && self.frame_skip.contains(&e.index()) {
+            if pass == Pass::Frame && self.frame_skip.contains(&e.index()) {
                 continue; // predicted: its `update` re-runs on the tick clock
             }
             let Some(mut tr) = world.get::<Transform>(*e).copied() else { continue };
@@ -1125,7 +1152,7 @@ impl ScriptHost {
             for inst in &scripts.0 {
                 if inst.enabled {
                     self.tick_instance(
-                        *e, &inst.kind, &inst.params, &inst.refs, &mut tr, dt, time, fixed,
+                        *e, &inst.kind, &inst.params, &inst.refs, &mut tr, dt, time, pass,
                     );
                     ran = true;
                 }
@@ -1404,9 +1431,9 @@ impl ScriptHost {
         true
     }
 
-    /// Run one already-ensured `(entity, script)` instance's lifecycle for this pass —
-    /// `fixed = false` is the per-frame pass (`start`/`update`), `fixed = true` the
-    /// per-gameplay-tick pass (`fixedUpdate`).
+    /// Run one already-ensured `(entity, script)` instance's lifecycle for
+    /// `pass` — per-frame (`start`/`update`), per-gameplay-tick
+    /// (`fixedUpdate`), or post-physics (`lateUpdate`).
     #[allow(clippy::too_many_arguments)]
     fn tick_instance(
         &mut self,
@@ -1417,18 +1444,18 @@ impl ScriptHost {
         tr: &mut Transform,
         dt: f32,
         time: f32,
-        fixed: bool,
+        pass: Pass,
     ) {
         let key = (e.index(), name.to_string());
         let (first, env) = {
             let Some(inst) = self.instances.get_mut(&key) else { return };
-            // `fixedUpdate` never runs before `start` — a brand-new instance waits for
-            // the next frame pass to start it first.
-            if fixed && !inst.started {
+            // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
+            // instance waits for the next frame pass to start it first.
+            if pass != Pass::Frame && !inst.started {
                 return;
             }
-            let first = !inst.started && !fixed;
-            if !fixed {
+            let first = !inst.started;
+            if pass == Pass::Frame {
                 inst.started = true;
             }
             let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
@@ -1477,7 +1504,7 @@ impl ScriptHost {
         };
         // Mark the current instance while its hooks run (`net.on` ownership).
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
-        let result = self.tick(&env, params, &resolved, tr, dt, time, first, eid, body, fixed);
+        let result = self.tick(&env, params, &resolved, tr, dt, time, first, eid, body, pass);
         *self.net.current.borrow_mut() = None;
         if let Err(err) = result {
             self.fail(name, format!("{name}: {err}"));
@@ -1497,7 +1524,7 @@ impl ScriptHost {
         first: bool,
         eid: u32,
         body: Option<BodyState>,
-        fixed: bool,
+        pass: Pass,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, env, params, refs)?)?;
         env.set("time", time as f64)?;
@@ -1505,22 +1532,33 @@ impl ScriptHost {
 
         let node = node_table(&self.lua, eid, tr, body)?;
         let pre = node_pre(tr);
-        if fixed {
-            // The per-gameplay-tick hook (constant dt — gameplay/netcode cadence).
-            if let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? {
-                f.call::<()>((node.clone(), dt as f64))?;
-            } else {
-                return Ok(()); // no hook: skip the body read-back (nothing ran)
-            }
-        } else {
-            // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
-            // still work for older scripts.
-            if first
-                && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
-                    f.call::<()>(node.clone())?;
+        match pass {
+            Pass::Fixed => {
+                // The per-gameplay-tick hook (constant dt — gameplay/netcode cadence).
+                if let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? {
+                    f.call::<()>((node.clone(), dt as f64))?;
+                } else {
+                    return Ok(()); // no hook: skip the body read-back (nothing ran)
                 }
-            if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
-                f.call::<()>((node.clone(), dt as f64))?;
+            }
+            Pass::Late => {
+                // The post-physics camera pass — followers sample FINAL poses.
+                if let Some(f) = lifecycle_fn(env, &["lateUpdate", "onLateUpdate"])? {
+                    f.call::<()>((node.clone(), dt as f64))?;
+                } else {
+                    return Ok(());
+                }
+            }
+            Pass::Frame => {
+                // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
+                // still work for older scripts.
+                if first
+                    && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
+                        f.call::<()>(node.clone())?;
+                    }
+                if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
+                    f.call::<()>((node.clone(), dt as f64))?;
+                }
             }
         }
         // Read back the velocity + height for a physics body — but only when

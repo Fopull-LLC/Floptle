@@ -61,6 +61,9 @@ end
 
 function fixedUpdate(node, dt)   -- runs every GAMEPLAY TICK (60 Hz, constant dt)
 end
+
+function lateUpdate(node, dt)    -- runs after physics each frame (the camera pass)
+end
 ```
 
 Each attached script keeps its **own state across frames** — assign a variable in
@@ -70,8 +73,17 @@ Each attached script keeps its **own state across frames** — assign a variable
 
 | Hook | Cadence | Put here |
 |---|---|---|
-| `update` | every rendered frame (variable `dt`) | cameras, cosmetic motion, UI-ish logic |
+| `update` | every rendered frame (variable `dt`) | cosmetic motion, UI-ish logic |
 | `fixedUpdate` | every gameplay tick (constant `dt`, 60 Hz) | movement, gameplay rules, velocity/physics writes |
+| `lateUpdate` | every rendered frame, AFTER physics | **cameras & followers** — anything that tracks another node |
+
+**Why `lateUpdate` for cameras:** the engine's frame order is scripts →
+animation → physics → *interpolated transform writeback* → `lateUpdate`. A
+camera positioned in `update` reads its target's pose from **before** this
+frame's physics — one frame stale, a follow error of `velocity × dt` that
+turns frame-time noise into visible movement jitter. In `lateUpdate` the
+target's pose is final for the frame, so the follow is exact. The stock
+`third_person_camera.lua` does this.
 
 `fixedUpdate` runs on the same fixed clock physics steps on, right before each
 physics tick — so gameplay code behaves identically at 30 fps and 240 fps, and

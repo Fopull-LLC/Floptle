@@ -1624,6 +1624,14 @@ struct Editor {
     /// A `scene.load(...)` a script queued this frame — performed at the top of
     /// the NEXT frame (never mid-frame under the running scripts).
     pending_scene: Option<String>,
+    /// The display's refresh period, seconds (0 = unknown) — dt snaps to whole
+    /// multiples of it so scheduler noise never reaches the simulation clock.
+    refresh_period: f32,
+    /// Frames until the refresh rate is re-queried (the window can change monitors).
+    refresh_poll: u32,
+    /// Banked (raw − snapped) dt, folded back ≤0.25 ms/frame — keeps long-term
+    /// time wall-clock exact under dt snapping.
+    dt_snap_error: f32,
     /// The Lua VM that runs node scripts in play mode (ADR-0003).
     script_host: ScriptHost,
     /// Animation: clip/controller registries + live per-entity runtimes.

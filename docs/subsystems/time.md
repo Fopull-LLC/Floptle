@@ -232,3 +232,35 @@ That proof exercises the entire load-bearing path: `sample_rate` → `LocalTime:
 integrator + animation, all at the quiet point next to the floating-origin rebase. It
 is the exact code path that later grows time-direction and echoes — so the proof is not
 a throwaway demo, it is the foundation, validated small before it carries weight.
+
+## 10. Frame pacing — why movement is smooth (2026-07-14)
+
+The "sometimes it jitters when I move" bug was frame pacing, not the floating
+origin (a regression test now proves a rebase renders zero discontinuity:
+`origin_rebase_never_snaps_the_rendered_motion`). Three fixes, layered:
+
+1. **Fifo present mode, deliberately** (`floptle-render/device.rs`). Mailbox
+   rendered uncapped and let the display grab whichever frame was newest at
+   each vsync — frames reached glass at times unrelated to the sim-time they
+   sampled, reading as speed-proportional judder. And Mailbox availability
+   varies by windowed/fullscreen/compositor/driver, which is why the jitter
+   came and went with window mode. Fifo presents every frame in order at the
+   monitor's cadence; the loop blocks in present, so frame times lock to the
+   refresh.
+
+2. **dt snapping** (`Editor::smooth_dt`). Under vsync a frame's true screen
+   time IS a whole number of refresh periods; the CPU-side `Instant` delta
+   just adds 1–3 ms of scheduler noise. Feeding that noise into the fixed-step
+   accumulator moved everything the interpolation renders by `velocity ×
+   noise` per frame. dt now snaps to the nearest whole multiple of the
+   monitor's refresh period (within 12%), with the residual banked and folded
+   back ≤0.25 ms/frame so long-term time stays wall-clock exact. Hitches and
+   uncapped frames pass through unsnapped.
+
+3. **`lateUpdate` — the camera pass** (floptle-script `Pass::Late`). Frame
+   order is scripts → animation → physics ticks → interpolated writeback →
+   `lateUpdate`. A camera positioned in `update` read its target's pose from
+   before this frame's physics — one frame stale, a follow error of
+   `velocity × dt` that turned any frame-time variance into visible wobble.
+   Followers now run after the writeback and sample final poses; the stock
+   `third_person_camera.lua` migrated.
