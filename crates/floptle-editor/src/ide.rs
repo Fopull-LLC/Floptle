@@ -2205,7 +2205,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
     ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
     ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
-    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …)." },
+    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …). TWO-WAY: writing a declared key persists across frames, shows live in the Inspector during Play, and is readable by other scripts through a handle (Stop reverts it). Undeclared keys stay frame-local; reference params (noderef & friends) never round-trip." },
     ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
     ApiEntry { label: "node.x", insert: "node.x", doc: "World X position (number)." },
     ApiEntry { label: "node.y", insert: "node.y", doc: "World Y position (number)." },

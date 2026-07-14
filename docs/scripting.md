@@ -232,6 +232,31 @@ The full Lua standard library (`math`, `string`, `table`, …) is available.
 > `params.<key>`. Declaring `defaults` is what makes a value tweakable per-node in the
 > Inspector; if you don't override it there, `params.<key>` is just the default.
 
+### `params` is two-way
+
+Writing a declared tunable **persists** — the next frame reads your value back,
+the Inspector shows it update **live** during Play, and other scripts see it
+through a handle. Stop reverts it with the rest of the play session. So state
+you'd otherwise keep in a `local` can live in `params` when you want it visible
+and tweakable:
+
+```lua
+defaults = { distance = 6.0 }
+
+function lateUpdate(node, dt)
+  params.distance = params.distance - input.scroll()   -- sticks, shows live
+end
+```
+
+- Only **declared** keys persist (present in `defaults`, or already stored on
+  the node). Assigning an undeclared key works for the current frame but is
+  not saved — declare it if you want it kept.
+- Reference params (`noderef()` & friends) never round-trip — they stay wired
+  by the Inspector.
+- Inspector edits during Play flow the other way instantly, so you can tune a
+  value the script is also reading. If the script *writes* the same key every
+  frame, its write wins — write only when changing (like the scroll above).
+
 ## 7. Assets & swapping models / materials
 
 Scripts can reach into the project's **`Assets/`** folder and change a node's
@@ -521,6 +546,29 @@ called from elsewhere still acts on the right object), and `params` is its tunab
 > `node` argument). `findScript` returns the *first* matching script — perfect for a
 > single manager. Looking something up by name? Cache it in `start` and reuse it; a
 > handle stays valid across frames.
+
+### Recipe: a first-person HUD that follows the camera mode
+
+The stock `third_person_camera.lua` exposes its state as script globals —
+`cam.firstPerson`, `cam.shiftlock` — exactly so other scripts can react to the
+view mode. Put your HUD elements under a **UI Layer** node, attach this, and
+the layer shows only in first person:
+
+```lua
+-- scripts/fp_hud.lua — attach to the UI Layer node holding the HUD.
+local cam
+
+function update(node, dt)
+  if not cam then cam = findScript("third_person_camera") end
+  local layer = node:getcomponent("UiLayer")
+  if layer and cam then
+    layer.enabled = cam.firstPerson and true or false
+  end
+end
+```
+
+The same pattern reads anything the camera knows: `cam.params.distance` for a
+zoom readout, `cam.shiftlock` for a crosshair, and so on.
 
 ## 9. Animation: `node:animator()`
 

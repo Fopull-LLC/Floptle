@@ -574,6 +574,7 @@ impl ScriptHost {
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             mouse_lock,
+            param_writes: RefCell::new(Vec::new()),
             scene_request,
             scene_name,
             anim_info: shared.anim_info.clone(),
@@ -1178,6 +1179,23 @@ impl ScriptHost {
     fn flush_writes(&mut self, world: &mut World) {
         // Flush transforms that a handle wrote on OTHER nodes back to the ECS.
         self.flush_scene(world);
+        // Persist `params.X = ...` writes into the node's stored ScriptInst —
+        // the next pass seeds from them (the write STICKS) and the Inspector
+        // shows them live. Stop reverts them with the rest of the play state.
+        {
+            let scene = self.scene.borrow();
+            for (eid, kind, key, v) in self.param_writes.borrow_mut().drain(..) {
+                if let Some(&ent) = scene.ents.get(&eid)
+                    && let Some(scripts) = world.get_mut::<Scripts>(ent)
+                    && let Some(inst) = scripts.0.iter_mut().find(|i| i.kind == kind)
+                {
+                    match inst.params.iter_mut().find(|(k, _)| *k == key) {
+                        Some(slot) => slot.1 = v,
+                        None => inst.params.push((key, v)),
+                    }
+                }
+            }
+        }
         // Apply script-driven component swaps: mesh model + material. (Model paths stay in
         // `model_changes` for the editor to drain and re-import the GPU mesh; materials are
         // resolved here against the lent preset map and applied directly.)
@@ -1506,8 +1524,45 @@ impl ScriptHost {
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
         let result = self.tick(&env, params, &resolved, tr, dt, time, first, eid, body, pass);
         *self.net.current.borrow_mut() = None;
-        if let Err(err) = result {
-            self.fail(name, format!("{name}: {err}"));
+        match result {
+            Ok(()) => self.collect_param_writes(&env, name, eid, params),
+            Err(err) => self.fail(name, format!("{name}: {err}")),
+        }
+    }
+
+    /// Persist `params.X = value` writes the hook just made: tunables are
+    /// TWO-WAY — a script's write sticks across frames (the next seed reads it
+    /// back) and lands in the node's stored params, so the Inspector shows it
+    /// live during Play (and Stop reverts it with everything else). Only
+    /// DECLARED numeric tunables persist — a key present in `defaults` or the
+    /// stored params; ad-hoc keys stay frame-local, and reference params
+    /// (node/script/component handles) never round-trip.
+    fn collect_param_writes(&self, env: &Table, name: &str, eid: u32, seeded: &[(String, f32)]) {
+        let Ok(pt) = env.get::<Table>("params") else { return };
+        let defaults = env.get::<Table>("defaults").ok();
+        for (k, v) in pt.pairs::<String, Value>().flatten() {
+            let new = match v {
+                Value::Number(n) => n as f32,
+                Value::Integer(i) => i as f32,
+                _ => continue,
+            };
+            // The value this key was SEEDED with: the stored override, else the
+            // declared default. (f32 → f64 → f32 is exact, so an untouched
+            // param compares bit-equal and costs nothing.)
+            let seed = seeded
+                .iter()
+                .find(|(pk, _)| *pk == k)
+                .map(|(_, pv)| *pv)
+                .or_else(|| {
+                    defaults
+                        .as_ref()
+                        .and_then(|d| d.get::<f64>(k.as_str()).ok())
+                        .map(|d| d as f32)
+                });
+            let Some(seed) = seed else { continue }; // undeclared: frame-local
+            if new != seed {
+                self.param_writes.borrow_mut().push((eid, name.to_string(), k, new));
+            }
         }
     }
 
