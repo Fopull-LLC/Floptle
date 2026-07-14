@@ -175,6 +175,9 @@ struct EditorCmd {
     set_collidable: Option<(Entity, bool)>,
     /// Toggle the Trigger flag on a Collidable (sensor: events, no blocking).
     set_trigger: Option<(Entity, bool)>,
+    /// A STRUCTURAL physics edit happened (e.g. the Rigidbody mode dropdown) —
+    /// rebuild the live sim so bodies/colliders re-register.
+    rebuild_physics: bool,
     /// Put a node on a named collision/query layer ("Default" removes the
     /// component). Rebuilds the sim mid-play so static colliders re-layer.
     set_layer: Option<(Entity, String)>,

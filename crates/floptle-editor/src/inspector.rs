@@ -1248,7 +1248,48 @@ impl EditorTabViewer<'_> {
                     }
                     ui.indent("rb_props", |ui| {
                         if let Some(rb) = world.get_mut::<floptle_core::RigidBody>(e) {
-                            use floptle_core::BodyKind;
+                            use floptle_core::{BodyKind, BodyMode};
+                            // The ONE dropdown that replaces hand-freezing axes +
+                            // disabling gravity. Structural (a Static body is a
+                            // baked collider, not a body) — rebuild the live sim.
+                            ui.horizontal(|ui| {
+                                ui.label("mode");
+                                let label = match rb.mode {
+                                    BodyMode::Dynamic => "Dynamic",
+                                    BodyMode::Kinematic => "Kinematic",
+                                    BodyMode::Static => "Static",
+                                };
+                                egui::ComboBox::from_id_salt("rb-mode")
+                                    .selected_text(label)
+                                    .show_ui(ui, |ui| {
+                                        let mut changed = false;
+                                        changed |= ui
+                                            .selectable_value(&mut rb.mode, BodyMode::Dynamic, "Dynamic")
+                                            .on_hover_text("fully simulated: gravity, collisions, gets pushed around")
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(&mut rb.mode, BodyMode::Kinematic, "Kinematic")
+                                            .on_hover_text("transform-driven: never falls or gets pushed — scripts/animation move it, and dynamic bodies collide WITH it (moving platforms, elevators). Near-zero per-tick cost")
+                                            .changed();
+                                        changed |= ui
+                                            .selectable_value(&mut rb.mode, BodyMode::Static, "Static")
+                                            .on_hover_text("baked immovable collider in this shape — no body at all, ZERO per-tick cost (walls, floors, props)")
+                                            .changed();
+                                        if changed {
+                                            cmd.inspector_changed = true;
+                                            cmd.rebuild_physics = true;
+                                        }
+                                    });
+                                match rb.mode {
+                                    BodyMode::Dynamic => {}
+                                    BodyMode::Kinematic => {
+                                        ui.small("moves via its transform; pushes dynamic bodies");
+                                    }
+                                    BodyMode::Static => {
+                                        ui.small("baked collider — cheapest way to be solid");
+                                    }
+                                }
+                            });
                             ui.horizontal(|ui| {
                                 ui.label("shape");
                                 egui::ComboBox::from_id_salt("rb-shape")
@@ -1283,25 +1324,31 @@ impl EditorTabViewer<'_> {
                                         ui.add(egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
                                 }
                             }
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
-                            cmd.inspector_changed |=
-                                ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
-                            cmd.inspector_changed |= ui
-                                .checkbox(&mut rb.gravity, "affected by gravity")
-                                .on_hover_text("off = floats (still collides; a script can still move it)")
-                                .changed();
-                            ui.horizontal(|ui| {
-                                ui.label("freeze pos");
-                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
-                                }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("freeze rot");
-                                for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                    cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
-                                }
+                            // Bounce/friction/gravity/locks only matter on a
+                            // SIMULATED body — grey them out otherwise so the
+                            // mode dropdown reads as the one switch it is.
+                            let dynamic = rb.mode == BodyMode::Dynamic;
+                            ui.add_enabled_ui(dynamic, |ui| {
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                                cmd.inspector_changed |= ui
+                                    .checkbox(&mut rb.gravity, "affected by gravity")
+                                    .on_hover_text("off = floats (still collides; a script can still move it)")
+                                    .changed();
+                                ui.horizontal(|ui| {
+                                    ui.label("freeze pos");
+                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                        cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("freeze rot");
+                                    for (i, ax) in ["x", "y", "z"].iter().enumerate() {
+                                        cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
+                                    }
+                                });
                             });
                         }
                     });
@@ -1430,7 +1477,7 @@ impl EditorTabViewer<'_> {
                             "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
                         ));
                         if world.get::<floptle_core::RigidBody>(e).is_some() {
-                            ui.small("⚠ This node also has a Rigidbody, so on Play it's a dynamic body (it falls / gets moved) and this static Collider is ignored. To make it a solid obstacle the player bumps into, remove the Rigidbody so it becomes static world geometry (the solver has no body-vs-body pass, so two dynamic bodies pass through each other).");
+                            ui.small("⚠ This node also has a Rigidbody, so its body owns the physics and this static Collider is ignored. To make it a solid obstacle, set the Rigidbody's mode to Static (a baked collider in the body's shape) — or remove the Rigidbody to use this geometry-shaped collider instead.");
                         } else {
                             // The collider doubles as the node's sun-shadow caster:
                             // primitives stand in as analytic proxy shapes, and a

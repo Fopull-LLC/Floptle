@@ -157,16 +157,19 @@ impl Sim {
             );
         }
         let mut map = Vec::new();
-        // Collect first (immutable borrow of the ECS) then build the bodies. A `RigidBody`
-        // ALWAYS becomes a dynamic body — that's what makes it fall/move. If the node is
-        // *also* flagged `Collidable`/`MeshCollider`, that marker is ignored here (and the
-        // editor skips adding a static collider for it), so the dynamic body never fights a
-        // static shape sitting on top of it. `Collidable` means "static world geometry" only
-        // when there is NO RigidBody; the solver has no body-vs-body pass, so to make one
-        // object a solid obstacle the player bumps into, make it Collidable with no RigidBody.
+        // Collect first (immutable borrow of the ECS) then build the bodies. A Dynamic
+        // or Kinematic `RigidBody` becomes a body; a STATIC one becomes a baked
+        // immovable collider in the body's shape — no body at all, zero per-tick cost.
+        // If the node is *also* flagged `Collidable`/`MeshCollider`, that marker is
+        // ignored here (and the editor skips adding a static collider for it), so a
+        // body never fights a static shape sitting on top of it.
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
+            if rb.mode == floptle_core::BodyMode::Static {
+                Self::add_static_body_collider(&mut world, ecs, e, &rb, &layers);
+                continue;
+            }
             let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
@@ -217,8 +220,62 @@ impl Sim {
         b.use_gravity = rb.gravity;
         b.lock_pos = rb.lock_pos;
         b.layer = layers.index_for(ecs, e);
+        b.kinematic = rb.mode == floptle_core::BodyMode::Kinematic;
         let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
         (b, rot0)
+    }
+
+    /// A STATIC-mode `RigidBody`: bake an immovable collider in the body's
+    /// shape (sphere / capsule / box, sized by its params) at the node's world
+    /// pose — the cheapest way to make something solid. Touch events still
+    /// name the node (`eid`); it just never simulates.
+    fn add_static_body_collider(
+        world: &mut PhysicsWorld,
+        ecs: &World,
+        e: Entity,
+        rb: &RigidBody,
+        layers: &floptle_core::Layers,
+    ) {
+        let wt = world_transform(ecs, e);
+        let (layer, eid) = (layers.index_for(ecs, e), Some(e.index()));
+        let r = rb.radius.max(0.01);
+        match rb.kind {
+            BodyKind::Sphere => {
+                world.add_collider_tagged(
+                    wt.translation,
+                    Box::new(SphereShape { center: Vec3::ZERO, radius: r }),
+                    layer,
+                    eid,
+                    false,
+                );
+            }
+            BodyKind::Capsule => {
+                let u = (wt.rotation * Vec3::Y).try_normalize().unwrap_or(Vec3::Y);
+                let half = (rb.height.max(2.0 * r) * 0.5 - r).max(0.0);
+                world.add_collider_tagged(
+                    wt.translation,
+                    Box::new(CapsuleShape { a: -u * half, b: u * half, radius: r }),
+                    layer,
+                    eid,
+                    false,
+                );
+            }
+            BodyKind::Box => {
+                let s = wt.scale;
+                let h = rb.half_extents;
+                world.add_collider_tagged(
+                    wt.translation,
+                    Box::new(BoxShape::new(
+                        Vec3::ZERO,
+                        Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z),
+                        wt.rotation,
+                    )),
+                    layer,
+                    eid,
+                    false,
+                );
+            }
+        }
     }
 
     /// Register a body for a RUNTIME-SPAWNED `RigidBody` node (`net.spawn`, or
@@ -230,6 +287,15 @@ impl Sim {
             return false;
         }
         let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
+        // A STATIC-mode spawn (net.spawn of a wall/prop) bakes its collider
+        // live instead of registering a body.
+        if rb.mode == floptle_core::BodyMode::Static {
+            if self.world.colliders.iter().any(|c| c.eid == Some(e.index())) {
+                return false;
+            }
+            Self::add_static_body_collider(&mut self.world, ecs, e, &rb, &self.layers);
+            return true;
+        }
         let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
         let pos = b.pos;
         let bi = self.world.add_body(b);
@@ -243,8 +309,12 @@ impl Sim {
     }
 
     /// Remove a runtime-despawned entity's body. Swap-remove keeps the body
-    /// array dense; the displaced (last) body's link is re-pointed.
+    /// array dense; the displaced (last) body's link is re-pointed. Also drops
+    /// any static collider the entity baked (a STATIC-mode body, or a spawned
+    /// Collidable) — contacts referencing collider indices are transient
+    /// (rebuilt every step), so the retain is safe between ticks.
     pub fn remove_body(&mut self, eid: u32) {
+        self.world.colliders.retain(|c| c.eid != Some(eid));
         let Some(li) = self.map.iter().position(|l| l.entity.index() == eid) else { return };
         let bi = self.map[li].body;
         let last = self.world.bodies.len() - 1;
@@ -416,11 +486,13 @@ impl Sim {
         // Accumulate contacts across the tick's substeps (each step clears its
         // own) so a one-substep graze still registers as a touch this tick.
         let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
+        let mut tick_kin: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
         for _ in 0..n {
             self.world.step(self.fixed_dt);
             tick_contacts.extend(self.world.contacts.iter().copied());
+            tick_kin.extend(self.world.kin_contacts.iter().copied());
         }
-        self.detect_touches(&tick_contacts);
+        self.detect_touches(&tick_contacts, &tick_kin);
     }
 
     /// Diff this tick's touching pairs against the last tick's into
@@ -430,7 +502,11 @@ impl Sim {
     /// hull overlap (the solver has no body-body response, but games still
     /// need to KNOW two bodies met). Costs O(contacts + bodies×sensors +
     /// bodies²) per tick — trivial at gameplay body counts.
-    fn detect_touches(&mut self, tick_contacts: &[crate::body::Contact]) {
+    fn detect_touches(
+        &mut self,
+        tick_contacts: &[crate::body::Contact],
+        tick_kin: &[(usize, u32, Vec3, Vec3)],
+    ) {
         let origin = self.world.origin;
         let to_world = |p: Vec3| origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
         // Body slot → entity index (slots without a link never event).
@@ -455,6 +531,16 @@ impl Sim {
                 continue;
             };
             record(*a, b, TouchInfo { point: to_world(c.point), normal: c.normal, sensor: false });
+        }
+        // 1b. Dynamic-vs-KINEMATIC resolutions (a player standing on a moving
+        // platform) — recorded by the solver's kinematic-hull pass.
+        for (bi, kin_eid, point, normal) in tick_kin {
+            let Some(Some(a)) = body_eid.get(*bi) else { continue };
+            record(
+                *a,
+                *kin_eid,
+                TouchInfo { point: to_world(*point), normal: *normal, sensor: false },
+            );
         }
         // 2. Trigger (sensor) overlap — the solver skips these, so test here.
         for col in self.world.colliders.iter().filter(|c| c.sensor) {
@@ -564,8 +650,10 @@ impl Sim {
         let alpha = alpha.clamp(0.0, 1.0);
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.active {
-                continue; // snapshot-driven: interpolation owns its transform
+            if !b.active || b.kinematic {
+                // Snapshot-driven / kinematic: the TRANSFORM is authoritative
+                // (interp or scripts own it) — never write the body pose back.
+                continue;
             }
             let from = self.tick_prev.get(link.body).copied().unwrap_or(b.prev_pos);
             let p = from.lerp(b.pos, alpha);
@@ -714,8 +802,29 @@ impl Sim {
                 // Live layer switches: `node.layer = "Ghost"` (or an Inspector
                 // edit) re-resolves against the play-start layer table.
                 let layer = self.layers.index_for(ecs, ent);
+                // Live Dynamic ↔ Kinematic switches (`rig.kinematic = true` /
+                // the Inspector's mode dropdown). Static is structural — the
+                // editor rebuilds the sim for it.
+                let kinematic = rb.mode == floptle_core::BodyMode::Kinematic;
+                // KINEMATIC bodies follow their node's transform (scripts and
+                // animation move the node; the sim just tracks it) — origin-
+                // relative in f64 so far-out platforms stay exact. On clients,
+                // snapshots drive the transform, so this ALSO keeps a
+                // replicated platform's hull where players see it.
+                let kin_pos = kinematic.then(|| {
+                    (world_transform(ecs, ent).translation - self.world.origin).as_vec3()
+                });
                 let b = &mut self.world.bodies[bidx];
                 b.layer = layer;
+                if b.kinematic && !kinematic {
+                    // Waking up into Dynamic: start from rest at the tracked pose.
+                    b.vel = Vec3::ZERO;
+                }
+                b.kinematic = kinematic;
+                if let Some(p) = kin_pos {
+                    b.prev_pos = b.pos;
+                    b.pos = p;
+                }
                 for a in 0..3 {
                     if rb.lock_pos[a] && !b.lock_pos[a] {
                         crate::body::set_axis(&mut b.home, a, crate::body::axis(b.pos, a));
@@ -740,6 +849,26 @@ impl Sim {
                 };
             }
         }
+        // Refresh the kinematic hulls dynamic bodies collide against (poses
+        // were just synced above). Cheap: kinematic bodies are few.
+        self.world.kin_hulls = self
+            .world
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.kinematic)
+            .filter_map(|(bi, b)| {
+                let eid = self.map.iter().find(|l| l.body == bi)?.entity.index();
+                Some(BodyHull {
+                    eid,
+                    pos: b.pos,
+                    radius: b.radius,
+                    shape: b.shape,
+                    up: b.up,
+                    layer: b.layer,
+                })
+            })
+            .collect();
     }
 
     /// Set a capsule body's total standing height (for crouch). The feet stay planted —
@@ -764,7 +893,7 @@ impl Sim {
     fn writeback_transforms(&self, ecs: &mut World, alpha: f32) {
         for link in &self.map {
             let b = &self.world.bodies[link.body];
-            if !b.active {
+            if !b.active || b.kinematic {
                 continue;
             }
             let p = b.prev_pos.lerp(b.pos, alpha);
@@ -934,6 +1063,91 @@ mod runtime_body_tests {
             !(1u32 << wall_layer),
         );
         assert!(masked.is_none(), "masking out Walls makes the ray pass through");
+    }
+
+    /// Body modes end-to-end: a STATIC rigidbody becomes a baked collider
+    /// (no body at all — a dynamic ball rests on it), and a KINEMATIC body
+    /// never falls, follows its transform, and CARRIES a dynamic body resting
+    /// on it (the moving-platform contract).
+    #[test]
+    fn static_and_kinematic_modes_work() {
+        use floptle_core::BodyMode;
+        let mut ecs = World::default();
+        // A static box floor at y = 0 (mode = Static — collider, not a body).
+        let floor = ecs.spawn();
+        ecs.insert(floor, Transform::from_translation(DVec3::new(0.0, 0.0, 0.0)));
+        ecs.insert(
+            floor,
+            RigidBody {
+                kind: BodyKind::Box,
+                mode: BodyMode::Static,
+                half_extents: [50.0, 0.5, 50.0],
+                ..Default::default()
+            },
+        );
+        // A dynamic ball dropped onto it.
+        let ball = ecs.spawn();
+        ecs.insert(ball, Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)));
+        ecs.insert(ball, RigidBody { gravity: true, ..Default::default() });
+        // A kinematic platform out at x = 20, with a second ball on top.
+        let platform = ecs.spawn();
+        ecs.insert(platform, Transform::from_translation(DVec3::new(20.0, 2.0, 0.0)));
+        ecs.insert(
+            platform,
+            RigidBody {
+                kind: BodyKind::Box,
+                mode: BodyMode::Kinematic,
+                half_extents: [2.0, 0.25, 2.0],
+                ..Default::default()
+            },
+        );
+        let rider = ecs.spawn();
+        ecs.insert(rider, Transform::from_translation(DVec3::new(20.0, 3.5, 0.0)));
+        ecs.insert(rider, RigidBody { gravity: true, ..Default::default() });
+
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        // Static mode: NO body registered (that's the compute saving)…
+        assert!(sim.body_snapshot(floor.index()).is_none(), "static mode must not be a body");
+        // …but its collider exists and names the node.
+        assert!(sim.world.colliders.iter().any(|c| c.eid == Some(floor.index())));
+
+        // Run 2 s: the ball must come to rest ON the static box (y ≈ 1.0),
+        // the platform must NOT fall, and the rider must rest on the platform.
+        for _ in 0..120 {
+            sim.sync_dynamic_params(&ecs);
+            sim.step_tick(1.0 / 60.0, None);
+            sim.writeback_interpolated(&mut ecs, 1.0);
+        }
+        let ball_y = sim.body_snapshot(ball.index()).unwrap().pos.y;
+        assert!((ball_y - 1.0).abs() < 0.1, "ball rests on the static box, y = {ball_y}");
+        let plat_y = ecs.get::<Transform>(platform).unwrap().translation.y;
+        assert!((plat_y - 2.0).abs() < 1e-6, "kinematic never falls, y = {plat_y}");
+        let rider_y = sim.body_snapshot(rider.index()).unwrap().pos.y;
+        assert!((rider_y - 2.75).abs() < 0.1, "rider rests ON the platform, y = {rider_y}");
+
+        // Move the platform up via its TRANSFORM (script-style): the sim
+        // follows, and the rider is CARRIED up with it.
+        for _ in 0..120 {
+            if let Some(t) = ecs.get_mut::<Transform>(platform) {
+                t.translation.y += 2.0 / 120.0; // +2 units over 2 s
+            }
+            sim.sync_dynamic_params(&ecs);
+            sim.step_tick(1.0 / 60.0, None);
+            sim.writeback_interpolated(&mut ecs, 1.0);
+        }
+        let rider_y = sim.body_snapshot(rider.index()).unwrap().pos.y;
+        assert!(
+            (rider_y - 4.75).abs() < 0.2,
+            "the platform must CARRY the rider up (expected ≈ 4.75, got {rider_y})"
+        );
+        let plat_y = ecs.get::<Transform>(platform).unwrap().translation.y;
+        assert!((plat_y - 4.0).abs() < 1e-4, "the transform stayed authoritative, y = {plat_y}");
     }
 
     /// The touch-event pipeline end-to-end: a body dropped onto a solid box

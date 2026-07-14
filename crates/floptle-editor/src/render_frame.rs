@@ -3936,6 +3936,9 @@ impl Editor {
             }
             self.rebuild_sim();
         }
+        if cmd.rebuild_physics {
+            self.rebuild_sim();
+        }
         if let Some((e, on)) = cmd.set_trigger {
             self.record();
             if on {

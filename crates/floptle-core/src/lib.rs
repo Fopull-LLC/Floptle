@@ -39,9 +39,9 @@ pub use ecs::{Entity, World};
 pub use layers::Layers;
 pub use material::Material;
 pub use matter::{
-    world_transform, AnimController, AoMode, BodyKind, BoneAttach, CastShadow, Collidable,
-    GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent, ParticleSystem, RigidBody,
-    Shape, Spin, Tags, Trigger, Visible,
+    world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
+    Collidable, GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent, ParticleSystem,
+    RigidBody, Shape, Spin, Tags, Trigger, Visible,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use script::{ScriptInst, Scripts};

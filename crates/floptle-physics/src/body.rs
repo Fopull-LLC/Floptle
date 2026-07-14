@@ -57,6 +57,11 @@ pub struct Body {
     /// `floptle_core::Layers`). The solver only resolves this body against
     /// colliders whose layer bit is set in `PhysicsWorld::matrix[layer]`.
     pub layer: u8,
+    /// KINEMATIC: transform-driven — the step skips it entirely (no gravity,
+    /// no depenetration; the node's transform is authoritative and the sim
+    /// follows it). Dynamic bodies collide WITH it via
+    /// `PhysicsWorld::kin_hulls` — moving platforms that push the player.
+    pub kinematic: bool,
 }
 
 impl Body {
@@ -77,6 +82,7 @@ impl Body {
             home: pos,
             active: true,
             layer: 0,
+            kinematic: false,
         }
     }
 
