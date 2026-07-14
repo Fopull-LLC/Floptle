@@ -197,6 +197,15 @@ impl Editor {
         if self.playing {
             self.playing = false;
             self.paused = false;
+            // Make the revert EXPLICIT — "where did my tweaks go" is a classic
+            // lost-work surprise: Play-mode changes are a simulation, not edits.
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                "⏹ stopped — the scene reverted to its pre-Play state (changes made \
+                 during Play are not kept)"
+                    .into(),
+                None,
+            );
             // Silence the play session's sounds and revert Lua mixer tweaks.
             let mixer = self.project.mixer.clone();
             self.audio.stop_play(&mixer);

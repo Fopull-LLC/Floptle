@@ -54,6 +54,9 @@ impl Editor {
 
         // Live Lua syntax check for the active IDE file (drives red squiggles).
         self.check_active_script_syntax();
+        // Crash safety: periodically snapshot a dirty scene to `.floptle/autosave`
+        // (deleted on a real save; offered for recovery at the next open).
+        self.autosave_tick();
         // Reap a finished cross-target export build (Windows-from-Linux etc.).
         self.poll_export_build();
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
@@ -1146,11 +1149,22 @@ impl Editor {
         let ref_kinds = &self.ref_kinds;
         let ui_canvas_snapshot = self.ui_canvas.clone();
         let show_export = &mut self.show_export;
+        // Relative export folders resolve against the project's PARENT (shown
+        // live in the dialog) — never the process CWD, which depends on how
+        // the editor was launched.
+        let export_base =
+            self.project_root.parent().unwrap_or(&self.project_root).to_path_buf();
+        if self.export_dir.trim().is_empty() {
+            self.export_dir = "builds".into();
+        }
         let export_dir = &mut self.export_dir;
         let export_title = &mut self.export_title;
         let export_target = &mut self.export_target;
         let export_building = self.export_build.is_some();
         let export_status = &self.export_status;
+        let export_done = self.export_done.clone();
+        let autosave_prompt = self.autosave_prompt.clone();
+        let scene_name_now = self.scene_name.clone();
         if export_title.is_empty() {
             *export_title = self
                 .project_root
@@ -1191,6 +1205,14 @@ impl Editor {
                             ui.close();
                         }
                         ui.separator();
+                        if ui
+                            .button("Open Project Folder")
+                            .on_hover_text("show the project (assets, scenes, scripts) in your file manager")
+                            .clicked()
+                        {
+                            cmd.open_folder = Some(std::path::PathBuf::new()); // empty = project root
+                            ui.close();
+                        }
                         if ui
                             .button("Export Game…")
                             .on_hover_text(
@@ -1694,6 +1716,13 @@ impl Editor {
                             ui.text_edit_singleline(export_dir)
                                 .on_hover_text("the build lands here (created if missing)");
                         });
+                        // Exactly where that lands — no guessing at relative paths.
+                        let resolved = {
+                            let t = export_dir.trim();
+                            let p = std::path::Path::new(t);
+                            if p.is_absolute() { p.to_path_buf() } else { export_base.join(p) }
+                        };
+                        ui.small(format!("→  {}", resolved.display()));
                         ui.horizontal(|ui| {
                             ui.label("Target");
                             egui::ComboBox::from_id_salt("export_target")
@@ -1724,10 +1753,46 @@ impl Editor {
                             ui.add_space(4.0);
                             ui.label(status.as_str());
                         }
+                        if let Some(done) = &export_done
+                            && ui.button("📂 Open build folder").clicked()
+                        {
+                            cmd.open_folder = Some(done.clone());
+                        }
                     });
                 if !open {
                     *show_export = false;
                 }
+            }
+
+            // ---- autosave recovery (a newer autosave than the scene file) ----
+            if let Some(auto) = &autosave_prompt {
+                let age = std::fs::metadata(auto)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| {
+                        let s = d.as_secs();
+                        if s < 120 { format!("{s} s ago") } else { format!("{} min ago", s / 60) }
+                    })
+                    .unwrap_or_else(|| "recently".into());
+                egui::Window::new("💾 Recover unsaved work?")
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(360.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!(
+                            "'{scene_name_now}' has an AUTOSAVE newer than its saved file                              (written {age}) — usually the editor closed with unsaved                              changes. Restore it?"
+                        ));
+                        ui.small("Restoring loads the autosaved version (still unsaved —                                   Ctrl+S to keep it). Discard deletes the autosave.");
+                        ui.horizontal(|ui| {
+                            if ui.button("♻ Restore autosave").clicked() {
+                                cmd.autosave_action = Some(true);
+                            }
+                            if ui.button("🗑 Discard it").clicked() {
+                                cmd.autosave_action = Some(false);
+                            }
+                        });
+                    });
             }
 
             // ---- project settings window (project-wide rendering) ----
@@ -2695,7 +2760,12 @@ impl Editor {
             if self.fps_timer >= 0.4 {
                 self.fps_timer = 0.0;
                 if let Some(window) = self.window.as_ref() {
-                    window.set_title(&format!("Floptle Editor — {:.0} fps", self.fps));
+                    window.set_title(&format!(
+                        "Floptle Editor — {}{} — {:.0} fps",
+                        self.scene_name,
+                        if self.scene_dirty { " •" } else { "" },
+                        self.fps
+                    ));
                 }
             }
         }
@@ -3826,6 +3896,18 @@ impl Editor {
         }
         if let Some((sources, dest)) = cmd.move_assets {
             self.move_assets(&sources, &dest);
+        }
+        if let Some(dir) = cmd.open_folder {
+            // Empty path = "the project root" (the File-menu shortcut).
+            let target = if dir.as_os_str().is_empty() { self.project_root.clone() } else { dir };
+            crate::project::open_in_file_manager(&target);
+        }
+        if let Some(restore) = cmd.autosave_action {
+            if restore {
+                self.restore_autosave();
+            } else if let Some(auto) = self.autosave_prompt.take() {
+                let _ = std::fs::remove_file(auto);
+            }
         }
         // Pre-warm a model being dragged so its live ghost can render next frame
         // (the gather can't import — gpu/raster are borrowed there).

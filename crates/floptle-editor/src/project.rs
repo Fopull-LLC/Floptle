@@ -287,6 +287,7 @@ impl Editor {
         self.selected_asset = None;
         self.history = History::default();
         self.scene_dirty = false;
+        self.check_autosave(); // offer crash recovery if an autosave is newer
         println!("  opened scene: {}", p.display());
     }
 
@@ -544,6 +545,7 @@ impl Editor {
         self.adopt_terrain();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.migrate_legacy_post(&doc);
+        self.check_autosave(); // offer crash recovery if an autosave is newer
         self.materials = self.load_materials();
         self.asset_tree = build_assets(&self.project_root);
         self.load_texture_settings();
@@ -608,25 +610,52 @@ impl Editor {
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
     }
 
-    pub(crate) fn save_scene(&self) {
+    /// Save the open scene (+ its terrain fields/palette). Success clears the
+    /// dirty flag and the crash-recovery autosave; FAILURE keeps both and lands
+    /// in the Console loudly — a failed save must never look like a saved one
+    /// (the old path printed to stderr and callers cleared `scene_dirty`
+    /// unconditionally, which could silently lose work).
+    pub(crate) fn save_scene(&mut self) -> bool {
         let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
         let path = self.scene_path();
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
-        match floptle_scene::save(&doc, &path) {
-            Ok(()) => println!("  saved {}", path.display()),
-            Err(e) => eprintln!("  save failed: {e}"),
-        }
+        let ok = match floptle_scene::save(&doc, &path) {
+            Ok(()) => {
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("💾 saved {}", path.display()),
+                    None,
+                );
+                true
+            }
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("💾 SAVE FAILED — {} — {e} (your changes are still unsaved!)", path.display()),
+                    None,
+                );
+                false
+            }
+        };
         // Terrain fields are large, so each lives beside the scene (one file per
         // terrain id), not inline in the scene doc.
         let dir = self.project_root.join("terrain");
         let _ = std::fs::create_dir_all(&dir);
-        for (&e, t) in &self.terrains {
-            let id = match self.world.get::<Matter>(e) {
-                Some(Matter::Terrain { id }) => *id,
-                _ => continue,
-            };
-            if let Err(e) = std::fs::write(self.terrain_field_path_id(id), t.to_bytes()) {
-                eprintln!("  save terrain failed: {e}");
+        let terrain_writes: Vec<(u32, Vec<u8>)> = self
+            .terrains
+            .iter()
+            .filter_map(|(&e, t)| match self.world.get::<Matter>(e) {
+                Some(Matter::Terrain { id }) => Some((*id, t.to_bytes())),
+                _ => None,
+            })
+            .collect();
+        for (id, bytes) in terrain_writes {
+            if let Err(e) = std::fs::write(self.terrain_field_path_id(id), bytes) {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("💾 save terrain {id} failed: {e}"),
+                    None,
+                );
             }
         }
         // The texture PALETTE (which image fills each painted slot) is editor state,
@@ -635,6 +664,86 @@ impl Editor {
             let palette = self.terrain_textures.join("\n");
             let _ = std::fs::write(self.terrain_palette_path(), palette);
         }
+        if ok {
+            self.scene_dirty = false;
+            let _ = std::fs::remove_file(self.autosave_path()); // saved for real
+        }
+        ok
+    }
+
+    /// Where this scene's crash-recovery autosave lives (`.floptle` is the
+    /// project's editor-cache dir, never exported).
+    pub(crate) fn autosave_path(&self) -> PathBuf {
+        self.project_root.join(".floptle/autosave").join(format!("{}.ron", self.scene_name))
+    }
+
+    /// Periodic crash safety: while the scene is dirty in edit mode, snapshot
+    /// it to the autosave file every [`Self::AUTOSAVE_SECS`]. Real saves delete
+    /// it; a crash leaves it behind, and the next open offers to restore.
+    pub(crate) fn autosave_tick(&mut self) {
+        const AUTOSAVE_SECS: u64 = 45;
+        if !self.scene_dirty || self.playing || self.player_mode || self.anim_ui.record {
+            return;
+        }
+        let due = self
+            .last_autosave
+            .is_none_or(|t| t.elapsed().as_secs() >= AUTOSAVE_SECS);
+        if !due {
+            return;
+        }
+        self.last_autosave = Some(std::time::Instant::now());
+        let path = self.autosave_path();
+        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&self.project_root));
+        let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
+        if let Err(e) = floptle_scene::save(&doc, &path) {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("autosave failed: {e}"),
+                None,
+            );
+        }
+    }
+
+    /// After a scene loads: if a NEWER autosave exists (a crash or lost session
+    /// left unsaved work behind), arm the recovery prompt.
+    pub(crate) fn check_autosave(&mut self) {
+        self.autosave_prompt = None;
+        let auto = self.autosave_path();
+        let Ok(auto_m) = std::fs::metadata(&auto).and_then(|m| m.modified()) else { return };
+        let scene_m = std::fs::metadata(self.scene_path()).and_then(|m| m.modified()).ok();
+        if scene_m.is_none_or(|s| auto_m > s) {
+            self.autosave_prompt = Some(auto);
+        }
+    }
+
+    /// Restore the armed autosave over the live world (the file stays until a
+    /// real save — restoring must never destroy the only copy of the work).
+    pub(crate) fn restore_autosave(&mut self) {
+        let Some(path) = self.autosave_prompt.take() else { return };
+        let doc = match floptle_scene::load(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("autosave restore failed: {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        self.reset_anim_bindings();
+        self.world = World::new();
+        floptle_scene::spawn_into(&doc, &mut self.world);
+        self.adopt_terrain();
+        self.register_scene_meshes();
+        self.selection.clear();
+        self.history = History::default();
+        self.scene_dirty = true; // recovered work is UNSAVED until a real save
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            "recovered the autosaved scene — Ctrl+S to keep it".into(),
+            None,
+        );
     }
 
     /// Where the scene's terrain texture palette (slot→image paths) is stored.
@@ -649,10 +758,13 @@ impl Editor {
         // bake them into the scene file. End the recording (restoring the real
         // scene) first; the clip itself saves through its own dirty flag.
         self.stop_recording();
-        self.save_scene();
-        self.scene_dirty = false;
+        self.save_scene(); // clears scene_dirty ONLY on success + logs either way
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
-            eprintln!("  save project failed: {e}");
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!("💾 save project.ron failed: {e}"),
+                None,
+            );
         }
         let mut saved_scripts = 0;
         for f in &mut self.ide.open {
@@ -662,9 +774,28 @@ impl Editor {
             }
         }
         if saved_scripts > 0 {
-            println!("  saved {saved_scripts} script(s)");
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("💾 saved {saved_scripts} script(s)"),
+                None,
+            );
         }
     }
+}
+
+/// Open `path` in the OS file manager (xdg-open / open / explorer).
+pub(crate) fn open_in_file_manager(path: &Path) {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    let _ = std::process::Command::new(cmd)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// An empty scene (just lighting) — used when a project is closed.

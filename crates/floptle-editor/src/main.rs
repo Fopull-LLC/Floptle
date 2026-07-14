@@ -110,6 +110,10 @@ struct EditorCmd {
     toggle_pause: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
+    /// Open a folder in the OS file manager (empty path = the project root).
+    open_folder: Option<PathBuf>,
+    /// Autosave recovery prompt answered: true = restore it, false = discard.
+    autosave_action: Option<bool>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
     /// Save a material as a named preset under assets/materials/.
@@ -676,6 +680,7 @@ impl Editor {
     /// binary; cross targets spawn a background `cargo build` and the export
     /// finishes when it lands (see [`Self::poll_export_build`]).
     fn begin_export(&mut self, dir: String, target: usize) {
+        let dir = self.resolve_export_dir(&dir).display().to_string();
         let title = if self.export_title.trim().is_empty() {
             self.project_root
                 .file_name()
@@ -745,13 +750,31 @@ impl Editor {
         }
     }
 
-    fn finish_export(&mut self, result: Result<String, String>) {
+    fn finish_export(&mut self, result: Result<(String, PathBuf), String>) {
         let (level, line) = match result {
-            Ok(msg) => (floptle_script::LogLevel::Debug, format!("📦 {msg}")),
-            Err(e) => (floptle_script::LogLevel::Error, format!("📦 export failed: {e}")),
+            Ok((msg, dir)) => {
+                self.export_done = Some(dir);
+                (floptle_script::LogLevel::Debug, format!("✅ {msg}"))
+            }
+            Err(e) => {
+                self.export_done = None;
+                (floptle_script::LogLevel::Error, format!("📦 export failed: {e}"))
+            }
         };
         self.console.push(level, line.clone(), None);
         self.export_status = Some(line);
+    }
+
+    /// Where a typed export folder actually lands: absolute paths as-is;
+    /// relative paths resolve against the PROJECT's parent folder (predictable
+    /// and next to your work — never the process's working directory, which
+    /// depends on how the editor was launched).
+    pub(crate) fn resolve_export_dir(&self, dir: &str) -> PathBuf {
+        let p = Path::new(dir.trim());
+        if p.is_absolute() {
+            return p.to_path_buf();
+        }
+        self.project_root.parent().unwrap_or(&self.project_root).join(p)
     }
 
     /// Once per frame: reap a finished cross-target build and complete its
@@ -781,11 +804,22 @@ impl Editor {
                         &bin,
                         t,
                     )
-                    .map(|m| format!("{m} (built in {:.0} s)", b.started.elapsed().as_secs_f32())),
-                    _ => Err("the build succeeded but its binary wasn't found".into()),
+                    .map(|(m, d)| {
+                        (format!("{m} (built in {:.0} s)", b.started.elapsed().as_secs_f32()), d)
+                    }),
+                    Some(bin) => Err(format!(
+                        "the build succeeded but its binary wasn't at {} — rebuild, or report this",
+                        bin.display()
+                    )),
+                    None => Err("the build succeeded but its binary wasn't found".into()),
                 }
             }
-            Ok(_) => Err(format!("the {} build failed — see {}", t.label, b.log.display())),
+            Ok(s) => Err(format!(
+                "the {} build failed (exit {}) — full log: {}",
+                t.label,
+                s.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                b.log.display()
+            )),
             Err(e) => Err(format!("build wait: {e}")),
         };
         self.finish_export(result);
@@ -915,6 +949,17 @@ fn spawn_cross_build(triple: &str, log: &Path) -> Result<std::process::Child, St
         .stdout(logfile.try_clone().map_err(|e| e.to_string())?)
         .stderr(logfile)
         .stdin(std::process::Stdio::null());
+    // Build into the SAME target dir `cross_binary_path` reads (the running
+    // editor's). Without this the child cargo used whatever CARGO_TARGET_DIR
+    // the environment happened to have — launched differently, the build
+    // succeeded in one place while the export looked in another and reported
+    // failure over a perfectly good build.
+    if let Some(td) = std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.parent()?.to_path_buf()))
+    {
+        cmd.env("CARGO_TARGET_DIR", td);
+    }
     if triple == "x86_64-pc-windows-gnu" {
         if let Some(bin) = windows_toolchain_bin()? {
             let path = std::env::var_os("PATH").unwrap_or_default();
@@ -955,7 +1000,7 @@ fn export_game_with(
     title: &str,
     binary: &Path,
     target: &ExportTarget,
-) -> Result<String, String> {
+) -> Result<(String, PathBuf), String> {
     let exe_suffix = target.exe_suffix;
     std::fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
@@ -990,7 +1035,7 @@ fn export_game_with(
         .map_err(|e| format!("manifest: {e}"))?;
     std::fs::write(out_c.join("floptle-game.ron"), text)
         .map_err(|e| format!("write manifest: {e}"))?;
-    Ok(format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display()))
+    Ok((format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display()), out_c))
 }
 
 /// Recursive copy for the export: skips dot-entries (`.floptle` caches,
@@ -1386,6 +1431,13 @@ struct Editor {
     export_title: String,
     export_target: usize,
     export_status: Option<String>,
+    /// The last SUCCESSFUL export's folder — powers the dialog's "Open folder".
+    export_done: Option<PathBuf>,
+    /// When the last crash-recovery autosave was written (see `autosave_tick`).
+    last_autosave: Option<Instant>,
+    /// An autosave NEWER than the scene file was found at load — the recovery
+    /// prompt is up ("restore unsaved work?"); holds the autosave path.
+    autosave_prompt: Option<PathBuf>,
     /// A cross-target `cargo build` running in the background (Windows export
     /// from Linux etc.); polled each frame, the export finishes when it does.
     export_build: Option<ExportBuild>,
@@ -1687,6 +1739,9 @@ impl ApplicationHandler for Editor {
         self.scene_name = Self::scene_name_of(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        if !self.player_mode {
+            self.check_autosave(); // offer crash recovery if an autosave is newer
+        }
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.migrate_legacy_post(&doc);
         self.asset_tree = build_assets(&self.project_root);
@@ -2171,7 +2226,7 @@ mod cli_tests {
 
 #[cfg(test)]
 mod export_tests {
-    use super::{export_game_with, GameManifest, EXPORT_TARGETS};
+    use super::{export_game_with, Editor, GameManifest, EXPORT_TARGETS};
     use std::path::PathBuf;
 
     fn temp(name: &str) -> PathBuf {
@@ -2179,6 +2234,19 @@ mod export_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A typed export folder resolves PREDICTABLY: absolute stays put, relative
+    /// lands next to the project (its parent) — never the process CWD, which
+    /// depends on how the editor was launched (Ty's "where do paths actually
+    /// reference" complaint).
+    #[test]
+    fn export_dir_resolves_against_the_project_parent() {
+        let mut ed = Editor { project_root: PathBuf::from("/repo/assets"), ..Default::default() };
+        assert_eq!(ed.resolve_export_dir("builds"), PathBuf::from("/repo/builds"));
+        assert_eq!(ed.resolve_export_dir("/abs/dist"), PathBuf::from("/abs/dist"));
+        ed.project_root = PathBuf::from("/");
+        assert_eq!(ed.resolve_export_dir("b"), PathBuf::from("/b"));
     }
 
     /// Export = binary + assets (dot-entries skipped) + a manifest that parses
@@ -2195,9 +2263,10 @@ mod export_tests {
         let out = temp("out");
 
         let me = std::env::current_exe().unwrap();
-        let msg = export_game_with(&proj, &out, "My Cool Game!", &me, &EXPORT_TARGETS[0])
+        let (msg, done_dir) = export_game_with(&proj, &out, "My Cool Game!", &me, &EXPORT_TARGETS[0])
             .expect("export succeeds");
         assert!(msg.contains("2 asset file(s)"), "dot-entries must be skipped: {msg}");
+        assert!(done_dir.is_dir(), "the success result carries the build folder");
         assert!(out.join("assets/project.ron").is_file());
         assert!(out.join("assets/scenes/first.ron").is_file());
         assert!(!out.join("assets/.floptle").exists(), "editor cache must not ship");
