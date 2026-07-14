@@ -313,6 +313,14 @@ impl AnimSystem {
         self.preview_restore.clear();
         self.preview_restore_props.clear();
     }
+
+    /// Drop the preview snapshots WITHOUT applying them. Used when ● Record
+    /// stops: recording skips the per-frame restore (the world carries the
+    /// previewed values), so the held snapshot is stale mid-record state —
+    /// `stop_record_ui` restores the true pre-record scene instead.
+    pub fn forget_preview(&mut self) {
+        self.restore_preview_now();
+    }
 }
 
 /// `path` → registry key: project-relative, forward slashes, extension off.

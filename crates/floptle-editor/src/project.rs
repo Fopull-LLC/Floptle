@@ -645,6 +645,10 @@ impl Editor {
     /// Ctrl+S: save everything — the project config, the open scene, and every
     /// dirty script open in the IDE (so "the script you're editing" is saved too).
     pub(crate) fn save_all(&mut self) {
+        // While recording, the world carries previewed clip values — saving would
+        // bake them into the scene file. End the recording (restoring the real
+        // scene) first; the clip itself saves through its own dirty flag.
+        self.stop_recording();
         self.save_scene();
         self.scene_dirty = false;
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
