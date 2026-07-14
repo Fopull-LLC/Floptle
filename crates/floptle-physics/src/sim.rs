@@ -242,6 +242,12 @@ impl Sim {
     /// This is the netcode-era driver (`docs/netcode-design.md` §3): the gameplay tick
     /// is the deterministic unit scripts' `fixedUpdate`, input commands, snapshots, and
     /// prediction all share, so physics must advance in exact tick multiples.
+    /// Override the floating-origin rebase distance (default 4096 world
+    /// units). Mostly for tests — games rarely need to touch it.
+    pub fn set_origin_threshold(&mut self, threshold: f64) {
+        self.fo.threshold = threshold;
+    }
+
     pub fn step_tick(&mut self, tick_dt: f32, focus: Option<DVec3>) {
         if let Some(f) = focus {
             let local = f - self.world.origin;
@@ -574,5 +580,48 @@ mod runtime_body_tests {
             (rendered - server.pos).length() > 1.0,
             "render anchor must have LEFT the restored server pose"
         );
+    }
+
+    /// The floating-origin rebase must be INVISIBLE to rendering: a body
+    /// cruising past the threshold renders at exactly `velocity × dt`
+    /// increments straight through the rebase tick — never a snap. (The
+    /// "world moves around the player" feature: a threshold rebase onto
+    /// whole-number origins is EXACT in f32 — bodies, anchors, and the
+    /// interpolation span all shift together, and the ECS stays absolute
+    /// f64. This guards that contract.)
+    #[test]
+    fn origin_rebase_never_snaps_the_rendered_motion() {
+        let (mut ecs, ents) = world_with_bodies(1);
+        let e = ents[0];
+        let step = 1.0 / 60.0;
+        // Zero gravity: the body cruises +x at a constant 30 m/s.
+        let mut sim = Sim::build(&ecs, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+        sim.set_origin_threshold(50.0);
+        sim.set_body_velocity(e.index(), Vec3::new(30.0, 0.0, 0.0));
+
+        let mut last_x: Option<f64> = None;
+        let mut origins = std::collections::HashSet::new();
+        // 8 s → 240 m of travel → several rebases at the 50 m threshold.
+        for _ in 0..480 {
+            let focus = sim.body_snapshot(e.index()).unwrap().pos;
+            sim.step_tick(step, Some(focus));
+            origins.insert(format!("{:?}", sim.world.origin));
+            // Two render samples per tick, like frames landing mid-tick.
+            for alpha in [0.25f32, 0.75] {
+                sim.writeback_interpolated(&mut ecs, alpha);
+                let x = ecs.get::<Transform>(e).unwrap().translation.x;
+                if let Some(prev) = last_x {
+                    let d = x - prev;
+                    assert!(
+                        (-1e-3..=30.0 * step as f64 + 1e-3).contains(&d),
+                        "rendered motion must be smooth across rebases: stepped {d} m \
+                         (one tick of travel is {} m)",
+                        30.0 * step as f64
+                    );
+                }
+                last_x = Some(x);
+            }
+        }
+        assert!(origins.len() >= 3, "the rebase must actually have fired: {origins:?}");
     }
 }

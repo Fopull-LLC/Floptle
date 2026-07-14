@@ -2790,13 +2790,56 @@ impl Editor {
         }
     }
 
+    /// Frame-time smoothing: SNAP the measured dt to the nearest whole multiple
+    /// of the display's refresh period when it's close. Under vsync (Fifo) a
+    /// frame's true screen time IS a whole number of refresh periods — the
+    /// CPU-side measurement just adds 1–3 ms of scheduler noise on top, and
+    /// feeding that noise into the fixed-step accumulator moves everything the
+    /// interpolation renders by `velocity × noise` every frame (the moving-
+    /// jitter that came and went with window mode / load). The residual error
+    /// is banked and folded back a hair per frame, so long-term time stays
+    /// wall-clock exact (a fast clip on the bank absorbs one-off stalls).
+    fn smooth_dt(&mut self, raw: f32) -> f32 {
+        // (Re)read the monitor's refresh rate occasionally — cheap, and the
+        // window can move between monitors.
+        if self.refresh_poll == 0 {
+            self.refresh_period = self
+                .window
+                .as_ref()
+                .and_then(|w| w.current_monitor())
+                .and_then(|m| m.refresh_rate_millihertz())
+                .map(|mhz| 1000.0 / mhz as f32)
+                .unwrap_or(0.0);
+            self.refresh_poll = 240;
+        }
+        self.refresh_poll -= 1;
+        let period = self.refresh_period;
+        if period <= 0.0 || raw <= 0.0 {
+            return raw;
+        }
+        let n = (raw / period).round();
+        // Snap only when the measurement is close to a whole vsync count (and
+        // at least one) — a giant hitch or an uncapped frame passes through.
+        if n < 1.0 || (raw - n * period).abs() > period * 0.12 {
+            self.dt_snap_error = self.dt_snap_error.clamp(-period, period);
+            return raw;
+        }
+        self.dt_snap_error += raw - n * period;
+        // Fold the banked truth back in slowly (≤0.25 ms/frame): time stays
+        // exact without re-introducing per-frame noise.
+        let give = self.dt_snap_error.clamp(-0.00025, 0.00025);
+        self.dt_snap_error -= give;
+        n * period + give
+    }
+
     /// Advance the frame clock: `dt`/`elapsed`, the editor fly-camera (unless
     /// the Game view owns input), the smoothed FPS title, and the F-key focus
     /// glide. Returns `(dt, elapsed)`.
     fn advance_clock(&mut self, game_focused: bool) -> (f32, f32) {
         let now = Instant::now();
-        let dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
+        let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
+        let dt = self.smooth_dt(raw_dt);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         // Don't drive the editor (Scene) camera while the Game viewport is focused — that
         // input belongs to the game (e.g. the mouse is over the Game view in split mode).
@@ -2917,7 +2960,7 @@ impl Editor {
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
             // keeps simulating.
-            self.script_host.set_input(if game_focused {
+            let frame_input = if game_focused {
                 floptle_script::InputSnapshot {
                     keys_down: self.input_keys.clone(),
                     keys_pressed: self.input_keys_pressed.clone(),
@@ -2931,7 +2974,8 @@ impl Editor {
                 }
             } else {
                 floptle_script::InputSnapshot { aim, ..Default::default() }
-            });
+            };
+            self.script_host.set_input(frame_input.clone());
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
             // (physics doesn't step until after scripts, so this is safe). The sim
             // origin rides along so ray coordinates convert world ↔ sim frame.
@@ -3165,6 +3209,15 @@ impl Editor {
                         floptle_core::math::DVec3::from_array(pred.error_offset);
                 }
             }
+            // `lateUpdate` — the CAMERA pass: after physics and the interpolated
+            // writeback, so followers sample this frame's FINAL poses. (A camera
+            // positioned in `update` reads LAST frame's pose — a follow error of
+            // velocity × dt that turns frame-time noise into visible jitter.)
+            // The tick loop overwrote the input snapshot with per-tick state —
+            // restore the FRAME snapshot first, so mouse/scroll reads in
+            // lateUpdate see this frame's input, not the last tick's leftovers.
+            self.script_host.set_input(frame_input);
+            self.script_host.run_late(&mut self.world, sdt, self.play_t);
             // Surface fixedUpdate errors alongside the frame pass's.
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();

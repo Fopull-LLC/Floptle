@@ -513,6 +513,44 @@ mod tests {
         assert!((yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "yaw was {yaw}");
     }
 
+    /// `lateUpdate` — the camera pass: runs when the driver says (after
+    /// physics + writeback), sees the frame's dt, can move its node, and
+    /// NEVER fires before the frame pass `start`ed the instance.
+    #[test]
+    fn late_update_runs_after_start_and_moves_the_node() {
+        let dir = std::env::temp_dir().join("floptle_script_test_late");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "follow",
+            "function update(node, dt)\n  node.y = 5\nend\n\
+             function lateUpdate(node, dt)\n  node.x = node.x + dt\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "follow".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        // Before the frame pass builds+starts the instance, lateUpdate is a no-op.
+        host.run_late(&mut world, 1.0, 0.0);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 0.0);
+        // A normal frame: update runs, then the driver's late pass.
+        host.run(&mut world, &dir, 0.5, 0.5);
+        host.run_late(&mut world, 0.5, 0.5);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(e).unwrap();
+        assert_eq!(tr.translation.y, 5.0, "update ran");
+        assert!((tr.translation.x - 0.5).abs() < 1e-6, "lateUpdate moved the node by dt");
+    }
+
     #[test]
     fn params_seeded_from_defaults_without_overrides() {
         // A script with `defaults` but NO per-instance overrides must still see params.X
