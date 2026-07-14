@@ -4186,6 +4186,13 @@ impl Editor {
             self.focus_terrain();
         }
         if let Some(path) = cmd.open_scene {
+            // Opening a scene ends any play session FIRST — Stop restores the
+            // pre-Play scene (name, world, terrain), so the unsaved-changes
+            // prompt and its save below operate on real edit state, never on
+            // play-simulation state or a mid-play `scene.load(...)`'s scene.
+            if self.playing {
+                self.toggle_play();
+            }
             // Opening a scene replaces the world — prompt first if there are unsaved
             // edits, otherwise switch immediately.
             if self.scene_dirty {
