@@ -148,19 +148,31 @@ own lane **indented under its node's transform lane**, sharing the timeline's
 time axis and its draggable diamonds (teal, to read apart from the amber
 transform keys) — a UI element's `cell` shows up as a keyframe under that node,
 not a separate section. Drag a diamond to retime, right-click to delete, click
-to select; the selected key's **value + time are edited inline above the sheet**
-(a texture picker for image lanes, a number otherwise). The **▦ Property tracks**
-strip below is just an add-track builder (node · component · field) plus compact
-per-track controls (＋key at playhead, step toggle, delete track).
+to select; the selected key's **value + time are edited inline under the sheet**
+(a texture picker for image lanes, a number otherwise).
 
-**Record captures properties too.** With **● Record** on, changing any exposed
-numeric field on a bound node — a spritesheet `cell`, opacity, a light's
-intensity, colors — auto-keys it at the playhead (creating the track on first
-touch), the same way posing a child auto-keys its transform. `record_scan` diffs
-`floptle_script::mirror_components` each frame; turning record off restores the
-pre-record property values (recording authors the clip, never the scene). The
-scrub preview is likewise non-destructive: it snapshots the UI/light/material
-components it touches and restores them each frame.
+**Unity-style timeline interactions.** **＋ Property** in the header opens a
+node ▸ field cascade listing only the animatable fields each node actually has
+(numeric fields come from the live component mirror). **Right-click a lane
+label** for its menu — node lanes: key pose at playhead / add property / delete
+track; property lanes: key current value / step toggle / delete track.
+**Double-click any lane** keys it at that time (node lanes key the current
+pose, property lanes the current value) and selects the new key. Clicking empty
+sheet deselects. The time readout shows the frame number while snapping.
+
+**Record captures properties too — and shows what it plays.** With **● REC** on
+(red button, red playhead, red frame around the sheet), the scene holds the
+clip's values at the playhead — the Inspector shows them, and changing any
+exposed numeric field — a spritesheet `cell`, opacity, a light's intensity,
+colors — auto-keys it there (creating the track on first touch), the same way
+posing a child auto-keys its transform. `record_scan` diffs
+`floptle_script::mirror_components` each frame. Turning record off restores the
+pre-record scene exactly; undo/redo/save/play-start/tab-hide/target-switch all
+stop recording first, so previewed values can never leak into history or the
+scene file. Outside record, the scrub preview stays fully transient: it applies
+before every gather (so scrubbing shows live in the Scene view, Game view, and
+docked viewports) and restores the authored components after the frame's draw
+data is built.
 
 ## Notify / animation events
 
