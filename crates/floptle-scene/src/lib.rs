@@ -112,6 +112,16 @@ pub struct NodeDoc {
     /// its own serialized form — see [`floptle_audio::AudioSource`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<floptle_audio::AudioSource>,
+    /// The node's collision/query layer, BY NAME (`None` = "Default"). Stored
+    /// by name so reordering the project's layer list never re-layers a scene;
+    /// unknown names fall back to Default at Play (the editor warns).
+    /// See [`floptle_core::Layer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    /// Free-form string tags on this node (`node:hasTag` / `findTagged`).
+    /// See [`floptle_core::Tags`]; only tagged nodes serialize this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -765,6 +775,16 @@ pub struct ProjectConfigDoc {
     /// `None` on projects created before the Hub existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// The project's collision/query **layers**, by name (up to 32; "Default"
+    /// is implicit and always index 0 — it need not be listed). Nodes reference
+    /// these by name ([`NodeDoc::layer`]); Project Settings edits them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// Collision-matrix EXCEPTIONS: pairs of layer names that DON'T collide
+    /// (everything collides by default, so this stays tiny and readable).
+    /// Pairs naming a since-removed layer are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_collide: Vec<(String, String)>,
     /// The project-wide audio mixer graph (tracks, effects, routing). Edited
     /// in the Mixer tab; every scene plays through it.
     #[serde(default)]
@@ -813,6 +833,8 @@ impl ProjectConfigDoc {
             title: None,
             entry_scene: None,
             engine_version: None,
+            layers: Vec::new(),
+            no_collide: Vec::new(),
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
@@ -826,6 +848,12 @@ impl ProjectConfigDoc {
     /// A higher-resolution PS2-ish look.
     pub fn ps2() -> Self {
         Self { retro_height: 480, ..Self::ps1() }
+    }
+
+    /// Resolve this project's named layers + no-collide exceptions into the
+    /// runtime table physics and scripts filter with (Default pinned at bit 0).
+    pub fn build_layers(&self) -> floptle_core::Layers {
+        floptle_core::Layers::resolve(self.layers.clone(), &self.no_collide)
     }
 }
 
@@ -1097,6 +1125,12 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(a) = &node.audio {
         world.insert(e, a.clone());
     }
+    if let Some(l) = &node.layer {
+        world.insert(e, floptle_core::Layer(l.clone()));
+    }
+    if !node.tags.is_empty() {
+        world.insert(e, floptle_core::Tags(node.tags.clone()));
+    }
     e
 }
 
@@ -1208,6 +1242,12 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let ui = world.get::<floptle_ui::ElementSpec>(e).cloned();
         let audio = world.get::<floptle_audio::AudioSource>(e).cloned();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
+        // "Default" never serializes — a node's absence of a layer IS Default.
+        let layer = world
+            .get::<floptle_core::Layer>(e)
+            .map(|l| l.0.clone())
+            .filter(|l| l != floptle_core::layers::DEFAULT_LAYER);
+        let tags = world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
         nodes.push(NodeDoc {
             name,
             transform,
@@ -1227,6 +1267,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             ui_layer,
             ui,
             audio,
+            layer,
+            tags,
         });
     }
     let lighting =
@@ -1342,6 +1384,8 @@ mod tests {
                         },
                         play_on_start: false, // exercise the non-default round-trip
                     }),
+                    layer: Some("Enemies".into()), // exercise the layer round-trip
+                    tags: vec!["enemy".into(), "boss".into()], // exercise the tags round-trip
                 },
                 NodeDoc {
                     name: "blob".into(),
@@ -1365,6 +1409,8 @@ mod tests {
                     ui_layer: None,
                     ui: None,
                     audio: None,
+                    layer: None,
+                    tags: Vec::new(),
                 },
                 NodeDoc {
                     name: "lamp".into(),
@@ -1385,6 +1431,8 @@ mod tests {
                     ui_layer: None,
                     ui: None,
                     audio: None,
+                    layer: None,
+                    tags: Vec::new(),
                 },
                 NodeDoc {
                     name: "eye".into(),
@@ -1405,6 +1453,8 @@ mod tests {
                     ui_layer: None,
                     ui: None,
                     audio: None,
+                    layer: None,
+                    tags: Vec::new(),
                 },
             ],
         }

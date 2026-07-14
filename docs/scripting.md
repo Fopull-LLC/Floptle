@@ -26,6 +26,7 @@ it up immediately.
 15. [Tips & gotchas](#15-tips--gotchas)
 16. [Networking: `net.*`, `synced`, `onRpc`](#16-networking-net-synced-onrpc)
 17. [Scenes: `scene.load` & the entry scene](#17-scenes-sceneload--the-entry-scene)
+18. [Layers & tags](#18-layers--tags)
 
 ---
 
@@ -183,6 +184,18 @@ When the ray hits a body, `h.node` tells you whose: `h.node:getscript("combat")`
 reaches its scripts. Your own node's body never blocks your rays, and the
 optional `ignore` arg skips one more node's body — the orbit camera passes the
 character it follows, so it never reads as a wall.
+
+The last argument can instead be an **options table**, which also filters by
+[layer](#18-layers--tags):
+
+```lua
+-- only the ground can block this ray — other players/props never will
+local h = raycast(x, y, z, 0, -1, 0, 2.0, { ignore = target, layers = { "Ground" } })
+```
+
+`layers` takes one name or an array (Project Settings → Layers) and filters
+**both** static geometry and bodies; a misspelled layer name is an error, not a
+silent miss.
 
 Use it for ground checks, line-of-sight, shooting, or dropping objects onto a surface.
 (The built-in `node.grounded` already does a robust contact check for the character;
@@ -1106,3 +1119,69 @@ State that must survive a scene change (scores, inventory) lives in your
 scripts' hands: stash it via an RPC/`synced` pattern before switching, or keep
 it on the server's manager script — node state itself does not survive (the
 old scene's nodes are gone).
+
+---
+
+## 18. Layers & tags
+
+Two lightweight ways to group nodes — **layers** for physics + query filtering
+(fast bitmasks under the hood), **tags** for identity checks and lookups.
+
+### Layers
+
+Define up to 32 named layers in **Project Settings → Layers** and pick a node's
+layer at the top of the Inspector (every node starts on `Default`). Layers are
+referenced **by name** everywhere — scene files, scripts, the settings matrix —
+so reordering the project's list never silently re-layers a scene, and an
+unknown name (a layer you removed) falls back to `Default` with a Console
+warning at Play.
+
+The **collision matrix** in Project Settings decides which layers collide:
+uncheck `Ghosts × Walls` and every `Ghosts` rigidbody falls straight through
+`Walls` colliders. Everything collides by default; the file only stores the
+exceptions.
+
+```lua
+log(node.layer)             -- "Default" until you set one
+node.layer = "Ghosts"       -- move it (a dynamic body re-layers live)
+node.layer = "Ghots"        -- ERROR listing the project's layers — typos never
+                            -- silently do nothing
+```
+
+Rays filter with the same names — see the `raycast` options table in
+[§5](#5-input--keyboard--mouse):
+
+```lua
+local h = raycast(x, y, z, dx, dy, dz, max, { layers = { "Ground", "Walls" } })
+```
+
+### Tags
+
+Tags are free-form strings on any node — add them in the Inspector (the `tags`
+chips under the name) or at runtime. A node can carry any number of them.
+
+```lua
+node:addTag("burning")            -- duplicates are ignored
+node:removeTag("burning")         -- no-op when absent
+if node:hasTag("enemy") then end  -- the classic raycast hit filter
+node.tags                         -- the full list (assign an array to replace)
+
+for _, n in ipairs(findTagged("checkpoint")) do
+  gizmo.sphere(n.x, n.y, n.z, 1.0)
+end
+```
+
+The classic combo — a melee swing that only counts enemies:
+
+```lua
+local hit = raycast(node.x, node.y, node.z, fx, fy, fz, params.reach)
+if hit and hit.node and hit.node:hasTag("enemy") then
+  local hp = hit.node:getscript("health")
+  if hp then hp.damage(params.power) end
+end
+```
+
+Rules of thumb: a **layer** answers *"what can touch / see what?"* (it changes
+physics), a **tag** answers *"what is this thing?"* (it never does). Both save
+with the scene, copy/paste with nodes, and ride along when a networked spawn
+replicates.

@@ -822,8 +822,10 @@ impl Editor {
         // the two sims drift apart at the bit level.
         let origin = self.sim.as_ref().map(|s| s.world.origin).unwrap_or_else(|| self.sim_origin_hint());
         let gravity = Self::build_gravity_field(&sworld, origin);
-        let terrain_vols = self.terrain_volumes();
-        let mut ssim = floptle_physics::Sim::build(&sworld, &terrain_vols, gravity, origin);
+        let layers = self.project.build_layers();
+        let terrain_vols = self.terrain_volumes(&layers);
+        let mut ssim =
+            floptle_physics::Sim::build_layered(&sworld, &terrain_vols, gravity, origin, layers);
         drop(terrain_vols);
         self.add_static_colliders_for_world(&sworld, &mut ssim);
         // Seed the server bodies with the client's LIVE dynamic state (the doc
@@ -1491,6 +1493,7 @@ impl Editor {
             let wt = floptle_core::world_transform(world, e);
             let anchor = wt.translation;
             let s = wt.scale;
+            let layer = sim.layer_for(world, e);
             match world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     let path = asset_path.clone();
@@ -1509,7 +1512,7 @@ impl Editor {
                         );
                         indices.extend(part.mesh.indices.iter().map(|i| i + base));
                     }
-                    sim.add_static_mesh(anchor, &verts, &indices);
+                    sim.add_static_mesh(anchor, &verts, &indices, layer);
                 }
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
@@ -1517,6 +1520,7 @@ impl Editor {
                             anchor,
                             Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z),
                             wt.rotation,
+                            layer,
                         );
                     }
                     floptle_core::Shape::Plane => {
@@ -1525,14 +1529,15 @@ impl Editor {
                             anchor,
                             Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)),
                             wt.rotation,
+                            layer,
                         );
                     }
                     floptle_core::Shape::Sphere => {
-                        sim.add_static_sphere(anchor, 0.85 * s.max_element());
+                        sim.add_static_sphere(anchor, 0.85 * s.max_element(), layer);
                     }
                     floptle_core::Shape::Capsule => {
                         let up = wt.rotation * Vec3::Y;
-                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z));
+                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z), layer);
                     }
                 },
                 _ => {}

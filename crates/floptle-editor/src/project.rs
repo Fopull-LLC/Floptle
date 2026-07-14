@@ -890,6 +890,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         ui_layer: None,
         ui: None,
         audio: None,
+        layer: None,
+        tags: Vec::new(),
     }
 }
 
@@ -927,6 +929,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 ui_layer: None,
                 ui: None,
                 audio: None,
+                layer: None,
+                tags: Vec::new(),
             },
             NodeDoc {
                 name: "sphere".into(),
@@ -947,6 +951,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 ui_layer: None,
                 ui: None,
                 audio: None,
+                layer: None,
+                tags: Vec::new(),
             },
             NodeDoc {
                 name: "blob".into(),
@@ -967,6 +973,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 ui_layer: None,
                 ui: None,
                 audio: None,
+                layer: None,
+                tags: Vec::new(),
             },
             default_camera_node(),
         ],

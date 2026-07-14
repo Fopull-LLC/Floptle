@@ -25,6 +25,7 @@
 // `pool`, and `serde_ron` arrive in their roadmap phases; these are live.
 pub mod ecs;
 pub mod event;
+pub mod layers;
 pub mod material;
 pub mod math;
 pub mod matter;
@@ -35,11 +36,12 @@ pub mod time;
 pub mod transform;
 
 pub use ecs::{Entity, World};
+pub use layers::Layers;
 pub use material::Material;
 pub use matter::{
     world_transform, AnimController, AoMode, BodyKind, BoneAttach, CastShadow, Collidable,
-    GravityMode, Light, Matter, MeshCollider, Name, Parent, ParticleSystem, RigidBody, Shape, Spin,
-    Visible,
+    GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent, ParticleSystem, RigidBody,
+    Shape, Spin, Tags, Visible,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use script::{ScriptInst, Scripts};

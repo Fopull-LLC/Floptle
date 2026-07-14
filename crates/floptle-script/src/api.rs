@@ -440,6 +440,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let bodies = shared.bodies.clone();
         let body_changes = shared.body_changes.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
+        let layer_changes = shared.layer_changes.clone();
+        let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             // Transform reads.
@@ -497,6 +499,32 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "visible" => {
                     let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
                     return Ok(Value::Boolean(v));
+                }
+                // The node's collision/query layer, by name ("Default" when unset) —
+                // read-your-writes within the frame via the pending-changes map.
+                "layer" => {
+                    let l = layer_changes
+                        .borrow()
+                        .get(&e)
+                        .cloned()
+                        .or_else(|| scene.borrow().layers.get(&e).cloned())
+                        .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string());
+                    return Ok(Value::String(lua.create_string(&l)?));
+                }
+                // The node's tags as a fresh array table (possibly empty) —
+                // read-your-writes via the pending map, like `layer`.
+                "tags" => {
+                    let tags = tag_changes
+                        .borrow()
+                        .get(&e)
+                        .cloned()
+                        .or_else(|| scene.borrow().tags.get(&e).cloned())
+                        .unwrap_or_default();
+                    let arr = lua.create_table()?;
+                    for (i, t) in tags.iter().enumerate() {
+                        arr.set(i + 1, lua.create_string(t)?)?;
+                    }
+                    return Ok(Value::Table(arr));
                 }
                 // A UI element's text (nil on non-text nodes). Assigning it (see
                 // __newindex) changes what the label shows — read-your-writes within
@@ -568,6 +596,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let model_changes = shared.model_changes.clone();
         let material_changes = shared.material_changes.clone();
         let visible_changes = shared.visible_changes.clone();
+        let layer_changes = shared.layer_changes.clone();
+        let tag_changes = shared.tag_changes.clone();
+        let layer_table = shared.layer_table.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
@@ -684,6 +715,46 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     if let Value::Boolean(b) = val {
                         visible_changes.borrow_mut().insert(e, b);
                     }
+                    return Ok(());
+                }
+                // `node.layer = "Enemies"` — validated against the project's
+                // layer table NOW, so a typo errors at the assignment (never a
+                // silently-Default node). Applied to the ECS after the pass;
+                // a dynamic body re-resolves its bit next frame (live).
+                "layer" => {
+                    let Value::String(s) = &val else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.layer takes a layer name (a string)".into(),
+                        ));
+                    };
+                    let name = s.to_string_lossy().to_string();
+                    let lt = layer_table.borrow();
+                    if lt.index_of(&name).is_none() {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "no layer named '{name}' (project layers: {})",
+                            lt.names.join(", ")
+                        )));
+                    }
+                    drop(lt);
+                    layer_changes.borrow_mut().insert(e, name);
+                    return Ok(());
+                }
+                // `node.tags = {"enemy", "boss"}` — replace the whole list
+                // (use node:addTag / node:removeTag for single edits).
+                "tags" => {
+                    let Value::Table(t) = &val else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.tags takes an array of strings".into(),
+                        ));
+                    };
+                    let mut tags: Vec<String> = Vec::new();
+                    for v in t.sequence_values::<String>() {
+                        let v = v?;
+                        if !tags.contains(&v) {
+                            tags.push(v);
+                        }
+                    }
+                    tag_changes.borrow_mut().insert(e, tags);
                     return Ok(());
                 }
                 // UI element text: numbers coerce (hp counters write numbers directly).
@@ -880,6 +951,61 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     Some(c) => Value::Table(new_node_handle(lua, c)?),
                     None => Value::Nil,
                 })
+            })?,
+        )?;
+    }
+    // Tags: node:hasTag("enemy") → bool; node:addTag / node:removeTag edit the
+    // list (dedup on add, no-op removes are fine). Reads see this frame's
+    // pending edits (read-your-writes), the ECS component updates after the pass.
+    {
+        let scene = shared.scene.clone();
+        let tag_changes = shared.tag_changes.clone();
+        methods.set(
+            "hasTag",
+            lua.create_function(move |_, (this, tag): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let has = tag_changes
+                    .borrow()
+                    .get(&e)
+                    .map(|t| t.contains(&tag))
+                    .unwrap_or_else(|| {
+                        scene.borrow().tags.get(&e).map(|t| t.contains(&tag)).unwrap_or(false)
+                    });
+                Ok(has)
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let tag_changes = shared.tag_changes.clone();
+        methods.set(
+            "addTag",
+            lua.create_function(move |_, (this, tag): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let mut ch = tag_changes.borrow_mut();
+                let tags = ch
+                    .entry(e)
+                    .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let scene = shared.scene.clone();
+        let tag_changes = shared.tag_changes.clone();
+        methods.set(
+            "removeTag",
+            lua.create_function(move |_, (this, tag): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let mut ch = tag_changes.borrow_mut();
+                let tags = ch
+                    .entry(e)
+                    .or_insert_with(|| scene.borrow().tags.get(&e).cloned().unwrap_or_default());
+                tags.retain(|t| t != &tag);
+                Ok(())
             })?,
         )?;
     }
@@ -1318,6 +1444,29 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {
                     arr.set(i + 1, new_script_handle(lua, *e, &kind)?)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
+    }
+    // findTagged(tag): EVERY node carrying that tag, as node handles in scene
+    // order (an empty table when none). `findTagged("enemy")[1]` for the first.
+    {
+        let scene = shared.scene.clone();
+        lua.globals().set(
+            "findTagged",
+            lua.create_function(move |lua, tag: String| {
+                let ids: Vec<u32> = {
+                    let s = scene.borrow();
+                    s.order
+                        .iter()
+                        .copied()
+                        .filter(|e| s.tags.get(e).map(|t| t.contains(&tag)).unwrap_or(false))
+                        .collect()
+                };
+                let arr = lua.create_table()?;
+                for (i, e) in ids.iter().enumerate() {
+                    arr.set(i + 1, new_node_handle(lua, *e)?)?;
                 }
                 Ok(arr)
             })?,

@@ -581,7 +581,7 @@ mod tests {
         let mut sim =
             Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), origin);
         // A 10×1×10 platform whose top face is at world y = 0.5.
-        sim.add_static_box(far, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY);
+        sim.add_static_box(far, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY, 0);
         for _ in 0..240 {
             sim.advance(&mut ecs, 1.0 / 60.0, None);
         }
@@ -601,7 +601,7 @@ mod tests {
 
         let mut sim =
             Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
-        sim.add_static_box(DVec3::ZERO, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY);
+        sim.add_static_box(DVec3::ZERO, Vec3::new(5.0, 0.5, 5.0), Quat::IDENTITY, 0);
         for _ in 0..240 {
             sim.advance(&mut ecs, 1.0 / 60.0, None);
         }

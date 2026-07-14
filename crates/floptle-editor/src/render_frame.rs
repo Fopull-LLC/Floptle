@@ -1019,6 +1019,7 @@ impl Editor {
         let preview_material = &mut self.preview_material;
         let project = &mut self.project;
         let show_project_settings = &mut self.show_project_settings;
+        let layer_new = &mut self.layer_new;
         let show_project_mgr = &mut self.show_project_mgr;
         let project_path_buf = &mut self.project_path_buf;
         let grid = &mut self.grid;
@@ -1078,6 +1079,8 @@ impl Editor {
         let mat_name_buf = &mut self.mat_name_buf;
         let component_clip = &self.component_clip;
         let add_component_filter = &mut self.add_component_filter;
+        let layer_names = project.build_layers().names;
+        let tag_edit = &mut self.tag_edit;
         let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
         let script_errors = self.script_errors.as_slice();
@@ -1595,6 +1598,8 @@ impl Editor {
                 mat_name_buf,
                 component_clip,
                 add_component_filter,
+                layer_names: &layer_names,
+                tag_edit,
                 show_material_editor,
                 asset_tree,
                 texture_settings,
@@ -1877,6 +1882,115 @@ impl Editor {
 
                     ui.add_space(8.0);
                     ui.small("Post-processing (bloom, vignette, ambient occlusion) moved to each scene's ✨ Post Processing node — select it in the Hierarchy.");
+
+                    ui.add_space(8.0);
+                    ui.label("Layers — collision & query groups");
+                    ui.separator();
+                    ui.small("nodes pick a layer in the Inspector; scripts read/write node.layer and filter raycasts by name");
+                    // "Default" is implicit (always bit 0, can't be removed) —
+                    // the rows below edit the project's CUSTOM layers.
+                    let mut remove_idx: Option<usize> = None;
+                    for i in 0..project.layers.len() {
+                        ui.horizontal(|ui| {
+                            let before = project.layers[i].clone();
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut project.layers[i])
+                                    .desired_width(150.0),
+                            );
+                            if resp.changed() {
+                                let after = project.layers[i].clone();
+                                // The rename follows through: exception pairs here,
+                                // the open scene's nodes via cmd (per keystroke, so
+                                // they never detach mid-edit). Other scene FILES
+                                // keep the old name — they warn at Play.
+                                for (a, b) in project.no_collide.iter_mut() {
+                                    if *a == before {
+                                        *a = after.clone();
+                                    }
+                                    if *b == before {
+                                        *b = after.clone();
+                                    }
+                                }
+                                cmd.rename_layer = Some((before, after));
+                                want_save_project = true;
+                            }
+                            if ui
+                                .small_button("🗑")
+                                .on_hover_text("remove this layer — nodes still naming it act as Default (and warn at Play)")
+                                .clicked()
+                            {
+                                remove_idx = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove_idx {
+                        let name = project.layers.remove(i);
+                        project.no_collide.retain(|(a, b)| *a != name && *b != name);
+                        want_save_project = true;
+                    }
+                    let resolved = project.build_layers();
+                    ui.horizontal(|ui| {
+                        let full = resolved.names.len() >= floptle_core::layers::MAX_LAYERS;
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(layer_new)
+                                .hint_text("new layer…")
+                                .desired_width(150.0),
+                        );
+                        let commit = (resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            || ui.small_button("➕").clicked();
+                        if commit && !layer_new.trim().is_empty() {
+                            let name = layer_new.trim().to_string();
+                            if !full && resolved.index_of(&name).is_none() {
+                                project.layers.push(name);
+                                want_save_project = true;
+                            }
+                            layer_new.clear();
+                        }
+                        if full {
+                            ui.small("32-layer max");
+                        }
+                    });
+                    // The collision matrix: an unchecked pair passes through each
+                    // other (bodies vs colliders AND unfiltered rays still hit
+                    // everything — rays only filter when a script asks).
+                    let resolved = project.build_layers();
+                    if resolved.names.len() > 1 {
+                        ui.add_space(4.0);
+                        ui.small("collision matrix — unchecked pairs pass through each other");
+                        egui::Grid::new("layer_matrix").spacing([4.0, 2.0]).show(ui, |ui| {
+                            ui.label("");
+                            for (j, name) in resolved.names.iter().enumerate() {
+                                ui.small(format!("{j}")).on_hover_text(name);
+                            }
+                            ui.end_row();
+                            for (i, a) in resolved.names.iter().enumerate() {
+                                ui.small(format!("{i} {a}"));
+                                for (j, b) in resolved.names.iter().enumerate() {
+                                    if j < i {
+                                        ui.label("");
+                                        continue;
+                                    }
+                                    let mut on = resolved.collides(i as u8, j as u8);
+                                    if ui
+                                        .checkbox(&mut on, "")
+                                        .on_hover_text(format!("{a} × {b}"))
+                                        .changed()
+                                    {
+                                        if on {
+                                            project.no_collide.retain(|(x, y)| {
+                                                !((x == a && y == b) || (x == b && y == a))
+                                            });
+                                        } else {
+                                            project.no_collide.push((a.clone(), b.clone()));
+                                        }
+                                        want_save_project = true;
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    }
 
                     ui.add_space(6.0);
                     ui.small("saved to assets/project.ron");
@@ -3217,7 +3331,41 @@ impl Editor {
             // restore the FRAME snapshot first, so mouse/scroll reads in
             // lateUpdate see this frame's input, not the last tick's leftovers.
             self.script_host.set_input(frame_input);
+            // Re-lend the sim's state for the late pass: the tick loop reclaimed
+            // the colliders before stepping, so without this an orbit camera's
+            // wall raycast would see NO static geometry. Hulls and body state are
+            // refreshed too — post-step, so `raycast` hits bodies where they
+            // rendered and `node.vx/grounded` reads this frame's final values.
+            if let Some(sim) = self.sim.as_mut() {
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
+                let mut states = HashMap::new();
+                for (e, vel, up, grounded, height) in sim.body_states() {
+                    states.insert(
+                        e.index(),
+                        floptle_script::BodyState {
+                            vel: [vel.x, vel.y, vel.z],
+                            up: [up.x, up.y, up.z],
+                            grounded,
+                            height,
+                        },
+                    );
+                }
+                self.script_host.set_bodies(states);
+            }
+            if let Some(sim) = self.sim.as_ref() {
+                self.script_host.set_hulls(sim.body_hulls(&self.world));
+            }
             self.script_host.run_late(&mut self.world, sdt, self.play_t);
+            if let Some(sim) = self.sim.as_mut() {
+                sim.world.colliders = self.script_host.take_colliders(); // reclaim
+                // A velocity write from lateUpdate still lands (applied next
+                // step) — but the camera pass shouldn't steer bodies; drain so
+                // nothing double-applies with next frame's `update` writes.
+                for (eid, v) in self.script_host.take_body_changes() {
+                    sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                }
+            }
             // Surface fixedUpdate errors alongside the frame pass's.
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
@@ -3755,6 +3903,36 @@ impl Editor {
                 // Clear both the new marker and any legacy mesh-collider marker.
                 self.world.remove::<floptle_core::Collidable>(e);
                 self.world.remove::<floptle_core::MeshCollider>(e);
+            }
+            self.rebuild_sim();
+        }
+        if let Some((e, layer)) = cmd.set_layer {
+            self.record();
+            if layer == floptle_core::layers::DEFAULT_LAYER {
+                self.world.remove::<floptle_core::Layer>(e);
+            } else {
+                self.world.insert(e, floptle_core::Layer(layer));
+            }
+            // Re-layer the live sim: bodies re-resolve via sync_dynamic_params,
+            // but static colliders bake their bit at build — so rebuild.
+            self.rebuild_sim();
+        }
+        if let Some((old, new)) = cmd.rename_layer {
+            // The open scene's nodes follow a Project-Settings layer rename
+            // (fires per keystroke, so they never detach mid-edit). "Default"
+            // as the new name = the component becomes redundant — drop it.
+            let on_old: Vec<Entity> = self
+                .world
+                .query::<floptle_core::Layer>()
+                .filter(|(_, l)| l.0 == old)
+                .map(|(e, _)| e)
+                .collect();
+            for e in on_old {
+                if new == floptle_core::layers::DEFAULT_LAYER {
+                    self.world.remove::<floptle_core::Layer>(e);
+                } else {
+                    self.world.insert(e, floptle_core::Layer(new.clone()));
+                }
             }
             self.rebuild_sim();
         }
