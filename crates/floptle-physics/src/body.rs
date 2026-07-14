@@ -53,6 +53,10 @@ pub struct Body {
     /// physics never fights the interpolated snapshots driving their
     /// transforms (`docs/netcode-design.md` §6). Default true.
     pub active: bool,
+    /// Collision-layer bit index (resolved from the node's named layer by
+    /// `floptle_core::Layers`). The solver only resolves this body against
+    /// colliders whose layer bit is set in `PhysicsWorld::matrix[layer]`.
+    pub layer: u8,
 }
 
 impl Body {
@@ -72,6 +76,7 @@ impl Body {
             contact: None,
             home: pos,
             active: true,
+            layer: 0,
         }
     }
 

@@ -173,6 +173,12 @@ struct EditorCmd {
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
     set_collidable: Option<(Entity, bool)>,
+    /// Put a node on a named collision/query layer ("Default" removes the
+    /// component). Rebuilds the sim mid-play so static colliders re-layer.
+    set_layer: Option<(Entity, String)>,
+    /// A project layer was renamed in Project Settings: (old, new). The open
+    /// scene's nodes follow the rename (per keystroke, so they stay in sync).
+    rename_layer: Option<(String, String)>,
     /// Change a node's "type" (its `Matter`) — geometry/camera/light/… are mutually
     /// exclusive, so picking one in "Add Component" replaces the current type.
     set_matter: Option<(Entity, Matter)>,
@@ -400,6 +406,10 @@ struct EditorTabViewer<'a> {
     component_clip: &'a Option<ComponentClip>,
     /// Search text for the Inspector's "➕ Add Component" menu.
     add_component_filter: &'a mut String,
+    /// The project's layer names ("Default" first) — the Inspector's layer picker.
+    layer_names: &'a [String],
+    /// The Inspector's "add tag" text field buffer.
+    tag_edit: &'a mut String,
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
@@ -519,6 +529,20 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     // The Scene + Game tabs are transparent so the 3D render shows through them.
     fn clear_background(&self, tab: &EditorTab) -> bool {
         !matches!(tab, EditorTab::Scene | EditorTab::Game)
+    }
+
+    // Form-style panels scroll VERTICALLY ONLY. The dock wraps tab bodies in a
+    // two-axis scroll area by default, so one over-wide row (a long script or
+    // param name) grows the content region past the visible panel — and every
+    // right-aligned control (the … component menus) then aligns to an edge
+    // that's off-screen. Vertical-only clamps rows to the panel width, so
+    // "right-aligned" always means the VISIBLE right edge and long text
+    // truncates instead of pushing controls out of view.
+    fn scroll_bars(&self, tab: &EditorTab) -> [bool; 2] {
+        match tab {
+            EditorTab::Hierarchy | EditorTab::Inspector | EditorTab::Terrain => [false, true],
+            _ => [true, true],
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut EditorTab) {
@@ -1604,6 +1628,10 @@ struct Editor {
     component_clip: Option<ComponentClip>,
     /// Search text for the Inspector's "➕ Add Component" menu.
     add_component_filter: String,
+    /// Text being typed into the Inspector's "add tag" field.
+    tag_edit: String,
+    /// Text being typed into Project Settings' "new layer" field.
+    layer_new: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
     playing: bool,
     /// The physics sim while playing (built on Play, dropped on Stop).

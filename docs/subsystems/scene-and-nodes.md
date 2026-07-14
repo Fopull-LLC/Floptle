@@ -206,3 +206,30 @@ were editing (name and all). In multiplayer only the server switches; clients
 follow via the wire protocol's scene epoch (docs/netcode-design.md §5.2b), and
 late joiners land in the session's current scene from the Welcome handshake.
 Full guide: docs/scripting.md §17.
+
+## Layers & tags (2026-07-14)
+
+Two per-node grouping primitives, live end-to-end:
+
+- **`Layer(String)`** — a named collision/query layer. The project defines up
+  to 32 (`project.ron` `layers`, "Default" implicit at bit 0) and stores the
+  collision matrix as **exceptions** (`no_collide` name pairs; default =
+  everything collides). Names resolve to bit indices once per Play through
+  `floptle_core::Layers` — scenes/scripts never touch indices, so reordering
+  the project list can't re-layer a scene, and an unknown (removed) name falls
+  back to Default with a Console warning. Physics filters body-vs-collider
+  pairs with `PhysicsWorld::matrix`; `raycast_colliders/_hulls` take the same
+  `u32` mask. Lua: `node.layer` (get/set — a typo'd write ERRORS listing the
+  project's layers), `raycast(..., { layers = {"Ground"} })`. Inspector: layer
+  picker at the top of every node; Project Settings: layer list editor +
+  matrix grid (renames follow through to the open scene per keystroke).
+- **`Tags(Vec<String>)`** — free-form identity strings on any node. Lua:
+  `node:hasTag/addTag/removeTag`, `node.tags`, `findTagged(tag)` (scene-order
+  node handles). Inspector: tag chips + adder under the node name. No physics
+  meaning — identity only.
+
+Both serialize on `NodeDoc` (`layer` by name, skipped when Default; `tags`
+skipped when empty), ride the node clipboard, and replicate with networked
+spawns (spawn docs carry them). Dynamic bodies re-resolve their layer every
+frame (`sync_dynamic_params`), so `node.layer = "Ghosts"` takes effect live;
+static colliders bake their bit at sim build (layer edits rebuild the sim).

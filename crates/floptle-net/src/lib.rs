@@ -247,6 +247,8 @@ mod tests {
             ui_layer: None,
             ui: None,
             audio: None,
+            layer: None,
+            tags: Vec::new(),
         };
         let arrow = server.spawn_doc(&mut sw, &node, Some(1));
         // Tick the empty-peers server a few times.

@@ -86,6 +86,9 @@ impl Editor {
             // out the node sits (ADR-0015); the sim re-anchors them per rebase.
             let anchor = wt.translation;
             let s = wt.scale;
+            // The node's named layer, resolved through the sim's table so the
+            // collision matrix + masked raycasts filter this collider.
+            let layer = sim.layer_for(&self.world, e);
             match self.world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     let path = asset_path.clone();
@@ -103,29 +106,69 @@ impl Editor {
                         verts.extend(part.mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))));
                         indices.extend(part.mesh.indices.iter().map(|i| i + base));
                     }
-                    sim.add_static_mesh(anchor, &verts, &indices);
+                    sim.add_static_mesh(anchor, &verts, &indices, layer);
                 }
                 // Primitive geometry → matching analytic collider, sized to match the
                 // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
-                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation);
+                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation, layer);
                     }
                     floptle_core::Shape::Plane => {
                         // Flat in Z → a thin box so you can stand on / collide with the quad.
-                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)), wt.rotation);
+                        sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.02 * s.z.max(1.0)), wt.rotation, layer);
                     }
                     floptle_core::Shape::Sphere => {
-                        sim.add_static_sphere(anchor, 0.85 * s.max_element());
+                        sim.add_static_sphere(anchor, 0.85 * s.max_element(), layer);
                     }
                     floptle_core::Shape::Capsule => {
                         let up = wt.rotation * Vec3::Y;
-                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z));
+                        sim.add_static_capsule(anchor, up, 0.5 * s.y, 0.5 * s.x.max(s.z), layer);
                     }
                 },
                 _ => {}
             }
         }
+    }
+
+    /// Build the play sim under the PROJECT'S LAYER TABLE: terrain + static
+    /// colliders carry their node's layer bit, dynamic bodies resolve theirs,
+    /// the collision matrix lands in the world, and the script host is lent
+    /// the same table (`node.layer` validation + `raycast` layer filters).
+    /// Nodes naming a layer the project no longer defines get a Console
+    /// warning (they behave as Default). The one path every sim build takes —
+    /// Play start, mid-play rebuilds, and scene switches.
+    pub(crate) fn build_play_sim(&mut self) -> floptle_physics::Sim {
+        let layers = self.project.build_layers();
+        for (e, l) in self.world.query::<floptle_core::Layer>() {
+            if layers.index_of(&l.0).is_none() {
+                let name = self
+                    .world
+                    .get::<floptle_core::Name>(e)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| format!("#{}", e.index()));
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "node '{name}' is on unknown layer '{}' — treated as Default \
+                         (define it in Project Settings → Layers)",
+                        l.0
+                    ),
+                    None,
+                );
+            }
+        }
+        let origin = self.sim_origin_hint();
+        let gravity = Self::build_gravity_field(&self.world, origin);
+        let terrain_vols = self.terrain_volumes(&layers);
+        let mut sim =
+            floptle_physics::Sim::build_layered(&self.world, &terrain_vols, gravity, origin, layers);
+        drop(terrain_vols);
+        // Add static colliders (any node flagged "Collidable", plus legacy mesh
+        // colliders) so a character can walk on / bump into them, not just terrain.
+        self.add_static_colliders(&mut sim);
+        self.script_host.set_layers(sim.layers().clone());
+        sim
     }
 
     /// Rebuild the live physics sim from the current scene. A no-op unless playing —
@@ -135,22 +178,26 @@ impl Editor {
         if !self.playing {
             return;
         }
-        let origin = self.sim_origin_hint();
-        let gravity = Self::build_gravity_field(&self.world, origin);
-        let terrain_vols = self.terrain_volumes();
-        let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
-        drop(terrain_vols);
-        self.add_static_colliders(&mut sim);
+        let sim = self.build_play_sim();
         self.sim = Some(sim);
     }
 
-    /// Every terrain volume as `(node world translation, node-local field)` — what the
-    /// sim colliders anchor on. Each volume collides at its NATIVE resolution (the
-    /// combined field is render-only), placed in full `f64` (ADR-0015).
-    pub(crate) fn terrain_volumes(&self) -> Vec<(DVec3, &floptle_field::Terrain)> {
+    /// Every terrain volume as `(node world translation, node-local field, layer bit)` —
+    /// what the sim colliders anchor on. Each volume collides at its NATIVE resolution
+    /// (the combined field is render-only), placed in full `f64` (ADR-0015).
+    pub(crate) fn terrain_volumes(
+        &self,
+        layers: &floptle_core::Layers,
+    ) -> Vec<(DVec3, &floptle_field::Terrain, u8)> {
         self.terrains
             .iter()
-            .map(|(&e, t)| (floptle_core::world_transform(&self.world, e).translation, t))
+            .map(|(&e, t)| {
+                (
+                    floptle_core::world_transform(&self.world, e).translation,
+                    t,
+                    layers.index_for(&self.world, e),
+                )
+            })
             .collect()
     }
 
@@ -259,15 +306,9 @@ impl Editor {
             self.tick_scroll = 0.0;
             // Build the physics sim from the scene: RigidBody nodes + every terrain
             // volume (its own anchored SDF collider, native resolution) + the gravity
-            // field from GravityVolume nodes.
-            let origin = self.sim_origin_hint();
-            let gravity = Self::build_gravity_field(&self.world, origin);
-            let terrain_vols = self.terrain_volumes();
-            let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
-            drop(terrain_vols);
-            // Add static colliders (any node flagged "Collidable", plus legacy mesh
-            // colliders) so a character can walk on / bump into them, not just terrain.
-            self.add_static_colliders(&mut sim);
+            // field from GravityVolume nodes + static colliders — all under the
+            // project's layer table (collision matrix + raycast filters).
+            let sim = self.build_play_sim();
             self.sim = Some(sim);
             // Start play with a clean Console so you only see this run's output.
             self.console.entries.clear();
@@ -369,12 +410,7 @@ impl Editor {
         self.grabbed = None;
         self.drag = None;
         // …and rebuild the play session against it (the same steps as Play).
-        let origin = self.sim_origin_hint();
-        let gravity = Self::build_gravity_field(&self.world, origin);
-        let terrain_vols = self.terrain_volumes();
-        let mut sim = floptle_physics::Sim::build(&self.world, &terrain_vols, gravity, origin);
-        drop(terrain_vols);
-        self.add_static_colliders(&mut sim);
+        let sim = self.build_play_sim();
         self.sim = Some(sim);
         self.vfx.start_play(&self.world);
         let root = self.project_root.clone();

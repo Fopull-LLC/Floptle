@@ -126,6 +126,8 @@ impl Editor {
         let ui_layer = self.world.get::<floptle_ui::UiLayer>(e).copied();
         let ui = self.world.get::<floptle_ui::ElementSpec>(e).cloned();
         let audio = self.world.get::<floptle_audio::AudioSource>(e).cloned();
+        let layer = self.world.get::<floptle_core::Layer>(e).map(|l| l.0.clone());
+        let tags = self.world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
         Some(NodeDoc {
             name,
             transform,
@@ -145,6 +147,8 @@ impl Editor {
             ui_layer,
             ui,
             audio,
+            layer,
+            tags,
         })
     }
 
@@ -199,6 +203,12 @@ impl Editor {
         if let Some(a) = &node.audio {
             self.world.insert(e, a.clone());
         }
+        if let Some(l) = &node.layer {
+            self.world.insert(e, floptle_core::Layer(l.clone()));
+        }
+        if !node.tags.is_empty() {
+            self.world.insert(e, floptle_core::Tags(node.tags.clone()));
+        }
         e
     }
 
@@ -229,6 +239,8 @@ impl Editor {
             ui_layer: None,
             ui: None,
             audio: None,
+            layer: None,
+            tags: Vec::new(),
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -269,6 +281,8 @@ impl Editor {
                 ui_layer: None,
                 ui: None,
                 audio: None,
+                layer: None,
+                tags: Vec::new(),
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

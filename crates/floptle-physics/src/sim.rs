@@ -31,6 +31,10 @@ pub struct Sim {
     map: Vec<BodyLink>,
     accum: f32,
     pub fixed_dt: f32,
+    /// The project's resolved layer table (names → bit indices + collision
+    /// matrix), captured at build so runtime spawns and live `node.layer`
+    /// edits resolve against the same table physics filters with.
+    layers: floptle_core::Layers,
     /// Rebase policy (ADR-0015): when the focus (active camera) drifts past the
     /// threshold, the sim's local frame recenters on it between fixed steps.
     fo: floptle_core::FloatingOrigin,
@@ -67,10 +71,27 @@ impl Sim {
         gravity: GravityField,
         origin: DVec3,
     ) -> Self {
+        let t: Vec<(DVec3, &Terrain, u8)> = terrains.iter().map(|(a, t)| (*a, *t, 0)).collect();
+        Self::build_layered(ecs, &t, gravity, origin, floptle_core::Layers::default())
+    }
+
+    /// [`Self::build`] with the project's layer table: each terrain tuple
+    /// carries its node's resolved layer bit, every `RigidBody` body resolves
+    /// its node's named layer through `layers`, and the collision matrix lands
+    /// in the physics world — so body-vs-collider pairs the project excepted
+    /// never resolve, and masked raycasts filter with the same bits.
+    pub fn build_layered(
+        ecs: &World,
+        terrains: &[(DVec3, &Terrain, u8)],
+        gravity: GravityField,
+        origin: DVec3,
+        layers: floptle_core::Layers,
+    ) -> Self {
         let mut world = PhysicsWorld::new(gravity);
         world.origin = origin.round();
-        for (anchor, t) in terrains {
-            world.add_collider_at(*anchor, Box::new(SdfTerrain { terrain: (*t).clone() }));
+        world.matrix = layers.matrix;
+        for (anchor, t, layer) in terrains {
+            world.add_collider_on(*anchor, Box::new(SdfTerrain { terrain: (*t).clone() }), *layer);
         }
         let mut map = Vec::new();
         // Collect first (immutable borrow of the ECS) then build the bodies. A `RigidBody`
@@ -83,7 +104,7 @@ impl Sim {
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
         for (e, rb) in found {
-            let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin);
+            let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
             map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
         }
         Self {
@@ -91,14 +112,27 @@ impl Sim {
             map,
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
+            layers,
             fo: floptle_core::FloatingOrigin::default(),
             tick_prev: Vec::new(),
         }
     }
 
+    /// The layer table this sim resolves named layers with (the editor uses it
+    /// to compute static colliders' layer bits with the same rules).
+    pub fn layers(&self) -> &floptle_core::Layers {
+        &self.layers
+    }
+
     /// Build one `RigidBody` entity's dynamic body (sim frame) — shared by
     /// [`Self::build`] and runtime spawns ([`Self::add_body_for`]).
-    fn body_from(ecs: &World, e: Entity, rb: &RigidBody, origin: DVec3) -> (Body, Quat) {
+    fn body_from(
+        ecs: &World,
+        e: Entity,
+        rb: &RigidBody,
+        origin: DVec3,
+        layers: &floptle_core::Layers,
+    ) -> (Body, Quat) {
         let wt = world_transform(ecs, e);
         // Sim frame: subtract the origin in f64 FIRST, then narrow — the residual
         // is small and exact no matter how far out the node sits.
@@ -117,6 +151,7 @@ impl Sim {
         b.friction = rb.friction;
         b.use_gravity = rb.gravity;
         b.lock_pos = rb.lock_pos;
+        b.layer = layers.index_for(ecs, e);
         let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
         (b, rot0)
     }
@@ -130,7 +165,7 @@ impl Sim {
             return false;
         }
         let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
-        let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin);
+        let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
         let pos = b.pos;
         let bi = self.world.add_body(b);
         self.map.push(BodyLink { entity: e, body: bi, lock_rot: rb.lock_rot, rot0 });
@@ -165,33 +200,52 @@ impl Sim {
     /// Register a static triangle-mesh collider — e.g. an imported map model the player
     /// can walk on. `anchor` is the mesh node's world translation (full `f64`); `verts`
     /// are baked RELATIVE to it, so a map placed a million units out collides exactly.
+    /// `layer` is the node's resolved collision-layer bit ([`Self::layer_for`]).
     /// Call after [`build`](Self::build).
-    pub fn add_static_mesh(&mut self, anchor: DVec3, verts: &[Vec3], indices: &[u32]) {
+    pub fn add_static_mesh(&mut self, anchor: DVec3, verts: &[Vec3], indices: &[u32], layer: u8) {
         if indices.len() >= 3 && !verts.is_empty() {
-            self.world.add_collider_at(anchor, Box::new(TriMeshCollider::new(verts, indices)));
+            self.world.add_collider_on(anchor, Box::new(TriMeshCollider::new(verts, indices)), layer);
         }
     }
 
     /// Register a static oriented-box collider (the "collidable" switch on a Cube node).
     /// `center` is the node's world translation (full `f64`).
-    pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat) {
-        self.world.add_collider_at(center, Box::new(BoxShape::new(Vec3::ZERO, half, rot)));
+    pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat, layer: u8) {
+        self.world.add_collider_on(center, Box::new(BoxShape::new(Vec3::ZERO, half, rot)), layer);
     }
 
     /// Register a static sphere collider (a collidable Sphere node).
-    pub fn add_static_sphere(&mut self, center: DVec3, radius: f32) {
-        self.world
-            .add_collider_at(center, Box::new(SphereShape { center: Vec3::ZERO, radius: radius.max(1e-3) }));
+    pub fn add_static_sphere(&mut self, center: DVec3, radius: f32, layer: u8) {
+        self.world.add_collider_on(
+            center,
+            Box::new(SphereShape { center: Vec3::ZERO, radius: radius.max(1e-3) }),
+            layer,
+        );
     }
 
     /// Register a static capsule collider (a collidable Capsule node). `up` is the capsule
     /// axis (world space); `half_height` is center-to-endcap-center; `radius` its thickness.
-    pub fn add_static_capsule(&mut self, center: DVec3, up: Vec3, half_height: f32, radius: f32) {
+    pub fn add_static_capsule(
+        &mut self,
+        center: DVec3,
+        up: Vec3,
+        half_height: f32,
+        radius: f32,
+        layer: u8,
+    ) {
         let u = up.try_normalize().unwrap_or(Vec3::Y);
-        self.world.add_collider_at(
+        self.world.add_collider_on(
             center,
             Box::new(CapsuleShape { a: -u * half_height, b: u * half_height, radius: radius.max(1e-3) }),
+            layer,
         );
+    }
+
+    /// The collision-layer bit a node resolves to under this sim's layer table
+    /// (its named `Layer` component, else Default/0) — for the editor's static
+    /// collider registration.
+    pub fn layer_for(&self, ecs: &World, e: Entity) -> u8 {
+        self.layers.index_for(ecs, e)
     }
 
     /// Cast a ray against the world's colliders (terrain + meshes) from a WORLD-space
@@ -368,7 +422,14 @@ impl Sim {
                         .map(|t| (t.translation - self.world.origin).as_vec3())
                         .unwrap_or(b.pos)
                 };
-                BodyHull { eid: l.entity.index(), pos, radius: b.radius, shape: b.shape, up: b.up }
+                BodyHull {
+                    eid: l.entity.index(),
+                    pos,
+                    radius: b.radius,
+                    shape: b.shape,
+                    up: b.up,
+                    layer: b.layer,
+                }
             })
             .collect()
     }
@@ -414,7 +475,11 @@ impl Sim {
                     self.map[i].rot0 = t.rotation;
                 }
                 self.map[i].lock_rot = rb.lock_rot;
+                // Live layer switches: `node.layer = "Ghost"` (or an Inspector
+                // edit) re-resolves against the play-start layer table.
+                let layer = self.layers.index_for(ecs, ent);
                 let b = &mut self.world.bodies[bidx];
+                b.layer = layer;
                 for a in 0..3 {
                     if rb.lock_pos[a] && !b.lock_pos[a] {
                         crate::body::set_axis(&mut b.home, a, crate::body::axis(b.pos, a));
@@ -580,6 +645,59 @@ mod runtime_body_tests {
             (rendered - server.pos).length() > 1.0,
             "render anchor must have LEFT the restored server pose"
         );
+    }
+
+    /// The collision matrix end-to-end: a "Ghosts"-layer body falls straight
+    /// through a "Walls"-layer box the project excepted, while a Default-layer
+    /// body standing on the same box stays put — and a masked ray skips the
+    /// box exactly like the solver does.
+    #[test]
+    fn excepted_layers_pass_through_each_other() {
+        let layers = floptle_core::Layers::resolve(
+            vec!["Default".into(), "Ghosts".into(), "Walls".into()],
+            &[("Ghosts".into(), "Walls".into())],
+        );
+        let mut ecs = World::default();
+        let mk = |ecs: &mut World, x: f64, layer: Option<&str>| {
+            let e = ecs.spawn();
+            ecs.insert(e, Transform::from_translation(DVec3::new(x, 5.0, 0.0)));
+            ecs.insert(e, RigidBody { gravity: true, ..Default::default() });
+            if let Some(l) = layer {
+                ecs.insert(e, floptle_core::Layer(l.to_string()));
+            }
+            e
+        };
+        let ghost = mk(&mut ecs, 0.0, Some("Ghosts"));
+        let walker = mk(&mut ecs, 1.0, None);
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            layers,
+        );
+        let wall_layer = sim.layers().index_of("Walls").unwrap();
+        sim.add_static_box(DVec3::new(0.0, 2.0, 0.0), Vec3::new(50.0, 0.5, 50.0), Quat::IDENTITY, wall_layer);
+        for _ in 0..180 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let g = sim.body_snapshot(ghost.index()).unwrap();
+        let w = sim.body_snapshot(walker.index()).unwrap();
+        assert!(g.pos.y < 0.0, "the Ghosts body must fall THROUGH the Walls box, y = {}", g.pos.y);
+        assert!((w.pos.y - 3.0).abs() < 0.1, "the Default body rests ON it, y = {}", w.pos.y);
+        // Masked raycast: exclude the Walls bit and the ray passes through too.
+        let down = Vec3::new(0.0, -1.0, 0.0);
+        let from = Vec3::new(1.0, 5.0, 0.0);
+        let all = crate::raycast_colliders(&sim.world.colliders, from, down, 20.0, !0);
+        assert!(all.is_some(), "unmasked ray hits the box");
+        let masked = crate::raycast_colliders(
+            &sim.world.colliders,
+            from,
+            down,
+            20.0,
+            !(1u32 << wall_layer),
+        );
+        assert!(masked.is_none(), "masking out Walls makes the ray pass through");
     }
 
     /// The floating-origin rebase must be INVISIBLE to rendering: a body

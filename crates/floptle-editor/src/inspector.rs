@@ -57,8 +57,11 @@ pub(crate) fn component_header(
     let mut copy = false;
     let mut paste = false;
     let mut remove = false;
+    // Right-to-left: the … menu is laid out FIRST, so it's pinned to the
+    // visible right edge no matter how long the title is — the title takes
+    // whatever is left and truncates. (Title-first would push the menu past
+    // the panel edge the moment the title outgrows the row.)
     ui.horizontal(|ui| {
-        ui.strong(title);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button("…", |ui| {
                 if ui.button("⎘  Copy values").clicked() {
@@ -79,6 +82,9 @@ pub(crate) fn component_header(
             })
             .response
             .on_hover_text("component options");
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
+            });
         });
     });
     (copy, paste, remove)
@@ -472,6 +478,86 @@ impl EditorTabViewer<'_> {
                         cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
                     });
                 }
+                // ===== Layer + tags — identity every node carries. =====
+                // Layer: the node's collision/query layer (project-defined names,
+                // Project Settings → Layers). Tags: free-form chips scripts find
+                // with `findTagged` / compare with `node:hasTag`.
+                ui.horizontal(|ui| {
+                    ui.label("layer");
+                    let cur = world
+                        .get::<floptle_core::Layer>(e)
+                        .map(|l| l.0.clone())
+                        .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string());
+                    let known = self.layer_names.contains(&cur);
+                    let shown = if known { cur.clone() } else { format!("⚠ {cur}") };
+                    egui::ComboBox::from_id_salt("node_layer")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            for name in self.layer_names {
+                                if ui.selectable_label(*name == cur, name).clicked()
+                                    && *name != cur
+                                {
+                                    cmd.set_layer = Some((e, name.clone()));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "collision/query layer — the Project Settings matrix decides \
+                             which layers collide; raycasts can filter by them",
+                        );
+                    if !known {
+                        ui.small("not in Project Settings — acts as Default")
+                            .on_hover_text("define it in Project Settings → Layers, or pick another");
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("tags");
+                    let mut remove: Option<String> = None;
+                    if let Some(tags) = world.get::<floptle_core::Tags>(e) {
+                        for t in &tags.0 {
+                            if ui
+                                .small_button(format!("{t} ✕"))
+                                .on_hover_text("remove this tag")
+                                .clicked()
+                            {
+                                remove = Some(t.clone());
+                            }
+                        }
+                    }
+                    let field = egui::TextEdit::singleline(self.tag_edit)
+                        .hint_text("add tag…")
+                        .desired_width(90.0);
+                    let resp = ui.add(field);
+                    let commit = (resp.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        || ui.small_button("➕").on_hover_text("add the tag").clicked();
+                    if commit && !self.tag_edit.trim().is_empty() {
+                        let tag = self.tag_edit.trim().to_string();
+                        self.tag_edit.clear();
+                        let tags = match world.get_mut::<floptle_core::Tags>(e) {
+                            Some(t) => t,
+                            None => {
+                                world.insert(e, floptle_core::Tags::default());
+                                world.get_mut::<floptle_core::Tags>(e).unwrap()
+                            }
+                        };
+                        if !tags.has(&tag) {
+                            tags.0.push(tag);
+                            cmd.inspector_changed = true;
+                        }
+                        resp.request_focus(); // keep typing tags
+                    }
+                    if let Some(tag) = remove
+                        && let Some(tags) = world.get_mut::<floptle_core::Tags>(e)
+                    {
+                        tags.0.retain(|t| *t != tag);
+                        if tags.0.is_empty() {
+                            world.remove::<floptle_core::Tags>(e);
+                        }
+                        cmd.inspector_changed = true;
+                    }
+                });
                 // The component clipboard (read-only); copy/paste route through `cmd`.
                 let clip = self.component_clip.as_ref();
 
@@ -1391,10 +1477,11 @@ impl EditorTabViewer<'_> {
                         }
                 }
                 if world.get::<Scripts>(e).map(|s| !s.0.is_empty()).unwrap_or(false) {
+                    // Menu first (right-to-left) so it stays pinned on-screen —
+                    // see component_header.
                     ui.horizontal(|ui| {
-                        ui.strong("⚙ Scripts");
-                        if matches!(clip, Some(ComponentClip::Script(_))) {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if matches!(clip, Some(ComponentClip::Script(_))) {
                                 ui.menu_button("…", |ui| {
                                     if ui.button("📋  Paste script").clicked() {
                                         cmd.paste_component = Some(e);
@@ -1403,8 +1490,11 @@ impl EditorTabViewer<'_> {
                                 })
                                 .response
                                 .on_hover_text("adds the copied script, or updates a matching one");
+                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.strong("⚙ Scripts");
                             });
-                        }
+                        });
                     });
                     let mut remove: Option<usize> = None;
                     let mut copy_idx: Option<usize> = None;
@@ -1450,9 +1540,11 @@ impl EditorTabViewer<'_> {
                     ui.indent("script_list", |ui| {
                         if let Some(scr) = world.get_mut::<Scripts>(e) {
                             for (i, inst) in scr.0.iter_mut().enumerate() {
+                                // Menu first (right-to-left) so a long script
+                                // name truncates instead of pushing the … menu
+                                // off-screen — see component_header.
                                 ui.horizontal(|ui| {
                                     cmd.inspector_changed |= ui.checkbox(&mut inst.enabled, "").changed();
-                                    ui.strong(&inst.kind);
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.menu_button("…", |ui| {
                                             if ui.button("⎘  Copy values").clicked() {
@@ -1473,6 +1565,17 @@ impl EditorTabViewer<'_> {
                                                 ui.close();
                                             }
                                         });
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&inst.kind).strong(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
                                     });
                                 });
                                 for (k, v) in inst.params.iter_mut() {

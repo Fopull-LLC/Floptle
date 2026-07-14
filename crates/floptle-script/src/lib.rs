@@ -176,6 +176,15 @@ pub struct ScriptHost {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.layer = "Name"` writes (entity index → validated layer name),
+    /// applied as a `Layer` component after `run` ("Default" removes it).
+    layer_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// Tag edits: entity index → the node's full new tag list, applied as a
+    /// `Tags` component after `run` (empty removes it).
+    tag_changes: Rc<RefCell<HashMap<u32, Vec<String>>>>,
+    /// The project's resolved layer table, set by the driver at Play start
+    /// ([`Self::set_layers`]) — validates layer writes, resolves raycast masks.
+    layer_table: Rc<RefCell<floptle_core::Layers>>,
     /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
     ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
@@ -395,6 +404,12 @@ struct SceneMirror {
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
+    /// Nodes with an explicit `Layer` component, by layer NAME (absent =
+    /// "Default"). Read by `node.layer`.
+    layers: HashMap<u32, String>,
+    /// Nodes' tag lists (absent = untagged). Read by `node.tags` /
+    /// `node:hasTag`, scanned by `findTagged`.
+    tags: HashMap<u32, Vec<String>>,
     /// entity → component name → (field → value): the numeric fields scripts can read via
     /// `node:getcomponent("PointLight"/"RigidBody")`. Synced each run for read-back; writes
     /// go through `Shared::component_changes` and are flushed to the ECS after `run`.
@@ -424,6 +439,16 @@ struct Shared {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.layer = "Name"` writes (entity index → layer name, pre-validated
+    /// against the project's layer table), applied as a `Layer` component.
+    layer_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// Tag edits (`node:addTag/removeTag`, `node.tags = {...}`): entity index →
+    /// the node's FULL new tag list, applied as a `Tags` component.
+    tag_changes: Rc<RefCell<HashMap<u32, Vec<String>>>>,
+    /// The project's resolved layer table (names + collision matrix), lent by
+    /// the driver at Play start — validates `node.layer` writes and resolves
+    /// `raycast`'s named-layer filters to masks.
+    layer_table: Rc<RefCell<floptle_core::Layers>>,
     /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
     ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
@@ -1701,6 +1726,58 @@ mod tests {
     }
 
     #[test]
+    fn layers_and_tags_round_trip_through_the_lua_api() {
+        // node.layer reads "Default" when unset; a valid write lands as a
+        // Layer component; tags edit read-your-writes and flush as Tags; a
+        // findTagged scan sees a PRE-EXISTING tag the same frame.
+        let dir = std::env::temp_dir().join("floptle_script_test_layers");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "layerer",
+            "function update(node, dt)\n\
+             local score = 0\n\
+             if node.layer == \"Default\" then score = score + 1 end\n\
+             node.layer = \"Enemies\"\n\
+             if node.layer == \"Enemies\" then score = score + 10 end\n\
+             node:addTag(\"boss\")\n\
+             node:addTag(\"boss\")\n\
+             if node:hasTag(\"boss\") and #node.tags == 1 then score = score + 100 end\n\
+             if #findTagged(\"marked\") == 1 then score = score + 1000 end\n\
+             local ok, err = pcall(function() node.layer = \"Typo\" end)\n\
+             if not ok then score = score + 10000 end\n\
+             node.x = score\n\
+            end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "layerer".into(), enabled: true, params: vec![], refs: Vec::new() }]),
+        );
+        let marked = world.spawn();
+        world.insert(marked, Transform::IDENTITY);
+        world.insert(marked, floptle_core::Tags(vec!["marked".into()]));
+        let mut host = ScriptHost::new();
+        host.set_layers(floptle_core::Layers::resolve(
+            vec!["Default".into(), "Enemies".into()],
+            &[],
+        ));
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 11111.0);
+        assert_eq!(
+            world.get::<floptle_core::Layer>(e).map(|l| l.0.clone()),
+            Some("Enemies".to_string())
+        );
+        assert_eq!(
+            world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()),
+            Some(vec!["boss".to_string()])
+        );
+    }
+
+    #[test]
     fn assets_api_resolves_under_project_root() {
         // assets.getFile returns the path for an existing file (nil for a missing one);
         // assets.getContents lists a directory. Encode the three results into node.x.
@@ -1736,6 +1813,7 @@ mod tests {
             radius: 0.4,
             shape: floptle_physics::BodyShape::Capsule { half_height: 0.6 },
             up: glam::Vec3::Y,
+            layer: 0,
         }
     }
 

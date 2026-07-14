@@ -19,6 +19,10 @@ pub struct AnchoredCollider {
     pub shape: Box<dyn CollisionShape>,
     /// World-space anchor of the frame `shape`'s data is expressed in.
     pub anchor: DVec3,
+    /// Collision-layer bit index (resolved from the node's named layer). Bodies
+    /// only resolve against this collider when `matrix[body.layer]` has this
+    /// bit set; masked raycasts skip it the same way.
+    pub layer: u8,
     /// Cached `(anchor − world.origin)` as f32; queries subtract it from the probe.
     offset: Vec3,
 }
@@ -27,7 +31,7 @@ impl AnchoredCollider {
     /// A collider whose data is in ABSOLUTE world coordinates (anchor = 0) — the
     /// right frame for data that's already near the world origin, and for tests.
     pub fn world(shape: Box<dyn CollisionShape>) -> Self {
-        Self { shape, anchor: DVec3::ZERO, offset: Vec3::ZERO }
+        Self { shape, anchor: DVec3::ZERO, layer: 0, offset: Vec3::ZERO }
     }
 
     /// Signed distance from sim-frame point `p` to the surface.
@@ -47,7 +51,6 @@ impl AnchoredCollider {
 /// Everything in here is **origin-relative** (ADR-0015): body positions, contact
 /// points, gravity centers and ray origins are all expressed relative to `origin`,
 /// a `f64` world point. Near the origin (the default), the two frames coincide.
-#[derive(Default)]
 pub struct PhysicsWorld {
     pub gravity: GravityField,
     pub colliders: Vec<AnchoredCollider>,
@@ -56,6 +59,24 @@ pub struct PhysicsWorld {
     pub contacts: Vec<Contact>,
     /// World-space location of the sim's local origin. `world = origin + local`.
     pub origin: DVec3,
+    /// The collision matrix: bit `j` of `matrix[i]` = a body on layer `i`
+    /// resolves against colliders on layer `j`. Defaults to all-collide
+    /// (`!0` everywhere); the sim overwrites it from the project's
+    /// `floptle_core::Layers` each Play.
+    pub matrix: [u32; 32],
+}
+
+impl Default for PhysicsWorld {
+    fn default() -> Self {
+        Self {
+            gravity: GravityField::default(),
+            colliders: Vec::new(),
+            bodies: Vec::new(),
+            contacts: Vec::new(),
+            origin: DVec3::ZERO,
+            matrix: [!0u32; 32],
+        }
+    }
 }
 
 /// A raycast result: the world hit point, the surface normal there, and the distance
@@ -73,11 +94,14 @@ pub struct RayHit {
 /// can't make the ray overshoot — at the cost of marching in ≤1-unit steps far from any
 /// surface (fine for the short rays games actually cast: ground checks, line-of-sight,
 /// shots). Range is bounded by the iteration budget (~512 units).
+/// `mask` filters by collision layer: bit `i` set = colliders on layer `i` are
+/// testable (`!0` = everything, the no-filter default).
 pub fn raycast_colliders(
     colliders: &[AnchoredCollider],
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
+    mask: u32,
 ) -> Option<RayHit> {
     let rd = dir.try_normalize()?;
     let mut t = 0.0f32;
@@ -89,6 +113,9 @@ pub fn raycast_colliders(
         let mut dmin = f32::MAX;
         let mut hit = 0usize;
         for (i, c) in colliders.iter().enumerate() {
+            if (mask >> c.layer) & 1 == 0 {
+                continue;
+            }
             let d = c.distance(p);
             if d < dmin {
                 dmin = d;
@@ -123,6 +150,9 @@ pub struct BodyHull {
     pub shape: BodyShape,
     /// Capsule axis (kept along −gravity by the solver).
     pub up: Vec3,
+    /// The body's collision-layer bit index, so masked raycasts filter dynamic
+    /// bodies with the same bits as static geometry.
+    pub layer: u8,
 }
 
 impl BodyHull {
@@ -163,14 +193,16 @@ impl BodyHull {
 /// `max_dist` as `(entity index, hit)`, or None. `exclude` lists entities the
 /// ray passes through — the caster's own body (a swing traced from a
 /// character's center must not hit the character), plus any explicit ignores
-/// (a camera ray skipping the character it orbits). Hull distances are exact
-/// analytic SDFs, so the march takes full-distance steps.
+/// (a camera ray skipping the character it orbits). `mask` filters by collision
+/// layer, same bits as [`raycast_colliders`] (`!0` = everything). Hull
+/// distances are exact analytic SDFs, so the march takes full-distance steps.
 pub fn raycast_hulls(
     hulls: &[BodyHull],
     origin: Vec3,
     dir: Vec3,
     max_dist: f32,
     exclude: &[u32],
+    mask: u32,
 ) -> Option<(u32, RayHit)> {
     let rd = dir.try_normalize()?;
     let mut t = 0.0f32;
@@ -182,7 +214,7 @@ pub fn raycast_hulls(
         let mut dmin = f32::MAX;
         let mut hit: Option<&BodyHull> = None;
         for h in hulls {
-            if exclude.contains(&h.eid) {
+            if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
                 continue;
             }
             let d = h.distance(p);
@@ -217,8 +249,18 @@ impl PhysicsWorld {
     /// full `f64`). Bake geometry near ITS OWN anchor and pass the anchor here —
     /// that's what keeps collision exact for content placed far from the world origin.
     pub fn add_collider_at(&mut self, anchor: DVec3, shape: Box<dyn CollisionShape>) -> usize {
+        self.add_collider_on(anchor, shape, 0)
+    }
+
+    /// [`Self::add_collider_at`], on a specific collision layer (bit index).
+    pub fn add_collider_on(
+        &mut self,
+        anchor: DVec3,
+        shape: Box<dyn CollisionShape>,
+        layer: u8,
+    ) -> usize {
         let offset = (anchor - self.origin).as_vec3();
-        self.colliders.push(AnchoredCollider { shape, anchor, offset });
+        self.colliders.push(AnchoredCollider { shape, anchor, layer, offset });
         self.colliders.len() - 1
     }
 
@@ -254,7 +296,7 @@ impl PhysicsWorld {
     /// Cast a ray against every collider; the first surface hit within `max_dist`, else
     /// None. See [`raycast_colliders`].
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RayHit> {
-        raycast_colliders(&self.colliders, origin, dir, max_dist)
+        raycast_colliders(&self.colliders, origin, dir, max_dist, !0)
     }
 
     pub fn add_body(&mut self, body: Body) -> usize {
@@ -303,9 +345,15 @@ impl PhysicsWorld {
             self.bodies[bi].contact = None;
 
             // Resolve penetration against every collider (relaxation passes), sampling
-            // each of the body's collision spheres (2 for a capsule).
+            // each of the body's collision spheres (2 for a capsule). The collision
+            // matrix filters pairs: a body on layer i skips colliders whose layer bit
+            // isn't set in matrix[i] (all-collide by default).
+            let row = self.matrix[self.bodies[bi].layer as usize];
             for _ in 0..2 {
                 for ci in 0..self.colliders.len() {
+                    if (row >> self.colliders[ci].layer) & 1 == 0 {
+                        continue;
+                    }
                     let (centers, n_c, radius) = self.bodies[bi].sample_centers();
                     for &c in &centers[..n_c] {
                         let pen = radius - self.colliders[ci].distance(c);
@@ -391,6 +439,7 @@ mod hull_tests {
             radius: 0.4,
             shape: BodyShape::Capsule { half_height: 0.6 },
             up: Vec3::Y,
+            layer: 0,
         }
     }
 
@@ -398,7 +447,7 @@ mod hull_tests {
     fn ray_hits_the_nearest_hull_and_identifies_it() {
         let hulls = [capsule_at(7, 5.0), capsule_at(9, 10.0)];
         let (eid, hit) =
-            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[]).expect("hit");
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[], !0).expect("hit");
         assert_eq!(eid, 7, "the nearer capsule wins");
         assert!((hit.distance - 4.6).abs() < 0.05, "surface at x = 5 − 0.4, got {}", hit.distance);
         assert!(hit.normal[0] < -0.9, "normal faces the ray");
@@ -408,14 +457,30 @@ mod hull_tests {
     fn exclusion_skips_the_caster_own_body() {
         // The ray STARTS INSIDE hull 7 (a swing from the character's center).
         let hulls = [capsule_at(7, 0.0), capsule_at(9, 10.0)];
-        let (eid, _) = raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[7])
+        let (eid, _) = raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[7], !0)
             .expect("must hit the other hull");
         assert_eq!(eid, 9);
         // Without exclusion it self-hits immediately.
         let (eid, hit) =
-            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[]).unwrap();
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[], !0).unwrap();
         assert_eq!(eid, 7);
         assert_eq!(hit.distance, 0.0);
+    }
+
+    #[test]
+    fn layer_mask_filters_hulls_like_exclusion() {
+        // Hull 7 sits on layer 2; a mask without bit 2 rays straight through it.
+        let mut near = capsule_at(7, 5.0);
+        near.layer = 2;
+        let hulls = [near, capsule_at(9, 10.0)];
+        let (eid, _) =
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[], !(1 << 2))
+                .expect("must hit the layer-0 hull behind");
+        assert_eq!(eid, 9);
+        // With the bit set, the nearer hull wins again.
+        let (eid, _) =
+            raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 50.0, &[], !0).unwrap();
+        assert_eq!(eid, 7);
     }
 
     #[test]
@@ -432,7 +497,7 @@ mod hull_tests {
     #[test]
     fn ray_misses_within_range_returns_none() {
         let hulls = [capsule_at(1, 5.0)];
-        assert!(raycast_hulls(&hulls, Vec3::ZERO, Vec3::Y, 100.0, &[]).is_none());
-        assert!(raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 2.0, &[]).is_none());
+        assert!(raycast_hulls(&hulls, Vec3::ZERO, Vec3::Y, 100.0, &[], !0).is_none());
+        assert!(raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 2.0, &[], !0).is_none());
     }
 }

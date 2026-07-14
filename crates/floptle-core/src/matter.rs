@@ -8,6 +8,30 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name(pub String);
 
+/// The named collision/query **layer** a node is on. Layers are project-defined
+/// (Project Settings, up to 32) and referenced BY NAME everywhere — scene files,
+/// scripts (`node.layer`), the Inspector — so reordering the project's layer
+/// list never silently re-layers a scene. A node with no `Layer` component is
+/// on `"Default"`. Resolved to a bit index once per Play by
+/// [`crate::layers::Layers`]; physics filters contacts through the project's
+/// collision matrix and raycasts filter with the same bits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layer(pub String);
+
+/// Free-form string **tags** on a node — mark it `"enemy"`, `"checkpoint"`,
+/// `"breakable"` and find/compare cheaply from scripts (`node:hasTag`,
+/// `findTagged`). A node holds any number of tags (no single-tag straitjacket);
+/// order is authoring order, duplicates are rejected on add.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tags(pub Vec<String>);
+
+impl Tags {
+    /// Whether the exact tag is present (case-sensitive).
+    pub fn has(&self, tag: &str) -> bool {
+        self.0.iter().any(|t| t == tag)
+    }
+}
+
 /// A scene-graph parent link: this entity's [`Transform`](crate::transform::Transform)
 /// is **local** (relative to the parent), and its world transform is the parent's
 /// world transform composed with it. Moving/rotating/scaling a parent therefore

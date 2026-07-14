@@ -47,6 +47,11 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field layer string Collision/query layer, by project-defined NAME (\"Default\" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
+---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
+---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
+---@field addTag fun(self: Node, tag: string) Add a tag (duplicates are ignored).
+---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
@@ -406,7 +411,10 @@ function input.clicked(i) end
 ---handle (nil for static geometry), so `hit.node:getscript(\"combat\")` works.
 ---Your OWN node's body is excluded (a ray from your center never hits you);
 ---pass another node as `ignore` to skip its body too (e.g. an orbit camera
----ignoring the character it follows).
+---ignoring the character it follows). The last arg can instead be an OPTIONS
+---table: `raycast(x,y,z, dx,dy,dz, max, { ignore = target, layers = {\"Ground\"} })`
+---— `layers` (a name or an array of names, Project Settings → Layers) filters
+---BOTH static geometry and bodies; a misspelled layer name is an error.
 ---@param ox number
 ---@param oy number
 ---@param oz number
@@ -414,7 +422,7 @@ function input.clicked(i) end
 ---@param dy number
 ---@param dz number
 ---@param max number
----@param ignore Node|nil A node whose body the ray passes through.
+---@param ignore Node|{ ignore: Node|nil, layers: string|string[]|nil }|nil A node whose body the ray passes through, or an options table.
 ---@return { x: number, y: number, z: number, nx: number, ny: number, nz: number, distance: number, node: Node|nil }|nil
 function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 
@@ -424,6 +432,13 @@ function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 ---@param kind string
 ---@return table[]
 function findScripts(kind) end
+
+---EVERY node carrying tag `tag` (Inspector \"tags\" chips / node:addTag), as
+---node handles in scene order — an empty table when none.
+---`findTagged(\"enemy\")[1]` grabs the first.
+---@param tag string
+---@return Node[]
+function findTagged(tag) end
 
 ---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
 ---viewport, Scene AND Game views. Call every frame you want a shape visible.
@@ -497,15 +512,15 @@ function scene.list() end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"scene\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
 ];
 
 /// Write the Lua language-server support files into a project (annotations always

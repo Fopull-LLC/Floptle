@@ -242,22 +242,33 @@ impl ScriptHost {
         let hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>> =
             Rc::new(RefCell::new(Vec::new()));
         let sim_origin: Rc<RefCell<glam::DVec3>> = Rc::new(RefCell::new(glam::DVec3::ZERO));
+        // The project's layer table (names → bits + collision matrix), lent by
+        // the driver at Play start — shared with the raycast closure (named
+        // layer filters) and the node handles (`node.layer` validation).
+        let layer_table: Rc<RefCell<floptle_core::Layers>> =
+            Rc::new(RefCell::new(floptle_core::Layers::default()));
         {
             let cols = colliders.clone();
             let hus = hulls.clone();
             let so = sim_origin.clone();
             let cur = net.current.clone();
+            let lt = layer_table.clone();
             type Args = (f64, f64, f64, f64, f64, f64, f64, Option<Value>);
             if let Ok(f) = lua.create_function(move |lua,
                 (ox, oy, oz, dx, dy, dz, max, ignore): Args| {
                 let origin = *so.borrow();
                 let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
                 let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
-                let solid = floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32);
                 // Bodies the ray passes through: the caster's own, plus an
                 // optional explicit ignore (a node handle or entity id) — e.g.
-                // an orbit camera skipping the character it follows.
+                // an orbit camera skipping the character it follows. The 8th
+                // arg is either that ignore directly, or an OPTIONS table:
+                // `{ ignore = node, layers = "Ground" | {"Ground", "Props"} }`
+                // — `layers` filters BOTH static geometry and body hulls by
+                // the project's named layers (a misspelled name is an error,
+                // not a silent everything-misses).
                 let mut exclude: Vec<u32> = Vec::with_capacity(2);
+                let mut mask = !0u32;
                 if let Some((eid, _)) = cur.borrow().as_ref() {
                     exclude.push(*eid);
                 }
@@ -265,14 +276,51 @@ impl ScriptHost {
                     Some(Value::Table(t)) => {
                         if let Ok(eid) = t.raw_get::<u32>("__id") {
                             exclude.push(eid);
+                        } else {
+                            // No __id → an options table.
+                            if let Ok(ig) = t.get::<Table>("ignore")
+                                && let Ok(eid) = ig.raw_get::<u32>("__id")
+                            {
+                                exclude.push(eid);
+                            }
+                            let names: Vec<String> = match t.get::<Value>("layers") {
+                                Ok(Value::String(s)) => vec![s.to_string_lossy().to_string()],
+                                Ok(Value::Table(list)) => {
+                                    list.sequence_values::<String>().flatten().collect()
+                                }
+                                _ => Vec::new(),
+                            };
+                            if !names.is_empty() {
+                                let lt = lt.borrow();
+                                mask = 0;
+                                for n in &names {
+                                    match lt.index_of(n) {
+                                        Some(i) => mask |= 1u32 << i,
+                                        None => {
+                                            return Err(mlua::Error::RuntimeError(format!(
+                                                "raycast: no layer named '{n}' (project layers: {})",
+                                                lt.names.join(", ")
+                                            )))
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Some(Value::Integer(id)) => exclude.push(*id as u32),
                     Some(Value::Number(id)) => exclude.push(*id as u32),
                     _ => {}
                 }
-                let body =
-                    floptle_physics::raycast_hulls(&hus.borrow(), o, dir, max as f32, &exclude);
+                let solid =
+                    floptle_physics::raycast_colliders(&cols.borrow(), o, dir, max as f32, mask);
+                let body = floptle_physics::raycast_hulls(
+                    &hus.borrow(),
+                    o,
+                    dir,
+                    max as f32,
+                    &exclude,
+                    mask,
+                );
                 // Nearest surface wins between static geometry and body hulls.
                 let (h, eid) = match (solid, body) {
                     (Some(s), Some((be, b))) if b.distance < s.distance => (b, Some(be)),
@@ -521,6 +569,9 @@ impl ScriptHost {
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
+            layer_changes: Rc::new(RefCell::new(HashMap::new())),
+            tag_changes: Rc::new(RefCell::new(HashMap::new())),
+            layer_table: layer_table.clone(),
             ui_text_changes: Rc::new(RefCell::new(HashMap::new())),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
@@ -569,6 +620,9 @@ impl ScriptHost {
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
+            layer_changes: shared.layer_changes.clone(),
+            tag_changes: shared.tag_changes.clone(),
+            layer_table,
             ui_text_changes: shared.ui_text_changes.clone(),
             component_changes: shared.component_changes.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
@@ -931,6 +985,13 @@ impl ScriptHost {
         *self.input.borrow_mut() = snapshot;
     }
 
+    /// Lend the project's resolved layer table (call at Play start, alongside
+    /// the sim build). Validates `node.layer` writes and resolves the named
+    /// `layers` filter in `raycast(...)` to a bitmask.
+    pub fn set_layers(&self, layers: floptle_core::Layers) {
+        *self.layer_table.borrow_mut() = layers;
+    }
+
     /// Feed the physics body state (entity index → vel + grounded) for the frame, so
     /// scripts can read `node.vx/vy/vz/grounded`. Call before [`run`](Self::run).
     pub fn set_bodies(&self, map: HashMap<u32, BodyState>) {
@@ -1219,6 +1280,27 @@ impl ScriptHost {
                     world.insert(ent, Visible(*shown));
                 }
             }
+            // `node.layer = ...` (pre-validated): "Default" removes the
+            // component (absence IS Default — keeps scene files clean).
+            for (eid, layer) in self.layer_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if layer == floptle_core::layers::DEFAULT_LAYER {
+                        world.remove::<floptle_core::Layer>(ent);
+                    } else {
+                        world.insert(ent, floptle_core::Layer(layer.clone()));
+                    }
+                }
+            }
+            // Tag edits: the handle computed the node's full new list.
+            for (eid, tags) in self.tag_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if tags.is_empty() {
+                        world.remove::<floptle_core::Tags>(ent);
+                    } else {
+                        world.insert(ent, floptle_core::Tags(tags.clone()));
+                    }
+                }
+            }
             // `node.text = ...`: write the UI element's label (creating the text
             // spec if the element doesn't have one yet).
             for (eid, txt) in self.ui_text_changes.borrow().iter() {
@@ -1237,6 +1319,8 @@ impl ScriptHost {
         }
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
+        self.layer_changes.borrow_mut().clear();
+        self.tag_changes.borrow_mut().clear();
         self.ui_text_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
     }
@@ -1296,6 +1380,8 @@ impl ScriptHost {
         s.dirty.clear();
         s.models.clear();
         s.visible.clear();
+        s.layers.clear();
+        s.tags.clear();
         s.components.clear();
         s.ui_texts.clear();
         for (e, tr) in world.query::<Transform>() {
@@ -1318,6 +1404,12 @@ impl ScriptHost {
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
+            }
+            if let Some(l) = world.get::<floptle_core::Layer>(e) {
+                s.layers.insert(id, l.0.clone());
+            }
+            if let Some(t) = world.get::<floptle_core::Tags>(e) {
+                s.tags.insert(id, t.0.clone());
             }
             if let Some(n) = world.get::<floptle_core::Name>(e) {
                 s.names.insert(id, n.0.clone());

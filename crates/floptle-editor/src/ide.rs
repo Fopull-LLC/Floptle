@@ -2113,7 +2113,8 @@ pub(crate) const LUA_KEYWORDS: &[&str] = &[
 pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
-    "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "assets", "gizmo",
+    "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "findTagged",
+    "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio",
 ];
 
@@ -2164,7 +2165,7 @@ fn api_category(label: &str) -> &'static str {
         "animation — node:animator"
     } else if label.starts_with("math") || label.starts_with("string") {
         "lua stdlib"
-    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "findScripts" | "raycast") {
+    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "findScripts" | "findTagged" | "raycast") {
         "scene lookups & raycast"
     } else {
         "script basics — lifecycle, params, log"
@@ -2244,7 +2245,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — pin the cursor to the window center and hide it (FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
     ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
     ApiEntry { label: "input.setMouseLocked", insert: "input.setMouseLocked(", doc: "input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle)." },
-    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max [, ignore]) — cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. Use for ground checks, line-of-sight, shooting." },
+    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max [, ignore]) — cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {\"Ground\"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting." },
     ApiEntry { label: "gizmo", insert: "gizmo", doc: "Immediate-mode debug drawing (play mode): gizmo.line/ray/sphere/point show for ONE frame in the Scene view (never the Game view; the viewport gizmos toggle hides them). Call every frame you want a shape visible." },
     ApiEntry { label: "gizmo.line", insert: "gizmo.line(", doc: "gizmo.line(x1,y1,z1, x2,y2,z2 [, r,g,b]) — a world-space debug line for one frame. Color is 0–1 floats (default green)." },
     ApiEntry { label: "gizmo.ray", insert: "gizmo.ray(", doc: "gizmo.ray(ox,oy,oz, dx,dy,dz [, len [, r,g,b]]) — a debug ray: origin + direction. With `len` the direction is normalized and the ray is that long — mirrors raycast(...), perfect for visualizing ground checks / line-of-sight." },
@@ -2261,6 +2262,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "findScript", insert: "findScript(", doc: "findScript(\"GameManager\") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state." },
     ApiEntry { label: "findScriptInScene", insert: "findScriptInScene(", doc: "Alias of findScript(kind)." },
     ApiEntry { label: "findScripts", insert: "findScripts(", doc: "findScripts(kind) — EVERY node carrying that script, as script handles in scene order. Pair with net.isMine to pick the local player out of many avatars: for _, s in ipairs(findScripts(\"third_person\")) do if net.isMine(s.node) then ... end end" },
+    ApiEntry { label: "findTagged", insert: "findTagged(", doc: "findTagged(\"enemy\") — EVERY node carrying that tag (Inspector tag chips / node:addTag), as node handles in scene order. Empty table when none; findTagged(\"enemy\")[1] grabs the first." },
+    ApiEntry { label: "node.layer", insert: "node.layer", doc: "The node's collision/query layer, by project-defined NAME (\"Default\" when unset). Assign to move it (node.layer = \"Ghosts\") — a name the project doesn't define is an ERROR, so typos surface immediately. The Project Settings matrix decides which layers collide; a dynamic body re-layers live." },
+    ApiEntry { label: "node.tags", insert: "node.tags", doc: "The node's tags as an array of strings (a fresh table each read). Assign a whole array to replace the list; use node:addTag / node:removeTag for single edits and node:hasTag to test." },
+    ApiEntry { label: "node:hasTag", insert: "node:hasTag(", doc: "node:hasTag(\"enemy\") — whether the node carries that exact tag. The classic hit-filter: local hit = raycast(...) if hit and hit.node and hit.node:hasTag(\"enemy\") then ... end" },
+    ApiEntry { label: "node:addTag", insert: "node:addTag(", doc: "node:addTag(\"burning\") — add a tag at runtime (duplicates are ignored). findTagged sees it next frame." },
+    ApiEntry { label: "node:removeTag", insert: "node:removeTag(", doc: "node:removeTag(\"burning\") — remove a tag (no-op when absent)." },
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
@@ -2513,6 +2520,34 @@ from the dropdown, or DRAG a node from the Hierarchy onto the slot):
     itself is O(1) now — a hash index — but wiring beats typing names.)
 Components you can reference: RigidBody, PointLight, Camera, ParticleSystem,
 UiElement, UiSlider, UiLayer.",
+    ),
+    (
+        "Layers & tags — group, filter, find",
+        "\
+LAYERS group nodes for physics + queries. Define them in Project Settings →
+Layers (up to 32, referenced by NAME everywhere); pick a node's layer in the
+Inspector. The collision matrix there decides which layers collide — uncheck
+Ghosts × Walls and ghost bodies walk straight through wall colliders.
+
+  • node.layer                       the layer name (\"Default\" when unset)
+  • node.layer = \"Ghosts\"            move it (typos ERROR — never silent)
+  • raycast(x,y,z, dx,dy,dz, max,
+      { layers = {\"Ground\"} })      the ray only hits those layers
+      { ignore = target, layers = \"Walls\" }   combine with an ignore
+
+TAGS are free-form strings on any node (Inspector \"tags\" chips) — mark things
+\"enemy\", \"checkpoint\", \"breakable\" and find/compare them cheaply:
+
+  • node:hasTag(\"enemy\")            true/false — the classic raycast filter:
+      local hit = raycast(...)
+      if hit and hit.node and hit.node:hasTag(\"enemy\") then ... end
+  • node:addTag / node:removeTag    edit at runtime (dedup / no-op safe)
+  • node.tags                       the full list (assign an array to replace)
+  • findTagged(\"enemy\")             EVERY tagged node, scene order
+
+Layers answer \"what can touch/see what\" (fast bitmask filters in physics);
+tags answer \"what IS this thing\" (identity checks + lookups). Both save with
+the scene and replicate with spawned nodes in multiplayer.",
     ),
     (
         "Game UI from scripts — text, sliders, buttons",
