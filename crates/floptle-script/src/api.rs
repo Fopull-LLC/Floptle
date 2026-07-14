@@ -444,6 +444,26 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
+            // `node.pos` — the position as a vec3 value. The script's OWN node
+            // table carries live raw x/y/z (possibly written earlier this
+            // hook), so prefer those; cross-node handles read the mirror.
+            if key == "pos" {
+                if let (Ok(x), Ok(y), Ok(z)) = (
+                    this.raw_get::<f64>("x"),
+                    this.raw_get::<f64>("y"),
+                    this.raw_get::<f64>("z"),
+                ) {
+                    return Ok(Value::UserData(lua.create_userdata(
+                        crate::math_api::LuaVec3(glam::DVec3::new(x, y, z)),
+                    )?));
+                }
+                if let Some(tr) = scene.borrow().transforms.get(&e) {
+                    return Ok(Value::UserData(
+                        lua.create_userdata(crate::math_api::LuaVec3(tr.translation))?,
+                    ));
+                }
+                return Ok(Value::Nil);
+            }
             // Transform reads.
             {
                 let s = scene.borrow();
@@ -602,6 +622,29 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let ui_text_changes = shared.ui_text_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
+            // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
+            // table writes its live raw fields (the normal read-back path);
+            // cross-node handles write the mirror.
+            if key == "pos" {
+                let Some(v) = crate::math_api::vec3_of(&val) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node.pos takes a vec3 (or anything with x/y/z)".into(),
+                    ));
+                };
+                let own = this.raw_get::<f64>("x").is_ok();
+                if own {
+                    this.raw_set("x", v.x)?;
+                    this.raw_set("y", v.y)?;
+                    this.raw_set("z", v.z)?;
+                } else {
+                    let mut s = scene.borrow_mut();
+                    if let Some(tr) = s.transforms.get_mut(&e) {
+                        tr.translation = v;
+                        s.dirty.insert(e);
+                    }
+                }
+                return Ok(());
+            }
             // Transform writes.
             {
                 let mut s = scene.borrow_mut();

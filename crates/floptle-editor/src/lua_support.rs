@@ -47,6 +47,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
 ---@field layer string Collision/query layer, by project-defined NAME (\"Default\" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
 ---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
 ---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
@@ -440,6 +441,101 @@ function findScripts(kind) end
 ---@return Node[]
 function findTagged(tag) end
 
+---A 3-component vector value with real operators: `a + b`, `a - b`, `v * 2`,
+---`v / 2`, `-v`, `a == b`. Anything that ACCEPTS a vector also accepts a plain
+---{x=, y=, z=} table or a node handle.
+---@class Vec3
+---@field x number
+---@field y number
+---@field z number
+---@field length fun(self: Vec3): number
+---@field lengthSquared fun(self: Vec3): number
+---@field normalized fun(self: Vec3): Vec3 Unit-length copy (zero stays zero).
+---@field dot fun(self: Vec3, other: Vec3): number
+---@field cross fun(self: Vec3, other: Vec3): Vec3
+---@field lerp fun(self: Vec3, other: Vec3, t: number): Vec3
+---@field distance fun(self: Vec3, other: Vec3): number
+
+---A 2-component vector (UI/screen math) — same operators as Vec3.
+---@class Vec2
+---@field x number
+---@field y number
+---@field length fun(self: Vec2): number
+---@field lengthSquared fun(self: Vec2): number
+---@field normalized fun(self: Vec2): Vec2
+---@field dot fun(self: Vec2, other: Vec2): number
+---@field lerp fun(self: Vec2, other: Vec2, t: number): Vec2
+---@field distance fun(self: Vec2, other: Vec2): number
+
+---Make a vec3: `vec3()` = zero, `vec3(s)` = splat, `vec3(x, y, z)`, or
+---`vec3(other)` = copy (also from a {x=,y=,z=} table or node).
+---@param x number|Vec3|Node|nil
+---@param y number|nil
+---@param z number|nil
+---@return Vec3
+function vec3(x, y, z) end
+
+---Make a vec2: `vec2()` = zero, `vec2(s)` = splat, `vec2(x, y)`.
+---@param x number|Vec2|nil
+---@param y number|nil
+---@return Vec2
+function vec2(x, y) end
+
+---Distance between two points: vectors, {x=,y=,z=} tables, or NODE handles —
+---`distance(node, target)` just works. Also `distance(x1,y1,z1, x2,y2,z2)`.
+---@param a Vec3|Vec2|Node|number
+---@param b Vec3|Vec2|Node|number|nil
+---@return number
+function distance(a, b, ...) end
+
+---The contact info passed to collision/trigger hooks: world point + normal.
+---@class Hit
+---@field x number Contact point X (world).
+---@field y number Contact point Y (world).
+---@field z number Contact point Z (world).
+---@field nx number Contact normal X (unit, out of the hit surface).
+---@field ny number Contact normal Y.
+---@field nz number Contact normal Z.
+
+---Fires the tick two nodes START touching (this node's body vs a solid
+---collider, or vs another body). `other` is the other node's handle.
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onCollisionEnter(node, other, hit) end
+
+---Fires every tick while the touch lasts (resting on the ground reports its
+---floor node every tick — gate on `other:hasTag(...)` etc.).
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onCollisionStay(node, other, hit) end
+
+---Fires the tick the pair separates (hit = the last known contact).
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onCollisionExit(node, other, hit) end
+
+---Fires the tick a body ENTERS a trigger (a Collider with the \"trigger\"
+---switch on: no blocking, events only — portals, pickup zones, checkpoints).
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onTriggerEnter(node, other, hit) end
+
+---Fires every tick a body stays inside the trigger.
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onTriggerStay(node, other, hit) end
+
+---Fires the tick a body LEAVES the trigger.
+---@param node Node
+---@param other Node
+---@param hit Hit
+function onTriggerExit(node, other, hit) end
+
 ---Immediate-mode debug drawing (play mode): shapes show for ONE frame in the
 ---viewport, Scene AND Game views. Call every frame you want a shape visible.
 ---Colors are optional 0-1 floats (default green).
@@ -512,15 +608,15 @@ function scene.list() end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
 ];
 
 /// Write the Lua language-server support files into a project (annotations always

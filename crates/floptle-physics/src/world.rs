@@ -23,6 +23,12 @@ pub struct AnchoredCollider {
     /// only resolve against this collider when `matrix[body.layer]` has this
     /// bit set; masked raycasts skip it the same way.
     pub layer: u8,
+    /// The ECS entity index of the node this collider came from (`None` for
+    /// anonymous test colliders) — what collision events name as the "other".
+    pub eid: Option<u32>,
+    /// A trigger: the solver never pushes bodies out of it (they pass
+    /// through), but overlap still reports touch events (`onTriggerEnter`…).
+    pub sensor: bool,
     /// Cached `(anchor − world.origin)` as f32; queries subtract it from the probe.
     offset: Vec3,
 }
@@ -31,7 +37,7 @@ impl AnchoredCollider {
     /// A collider whose data is in ABSOLUTE world coordinates (anchor = 0) — the
     /// right frame for data that's already near the world origin, and for tests.
     pub fn world(shape: Box<dyn CollisionShape>) -> Self {
-        Self { shape, anchor: DVec3::ZERO, layer: 0, offset: Vec3::ZERO }
+        Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, offset: Vec3::ZERO }
     }
 
     /// Signed distance from sim-frame point `p` to the surface.
@@ -113,7 +119,9 @@ pub fn raycast_colliders(
         let mut dmin = f32::MAX;
         let mut hit = 0usize;
         for (i, c) in colliders.iter().enumerate() {
-            if (mask >> c.layer) & 1 == 0 {
+            // Sensors don't block rays either (a camera ray must pass through
+            // a portal trigger exactly like the player does).
+            if (mask >> c.layer) & 1 == 0 || c.sensor {
                 continue;
             }
             let d = c.distance(p);
@@ -259,8 +267,21 @@ impl PhysicsWorld {
         shape: Box<dyn CollisionShape>,
         layer: u8,
     ) -> usize {
+        self.add_collider_tagged(anchor, shape, layer, None, false)
+    }
+
+    /// The full-fat registration: layer bit + source entity (what collision
+    /// events name) + the sensor flag (a trigger — events without blocking).
+    pub fn add_collider_tagged(
+        &mut self,
+        anchor: DVec3,
+        shape: Box<dyn CollisionShape>,
+        layer: u8,
+        eid: Option<u32>,
+        sensor: bool,
+    ) -> usize {
         let offset = (anchor - self.origin).as_vec3();
-        self.colliders.push(AnchoredCollider { shape, anchor, layer, offset });
+        self.colliders.push(AnchoredCollider { shape, anchor, layer, eid, sensor, offset });
         self.colliders.len() - 1
     }
 
@@ -354,6 +375,11 @@ impl PhysicsWorld {
                     if (row >> self.colliders[ci].layer) & 1 == 0 {
                         continue;
                     }
+                    // Sensors never block — overlap is detected separately
+                    // (touch events), the body passes straight through.
+                    if self.colliders[ci].sensor {
+                        continue;
+                    }
                     let (centers, n_c, radius) = self.bodies[bi].sample_centers();
                     for &c in &centers[..n_c] {
                         let pen = radius - self.colliders[ci].distance(c);
@@ -380,7 +406,12 @@ impl PhysicsWorld {
                         if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
                             self.bodies[bi].grounded = true;
                         }
-                        self.contacts.push(Contact { body: bi, point: c - n * radius, normal: n });
+                        self.contacts.push(Contact {
+                            body: bi,
+                            collider: ci,
+                            point: c - n * radius,
+                            normal: n,
+                        });
                     }
                 }
             }

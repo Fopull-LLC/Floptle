@@ -89,7 +89,7 @@ use viz::*;
 /// current solved design size).
 pub(crate) type UiResize = (u32, [f32; 2], [bool; 2], [f32; 2]);
 /// A script's declared defaults: (numeric params, reference params + kinds).
-pub(crate) type ScriptDefaults = (Vec<(String, f32)>, Vec<(String, floptle_script::RefKind)>);
+pub(crate) type ScriptDefaults = floptle_script::ScriptDefaults;
 
 #[derive(Default)]
 struct EditorCmd {
@@ -173,6 +173,8 @@ struct EditorCmd {
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
     set_collidable: Option<(Entity, bool)>,
+    /// Toggle the Trigger flag on a Collidable (sensor: events, no blocking).
+    set_trigger: Option<(Entity, bool)>,
     /// Put a node on a named collision/query layer ("Default" removes the
     /// component). Rebuilds the sim mid-play so static colliders re-layer.
     set_layer: Option<(Entity, String)>,
@@ -1593,6 +1595,9 @@ struct Editor {
     history: History,
     /// Copied nodes (Ctrl+C), re-spawned by Ctrl+V.
     clipboard: Vec<floptle_scene::NodeDoc>,
+    /// The OS clipboard (lazy) — node copies also land here as tagged RON, so
+    /// paste works across scene switches, editor instances, and projects.
+    os_clipboard: Option<egui_winit::clipboard::Clipboard>,
     /// An inspector/gizmo edit session is open — coalesces a drag into one undo step.
     editing: bool,
     /// The pre-edit scene snapshot captured at the start of this frame.

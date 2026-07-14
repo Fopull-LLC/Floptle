@@ -2114,6 +2114,8 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "findTagged",
+    "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
+    "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio",
 ];
@@ -2206,7 +2208,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
     ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
     ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
-    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …). TWO-WAY: writing a declared key persists across frames, shows live in the Inspector during Play, and is readable by other scripts through a handle (Stop reverts it). Undeclared keys stay frame-local; reference params (noderef & friends) never round-trip." },
+    ApiEntry { label: "params", insert: "params", doc: "This instance's tunables, a table seeded from `defaults` (params.speed, …). NUMBERS and STRINGS both work — a string default (destination = \"arena\") becomes an Inspector text field, so two portals can share one script with different destinations. TWO-WAY: writing a declared key persists across frames, shows live in the Inspector during Play, and is readable by other scripts through a handle (Stop reverts it). Undeclared keys stay frame-local; reference params (noderef & friends) never round-trip." },
     ApiEntry { label: "node", insert: "node", doc: "The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll." },
     ApiEntry { label: "node.x", insert: "node.x", doc: "World X position (number)." },
     ApiEntry { label: "node.y", insert: "node.y", doc: "World Y position (number)." },
@@ -2268,6 +2270,14 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:hasTag", insert: "node:hasTag(", doc: "node:hasTag(\"enemy\") — whether the node carries that exact tag. The classic hit-filter: local hit = raycast(...) if hit and hit.node and hit.node:hasTag(\"enemy\") then ... end" },
     ApiEntry { label: "node:addTag", insert: "node:addTag(", doc: "node:addTag(\"burning\") — add a tag at runtime (duplicates are ignored). findTagged sees it next frame." },
     ApiEntry { label: "node:removeTag", insert: "node:removeTag(", doc: "node:removeTag(\"burning\") — remove a tag (no-op when absent)." },
+    ApiEntry { label: "node.pos", insert: "node.pos", doc: "The node's position as a vec3 (read/write): node.pos = node.pos + dir * dt. Accepts anything with x/y/z." },
+    ApiEntry { label: "vec3", insert: "vec3(", doc: "vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length(), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle." },
+    ApiEntry { label: "vec2", insert: "vec2(", doc: "vec2(x, y) — a 2-vector value (UI/screen math), same operators and methods as vec3 (minus cross)." },
+    ApiEntry { label: "distance", insert: "distance(", doc: "distance(a, b) — distance between two points: vec3/vec2 values, {x=,y=,z=} tables, or NODE handles (distance(node, target) just works). Also distance(x1,y1,z1, x2,y2,z2) for raw numbers." },
+    ApiEntry { label: "onCollisionEnter", insert: "function onCollisionEnter(node, other, hit)\n  \nend", doc: "function onCollisionEnter(node, other, hit) — fires the tick this node's body STARTS touching something solid (a collider or another body). `other` = the other node's handle (check other:hasTag(\"...\") / other.name); hit = { x, y, z, nx, ny, nz } (world contact point + normal). Also onCollisionStay (every tick while touching) and onCollisionExit (on separation)." },
+    ApiEntry { label: "onCollisionExit", insert: "function onCollisionExit(node, other, hit)\n  \nend", doc: "function onCollisionExit(node, other, hit) — fires the tick the touch ends (hit = the last known contact)." },
+    ApiEntry { label: "onTriggerEnter", insert: "function onTriggerEnter(node, other, hit)\n  \nend", doc: "function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRIGGER (a Collider with the \"trigger\" switch: bodies pass through, events still fire). The portal/pickup/checkpoint hook — pair with a string param: scene.load(params.destination). Also onTriggerStay / onTriggerExit." },
+    ApiEntry { label: "onTriggerExit", insert: "function onTriggerExit(node, other, hit)\n  \nend", doc: "function onTriggerExit(node, other, hit) — fires the tick a body leaves the trigger." },
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
@@ -2548,6 +2558,62 @@ TAGS are free-form strings on any node (Inspector \"tags\" chips) — mark thing
 Layers answer \"what can touch/see what\" (fast bitmask filters in physics);
 tags answer \"what IS this thing\" (identity checks + lookups). Both save with
 the scene and replicate with spawned nodes in multiplayer.",
+    ),
+    (
+        "Collision & trigger events — onCollisionEnter and friends",
+        "\
+Define these hooks in any script and the engine calls them when the node's
+body touches something (per gameplay tick, after physics):
+
+  function onCollisionEnter(node, other, hit)   -- touch STARTED
+  function onCollisionStay(node, other, hit)    -- every tick while touching
+  function onCollisionExit(node, other, hit)    -- touch ENDED
+
+  • other                    the other node's handle (other.name, other:hasTag(...))
+  • hit                      { x, y, z, nx, ny, nz } — world contact point + normal
+  • fires for body-vs-collider AND body-vs-body (bodies detect each other even
+    though they don't push each other; the solver is body-vs-static)
+  • the collision-matrix (Project Settings → Layers) gates events too: pairs
+    that don't collide don't event
+
+TRIGGERS: tick \"trigger\" on a node's Collider component and bodies pass
+STRAIGHT THROUGH it (rays too) — but overlap still fires:
+
+  function onTriggerEnter(node, other, hit)
+  function onTriggerStay(node, other, hit)
+  function onTriggerExit(node, other, hit)
+
+The portal recipe — one script, many portals (string param per instance):
+
+    defaults = { destination = \"hub\" }        -- Inspector text field
+    function onTriggerEnter(node, other, hit)
+      if other:hasTag(\"player\") then scene.load(params.destination) end
+    end
+
+Events fire where physics runs (offline, the server, the predicted owner) —
+never during prediction replays, so they can't double-fire on corrections.",
+    ),
+    (
+        "Vectors & math — vec3, vec2, distance",
+        "\
+Real vector VALUES with operators, not just x/y/z triplets:
+
+  local dir = (target.pos - node.pos):normalized()
+  node.pos = node.pos + dir * params.speed * dt
+
+  • vec3(x, y, z) / vec3(s) / vec3()   make one (splat / zero)
+  • a + b   a - b   v * 2   v / 2   -v   a == b
+  • v:length()  v:lengthSquared()  v:normalized()
+  • a:dot(b)   a:cross(b)   a:lerp(b, t)   a:distance(b)
+  • vec2(x, y)                          the 2D version (UI/screen math)
+  • node.pos                            the node's position AS a vec3 (read/write)
+
+  distance(a, b) works on vectors, {x=,y=,z=} tables, and NODE handles:
+
+    if distance(node, player) < params.aggro then chase() end
+
+  (Everything that accepts a vector also accepts a node or a plain table with
+  x/y/z — no conversions needed.)",
     ),
     (
         "Game UI from scripts — text, sliders, buttons",

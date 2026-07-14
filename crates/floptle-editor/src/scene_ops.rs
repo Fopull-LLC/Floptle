@@ -101,6 +101,7 @@ impl Editor {
                         enabled: i.enabled,
                         params: i.params.clone(),
                         refs: i.refs.clone(),
+                        strs: i.strs.clone(),
                     })
                     .collect()
             })
@@ -110,6 +111,7 @@ impl Editor {
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
+        let trigger = self.world.get::<floptle_core::Trigger>(e).is_some();
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow =
             self.world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
@@ -137,6 +139,7 @@ impl Editor {
             rigidbody,
             mesh_collider,
             collidable,
+            trigger,
             visible,
             cast_shadow,
             anim_controller,
@@ -166,6 +169,7 @@ impl Editor {
                     enabled: s.enabled,
                     params: s.params.clone(),
                     refs: s.refs.clone(),
+                    strs: s.strs.clone(),
                 })
                 .collect();
             self.world.insert(e, Scripts(insts));
@@ -181,6 +185,9 @@ impl Editor {
         }
         if node.collidable {
             self.world.insert(e, floptle_core::Collidable);
+        }
+        if node.trigger {
+            self.world.insert(e, floptle_core::Trigger);
         }
         if !node.visible {
             self.world.insert(e, floptle_core::Visible(false));
@@ -229,6 +236,7 @@ impl Editor {
             rigidbody: None,
             mesh_collider: false,
             collidable: false,
+            trigger: false,
             visible: true,
             cast_shadow: true,
             anim_controller: None,
@@ -271,6 +279,7 @@ impl Editor {
                 rigidbody: None,
                 mesh_collider: false,
                 collidable: false,
+                trigger: false,
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,
@@ -330,10 +339,34 @@ impl Editor {
         v
     }
 
+    /// The tag line marking clipboard text as Floptle nodes (RON follows).
+    const NODE_CLIP_TAG: &'static str = "//floptle-nodes-v1";
+
+    /// Lazily connect the OS clipboard (arboard under the hood; falls back to
+    /// an in-app buffer if the OS clipboard is unreachable).
+    fn ensure_os_clipboard(&mut self) {
+        if self.os_clipboard.is_none() {
+            use winit::raw_window_handle::HasDisplayHandle;
+            let handle =
+                self.window.as_ref().and_then(|w| w.display_handle().ok()).map(|h| h.as_raw());
+            self.os_clipboard = Some(egui_winit::clipboard::Clipboard::new(handle));
+        }
+    }
+
     pub(crate) fn copy_selected(&mut self) {
         let nodes: Vec<NodeDoc> =
             self.selected_matter_duplicable().iter().filter_map(|&e| self.node_of(e)).collect();
         if !nodes.is_empty() {
+            // Mirror onto the OS clipboard as tagged RON: paste then works in
+            // ANOTHER scene, another editor window, even another project —
+            // and you can read/share the copied nodes as plain text.
+            if let Ok(ron) = ron::ser::to_string_pretty(&nodes, ron::ser::PrettyConfig::default())
+            {
+                self.ensure_os_clipboard();
+                if let Some(c) = self.os_clipboard.as_mut() {
+                    c.set_text(format!("{}\n{ron}", Self::NODE_CLIP_TAG));
+                }
+            }
             self.clipboard = nodes;
         }
     }
@@ -354,7 +387,21 @@ impl Editor {
     }
 
     pub(crate) fn paste(&mut self) {
-        let nodes = self.clipboard.clone();
+        // Prefer the OS clipboard when it holds tagged Floptle nodes — that's
+        // what makes copy → switch scene/instance/project → paste just work.
+        // Anything else on the OS clipboard (plain text) is ignored and the
+        // in-app clipboard is used.
+        self.ensure_os_clipboard();
+        let external = self
+            .os_clipboard
+            .as_mut()
+            .and_then(|c| c.get())
+            .and_then(|t| {
+                t.strip_prefix(Self::NODE_CLIP_TAG)
+                    .map(|rest| ron::from_str::<Vec<NodeDoc>>(rest.trim_start()))
+            })
+            .and_then(|r| r.ok());
+        let nodes = external.unwrap_or_else(|| self.clipboard.clone());
         self.spawn_offset(nodes);
     }
 

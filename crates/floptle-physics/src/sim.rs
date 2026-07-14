@@ -43,6 +43,61 @@ pub struct Sim {
     /// `tick_prev → pos` so rendered motion spans the whole tick, not just the
     /// final physics substep. Empty until [`Self::step_tick`] first runs.
     tick_prev: Vec<Vec3>,
+    /// Entity pairs touching as of the last tick (ordered `(min, max)` eids),
+    /// with the most recent contact info — diffed each [`Self::step_tick`]
+    /// into enter / stay / exit [`TouchEvent`]s.
+    touching: std::collections::HashMap<(u32, u32), TouchInfo>,
+    /// Events produced by the most recent tick(s), drained by the driver via
+    /// [`Self::take_touch_events`] and dispatched to scripts.
+    events: Vec<TouchEvent>,
+}
+
+/// The last known contact between a touching pair (world coordinates, so a
+/// floating-origin rebase between ticks can't skew an exit event's point).
+#[derive(Clone, Copy, Debug)]
+struct TouchInfo {
+    point: DVec3,
+    normal: Vec3,
+    sensor: bool,
+}
+
+/// Identity + filtering a static collider registers with: the source node's
+/// layer bit, its entity index (what touch events name as the "other side"),
+/// and whether it's a TRIGGER (events only, no blocking).
+#[derive(Clone, Copy, Debug)]
+pub struct StaticTag {
+    pub layer: u8,
+    pub eid: u32,
+    pub sensor: bool,
+}
+
+/// Which edge of a touch a [`TouchEvent`] reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchPhase {
+    /// The pair started touching this tick.
+    Enter,
+    /// Still touching (reported every tick while the contact lasts).
+    Stay,
+    /// The pair separated this tick (point/normal are the last known contact).
+    Exit,
+}
+
+/// One collision/trigger event between two scene nodes, produced by
+/// [`Sim::step_tick`] and dispatched to both nodes' scripts as
+/// `onCollisionEnter/Stay/Exit` (solid) or `onTriggerEnter/Stay/Exit`
+/// (`sensor` = a trigger collider was involved).
+#[derive(Clone, Copy, Debug)]
+pub struct TouchEvent {
+    /// Entity indices of the two nodes (order not meaningful).
+    pub a: u32,
+    pub b: u32,
+    pub phase: TouchPhase,
+    /// Contact point, ABSOLUTE world coordinates.
+    pub point: DVec3,
+    /// Contact normal (unit), pointing out of the surface that was hit.
+    pub normal: Vec3,
+    /// A trigger (sensor) collider was involved — dispatch the trigger hooks.
+    pub sensor: bool,
 }
 
 /// One body's full dynamic state, in ABSOLUTE world coordinates (f64 position,
@@ -71,18 +126,20 @@ impl Sim {
         gravity: GravityField,
         origin: DVec3,
     ) -> Self {
-        let t: Vec<(DVec3, &Terrain, u8)> = terrains.iter().map(|(a, t)| (*a, *t, 0)).collect();
+        let t: Vec<(DVec3, &Terrain, u8, Option<u32>)> =
+            terrains.iter().map(|(a, t)| (*a, *t, 0, None)).collect();
         Self::build_layered(ecs, &t, gravity, origin, floptle_core::Layers::default())
     }
 
     /// [`Self::build`] with the project's layer table: each terrain tuple
-    /// carries its node's resolved layer bit, every `RigidBody` body resolves
-    /// its node's named layer through `layers`, and the collision matrix lands
-    /// in the physics world — so body-vs-collider pairs the project excepted
-    /// never resolve, and masked raycasts filter with the same bits.
+    /// carries its node's resolved layer bit + entity (so touch events can
+    /// name the terrain node), every `RigidBody` body resolves its node's
+    /// named layer through `layers`, and the collision matrix lands in the
+    /// physics world — so body-vs-collider pairs the project excepted never
+    /// resolve, and masked raycasts filter with the same bits.
     pub fn build_layered(
         ecs: &World,
-        terrains: &[(DVec3, &Terrain, u8)],
+        terrains: &[(DVec3, &Terrain, u8, Option<u32>)],
         gravity: GravityField,
         origin: DVec3,
         layers: floptle_core::Layers,
@@ -90,8 +147,14 @@ impl Sim {
         let mut world = PhysicsWorld::new(gravity);
         world.origin = origin.round();
         world.matrix = layers.matrix;
-        for (anchor, t, layer) in terrains {
-            world.add_collider_on(*anchor, Box::new(SdfTerrain { terrain: (*t).clone() }), *layer);
+        for (anchor, t, layer, eid) in terrains {
+            world.add_collider_tagged(
+                *anchor,
+                Box::new(SdfTerrain { terrain: (*t).clone() }),
+                *layer,
+                *eid,
+                false,
+            );
         }
         let mut map = Vec::new();
         // Collect first (immutable borrow of the ECS) then build the bodies. A `RigidBody`
@@ -115,6 +178,8 @@ impl Sim {
             layers,
             fo: floptle_core::FloatingOrigin::default(),
             tick_prev: Vec::new(),
+            touching: std::collections::HashMap::new(),
+            events: Vec::new(),
         }
     }
 
@@ -200,26 +265,46 @@ impl Sim {
     /// Register a static triangle-mesh collider — e.g. an imported map model the player
     /// can walk on. `anchor` is the mesh node's world translation (full `f64`); `verts`
     /// are baked RELATIVE to it, so a map placed a million units out collides exactly.
-    /// `layer` is the node's resolved collision-layer bit ([`Self::layer_for`]).
+    /// `tag` carries the node's layer bit / entity / trigger flag ([`Self::tag_for`]).
     /// Call after [`build`](Self::build).
-    pub fn add_static_mesh(&mut self, anchor: DVec3, verts: &[Vec3], indices: &[u32], layer: u8) {
+    pub fn add_static_mesh(
+        &mut self,
+        anchor: DVec3,
+        verts: &[Vec3],
+        indices: &[u32],
+        tag: StaticTag,
+    ) {
         if indices.len() >= 3 && !verts.is_empty() {
-            self.world.add_collider_on(anchor, Box::new(TriMeshCollider::new(verts, indices)), layer);
+            self.world.add_collider_tagged(
+                anchor,
+                Box::new(TriMeshCollider::new(verts, indices)),
+                tag.layer,
+                Some(tag.eid),
+                tag.sensor,
+            );
         }
     }
 
     /// Register a static oriented-box collider (the "collidable" switch on a Cube node).
     /// `center` is the node's world translation (full `f64`).
-    pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat, layer: u8) {
-        self.world.add_collider_on(center, Box::new(BoxShape::new(Vec3::ZERO, half, rot)), layer);
+    pub fn add_static_box(&mut self, center: DVec3, half: Vec3, rot: Quat, tag: StaticTag) {
+        self.world.add_collider_tagged(
+            center,
+            Box::new(BoxShape::new(Vec3::ZERO, half, rot)),
+            tag.layer,
+            Some(tag.eid),
+            tag.sensor,
+        );
     }
 
     /// Register a static sphere collider (a collidable Sphere node).
-    pub fn add_static_sphere(&mut self, center: DVec3, radius: f32, layer: u8) {
-        self.world.add_collider_on(
+    pub fn add_static_sphere(&mut self, center: DVec3, radius: f32, tag: StaticTag) {
+        self.world.add_collider_tagged(
             center,
             Box::new(SphereShape { center: Vec3::ZERO, radius: radius.max(1e-3) }),
-            layer,
+            tag.layer,
+            Some(tag.eid),
+            tag.sensor,
         );
     }
 
@@ -231,14 +316,27 @@ impl Sim {
         up: Vec3,
         half_height: f32,
         radius: f32,
-        layer: u8,
+        tag: StaticTag,
     ) {
         let u = up.try_normalize().unwrap_or(Vec3::Y);
-        self.world.add_collider_on(
+        self.world.add_collider_tagged(
             center,
             Box::new(CapsuleShape { a: -u * half_height, b: u * half_height, radius: radius.max(1e-3) }),
-            layer,
+            tag.layer,
+            Some(tag.eid),
+            tag.sensor,
         );
+    }
+
+    /// The identity a node's static collider registers with: its resolved
+    /// layer bit, its entity (what touch events name), and whether it's a
+    /// trigger (a `Trigger` component alongside `Collidable`).
+    pub fn tag_for(&self, ecs: &World, e: Entity) -> StaticTag {
+        StaticTag {
+            layer: self.layers.index_for(ecs, e),
+            eid: e.index(),
+            sensor: ecs.get::<floptle_core::Trigger>(e).is_some(),
+        }
     }
 
     /// The collision-layer bit a node resolves to under this sim's layer table
@@ -315,9 +413,147 @@ impl Sim {
         self.tick_prev.clear();
         self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
         let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
+        // Accumulate contacts across the tick's substeps (each step clears its
+        // own) so a one-substep graze still registers as a touch this tick.
+        let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
         for _ in 0..n {
             self.world.step(self.fixed_dt);
+            tick_contacts.extend(self.world.contacts.iter().copied());
         }
+        self.detect_touches(&tick_contacts);
+    }
+
+    /// Diff this tick's touching pairs against the last tick's into
+    /// enter / stay / exit [`TouchEvent`]s. Three sources, all matrix-gated:
+    /// the solver's resolved contacts (body vs solid collider), body-vs-SENSOR
+    /// overlap (triggers — the solver never resolves those), and body-vs-body
+    /// hull overlap (the solver has no body-body response, but games still
+    /// need to KNOW two bodies met). Costs O(contacts + bodies×sensors +
+    /// bodies²) per tick — trivial at gameplay body counts.
+    fn detect_touches(&mut self, tick_contacts: &[crate::body::Contact]) {
+        let origin = self.world.origin;
+        let to_world = |p: Vec3| origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+        // Body slot → entity index (slots without a link never event).
+        let mut body_eid: Vec<Option<u32>> = vec![None; self.world.bodies.len()];
+        for l in &self.map {
+            if let Some(slot) = body_eid.get_mut(l.body) {
+                *slot = Some(l.entity.index());
+            }
+        }
+        let mut now: std::collections::HashMap<(u32, u32), TouchInfo> =
+            std::collections::HashMap::new();
+        let mut record = |a: u32, b: u32, info: TouchInfo| {
+            let key = (a.min(b), a.max(b));
+            // A sensor overlap never downgrades a solid contact's info.
+            now.entry(key).or_insert(info);
+        };
+        // 1. Solid contacts the solver resolved this tick.
+        for c in tick_contacts {
+            let (Some(Some(a)), Some(b)) =
+                (body_eid.get(c.body), self.world.colliders.get(c.collider).and_then(|k| k.eid))
+            else {
+                continue;
+            };
+            record(*a, b, TouchInfo { point: to_world(c.point), normal: c.normal, sensor: false });
+        }
+        // 2. Trigger (sensor) overlap — the solver skips these, so test here.
+        for col in self.world.colliders.iter().filter(|c| c.sensor) {
+            let Some(b_eid) = col.eid else { continue };
+            for (bi, body) in self.world.bodies.iter().enumerate() {
+                let Some(Some(a_eid)) = body_eid.get(bi) else { continue };
+                if !body.active
+                    || (self.world.matrix[body.layer as usize] >> col.layer) & 1 == 0
+                {
+                    continue;
+                }
+                let (centers, n_c, radius) = body.sample_centers();
+                for &c in &centers[..n_c] {
+                    let d = col.distance(c);
+                    if d < radius {
+                        record(
+                            *a_eid,
+                            b_eid,
+                            TouchInfo {
+                                point: to_world(c),
+                                normal: col.normal(c),
+                                sensor: true,
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        // 3. Body-vs-body overlap (detection only; no physical response).
+        for i in 0..self.world.bodies.len() {
+            let Some(Some(a_eid)) = body_eid.get(i).copied() else { continue };
+            let a = &self.world.bodies[i];
+            if !a.active {
+                continue;
+            }
+            for j in (i + 1)..self.world.bodies.len() {
+                let Some(Some(b_eid)) = body_eid.get(j).copied() else { continue };
+                let b = &self.world.bodies[j];
+                if !b.active || (self.world.matrix[a.layer as usize] >> b.layer) & 1 == 0 {
+                    continue;
+                }
+                let hull = crate::world::BodyHull {
+                    eid: b_eid,
+                    pos: b.pos,
+                    radius: b.radius,
+                    shape: b.shape,
+                    up: b.up,
+                    layer: b.layer,
+                };
+                let (centers, n_c, radius) = a.sample_centers();
+                for &c in &centers[..n_c] {
+                    if hull.distance(c) < radius {
+                        record(
+                            a_eid,
+                            b_eid,
+                            TouchInfo {
+                                point: to_world(c),
+                                normal: hull.normal(c),
+                                sensor: false,
+                            },
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        // Diff → events.
+        for (&(a, b), info) in &now {
+            let phase =
+                if self.touching.contains_key(&(a, b)) { TouchPhase::Stay } else { TouchPhase::Enter };
+            self.events.push(TouchEvent {
+                a,
+                b,
+                phase,
+                point: info.point,
+                normal: info.normal,
+                sensor: info.sensor,
+            });
+        }
+        for (&(a, b), info) in &self.touching {
+            if !now.contains_key(&(a, b)) {
+                self.events.push(TouchEvent {
+                    a,
+                    b,
+                    phase: TouchPhase::Exit,
+                    point: info.point,
+                    normal: info.normal,
+                    sensor: info.sensor,
+                });
+            }
+        }
+        self.touching = now;
+    }
+
+    /// Drain the collision/trigger events produced since the last drain (the
+    /// driver dispatches them to both nodes' scripts after each tick).
+    pub fn take_touch_events(&mut self) -> Vec<TouchEvent> {
+        std::mem::take(&mut self.events)
     }
 
     /// Write interpolated body transforms to the ECS: `alpha` in `[0,1)` is how far
@@ -677,7 +913,7 @@ mod runtime_body_tests {
             layers,
         );
         let wall_layer = sim.layers().index_of("Walls").unwrap();
-        sim.add_static_box(DVec3::new(0.0, 2.0, 0.0), Vec3::new(50.0, 0.5, 50.0), Quat::IDENTITY, wall_layer);
+        sim.add_static_box(DVec3::new(0.0, 2.0, 0.0), Vec3::new(50.0, 0.5, 50.0), Quat::IDENTITY, StaticTag { layer: wall_layer, eid: 999, sensor: false });
         for _ in 0..180 {
             sim.step_tick(1.0 / 60.0, None);
         }
@@ -698,6 +934,91 @@ mod runtime_body_tests {
             !(1u32 << wall_layer),
         );
         assert!(masked.is_none(), "masking out Walls makes the ray pass through");
+    }
+
+    /// The touch-event pipeline end-to-end: a body dropped onto a solid box
+    /// fires Enter (then Stay) against the box's node; a body passing through
+    /// a TRIGGER fires sensor Enter → Exit without ever being blocked; and
+    /// two bodies crossing paths fire a body-vs-body Enter.
+    #[test]
+    fn touch_events_fire_enter_stay_and_exit() {
+        let mut ecs = World::default();
+        let faller = ecs.spawn();
+        ecs.insert(faller, Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)));
+        ecs.insert(faller, RigidBody { gravity: true, ..Default::default() });
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        // A solid floor box (node #100) and a trigger box (node #200) hanging
+        // in the fall path at y ≈ 2 — the body must pass THROUGH the trigger.
+        sim.add_static_box(
+            DVec3::new(0.0, 0.0, 0.0),
+            Vec3::new(50.0, 0.5, 50.0),
+            Quat::IDENTITY,
+            StaticTag { layer: 0, eid: 100, sensor: false },
+        );
+        sim.add_static_box(
+            DVec3::new(0.0, 2.0, 0.0),
+            Vec3::new(1.0, 0.2, 1.0),
+            Quat::IDENTITY,
+            StaticTag { layer: 0, eid: 200, sensor: true },
+        );
+        let feid = faller.index();
+        let mut trigger_enter = false;
+        let mut trigger_exit = false;
+        let mut floor_enter = false;
+        let mut floor_stays = 0;
+        for _ in 0..120 {
+            sim.step_tick(1.0 / 60.0, None);
+            for ev in sim.take_touch_events() {
+                let pair = (ev.a.min(ev.b), ev.a.max(ev.b));
+                if pair == (feid.min(200), feid.max(200)) {
+                    assert!(ev.sensor, "the trigger pair must report as a sensor event");
+                    match ev.phase {
+                        TouchPhase::Enter => trigger_enter = true,
+                        TouchPhase::Exit => trigger_exit = true,
+                        TouchPhase::Stay => {}
+                    }
+                }
+                if pair == (feid.min(100), feid.max(100)) {
+                    assert!(!ev.sensor);
+                    match ev.phase {
+                        TouchPhase::Enter => floor_enter = true,
+                        TouchPhase::Stay => floor_stays += 1,
+                        TouchPhase::Exit => {}
+                    }
+                }
+            }
+        }
+        assert!(trigger_enter, "falling through the trigger must fire onTriggerEnter");
+        assert!(trigger_exit, "leaving the trigger must fire onTriggerExit");
+        assert!(floor_enter, "landing on the floor must fire onCollisionEnter");
+        assert!(floor_stays > 10, "resting on the floor keeps reporting Stay, got {floor_stays}");
+        let rest = sim.body_snapshot(feid).unwrap().pos.y;
+        assert!(rest < 2.0, "the trigger must NOT have blocked the fall, rested at y = {rest}");
+
+        // Body-vs-body: drop a second body onto the resting one.
+        let bomber = ecs.spawn();
+        ecs.insert(bomber, Transform::from_translation(DVec3::new(0.0, 4.0, 0.0)));
+        ecs.insert(bomber, RigidBody { gravity: true, ..Default::default() });
+        assert!(sim.add_body_for(bomber, &ecs));
+        let mut body_pair = false;
+        for _ in 0..120 {
+            sim.step_tick(1.0 / 60.0, None);
+            for ev in sim.take_touch_events() {
+                let pair = (ev.a.min(ev.b), ev.a.max(ev.b));
+                if pair == (feid.min(bomber.index()), feid.max(bomber.index()))
+                    && ev.phase == TouchPhase::Enter
+                {
+                    body_pair = true;
+                }
+            }
+        }
+        assert!(body_pair, "two bodies meeting must fire a body-vs-body Enter");
     }
 
     /// The floating-origin rebase must be INVISIBLE to rendering: a body
