@@ -74,6 +74,10 @@ impl Editor {
         if self.playing {
             return; // stop play before editing history
         }
+        // Recording keeps previewed clip values live in the world — end it (and
+        // restore the true scene) before a history snapshot swaps entities out
+        // from under it.
+        self.stop_recording();
         match self.history.undo.pop() {
             Some(Snapshot::Scene(prev)) => {
                 let cur = self.snapshot();
@@ -93,6 +97,7 @@ impl Editor {
         if self.playing {
             return;
         }
+        self.stop_recording(); // same as undo — see above
         match self.history.redo.pop() {
             Some(Snapshot::Scene(next)) => {
                 let cur = self.snapshot();

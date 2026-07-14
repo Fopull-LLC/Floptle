@@ -170,17 +170,15 @@ impl Editor {
 
     /// Turn ● Record off and put the posed subtree back exactly as it was
     /// when recording started — recording authors the CLIP, never the scene.
+    /// One implementation for every path (transport, play start, undo, save):
+    /// restores transforms AND recorded property values, and forgets the
+    /// preview snapshot (stale mid-record state — never to be applied).
     pub(crate) fn stop_recording(&mut self) {
         if !self.anim_ui.record && self.anim_ui.record_restore.is_empty() {
             return;
         }
-        self.anim_ui.record = false;
-        for (e, tr) in self.anim_ui.record_restore.drain(..) {
-            if let Some(slot) = self.world.get_mut::<Transform>(e) {
-                *slot = tr;
-            }
-        }
-        self.anim_ui.last_scene_local.clear();
+        crate::anim_ui::stop_record_ui(&mut self.world, &mut self.anim_ui);
+        self.anim.forget_preview();
     }
 
     pub(crate) fn toggle_play(&mut self) {

@@ -56,33 +56,6 @@ impl Editor {
         self.check_active_script_syntax();
         // Reap a finished cross-target export build (Windows-from-Linux etc.).
         self.poll_export_build();
-        // Game-UI layers: gather + solve on the CPU while `self` is free (the
-        // draw core borrows the GPU stack); drawn over the finished frame below.
-        let ui_view = self.game_view() || self.player_mode;
-        // Screen-space overlay layers (game view only). gather_game_ui skips
-        // world-space layers — those live in the scene below.
-        let ui_layers = if ui_view {
-            let vp = self
-                .gpu
-                .as_ref()
-                .map(|g| [g.config.width as f32, g.config.height as f32])
-                .unwrap_or([0.0, 0.0]);
-            self.gather_game_ui(vp)
-        } else {
-            Vec::new()
-        };
-        // World canvases: in the Scene (authoring) view, EVERY layer renders as
-        // a movable hologram at its node's transform; in game/player view, only
-        // the layers whose `space` is World (screen-space ones are the overlay
-        // above). Either way outlines project onto the canvas and drags come
-        // back through cmd.ui_move (in design units).
-        let aspect = self
-            .gpu
-            .as_ref()
-            .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
-            .unwrap_or(16.0 / 9.0);
-        let ui_world = self.gather_ui_world(aspect, !ui_view);
-
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
         // shared 3D atlas (where shadow-only mesh occluders also live).
@@ -126,8 +99,10 @@ impl Editor {
         // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
         // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
         // so it only touches disjoint fields while gpu/egui are borrowed. Not while
-        // playing — script-driven transforms must not enter the undo history.
-        if !self.playing {
+        // playing — script-driven transforms must not enter the undo history — and
+        // not while recording (the world carries previewed clip values then; edits
+        // go to the CLIP as keys, not to scene undo).
+        if !self.playing && !self.anim_ui.record {
             self.frame_snapshot =
                 Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
         }
@@ -138,6 +113,86 @@ impl Editor {
         // BEFORE the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
         self.ensure_vfx_assets();
+
+        // Edit-mode animation preview (Animating tab): pose the bound node at the
+        // playhead. This must run BEFORE anything gathers draw data — the UI
+        // overlay/hologram gathers and the docked Game viewport below all read the
+        // ECS, so applying the preview after them meant scrubbing a property track
+        // (e.g. a spritesheet `cell`) showed nothing in the editor. Scene-node
+        // bindings apply transiently and are restored after the main draw list is
+        // built (except while recording — see `restore_preview` below), so a
+        // preview never dirties the authored scene.
+        if !self.playing {
+            if self.anim_ui.tab_visible {
+                if let (Some(target), Some(state)) =
+                    (self.anim_ui.target, self.anim_ui.sel_anim.clone())
+                {
+                    if self.anim_ui.preview_playing {
+                        self.anim_ui.playhead += dt;
+                    }
+                    // Record first: capture the user's pose edits as keys BEFORE
+                    // the preview re-applies the clip (which then includes them).
+                    if self.anim_ui.record
+                        && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
+                            self.anim_ui.clip_dirty = true;
+                        }
+                    anim::preview_pose(
+                        &mut self.anim,
+                        &mut self.world,
+                        &self.mesh_registry,
+                        target,
+                        &state,
+                        self.anim_ui.playhead,
+                    );
+                    if self.anim_ui.record {
+                        // Re-baseline against what the preview applied, so next
+                        // frame's diff sees only NEW user edits.
+                        anim_ui::refresh_record_baseline(&self.world, &mut self.anim_ui, target);
+                    }
+                }
+            } else {
+                // Tab hidden: recording can't continue without its scan/preview
+                // loop — stop it cleanly (restores the pre-record scene).
+                if self.anim_ui.record {
+                    anim_ui::stop_record_ui(&mut self.world, &mut self.anim_ui);
+                    self.anim.forget_preview();
+                }
+                if !self.anim.poses.is_empty() || !self.anim.instances.is_empty() {
+                    // Drop stale preview runtimes so models return to rest.
+                    self.anim.poses.clear();
+                    self.anim.instances.clear();
+                }
+            }
+            self.anim_ui.tab_visible = false; // re-armed by the tab each frame it draws
+        }
+
+        // Game-UI layers: gather + solve on the CPU while `self` is free (the
+        // draw core borrows the GPU stack); drawn over the finished frame below.
+        // AFTER the animation preview, so scrubbing shows live in every view.
+        let ui_view = self.game_view() || self.player_mode;
+        // Screen-space overlay layers (game view only). gather_game_ui skips
+        // world-space layers — those live in the scene below.
+        let ui_layers = if ui_view {
+            let vp = self
+                .gpu
+                .as_ref()
+                .map(|g| [g.config.width as f32, g.config.height as f32])
+                .unwrap_or([0.0, 0.0]);
+            self.gather_game_ui(vp)
+        } else {
+            Vec::new()
+        };
+        // World canvases: in the Scene (authoring) view, EVERY layer renders as
+        // a movable hologram at its node's transform; in game/player view, only
+        // the layers whose `space` is World (screen-space ones are the overlay
+        // above). Either way outlines project onto the canvas and drags come
+        // back through cmd.ui_move (in design units).
+        let aspect = self
+            .gpu
+            .as_ref()
+            .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
+            .unwrap_or(16.0 / 9.0);
+        let ui_world = self.gather_ui_world(aspect, !ui_view);
 
         // Offscreen previews render LAST (after play_step advanced this frame's poses
         // and particles, and after ensure_vfx_assets registered their textures/meshes):
@@ -627,46 +682,6 @@ impl Editor {
                 },
             );
 
-        // Edit-mode animation preview (Animating tab): pose the bound node at the
-        // playhead. Scene-node bindings apply transiently and are restored right
-        // after the draw list below is built, so a preview never dirties the
-        // authored scene (undo, save, and the Inspector all see real transforms).
-        if !self.playing {
-            if self.anim_ui.tab_visible {
-                if let (Some(target), Some(state)) =
-                    (self.anim_ui.target, self.anim_ui.sel_anim.clone())
-                {
-                    if self.anim_ui.preview_playing {
-                        self.anim_ui.playhead += dt;
-                    }
-                    // Record first: capture the user's pose edits as keys BEFORE
-                    // the preview re-applies the clip (which then includes them).
-                    if self.anim_ui.record
-                        && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
-                            self.anim_ui.clip_dirty = true;
-                        }
-                    anim::preview_pose(
-                        &mut self.anim,
-                        &mut self.world,
-                        &self.mesh_registry,
-                        target,
-                        &state,
-                        self.anim_ui.playhead,
-                    );
-                    if self.anim_ui.record {
-                        // Re-baseline against what the preview applied, so next
-                        // frame's diff sees only NEW user edits.
-                        anim_ui::refresh_record_baseline(&self.world, &mut self.anim_ui, target);
-                    }
-                }
-            } else if !self.anim.poses.is_empty() || !self.anim.instances.is_empty() {
-                // Tab hidden: drop stale preview runtimes so models return to rest.
-                self.anim.poses.clear();
-                self.anim.instances.clear();
-            }
-            self.anim_ui.tab_visible = false; // re-armed by the tab each frame it draws
-        }
-
         // Bone attachments follow their mesh's bones while authoring too (uses the
         // preview pose if the Animating tab is scrubbing, else the rig's rest pose).
         anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
@@ -739,7 +754,13 @@ impl Editor {
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
-        self.anim.restore_preview(&mut self.world);
+        // NOT while recording: record keeps the previewed values live so the
+        // Inspector shows what's under the playhead (edit it → it's keyed) and a
+        // scrub can't diff a stale pose into spurious keys. The pre-record scene is
+        // restored by stop_record_ui when ● Record turns off.
+        if !self.anim_ui.record {
+            self.anim.restore_preview(&mut self.world);
+        }
 
         // Live particle effects (play mode): pack every instance's billboards for
         // this frame. Owned data — drawn after the grid, before post, so particles
