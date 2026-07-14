@@ -582,6 +582,10 @@ impl ScriptHost {
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
         }
+        // Vector math: `vec3`/`vec2` value types + the `distance` global.
+        if let Err(e) = crate::math_api::install(&lua) {
+            eprintln!("[lua] failed to install the vector math API: {e}");
+        }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
         let audio_bridges = crate::audio_api::AudioBridges {
@@ -748,6 +752,63 @@ impl ScriptHost {
             called = true;
             if let Err(err) = f.call::<()>(node) {
                 self.record_error(&kind, format!("{kind}: anim event {func}: {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
+    /// Dispatch one collision/trigger event to every script on `eid` that
+    /// defines `func` (`onCollisionEnter/Stay/Exit`, `onTriggerEnter/Stay/
+    /// Exit`): called as `func(node, other, hit)` where `other` is the other
+    /// node's handle and `hit = { x, y, z, nx, ny, nz }` (world point +
+    /// contact normal). Same dispatch rules as anim events (raw env lookup —
+    /// never a global), with a write flush when anything ran.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_touch(
+        &mut self,
+        world: &mut World,
+        eid: u32,
+        func: &str,
+        other: u32,
+        point: [f64; 3],
+        normal: [f32; 3],
+    ) {
+        let targets: Vec<(String, Table)> = self
+            .envs
+            .borrow()
+            .iter()
+            .filter(|((id, _), _)| *id == eid)
+            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let mut called = false;
+        for (kind, env) in targets {
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>(func) else { continue };
+            let (Ok(node), Ok(other)) =
+                (new_node_handle(&self.lua, eid), new_node_handle(&self.lua, other))
+            else {
+                continue;
+            };
+            let hit = match self.lua.create_table() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let _ = hit.set("x", point[0]);
+            let _ = hit.set("y", point[1]);
+            let _ = hit.set("z", point[2]);
+            let _ = hit.set("nx", normal[0] as f64);
+            let _ = hit.set("ny", normal[1] as f64);
+            let _ = hit.set("nz", normal[2] as f64);
+            called = true;
+            *self.net.current.borrow_mut() = Some((eid, kind.clone()));
+            let result = f.call::<()>((node, other, hit));
+            *self.net.current.borrow_mut() = None;
+            if let Err(err) = result {
+                self.record_error(&kind, format!("{kind}: {func}: {err}"));
             }
         }
         if called {
@@ -992,6 +1053,12 @@ impl ScriptHost {
         *self.layer_table.borrow_mut() = layers;
     }
 
+    /// A live `(entity, script)` environment table, if built — for tests and
+    /// tooling that read a script's state from Rust.
+    pub fn instance_env(&self, eid: u32, kind: &str) -> Option<Table> {
+        self.envs.borrow().get(&(eid, kind.to_string())).cloned()
+    }
+
     /// Feed the physics body state (entity index → vel + grounded) for the frame, so
     /// scripts can read `node.vx/vy/vz/grounded`. Call before [`run`](Self::run).
     pub fn set_bodies(&self, map: HashMap<u32, BodyState>) {
@@ -1214,7 +1281,8 @@ impl ScriptHost {
             for inst in &scripts.0 {
                 if inst.enabled {
                     self.tick_instance(
-                        *e, &inst.kind, &inst.params, &inst.refs, &mut tr, dt, time, pass,
+                        *e, &inst.kind, &inst.params, &inst.refs, &inst.strs, &mut tr, dt, time,
+                        pass,
                     );
                     ran = true;
                 }
@@ -1250,9 +1318,19 @@ impl ScriptHost {
                     && let Some(scripts) = world.get_mut::<Scripts>(ent)
                     && let Some(inst) = scripts.0.iter_mut().find(|i| i.kind == kind)
                 {
-                    match inst.params.iter_mut().find(|(k, _)| *k == key) {
-                        Some(slot) => slot.1 = v,
-                        None => inst.params.push((key, v)),
+                    match v {
+                        crate::ParamWrite::Num(v) => {
+                            match inst.params.iter_mut().find(|(k, _)| *k == key) {
+                                Some(slot) => slot.1 = v,
+                                None => inst.params.push((key, v)),
+                            }
+                        }
+                        crate::ParamWrite::Str(v) => {
+                            match inst.strs.iter_mut().find(|(k, _)| *k == key) {
+                                Some(slot) => slot.1 = v,
+                                None => inst.strs.push((key, v)),
+                            }
+                        }
                     }
                 }
             }
@@ -1449,15 +1527,18 @@ impl ScriptHost {
         let Ok(defaults) = env.get::<Table>("defaults") else { return Default::default() };
         let mut nums = Vec::new();
         let mut refs = Vec::new();
+        let mut strs = Vec::new();
         for (k, v) in defaults.pairs::<String, mlua::Value>().flatten() {
             match v {
                 mlua::Value::Number(n) => nums.push((k, n as f32)),
                 mlua::Value::Integer(n) => nums.push((k, n as f32)),
                 mlua::Value::String(s) => {
-                    if let Some(kind) =
-                        crate::env::parse_ref_sentinel(&s.to_string_lossy())
-                    {
-                        refs.push((k, kind));
+                    let s = s.to_string_lossy();
+                    match crate::env::parse_ref_sentinel(&s) {
+                        Some(kind) => refs.push((k, kind)),
+                        // A plain string default = a STRING param (a portal's
+                        // destination scene, an item id) — Inspector-editable.
+                        None => strs.push((k, s.to_string())),
                     }
                 }
                 _ => {}
@@ -1465,7 +1546,8 @@ impl ScriptHost {
         }
         nums.sort_by(|a, b| a.0.cmp(&b.0));
         refs.sort_by(|a, b| a.0.cmp(&b.0));
-        (nums, refs)
+        strs.sort_by(|a, b| a.0.cmp(&b.0));
+        (nums, refs, strs)
     }
 
     /// Make sure the `(entity, script)` environment is built (hot-reloading on change),
@@ -1551,6 +1633,7 @@ impl ScriptHost {
         name: &str,
         params: &[(String, f32)],
         refs: &[(String, String)],
+        strs: &[(String, String)],
         tr: &mut Transform,
         dt: f32,
         time: f32,
@@ -1614,10 +1697,11 @@ impl ScriptHost {
         };
         // Mark the current instance while its hooks run (`net.on` ownership).
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
-        let result = self.tick(&env, params, &resolved, tr, dt, time, first, eid, body, pass);
+        let result =
+            self.tick(&env, params, &resolved, strs, tr, dt, time, first, eid, body, pass);
         *self.net.current.borrow_mut() = None;
         match result {
-            Ok(()) => self.collect_param_writes(&env, name, eid, params),
+            Ok(()) => self.collect_param_writes(&env, name, eid, params, strs),
             Err(err) => self.fail(name, format!("{name}: {err}")),
         }
     }
@@ -1625,35 +1709,76 @@ impl ScriptHost {
     /// Persist `params.X = value` writes the hook just made: tunables are
     /// TWO-WAY — a script's write sticks across frames (the next seed reads it
     /// back) and lands in the node's stored params, so the Inspector shows it
-    /// live during Play (and Stop reverts it with everything else). Only
-    /// DECLARED numeric tunables persist — a key present in `defaults` or the
-    /// stored params; ad-hoc keys stay frame-local, and reference params
-    /// (node/script/component handles) never round-trip.
-    fn collect_param_writes(&self, env: &Table, name: &str, eid: u32, seeded: &[(String, f32)]) {
+    /// live during Play (and Stop reverts it with everything else). Numbers
+    /// AND strings; only DECLARED tunables persist — a key present in
+    /// `defaults` or the stored params; ad-hoc keys stay frame-local, and
+    /// reference params (node/script/component handles) never round-trip.
+    fn collect_param_writes(
+        &self,
+        env: &Table,
+        name: &str,
+        eid: u32,
+        seeded: &[(String, f32)],
+        seeded_strs: &[(String, String)],
+    ) {
         let Ok(pt) = env.get::<Table>("params") else { return };
         let defaults = env.get::<Table>("defaults").ok();
         for (k, v) in pt.pairs::<String, Value>().flatten() {
-            let new = match v {
-                Value::Number(n) => n as f32,
-                Value::Integer(i) => i as f32,
+            match v {
+                Value::Number(_) | Value::Integer(_) => {
+                    let new = match v {
+                        Value::Number(n) => n as f32,
+                        Value::Integer(i) => i as f32,
+                        _ => unreachable!(),
+                    };
+                    // The value this key was SEEDED with: the stored override,
+                    // else the declared default. (f32 → f64 → f32 is exact, so
+                    // an untouched param compares bit-equal and costs nothing.)
+                    let seed = seeded
+                        .iter()
+                        .find(|(pk, _)| *pk == k)
+                        .map(|(_, pv)| *pv)
+                        .or_else(|| {
+                            defaults
+                                .as_ref()
+                                .and_then(|d| d.get::<f64>(k.as_str()).ok())
+                                .map(|d| d as f32)
+                        });
+                    let Some(seed) = seed else { continue }; // undeclared: frame-local
+                    if new != seed {
+                        self.param_writes.borrow_mut().push((
+                            eid,
+                            name.to_string(),
+                            k,
+                            crate::ParamWrite::Num(new),
+                        ));
+                    }
+                }
+                Value::String(s) => {
+                    let new = s.to_string_lossy().to_string();
+                    // Declared = stored string override, or a NON-SENTINEL
+                    // string default (ref sentinels never round-trip).
+                    let seed = seeded_strs
+                        .iter()
+                        .find(|(pk, _)| *pk == k)
+                        .map(|(_, pv)| pv.clone())
+                        .or_else(|| {
+                            defaults
+                                .as_ref()
+                                .and_then(|d| d.get::<String>(k.as_str()).ok())
+                                .filter(|d| crate::env::parse_ref_sentinel(d).is_none())
+                        });
+                    let Some(seed) = seed else { continue }; // undeclared: frame-local
+                    if new != seed {
+                        self.param_writes.borrow_mut().push((
+                            eid,
+                            name.to_string(),
+                            k,
+                            crate::ParamWrite::Str(new),
+                        ));
+                    }
+                }
                 _ => continue,
-            };
-            // The value this key was SEEDED with: the stored override, else the
-            // declared default. (f32 → f64 → f32 is exact, so an untouched
-            // param compares bit-equal and costs nothing.)
-            let seed = seeded
-                .iter()
-                .find(|(pk, _)| *pk == k)
-                .map(|(_, pv)| *pv)
-                .or_else(|| {
-                    defaults
-                        .as_ref()
-                        .and_then(|d| d.get::<f64>(k.as_str()).ok())
-                        .map(|d| d as f32)
-                });
-            let Some(seed) = seed else { continue }; // undeclared: frame-local
-            if new != seed {
-                self.param_writes.borrow_mut().push((eid, name.to_string(), k, new));
             }
         }
     }
@@ -1665,6 +1790,7 @@ impl ScriptHost {
         env: &Table,
         params: &[(String, f32)],
         refs: &[(String, crate::env::ResolvedRef)],
+        strs: &[(String, String)],
         tr: &mut Transform,
         dt: f32,
         time: f32,
@@ -1673,7 +1799,7 @@ impl ScriptHost {
         body: Option<BodyState>,
         pass: Pass,
     ) -> mlua::Result<()> {
-        env.set("params", params_table(&self.lua, env, params, refs)?)?;
+        env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 

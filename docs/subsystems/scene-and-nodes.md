@@ -233,3 +233,30 @@ skipped when empty), ride the node clipboard, and replicate with networked
 spawns (spawn docs carry them). Dynamic bodies re-resolve their layer every
 frame (`sync_dynamic_params`), so `node.layer = "Ghosts"` takes effect live;
 static colliders bake their bit at sim build (layer edits rebuild the sim).
+
+## Cross-scene copy/paste, string params, vectors, collision events (2026-07-14)
+
+- **Node clipboard → OS clipboard**: `copy_selected` mirrors the copied
+  `Vec<NodeDoc>` onto the system clipboard as tagged RON
+  (`//floptle-nodes-v1` + pretty RON); `paste()` prefers a valid tagged OS
+  clipboard over the in-app one — so copy → open another scene, another
+  editor window, even another project → paste just works (and copied nodes
+  are shareable as plain text).
+- **String params**: a plain string default (`destination = "hub"`) is a
+  per-instance text tunable — `ScriptInst.strs` / `ScriptDoc.strs`, Inspector
+  text field, seeded/synced like numerics, two-way (`ParamWrite::Str`).
+- **Vectors**: `floptle-script/src/math_api.rs` — `vec3`/`vec2` userdata with
+  operators + methods, `distance(a, b)` (vectors/tables/node handles),
+  `node.pos` read/write as vec3. Anything vector-shaped (numeric x/y/z)
+  is accepted anywhere a vector is.
+- **Collision & trigger events**: `Sim::step_tick` accumulates solver contacts
+  across substeps + tests body-vs-sensor and body-vs-body overlap
+  (matrix-gated), diffs touching pairs into `TouchEvent`s
+  (Enter/Stay/Exit, world-space point+normal, sensor flag). The editor
+  dispatches each to BOTH nodes' scripts as
+  `onCollisionEnter/Stay/Exit(node, other, hit)` /
+  `onTriggerEnter/Stay/Exit`. `Trigger` component (+ `NodeDoc.trigger`, the
+  Collider section's "trigger" switch) makes a Collidable a sensor: solver
+  and raycasts pass through, events still fire. Static colliders now carry
+  `eid` + `sensor` (`StaticTag`); `Contact` records its collider index.
+  Prediction replays (`step_body_tick`) never produce events.

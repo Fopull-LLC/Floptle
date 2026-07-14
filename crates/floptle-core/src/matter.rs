@@ -140,6 +140,15 @@ pub struct MeshCollider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collidable;
 
+/// Makes a [`Collidable`] node's static collider a **trigger**: bodies pass
+/// straight through it (no blocking, no push-out), but overlap still fires the
+/// `onTriggerEnter` / `onTriggerStay` / `onTriggerExit` script hooks — the
+/// portal / pickup-zone / checkpoint primitive. Lives ALONGSIDE `Collidable`
+/// (the Inspector's "trigger" switch on the Collider component); on its own it
+/// does nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Trigger;
+
 /// Attaches a layered animation controller asset (`*.actl.ron`) to a node. The
 /// runtime it drives lives editor/runtime-side; this is just the reference —
 /// the same discipline as `Matter::Mesh { asset_path }`. On a rigged Mesh node

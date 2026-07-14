@@ -86,9 +86,10 @@ impl Editor {
             // out the node sits (ADR-0015); the sim re-anchors them per rebase.
             let anchor = wt.translation;
             let s = wt.scale;
-            // The node's named layer, resolved through the sim's table so the
-            // collision matrix + masked raycasts filter this collider.
-            let layer = sim.layer_for(&self.world, e);
+            // The node's identity for this collider: resolved layer bit (the
+            // collision matrix + masked raycasts filter with it), entity (what
+            // touch events name), and the trigger flag (sensor: events only).
+            let layer = sim.tag_for(&self.world, e);
             match self.world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     let path = asset_path.clone();
@@ -182,13 +183,14 @@ impl Editor {
         self.sim = Some(sim);
     }
 
-    /// Every terrain volume as `(node world translation, node-local field, layer bit)` —
-    /// what the sim colliders anchor on. Each volume collides at its NATIVE resolution
-    /// (the combined field is render-only), placed in full `f64` (ADR-0015).
+    /// Every terrain volume as `(node world translation, node-local field, layer
+    /// bit, node entity)` — what the sim colliders anchor on (the entity is what
+    /// touch events name). Each volume collides at its NATIVE resolution (the
+    /// combined field is render-only), placed in full `f64` (ADR-0015).
     pub(crate) fn terrain_volumes(
         &self,
         layers: &floptle_core::Layers,
-    ) -> Vec<(DVec3, &floptle_field::Terrain, u8)> {
+    ) -> Vec<(DVec3, &floptle_field::Terrain, u8, Option<u32>)> {
         self.terrains
             .iter()
             .map(|(&e, t)| {
@@ -196,6 +198,7 @@ impl Editor {
                     floptle_core::world_transform(&self.world, e).translation,
                     t,
                     layers.index_for(&self.world, e),
+                    Some(e.index()),
                 )
             })
             .collect()
@@ -461,16 +464,16 @@ impl Editor {
             names.iter().map(|n| self.cached_script_defaults(n)).collect();
         // Refresh the Inspector's ref-kind map for this selection.
         self.ref_kinds.clear();
-        for (name, (_, refs)) in names.iter().zip(&defaults) {
+        for (name, (_, refs, _)) in names.iter().zip(&defaults) {
             for (param, kind) in refs {
                 self.ref_kinds.insert((name.clone(), param.clone()), kind.clone());
             }
         }
         let Some(scr) = self.world.get_mut::<Scripts>(e) else { return };
-        for (inst, (defs, ref_decls)) in scr.0.iter_mut().zip(defaults) {
+        for (inst, (defs, ref_decls, str_decls)) in scr.0.iter_mut().zip(defaults) {
             // An empty result means "no defaults declared" OR a transient parse error
             // (e.g. mid-edit) — never wipe the user's overrides in that case.
-            if defs.is_empty() && ref_decls.is_empty() {
+            if defs.is_empty() && ref_decls.is_empty() && str_decls.is_empty() {
                 continue;
             }
             // Drop params no longer declared in defaults.
@@ -488,6 +491,13 @@ impl Editor {
                     inst.refs.push((rk.clone(), String::new()));
                 }
             }
+            // Same for string params (overridden text survives; stale keys drop).
+            inst.strs.retain(|(k, _)| str_decls.iter().any(|(sk, _)| sk == k));
+            for (sk, sv) in &str_decls {
+                if !inst.strs.iter().any(|(k, _)| k == sk) {
+                    inst.strs.push((sk.clone(), sv.clone()));
+                }
+            }
         }
     }
 
@@ -503,10 +513,10 @@ impl Editor {
             return;
         }
         let name = script_name_of(path);
-        let (params, ref_decls) = self.script_host.script_defaults(Path::new(path));
+        let (params, ref_decls, strs) = self.script_host.script_defaults(Path::new(path));
         self.record();
         let refs = ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
-        let inst = ScriptInst { kind: name, enabled: true, params, refs };
+        let inst = ScriptInst { kind: name, enabled: true, params, refs, strs };
         if let Some(scr) = self.world.get_mut::<Scripts>(e) {
             scr.0.push(inst);
         } else {

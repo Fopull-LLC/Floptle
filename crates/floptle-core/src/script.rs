@@ -21,6 +21,11 @@ pub struct ScriptInst {
     /// and resolved by name each tick (O(1) via the host's name index). The
     /// script sees a node handle — no `find()` needed.
     pub refs: Vec<(String, String)>,
+    /// STRING params (declared `name = "value"` in the script's `defaults`):
+    /// per-instance text tunables, edited in the Inspector like the numeric
+    /// ones — a portal's destination scene, a pickup's item id. Two-way, like
+    /// `params`.
+    pub strs: Vec<(String, String)>,
 }
 
 impl ScriptInst {
@@ -29,10 +34,21 @@ impl ScriptInst {
         self.params.iter().find(|(k, _)| k == name).map(|(_, v)| *v).unwrap_or(default)
     }
 
+    /// Look up a string parameter, falling back to `default`.
+    pub fn str_param<'a>(&'a self, name: &str, default: &'a str) -> &'a str {
+        self.strs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or(default)
+    }
+
     /// A fresh instance of the named script with no params yet (the editor seeds
     /// them from the script's `defaults` table when attaching).
     pub fn new(kind: &str) -> Self {
-        Self { kind: kind.to_string(), enabled: true, params: Vec::new(), refs: Vec::new() }
+        Self {
+            kind: kind.to_string(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }
     }
 }
 

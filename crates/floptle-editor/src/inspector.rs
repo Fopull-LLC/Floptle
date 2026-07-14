@@ -1452,6 +1452,21 @@ impl EditorTabViewer<'_> {
                                 }
                                 cmd.inspector_changed = true;
                             }
+                            // Trigger: bodies pass through, overlap fires the
+                            // onTriggerEnter/Stay/Exit hooks — portals, pickup
+                            // zones, checkpoints.
+                            let mut trig = world.get::<floptle_core::Trigger>(e).is_some();
+                            if ui
+                                .checkbox(&mut trig, "trigger")
+                                .on_hover_text(
+                                    "events only, no blocking: bodies (and rays) pass through, \
+                                     but overlap fires onTriggerEnter / onTriggerStay / \
+                                     onTriggerExit on both nodes' scripts",
+                                )
+                                .changed()
+                            {
+                                cmd.set_trigger = Some((e, trig));
+                            }
                         }
                         if remove {
                             cmd.set_collidable = Some((e, false));
@@ -1582,6 +1597,21 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed |= ui
                                         .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
                                         .changed();
+                                }
+                                // String params (`name = "text"` in defaults):
+                                // free-text tunables — a portal's destination
+                                // scene, an item id. Same two-way rules as the
+                                // numbers.
+                                for (k, v) in inst.strs.iter_mut() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(k.as_str());
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::TextEdit::singleline(v)
+                                                    .desired_width(140.0),
+                                            )
+                                            .changed();
+                                    });
                                 }
                                 // Reference params (`name = noderef() / scriptref(k) /
                                 // componentref(c)` in the script's defaults): wire a

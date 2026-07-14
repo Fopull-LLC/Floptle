@@ -1493,7 +1493,7 @@ impl Editor {
             let wt = floptle_core::world_transform(world, e);
             let anchor = wt.translation;
             let s = wt.scale;
-            let layer = sim.layer_for(world, e);
+            let layer = sim.tag_for(world, e);
             match world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     let path = asset_path.clone();

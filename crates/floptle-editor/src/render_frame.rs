@@ -3304,6 +3304,36 @@ impl Editor {
                         }
                         sim.step_tick(self.game_tick.step, focus);
                     }
+                    // Collision / trigger events from THIS tick, dispatched to
+                    // BOTH nodes' scripts: `onCollisionEnter/Stay/Exit(node,
+                    // other, hit)` for solid contacts (incl. body-vs-body),
+                    // `onTriggerEnter/Stay/Exit` when a Trigger collider is
+                    // involved. Events fire where physics runs (offline, the
+                    // server, a predicted owner) — never during replays.
+                    let touches =
+                        self.sim.as_mut().map(|s| s.take_touch_events()).unwrap_or_default();
+                    for ev in touches {
+                        use floptle_physics::TouchPhase;
+                        let func = match (ev.sensor, ev.phase) {
+                            (true, TouchPhase::Enter) => "onTriggerEnter",
+                            (true, TouchPhase::Stay) => "onTriggerStay",
+                            (true, TouchPhase::Exit) => "onTriggerExit",
+                            (false, TouchPhase::Enter) => "onCollisionEnter",
+                            (false, TouchPhase::Stay) => "onCollisionStay",
+                            (false, TouchPhase::Exit) => "onCollisionExit",
+                        };
+                        let p = [ev.point.x, ev.point.y, ev.point.z];
+                        let n = [ev.normal.x, ev.normal.y, ev.normal.z];
+                        self.script_host.call_touch(&mut self.world, ev.a, func, ev.b, p, n);
+                        self.script_host.call_touch(&mut self.world, ev.b, func, ev.a, p, n);
+                    }
+                    // A handler's body writes (knockback, bounce) land THIS
+                    // tick, not the next one.
+                    if let Some(sim) = self.sim.as_mut() {
+                        for (eid, v) in self.script_host.take_body_changes() {
+                            sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
+                        }
+                    }
                     // Netcode rides the tick (docs/netcode-design.md §9): session
                     // commands, server snapshot send, ghost-client apply, RPC/event
                     // dispatch — all after physics, all on the deterministic clock.
@@ -3905,6 +3935,15 @@ impl Editor {
                 self.world.remove::<floptle_core::MeshCollider>(e);
             }
             self.rebuild_sim();
+        }
+        if let Some((e, on)) = cmd.set_trigger {
+            self.record();
+            if on {
+                self.world.insert(e, floptle_core::Trigger);
+            } else {
+                self.world.remove::<floptle_core::Trigger>(e);
+            }
+            self.rebuild_sim(); // the sensor flag bakes into the static collider
         }
         if let Some((e, layer)) = cmd.set_layer {
             self.record();

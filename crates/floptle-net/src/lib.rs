@@ -237,6 +237,7 @@ mod tests {
             rigidbody: None,
             mesh_collider: false,
             collidable: false,
+            trigger: false,
             visible: true,
             cast_shadow: true,
             anim_controller: None,

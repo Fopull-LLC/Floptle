@@ -27,6 +27,8 @@ it up immediately.
 16. [Networking: `net.*`, `synced`, `onRpc`](#16-networking-net-synced-onrpc)
 17. [Scenes: `scene.load` & the entry scene](#17-scenes-sceneload--the-entry-scene)
 18. [Layers & tags](#18-layers--tags)
+19. [Vectors & math: `vec3`, `vec2`, `distance`](#19-vectors--math-vec3-vec2-distance)
+20. [Collision & trigger events](#20-collision--trigger-events)
 
 ---
 
@@ -244,6 +246,24 @@ The full Lua standard library (`math`, `string`, `table`, …) is available.
 > **`defaults` → `params`:** every key you put in `defaults` is readable as
 > `params.<key>`. Declaring `defaults` is what makes a value tweakable per-node in the
 > Inspector; if you don't override it there, `params.<key>` is just the default.
+
+### String params
+
+A **plain string default** becomes an Inspector **text field** on each instance
+— so two portals share one script but carry different destinations:
+
+```lua
+-- portal.lua
+defaults = { destination = "hub" }   -- each portal's Inspector shows a text box
+
+function onTriggerEnter(node, other, hit)
+  if other:hasTag("player") then scene.load(params.destination) end
+end
+```
+
+Numbers and strings follow the same rules (seeding, live Inspector sync, the
+two-way behavior below). A string that *looks like* `noderef()` output is a
+reference param, not a string — those keep their picker.
 
 ### `params` is two-way
 
@@ -1185,3 +1205,92 @@ Rules of thumb: a **layer** answers *"what can touch / see what?"* (it changes
 physics), a **tag** answers *"what is this thing?"* (it never does). Both save
 with the scene, copy/paste with nodes, and ride along when a networked spawn
 replicates.
+
+---
+
+## 19. Vectors & math: `vec3`, `vec2`, `distance`
+
+Real vector **values** with operators — not just x/y/z triplets:
+
+```lua
+local dir = (target.pos - node.pos):normalized()
+node.pos = node.pos + dir * params.speed * dt
+```
+
+| | |
+|---|---|
+| `vec3(x, y, z)` / `vec3(s)` / `vec3()` | make one (splat / zero); `vec3(other)` copies |
+| `a + b`, `a - b`, `v * 2`, `v / 2`, `-v`, `a == b` | operators |
+| `v:length()`, `v:lengthSquared()`, `v:normalized()` | measure / unit |
+| `a:dot(b)`, `a:cross(b)`, `a:lerp(b, t)`, `a:distance(b)` | the classics |
+| `vec2(x, y)` | the 2D version (UI/screen math; same surface, no cross) |
+| `node.pos` | the node's position **as** a vec3 — read/write |
+
+`distance(a, b)` is a global that takes vectors, plain `{x=, y=, z=}` tables,
+or **node handles** — `distance(node, player)` just works. There's also a raw
+form: `distance(x1,y1,z1, x2,y2,z2)`.
+
+Everything that *accepts* a vector accepts anything with numeric `x/y/z`
+fields — vectors, tables, nodes — so there's never a conversion dance.
+
+---
+
+## 20. Collision & trigger events
+
+Define these hooks in any script on a node and the engine calls them when the
+node's body touches something — per gameplay tick, right after physics:
+
+```lua
+function onCollisionEnter(node, other, hit)  -- the touch STARTED this tick
+end
+function onCollisionStay(node, other, hit)   -- every tick while it lasts
+end
+function onCollisionExit(node, other, hit)   -- the pair separated (hit = last contact)
+end
+```
+
+- `other` is the other node's handle — `other.name`, `other:hasTag("enemy")`,
+  `other:getscript("health")` all work.
+- `hit` is `{ x, y, z, nx, ny, nz }`: the world contact point and the unit
+  normal out of the surface that was hit.
+- Fires for body-vs-collider **and body-vs-body** (two rigidbodies detect each
+  other even though the solver doesn't push them apart).
+- The events fire on **both** nodes' scripts, and the collision matrix
+  (Project Settings → Layers) gates them: pairs that don't collide don't event.
+- A body resting on the floor reports `onCollisionStay` against the floor node
+  every tick — gate on tags/names rather than assuming silence.
+
+### Triggers
+
+Tick **trigger** on a node's Collider component and it stops blocking: bodies
+(and raycasts) pass straight through, but overlap fires the trigger hooks —
+portals, pickup zones, checkpoints, kill planes:
+
+```lua
+function onTriggerEnter(node, other, hit) end
+function onTriggerStay(node, other, hit) end
+function onTriggerExit(node, other, hit) end
+```
+
+The full portal — **one script, any number of portals**, each with its own
+destination via a [string param](#6-globals-params-time-dt-log):
+
+```lua
+-- portal.lua — attach to a Collidable node with "trigger" ticked
+defaults = { destination = "hub" }
+
+function onTriggerEnter(node, other, hit)
+  if other:hasTag("player") then
+    scene.load(params.destination)
+  end
+end
+```
+
+### When events fire (and don't)
+
+Events are produced where physics runs: offline everywhere, on the **server**
+in multiplayer, and on a predicted node's owning client. Prediction **replays
+never re-fire events** (corrections can't double-trigger a pickup). Handlers
+run outside the normal `update` pass — their `node` writes apply immediately,
+but `params` writes are frame-local there (persist state in script variables
+or `synced` instead).

@@ -73,6 +73,10 @@ pub struct NodeDoc {
     /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub collidable: bool,
+    /// Makes the collidable a TRIGGER: bodies pass through, overlap fires the
+    /// `onTriggerEnter/Stay/Exit` hooks. See [`floptle_core::Trigger`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trigger: bool,
     /// Whether the node's geometry is drawn (default true). See [`floptle_core::Visible`].
     /// Only the rare hidden node serializes this.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
@@ -303,6 +307,9 @@ pub struct ScriptDoc {
     /// Node-reference params: param name → target node NAME (Inspector-wired).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<(String, String)>,
+    /// String params: per-instance text tunables (`name = "value"` defaults).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strs: Vec<(String, String)>,
 }
 
 fn yes() -> bool {
@@ -316,6 +323,7 @@ impl ScriptDoc {
             enabled: self.enabled,
             params: self.params.clone(),
             refs: self.refs.clone(),
+            strs: self.strs.clone(),
         }
     }
     fn from_inst(s: &ScriptInst) -> Self {
@@ -324,6 +332,7 @@ impl ScriptDoc {
             enabled: s.enabled,
             params: s.params.clone(),
             refs: s.refs.clone(),
+            strs: s.strs.clone(),
         }
     }
 }
@@ -1101,6 +1110,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if node.collidable {
         world.insert(e, floptle_core::Collidable);
     }
+    if node.trigger {
+        world.insert(e, floptle_core::Trigger);
+    }
     if !node.visible {
         world.insert(e, floptle_core::Visible(false));
     }
@@ -1230,6 +1242,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
+        let trigger = world.get::<floptle_core::Trigger>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
@@ -1257,6 +1270,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             rigidbody,
             mesh_collider,
             collidable,
+            trigger,
             visible,
             cast_shadow,
             anim_controller,
@@ -1302,6 +1316,7 @@ mod tests {
                         enabled: true,
                         params: vec![("speed".into(), 2.0)],
                         refs: vec![("target".into(), "blob".into())], // exercise the round-trip
+                        strs: vec![("scene".into(), "arena".into())], // exercise the round-trip
                     }],
                     material: Some(MaterialDoc {
                         color: [0.8, 0.3, 0.2],
@@ -1324,6 +1339,7 @@ mod tests {
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     collidable: true,    // exercise the collidable round-trip
+                    trigger: true,       // exercise the trigger round-trip
                     visible: false,      // exercise the visible round-trip
                     cast_shadow: false,  // exercise the cast-shadow opt-out round-trip
                     anim_controller: Some("animation_controllers/Test".into()),
@@ -1396,6 +1412,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    trigger: false,
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,
@@ -1421,6 +1438,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    trigger: false,
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,
@@ -1443,6 +1461,7 @@ mod tests {
                     rigidbody: None,
                     mesh_collider: false,
                     collidable: false,
+                    trigger: false,
                     visible: true,
                     cast_shadow: true,
                     anim_controller: None,

@@ -93,6 +93,7 @@ pub(crate) fn params_table(
     env: &Table,
     params: &[(String, f32)],
     refs: &[(String, ResolvedRef)],
+    strs: &[(String, String)],
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     if let Ok(defaults) = env.get::<Table>("defaults") {
@@ -108,6 +109,10 @@ pub(crate) fn params_table(
     }
     for (k, v) in params {
         t.set(k.as_str(), *v as f64)?;
+    }
+    // Stored STRING overrides land over the defaults, like the numbers above.
+    for (k, v) in strs {
+        t.set(k.as_str(), v.as_str())?;
     }
     for (k, r) in refs {
         match r {

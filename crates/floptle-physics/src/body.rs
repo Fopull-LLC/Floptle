@@ -136,6 +136,9 @@ impl Body {
 #[derive(Clone, Copy, Debug)]
 pub struct Contact {
     pub body: usize,
+    /// Index of the static collider the body resolved against (into
+    /// `PhysicsWorld::colliders`) — how touch events name the other side.
+    pub collider: usize,
     pub point: Vec3,
     pub normal: Vec3,
 }
