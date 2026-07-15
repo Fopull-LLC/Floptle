@@ -345,6 +345,7 @@ impl IrError {
 /// A call argument after resolution against the op's signature, in signature
 /// slot order. What the emitter consumes.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ResolvedArg {
     Expr(ExprId),
     /// An omitted optional input, filled from the signature default.
@@ -367,7 +368,7 @@ pub struct ResolvedCall {
 }
 
 /// The result of type-checking: per-expression types + per-call resolutions.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Checked {
     /// Type of every expression, parallel to [`ShaderIr::exprs`].
     pub types: Vec<Option<Ty>>,

@@ -222,6 +222,9 @@ pub struct Raster {
     /// The group-0/1/2 layouts, kept so flsl pipelines can be built later.
     globals_layout: wgpu::BindGroupLayout,
     field_layout: wgpu::BindGroupLayout,
+    /// The scene's spliced Field Shape code `(field functions, support)` —
+    /// every module built here includes it so meshes receive shape shadows/AO.
+    custom_field: Option<(String, String)>,
 }
 
 /// The WGSL every raster-pass module starts from: the pass shader + the shared
@@ -229,6 +232,34 @@ pub struct Raster {
 /// `.flsl` chunk against the REAL seam before asking for a pipeline.
 pub fn pass_prelude() -> &'static str {
     concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl"))
+}
+
+/// Replace a marker-delimited stub block (inclusive of both marker lines) with
+/// generated code — the Field Shape splice (proposal §7). Missing markers
+/// return the source untouched.
+pub(crate) fn splice_block(src: &str, begin: &str, end: &str, replacement: &str) -> String {
+    let (Some(b), Some(e)) = (src.find(begin), src.find(end)) else {
+        return src.to_string();
+    };
+    let e_end = src[e..].find('\n').map(|i| e + i + 1).unwrap_or(src.len());
+    format!("{}{}\n{}", &src[..b], replacement, &src[e_end..])
+}
+
+/// The raster module's source with Field Shape distance code spliced into its
+/// field.wgsl half: `(field_code, support)`. `None` = the baseline prelude.
+pub fn raster_custom_source(code: Option<(&str, &str)>) -> String {
+    match code {
+        None => pass_prelude().to_string(),
+        Some((field, support)) => {
+            let s = splice_block(
+                pass_prelude(),
+                "//[flsl-field-custom-begin]",
+                "//[flsl-field-custom-end]",
+                field,
+            );
+            format!("{s}\n{support}")
+        }
+    }
 }
 
 /// A registered material texture: its bind group + the texture kept alive for it.
@@ -272,6 +303,10 @@ struct FlslShader {
     /// Opaque-phase shaders draw with the opaque bucket (depth write on);
     /// blended ones draw after the transparent bucket (no depth write).
     opaque: bool,
+    /// The generated chunk + blend, kept so a Field Shape splice can rebuild
+    /// this pipeline against the new field module.
+    chunk: String,
+    blend: FlslBlend,
 }
 
 struct FlslBinding {
@@ -338,153 +373,8 @@ impl Raster {
         // atlas). The editor passes `Raymarch::field_bind`; standalone callers get
         // the empty fallback below (zeroed globals → every field branch skips).
         let field_layout = crate::raymarch::field_bind_layout(device);
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raster"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout), Some(&field_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                // LessEqual (not Less): when the depth prepass primed the buffer,
-                // the color pass's fragments arrive at depths EQUAL to their own
-                // prepass writes and must still shade.
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // Depth-only prepass (opaque instances, conservative alpha discard): primes
-        // the frame's depth buffer so the color pass early-z-kills hidden fragments
-        // (their shading marches the shadow field — the expensive part) and gives
-        // the raymarch a per-pixel march cap. Needs only groups 0 + 1.
-        let prepass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raster-prepass"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
-            immediate_size: 0,
-        });
-        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-prepass"),
-            layout: Some(&prepass_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_depth"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // Transparent variant: identical vertex/fragment, but alpha-blends and does NOT
-        // write depth, so an object behind it still shows through and later opaque draws
-        // aren't occluded by it. (No back-to-front sort yet, so overlapping transparent
-        // surfaces are approximate — enough for the basic transparency this exposes.)
-        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-transparent"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
-        // single-channel mask (no depth, no cull → the full screen silhouette), which
-        // a post-pass edge-detects into a selection outline. Needs only the globals.
-        let mask_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raster-mask"),
-            bind_group_layouts: &[Some(&globals_layout)],
-            immediate_size: 0,
-        });
-        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-mask"),
-            layout: Some(&mask_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_mask"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: crate::outline::MASK_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) =
+            Self::build_core_pipelines(gpu, &module, &globals_layout, &tex_layout, &field_layout);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raster-globals"),
@@ -560,7 +450,170 @@ impl Raster {
             flsl_bindings: Vec::new(),
             globals_layout,
             field_layout,
+            custom_field: None,
         }
+    }
+
+
+    /// The four core pipelines (opaque / transparent / mask / depth-prepass)
+    /// from one module — extracted so a Field Shape splice
+    /// ([`set_custom_field`](Self::set_custom_field)) can rebuild them.
+    fn build_core_pipelines(
+        gpu: &Gpu,
+        module: &wgpu::ShaderModule,
+        globals_layout: &wgpu::BindGroupLayout,
+        tex_layout: &wgpu::BindGroupLayout,
+        field_layout: &wgpu::BindGroupLayout,
+    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
+        let device = &gpu.device;
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster"),
+            bind_group_layouts: &[Some(globals_layout), Some(tex_layout), Some(field_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                // LessEqual (not Less): when the depth prepass primed the buffer,
+                // the color pass's fragments arrive at depths EQUAL to their own
+                // prepass writes and must still shade.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Depth-only prepass (opaque instances, conservative alpha discard): primes
+        // the frame's depth buffer so the color pass early-z-kills hidden fragments
+        // (their shading marches the shadow field — the expensive part) and gives
+        // the raymarch a per-pixel march cap. Needs only groups 0 + 1.
+        let prepass_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-prepass"),
+            bind_group_layouts: &[Some(globals_layout), Some(tex_layout)],
+            immediate_size: 0,
+        });
+        let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-prepass"),
+            layout: Some(&prepass_layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_depth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Transparent variant: identical vertex/fragment, but alpha-blends and does NOT
+        // write depth, so an object behind it still shows through and later opaque draws
+        // aren't occluded by it. (No back-to-front sort yet, so overlapping transparent
+        // surfaces are approximate — enough for the basic transparency this exposes.)
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-transparent"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Silhouette-mask pipeline: rasterizes a selected mesh as solid 1.0 into a
+        // single-channel mask (no depth, no cull → the full screen silhouette), which
+        // a post-pass edge-detects into a selection outline. Needs only the globals.
+        let mask_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-mask"),
+            bind_group_layouts: &[Some(globals_layout)],
+            immediate_size: 0,
+        });
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-mask"),
+            layout: Some(&mask_layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_mask"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::outline::MASK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline)
     }
 
     /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
@@ -579,9 +632,20 @@ impl Raster {
         replace: Option<FlslShaderId>,
     ) -> FlslShaderId {
         let device = &gpu.device;
+        // The base includes any spliced Field Shape code (support arrives once,
+        // inside `chunk`), so custom-material meshes see shape shadows/AO too.
+        let base = match &self.custom_field {
+            Some((field, _)) => splice_block(
+                pass_prelude(),
+                "//[flsl-field-custom-begin]",
+                "//[flsl-field-custom-end]",
+                field,
+            ),
+            None => pass_prelude().to_string(),
+        };
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raster-flsl"),
-            source: wgpu::ShaderSource::Wgsl(format!("{}\n{chunk}", pass_prelude()).into()),
+            source: wgpu::ShaderSource::Wgsl(format!("{base}\n{chunk}").into()),
         });
 
         // Group 3: the shader's param UBO + its declared texture slots.
@@ -680,7 +744,14 @@ impl Raster {
             cache: None,
         });
 
-        let shader = FlslShader { pipeline, group3_layout, tex_slots, opaque };
+        let shader = FlslShader {
+            pipeline,
+            group3_layout,
+            tex_slots,
+            opaque,
+            chunk: chunk.to_string(),
+            blend,
+        };
         match replace {
             Some(id) if (id.0 as usize) < self.flsl_shaders.len() => {
                 self.flsl_shaders[id.0 as usize] = shader;
@@ -690,6 +761,39 @@ impl Raster {
                 self.flsl_shaders.push(shader);
                 FlslShaderId(self.flsl_shaders.len() as u32 - 1)
             }
+        }
+    }
+
+    /// Splice (or clear, with `None`) the scene's Field Shape code into EVERY
+    /// module this pass owns — the core pipelines and each registered flsl
+    /// shader — so meshes (built-in and custom-material alike) receive shape
+    /// shadows and AO. `code` = `(field distance functions, stdlib support)`;
+    /// the caller MUST have naga-validated [`raster_custom_source`] first.
+    pub fn set_custom_field(&mut self, gpu: &Gpu, code: Option<(&str, &str)>) {
+        self.custom_field = code.map(|(f, s)| (f.to_string(), s.to_string()));
+        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raster"),
+            source: wgpu::ShaderSource::Wgsl(raster_custom_source(code).into()),
+        });
+        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) =
+            Self::build_core_pipelines(
+                gpu,
+                &module,
+                &self.globals_layout,
+                &self.tex_layout,
+                &self.field_layout,
+            );
+        self.pipeline = pipeline;
+        self.transparent_pipeline = transparent_pipeline;
+        self.mask_pipeline = mask_pipeline;
+        self.prepass_pipeline = prepass_pipeline;
+        // Rebuild every custom-shader pipeline against the new field module.
+        for i in 0..self.flsl_shaders.len() {
+            let (chunk, tex_slots, blend) = {
+                let s = &self.flsl_shaders[i];
+                (s.chunk.clone(), s.tex_slots, s.blend)
+            };
+            self.register_flsl_shader(gpu, &chunk, tex_slots, blend, Some(FlslShaderId(i as u32)));
         }
     }
 

@@ -451,6 +451,11 @@ pub enum MatterDoc {
         #[serde(default = "default_range")]
         radius: f32,
     },
+    /// An authored SDF shape — its Material's sdf-stage `.flsl` is the geometry.
+    FieldShape {
+        #[serde(default = "one_f32")]
+        radius: f32,
+    },
     /// The scene's environment background (solid color or equirect texture + tint).
     Skybox {
         #[serde(default = "sky_grey")]
@@ -576,6 +581,7 @@ impl From<&Matter> for MatterDoc {
                 strength: *strength,
                 radius: *radius,
             },
+            Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
             Matter::Skybox { color, size, texture, tint } => MatterDoc::Skybox {
                 color: *color,
                 size: *size,
@@ -632,6 +638,7 @@ impl MatterDoc {
                 strength: *strength,
                 radius: *radius,
             },
+            MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
             MatterDoc::Skybox { color, size, texture, tint } => Matter::Skybox {
                 color: *color,
                 size: *size,

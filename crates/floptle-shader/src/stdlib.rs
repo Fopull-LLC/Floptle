@@ -400,9 +400,12 @@ fn flsl_smin(a: f32, b: f32, k: f32) -> f32 {
     return mix(b, a, h) - kk * h * (1.0 - h);
 }
 
+// Tile space every `cell` units per axis; a zero (or negative) cell leaves
+// that axis un-repeated instead of collapsing it.
 fn flsl_op_repeat(p: vec3<f32>, cell: vec3<f32>) -> vec3<f32> {
-    let c = max(cell, vec3<f32>(1e-4));
-    return p - c * round(p / c);
+    let reps = step(vec3<f32>(1e-3), cell);
+    let c = max(cell, vec3<f32>(1e-3));
+    return mix(p, p - c * round(p / c), reps);
 }
 
 fn flsl_op_twist(p: vec3<f32>, amount: f32) -> vec3<f32> {

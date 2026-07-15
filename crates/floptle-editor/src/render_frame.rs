@@ -117,8 +117,10 @@ impl Editor {
         self.ensure_vfx_assets();
         // Compile/hot-reload `.flsl` shader materials + refresh their group(3)
         // bindings — the gathers below (main, Game viewport, camera preview)
-        // all read `flsl_binds`, so this must run before any of them.
+        // all read `flsl_binds`, so this must run before any of them. Field
+        // Shapes follow: their sdf shaders splice into both passes on change.
         self.ensure_flsl_materials();
+        self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
         // playhead. This must run BEFORE anything gathers draw data — the UI
@@ -757,12 +759,14 @@ impl Editor {
                         push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
-                // group / terrain / camera / light / gravity / skybox / post render elsewhere.
+                // group / terrain / camera / light / gravity / skybox / post render
+                // elsewhere; Field Shapes are raymarched (globals filled below).
                 Matter::Empty
                 | Matter::Terrain { .. }
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
+                | Matter::FieldShape { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => {}
             }
@@ -933,6 +937,13 @@ impl Editor {
                             .unwrap_or_else(blob_default_material);
                         mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x, mp)]));
                     }
+                    Matter::FieldShape { .. } => {
+                        // Mask through the raymarch with ONLY this shape active,
+                        // so the outline hugs the authored SDF silhouette.
+                        let mut g = make_rm(&[]);
+                        crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, Some(e));
+                        mask_blob = Some(g);
+                    }
                     Matter::Empty
                     | Matter::Terrain { .. }
                     | Matter::Camera { .. }
@@ -951,10 +962,14 @@ impl Editor {
         // — on frames with nothing to raymarch they're still uploaded (not drawn) so
         // the raster pass's field bind group has this frame's shadow/proxy data.
         let show_blobs = self.project.matter && !blobs.is_empty();
-        let rm_draw = show_blobs || !self.terrains.is_empty() || sky_params[0] >= 0.5;
+        let rm_draw = show_blobs
+            || !self.terrains.is_empty()
+            || sky_params[0] >= 0.5
+            || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
+            crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             g
         };
 
@@ -1617,6 +1632,7 @@ impl Editor {
                 materials,
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
+                sdf_cache: &self.sdf_cache,
                 component_clip,
                 add_component_filter,
                 layer_names: &layer_names,
@@ -3684,6 +3700,7 @@ impl Editor {
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
+                MatterDoc::FieldShape { .. } => "Field Shape",
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
             };
@@ -4504,7 +4521,10 @@ impl Editor {
         let show_blobs = self.project.matter && !blobs.is_empty();
         // A textured skybox is DRAWN by the raymarch pass (missed rays sample the
         // sky) — keep it running even with no terrain/blobs in the scene.
-        let rm_draw = show_blobs || !self.terrains.is_empty() || sky_params[0] >= 0.5;
+        let rm_draw = show_blobs
+            || !self.terrains.is_empty()
+            || sky_params[0] >= 0.5
+            || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
@@ -4561,6 +4581,7 @@ impl Editor {
                 ..Default::default()
             };
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
+            crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             g
         };
 

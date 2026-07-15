@@ -621,7 +621,7 @@ impl<'a> EditorTabViewer<'a> {
             return;
         }
         ui.separator();
-        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
+        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
         if let Some(name) = r.save_as
             && !name.is_empty() {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));

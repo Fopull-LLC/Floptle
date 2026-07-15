@@ -423,6 +423,9 @@ struct EditorTabViewer<'a> {
     /// Compiled `.flsl` shaders — the Inspector's Material section reads the
     /// selected shader's uniform/texture schema (and error) from here.
     flsl_cache: &'a shaders::FlslCache,
+    /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
+    /// back to this schema when the picked shader is `stage sdf`.
+    sdf_cache: &'a shaders::SdfCache,
     /// The component clipboard (read-only here; copy/paste route through `cmd`).
     component_clip: &'a Option<ComponentClip>,
     /// Search text for the Inspector's "➕ Add Component" menu.
@@ -1687,6 +1690,12 @@ struct Editor {
     flsl_binds: shaders::FlslBinds,
     /// Retired binding slots, reused before growing the raster's registry.
     flsl_free: Vec<floptle_render::FlslBindingId>,
+    /// Parsed Sdf-stage shaders by material path (Field Shapes, mtime-cached).
+    sdf_cache: shaders::SdfCache,
+    /// Live Field Shape entities → their splice slot (0..4).
+    flsl_shape_slots: HashMap<Entity, usize>,
+    /// The (entity, shader, generation) set the current splice was built from.
+    flsl_field_key: Vec<(Entity, String, u64)>,
     /// The terrain fields (id-keyed) + texture palette when Play started.
     /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
     /// it — Stop restores from here so unsaved sculpts survive Play and a

@@ -325,6 +325,12 @@ pub enum Matter {
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
+    /// An authored SDF shape (ADR-0007 Sdf stage): its Material's `.flsl`
+    /// shader IS the geometry, raymarched as part of the scene field (up to 4
+    /// per scene). `radius` bounds the shape in LOCAL units — the march,
+    /// shadows and spans all key off it, so keep it snug. Visual only for now
+    /// (no collision until the CPU field evaluator lands — proposal §7.3).
+    FieldShape { radius: f32 },
     /// The scene's environment background — a face-inverted sphere of radius `size`
     /// drawn behind everything. `color` is the solid sky color (grey by default); when
     /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by

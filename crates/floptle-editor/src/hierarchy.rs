@@ -143,6 +143,17 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::GravityVolume { radial: false, strength: 9.81, radius: 20.0 });
             ui.close();
         }
+        if ui
+            .button("◈ Field Shape")
+            .on_hover_text(
+                "an authored SDF shape: assign an sdf-stage .flsl on its Material and the \
+                 shader IS the geometry, raymarched into the scene field (up to 4 per scene)",
+            )
+            .clicked()
+        {
+            pick = Some(MatterDoc::FieldShape { radius: 1.5 });
+            ui.close();
+        }
         if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();

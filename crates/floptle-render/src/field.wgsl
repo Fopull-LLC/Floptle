@@ -71,7 +71,39 @@ struct Globals {
     // standing inside the brick must not pay to march (and fetch) through it.
     vol_tight_c: array<vec4<f32>, 16>,
     vol_tight_h: array<vec4<f32>, 16>,
+    // ---- Field Shapes (ADR-0007 Sdf stage): up to 4 authored SDF shaders in
+    // the scene, each contributing a distance (`custom_d`) min-folded into the
+    // field. Shader code is SPLICED into this module by the renderer; per-shape
+    // transform/params live here so edits are uniform writes, not recompiles.
+    shape_meta: vec4<f32>,             // x = active shape count
+    shape_pos: array<vec4<f32>, 4>,    // xyz camera-relative position, w = uniform scale
+    shape_rot: array<vec4<f32>, 4>,    // INVERSE rotation quat (xyzw)
+    shape_aux: array<vec4<f32>, 4>,    // x = bounding radius (world units)
+    shape_uniforms: array<vec4<f32>, 64>, // 16 slots per shape (shader-exposed knobs)
+    // Per-shape surface material, same model as terrain_*/blob_*.
+    shape_tint: array<vec4<f32>, 4>,
+    shape_emissive: array<vec4<f32>, 4>,
+    shape_specular: array<vec4<f32>, 4>,
+    shape_params: array<vec4<f32>, 4>,
+    shape_rim: array<vec4<f32>, 4>,
 };
+
+// A point mapped into Field Shape `i`'s local frame: un-translate (positions
+// are camera-relative on both sides), un-rotate by the stored INVERSE quat,
+// un-scale. Sdf shader code (spliced below) authors in this space.
+fn shape_local(i: u32, p: vec3<f32>) -> vec3<f32> {
+    let q = G.shape_rot[i];
+    let rel = p - G.shape_pos[i].xyz;
+    let r = rel + 2.0 * cross(q.xyz, cross(q.xyz, rel) + q.w * rel);
+    return r / max(G.shape_pos[i].w, 1e-6);
+}
+
+//[flsl-field-custom-begin] — the renderer splices generated Field Shape
+// distance functions over this block; the stub keeps the field unchanged.
+fn custom_d(p: vec3<f32>) -> f32 {
+    return 1e9;
+}
+//[flsl-field-custom-end]
 
 fn sd_sphere(p: vec3<f32>, r: f32) -> f32 {
     return length(p) - r;
@@ -148,6 +180,15 @@ fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
     let count = min(u32(G.params.y), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let s = sphere_span(ro, rd, G.blobs[i].xyz, blob_bound(i));
+        if (s.x <= s.y && s.y > 0.0) {
+            t0 = min(t0, s.x);
+            t1 = max(t1, s.y);
+        }
+    }
+    // Field Shapes: their authored bounding spheres join the span.
+    let shapes = min(u32(G.shape_meta.x), 4u);
+    for (var i = 0u; i < shapes; i = i + 1u) {
+        let s = sphere_span(ro, rd, G.shape_pos[i].xyz, G.shape_aux[i].x);
         if (s.x <= s.y && s.y > 0.0) {
             t0 = min(t0, s.x);
             t1 = max(t1, s.y);
@@ -317,13 +358,17 @@ fn volumes_d(p: vec3<f32>) -> VolFoldD {
 fn map_d(p: vec3<f32>) -> f32 {
     let a = analytic_d(p);
     let v = volumes_d(p);
+    var base: f32;
     if (!v.any) {
-        return a;
+        base = a;
+    } else if (u32(G.params.y) == 0u) {
+        base = v.d;
+    } else {
+        base = smin(a, v.d, max(G.params.z, 0.0001));
     }
-    if (u32(G.params.y) == 0u) {
-        return v.d;
-    }
-    return smin(a, v.d, max(G.params.z, 0.0001));
+    // Field Shapes union in hard (min is exact against the 1e9 stub — no f32
+    // cancellation, unlike smin against an absent part).
+    return min(base, custom_d(p));
 }
 
 // The field's sampling granularity at `p`: ~one voxel inside a baked volume (the
@@ -573,7 +618,19 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
             t_end = max(t_end, min(s.y, max_d));
         }
     }
-    if (vmask == 0u && pmask == 0u && !blobs) {
+    // Field Shapes cast too: penumbra-expanded bounding spheres, exactly like
+    // blobs (the k·d/t estimator's reach — see the sweep comment above).
+    var shapes = false;
+    let sc = min(u32(G.shape_meta.x), 4u);
+    for (var i = 0u; i < sc; i = i + 1u) {
+        let pen = max(dot(G.shape_pos[i].xyz - ro, l), 0.0) / pen_k;
+        let s = sphere_span(ro, l, G.shape_pos[i].xyz, G.shape_aux[i].x + pen);
+        if (s.x <= s.y && s.y > 0.0 && s.x < max_d) {
+            shapes = true;
+            t_end = max(t_end, min(s.y, max_d));
+        }
+    }
+    if (vmask == 0u && pmask == 0u && !blobs && !shapes) {
         return 1.0; // nothing anywhere along this ray — fully lit, no march
     }
     // A proxy containing the start point is the caster this fragment belongs to
@@ -596,6 +653,9 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     for (var s = 0; s < 64; s = s + 1) {
         let q = ro + l * t;
         var d = shadow_field_d(q, vmask, blobs);
+        if (shapes) {
+            d = min(d, custom_d(q));
+        }
         for (var i = 0u; i < pc; i = i + 1u) {
             if ((march & (1u << i)) != 0u) {
                 d = min(d, prox_d(i, q));
