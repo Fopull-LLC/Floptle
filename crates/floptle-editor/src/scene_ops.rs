@@ -192,6 +192,9 @@ impl Editor {
         if !node.visible {
             self.world.insert(e, floptle_core::Visible(false));
         }
+        if !node.cast_shadow {
+            self.world.insert(e, floptle_core::CastShadow(false));
+        }
         if let Some(ctl) = &node.anim_controller {
             self.world.insert(e, floptle_core::AnimController { asset: ctl.clone() });
         }
@@ -254,10 +257,13 @@ impl Editor {
         self.select_single(e);
     }
 
-    /// Drop of an asset from the browser: spawn a model, or attach a script to the
-    /// selection (a model dropped on the viewport, a script anywhere).
+    /// Drop of an asset from the browser: spawn a model or a prefab instance at
+    /// the cursor, or attach a script to the selection.
     pub(crate) fn drop_asset(&mut self, path: &str) {
-        if is_model(path) {
+        if crate::assets::is_prefab(path) {
+            let at = self.cursor_world();
+            self.instantiate_prefab(path, Some(at), None);
+        } else if is_model(path) {
             if !self.import_model(path) {
                 return;
             }
@@ -317,7 +323,23 @@ impl Editor {
             return;
         }
         self.record();
-        for e in targets {
+        // Deleting a node deletes its WHOLE subtree — children don't silently
+        // become orphaned roots. (PostProcess stays even if it's a descendant.)
+        let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
+            std::collections::HashMap::new();
+        for (e, p) in self.world.query::<floptle_core::Parent>() {
+            kids.entry(p.0).or_default().push(e);
+        }
+        let mut doomed = Vec::new();
+        let mut queue: std::collections::VecDeque<Entity> = targets.into();
+        while let Some(e) = queue.pop_front() {
+            if matches!(self.world.get::<Matter>(e), Some(Matter::PostProcess { .. })) {
+                continue;
+            }
+            doomed.push(e);
+            queue.extend(kids.get(&e).map(|v| v.as_slice()).unwrap_or(&[]));
+        }
+        for e in doomed {
             if self.terrains.remove(&e).is_some() {
                 if self.active_terrain == Some(e) {
                     self.active_terrain = None;
@@ -339,6 +361,77 @@ impl Editor {
         v
     }
 
+    /// Serialize `roots` — each with its WHOLE subtree — into the flat node-list
+    /// format shared by the clipboard and prefab files: `parent` is an index into
+    /// the returned list (`None` = a root). Children keep their local transforms
+    /// (and bone attachments); roots bake their WORLD transform, since whatever
+    /// they were parented to isn't coming along. Selecting both a parent and its
+    /// child captures the child once (inside the parent's subtree).
+    pub(crate) fn subtree_docs(&self, roots: &[Entity]) -> Vec<NodeDoc> {
+        let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
+            std::collections::HashMap::new();
+        for (e, p) in self.world.query::<floptle_core::Parent>() {
+            kids.entry(p.0).or_default().push(e);
+        }
+        let roots: Vec<Entity> = roots
+            .iter()
+            .copied()
+            .filter(|&r| !roots.iter().any(|&o| o != r && self.is_descendant(r, o)))
+            .collect();
+        let mut docs: Vec<NodeDoc> = Vec::new();
+        let mut queue: std::collections::VecDeque<(Entity, Option<usize>)> =
+            roots.iter().map(|&r| (r, None)).collect();
+        while let Some((e, pidx)) = queue.pop_front() {
+            let Some(mut doc) = self.node_of(e) else { continue };
+            doc.parent = pidx;
+            if pidx.is_none() {
+                doc.transform =
+                    TransformDoc::from(&floptle_core::world_transform(&self.world, e));
+            } else if let Some(a) = self.world.get::<floptle_core::BoneAttach>(e) {
+                // A bone-attached child rides along; its live Transform is a
+                // derived pose value, so serialize a stable identity (exactly
+                // like scene save — resolve_attachments re-derives it).
+                doc.attachment = Some(floptle_scene::AttachmentDoc {
+                    bone: a.bone.clone(),
+                    offset: TransformDoc::from(&a.offset),
+                });
+                doc.transform = TransformDoc::default();
+            }
+            let idx = docs.len();
+            docs.push(doc);
+            for &k in kids.get(&e).map(|v| v.as_slice()).unwrap_or(&[]) {
+                queue.push_back((k, Some(idx)));
+            }
+        }
+        docs
+    }
+
+    /// Spawn a flat node list (the clipboard/prefab format), wiring `Parent` and
+    /// bone attachments from the internal indices. Returns every spawned entity in
+    /// doc order — roots are the entries whose `doc.parent` is `None`.
+    pub(crate) fn spawn_docs(&mut self, docs: &[NodeDoc]) -> Vec<Entity> {
+        let ents: Vec<Entity> = docs.iter().map(|d| self.spawn_node(d)).collect();
+        for (i, d) in docs.iter().enumerate() {
+            if let Some(p) = d.parent
+                && p != i
+                && let Some(&pe) = ents.get(p)
+            {
+                self.world.insert(ents[i], floptle_core::Parent(pe));
+                if let Some(a) = &d.attachment {
+                    self.world.insert(
+                        ents[i],
+                        floptle_core::BoneAttach {
+                            target: pe,
+                            bone: a.bone.clone(),
+                            offset: a.offset.to_transform(),
+                        },
+                    );
+                }
+            }
+        }
+        ents
+    }
+
     /// The tag line marking clipboard text as Floptle nodes (RON follows).
     const NODE_CLIP_TAG: &'static str = "//floptle-nodes-v1";
 
@@ -354,8 +447,7 @@ impl Editor {
     }
 
     pub(crate) fn copy_selected(&mut self) {
-        let nodes: Vec<NodeDoc> =
-            self.selected_matter_duplicable().iter().filter_map(|&e| self.node_of(e)).collect();
+        let nodes = self.subtree_docs(&self.selected_matter_duplicable());
         if !nodes.is_empty() {
             // Mirror onto the OS clipboard as tagged RON: paste then works in
             // ANOTHER scene, another editor window, even another project —
@@ -371,19 +463,22 @@ impl Editor {
         }
     }
 
-    /// Spawn the given nodes (offset slightly) and select them — used by paste/dup.
-    pub(crate) fn spawn_offset(&mut self, nodes: Vec<NodeDoc>) {
+    /// Spawn the given nodes (roots offset slightly, subtrees intact) and select
+    /// the new roots — used by paste/dup.
+    pub(crate) fn spawn_offset(&mut self, mut nodes: Vec<NodeDoc>) {
         if nodes.is_empty() {
             return;
         }
         self.record();
         self.selection.clear();
-        for mut node in nodes {
+        for node in nodes.iter_mut().filter(|n| n.parent.is_none()) {
             node.transform.translation[0] += 0.5;
             node.transform.translation[2] += 0.5;
-            let e = self.spawn_node(&node);
-            self.selection.push(e);
         }
+        let ents = self.spawn_docs(&nodes);
+        self.selection.extend(
+            ents.iter().zip(&nodes).filter(|(_, n)| n.parent.is_none()).map(|(&e, _)| e),
+        );
     }
 
     pub(crate) fn paste(&mut self) {
@@ -406,8 +501,7 @@ impl Editor {
     }
 
     pub(crate) fn duplicate_selected(&mut self) {
-        let nodes: Vec<NodeDoc> =
-            self.selected_matter_duplicable().iter().filter_map(|&e| self.node_of(e)).collect();
+        let nodes = self.subtree_docs(&self.selected_matter_duplicable());
         self.spawn_offset(nodes);
     }
 
@@ -458,5 +552,73 @@ impl Editor {
         self.world.insert(e, matter.to_matter());
         self.world.insert(e, floptle_core::Parent(parent));
         self.select_single(e);
+    }
+}
+
+#[cfg(test)]
+mod subtree_tests {
+    use floptle_core::math::DVec3;
+    use super::*;
+
+    fn node(ed: &mut Editor, name: &str, at: DVec3, parent: Option<Entity>) -> Entity {
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::from_translation(at));
+        ed.world.insert(e, Name(name.into()));
+        ed.world.insert(e, Matter::Empty);
+        if let Some(p) = parent {
+            ed.world.insert(e, floptle_core::Parent(p));
+        }
+        e
+    }
+
+    /// The clipboard/duplicate/prefab capture format: a parent → child →
+    /// grandchild chain round-trips through `subtree_docs` → `spawn_docs` with
+    /// hierarchy, local transforms, and per-node components intact; selecting
+    /// a parent AND its child captures the child once; and deleting the parent
+    /// removes the WHOLE subtree (no orphaned roots).
+    #[test]
+    fn subtrees_round_trip_and_delete_removes_children() {
+        let mut ed = Editor::default();
+        let parent = node(&mut ed, "Rig", DVec3::new(5.0, 0.0, 0.0), None);
+        let child = node(&mut ed, "Arm", DVec3::new(1.0, 0.0, 0.0), Some(parent));
+        let grand = node(&mut ed, "Hand", DVec3::new(0.5, 0.0, 0.0), Some(child));
+        ed.world.insert(child, floptle_core::CastShadow(false));
+        ed.world.insert(grand, floptle_core::Tags(vec!["grip".into()]));
+
+        let docs = ed.subtree_docs(&[parent]);
+        assert_eq!(docs.len(), 3, "the whole chain is captured");
+        assert_eq!(docs[0].parent, None);
+        assert_eq!(docs[1].parent, Some(0));
+        assert_eq!(docs[2].parent, Some(1));
+        assert_eq!(docs[1].transform.translation, [1.0, 0.0, 0.0], "children stay local");
+        assert!(!docs[1].cast_shadow);
+        assert_eq!(docs[2].tags, vec!["grip".to_string()]);
+        // A redundant child in the root set must not duplicate its subtree.
+        assert_eq!(ed.subtree_docs(&[parent, child]).len(), 3);
+
+        let ents = ed.spawn_docs(&docs);
+        assert_eq!(ents.len(), 3);
+        assert_eq!(
+            ed.world.get::<floptle_core::Parent>(ents[1]).map(|p| p.0),
+            Some(ents[0]),
+            "hierarchy re-wires to the NEW entities"
+        );
+        assert_eq!(ed.world.get::<floptle_core::Parent>(ents[2]).map(|p| p.0), Some(ents[1]));
+        assert_eq!(
+            ed.world.get::<floptle_core::CastShadow>(ents[1]).map(|c| c.0),
+            Some(false),
+            "the shadow opt-out survives the round trip"
+        );
+
+        // Deleting the original parent takes its children with it…
+        ed.selection = vec![parent];
+        ed.delete_selected();
+        for e in [parent, child, grand] {
+            assert!(!ed.world.is_alive(e), "subtree fully deleted");
+        }
+        // …while the spawned copies are untouched.
+        for e in &ents {
+            assert!(ed.world.is_alive(*e));
+        }
     }
 }

@@ -55,6 +55,12 @@ pub(crate) fn is_material(path: &str) -> bool {
     p.ends_with(".ron") && p.replace('\\', "/").contains("materials/")
 }
 
+/// A prefab (`*.prefab.ron`) — a reusable node subtree. Drag into the scene
+/// to place an instance; `spawn("name")` spawns one from Lua.
+pub(crate) fn is_prefab(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(floptle_scene::PREFAB_EXT)
+}
+
 /// A scene file (`scenes/<name>.ron`).
 /// A particle effect asset (`*.vfx.ron`).
 pub(crate) fn is_vfx(path: &str) -> bool {
@@ -97,6 +103,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("◎", egui::Color32::from_rgb(180, 160, 250)) // animation controller
     } else if is_vfx(path) {
         ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
+    } else if is_prefab(path) {
+        ("⬡", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
     } else if is_audio(path) {
         ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
     } else if path.to_ascii_lowercase().ends_with(".ron") {

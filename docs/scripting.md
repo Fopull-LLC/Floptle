@@ -29,6 +29,7 @@ it up immediately.
 18. [Layers & tags](#18-layers--tags)
 19. [Vectors & math: `vec3`, `vec2`, `distance`](#19-vectors--math-vec3-vec2-distance)
 20. [Collision & trigger events](#20-collision--trigger-events)
+21. [Prefabs: `spawn` & `destroy`](#21-prefabs-spawn--destroy)
 
 ---
 
@@ -1344,3 +1345,49 @@ never re-fire events** (corrections can't double-trigger a pickup). Handlers
 run outside the normal `update` pass — their `node` writes apply immediately,
 but `params` writes are frame-local there (persist state in script variables
 or `synced` instead).
+
+## 21. Prefabs: `spawn` & `destroy`
+
+A **prefab** is a reusable node (with its whole child subtree) saved as an
+asset. Make one by **dragging a node from the Hierarchy into the Assets
+panel** (drop on a folder to aim; it lands in `prefabs/` otherwise), or
+right-click the node → **⬡ Save as Prefab**. Place instances by dragging the
+prefab into the viewport, dropping it on a Hierarchy row (spawns as that
+node's child), or right-click → **Add to scene**.
+
+At runtime, scripts spawn and remove them:
+
+```lua
+-- spawn(prefab [, pos [, fn]]) — the callback gets the new root's handle
+spawn("bullet")                                   -- at its authored spot
+spawn("bullet", node.pos + dir * 1.5)             -- at a position
+spawn("bullet", node.pos + dir * 1.5, function(b) -- ...and configure it
+  b:getcomponent("RigidBody").vx = dir.x * 40
+  b:getcomponent("RigidBody").vz = dir.z * 40
+end)
+
+destroy(other)      -- remove a node (and all its children)
+node:destroy()      -- same thing, method form (self-destruct a pickup)
+```
+
+| Call | What it does |
+|---|---|
+| `spawn(prefab)` | spawn an instance — `"bullet"` finds `prefabs/bullet.prefab.ron`; subfolders (`"weapons/sword"`) and full paths work too |
+| `spawn(prefab, pos)` | ...with its first root placed at `pos` (a vec3/table/node — sibling roots keep their relative offsets) |
+| `spawn(prefab, pos, fn)` | ...then call `fn(root)` with the new node's handle, same frame — velocities, params, tags, whatever |
+| `destroy(node)` / `node:destroy()` | queue the node + its whole subtree for removal (applied after the pass, so the handle stays readable through the current call) |
+
+The spawned node is complete immediately: rigidbodies simulate (all three
+[body modes](#4-node--the-physics-body)), its scripts fire `start` next pass,
+animators/particles/audio wire themselves. Everything is undo-free play-state
+— Stop discards it like any other play change.
+
+**Multiplayer**: `spawn()`/`destroy()` are LOCAL. For replicated objects, the
+server calls `net.spawn("bullet", {x=…, y=…, z=…})` — it accepts prefab names
+now (single-node prefabs; replication is per-node) — and `net.despawn(node)`,
+which broadcast to every client. `destroy()` on the server also routes
+replicated nodes through the session automatically; on a client it refuses
+(server authority).
+
+**Gotcha**: a spawned prop that should be *solid* needs a Rigidbody in
+**Static** mode (a plain Collidable marker only bakes at Play start).

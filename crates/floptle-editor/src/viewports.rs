@@ -519,6 +519,7 @@ impl Editor {
 
     /// Give `e` play-mode authority, clearing it from every other camera.
     pub(crate) fn set_active_camera(&mut self, e: Entity) {
+        self.record(); // undoable, like every other scene mutation
         let cams: Vec<Entity> = self
             .world
             .query::<Matter>()
@@ -529,7 +530,9 @@ impl Editor {
                 *active = c == e;
             }
         }
-        self.scene_dirty = true;
+        if !self.playing {
+            self.scene_dirty = true;
+        }
     }
 
     /// Move a camera node to the current editor viewpoint.

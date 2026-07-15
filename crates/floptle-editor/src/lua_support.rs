@@ -51,6 +51,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field layer string Collision/query layer, by project-defined NAME (\"Default\" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
 ---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
 ---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
+---@field destroy fun(self: Node) Remove this node and its whole subtree (queued; applied after the pass). Same as `destroy(node)`.
 ---@field addTag fun(self: Node, tag: string) Add a tag (duplicates are ignored).
 ---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
@@ -226,6 +227,24 @@ function log(msg) end
 ---@param y number
 ---@param z number
 function spawnEffect(key, x, y, z) end
+
+---Spawn a PREFAB instance (make one by dragging a node into the Assets panel).
+---`\"bullet\"` finds `prefabs/bullet.prefab.ron`; subfolder names and full
+---paths work too. `pos` places the first root (a vec3/table/node); `fn(root)`
+---runs with the new node's handle the same frame:
+---`spawn(\"bullet\", node.pos + dir, function(b) b.vx = dir.x * 40 end)`
+---Local-only in multiplayer — the server uses `net.spawn` for replicated objects.
+---@param prefab string Prefab name or path.
+---@param pos? Vec3 World position for the first root.
+---@param fn? fun(root: Node) Configure the freshly spawned root.
+function spawn(prefab, pos, fn) end
+
+---Remove a node AND its whole subtree (physics body included). Queued —
+---applied after the pass, so the handle stays readable through this call.
+---Method form: `node:destroy()`. On a client, replicated nodes refuse
+---(server authority — use `net.despawn` on the server).
+---@param target Node The node (or node handle) to remove.
+function destroy(target) end
 
 ---Runs once when play begins (optional).
 ---@param node Node
@@ -609,15 +628,15 @@ function scene.list() end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\"]\n}\n",
-    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\"]\n}\n",
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
 ];
 
 /// Write the Lua language-server support files into a project (annotations always

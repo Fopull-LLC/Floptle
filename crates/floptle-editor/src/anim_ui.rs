@@ -263,7 +263,7 @@ pub fn anim_component_ui(
     let Some(key) = world.get::<AnimController>(e).map(|c| c.asset.clone()) else {
         return;
     };
-    let (_, _, remove) = crate::inspector::component_header(ui, "▶ Animation Controller", false, true);
+    let remove = crate::inspector::component_header_no_copy(ui, "▶ Animation Controller", true);
     if remove {
         cmd.set_anim_controller = Some((e, None));
         return;

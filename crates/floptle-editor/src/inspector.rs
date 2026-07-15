@@ -89,6 +89,33 @@ pub(crate) fn component_header(
     });
     (copy, paste, remove)
 }
+/// [`component_header`] for components with no copyable values (Collider,
+/// Networked, Animation Controller): the `…` menu offers only Remove, so no
+/// dead "Copy values" item sits there doing nothing. Returns `remove`.
+pub(crate) fn component_header_no_copy(ui: &mut egui::Ui, title: &str, can_remove: bool) -> bool {
+    let mut remove = false;
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("…", |ui| {
+                if can_remove {
+                    if ui.button("🗑  Remove component").clicked() {
+                        remove = true;
+                        ui.close();
+                    }
+                } else {
+                    ui.weak("(no options)");
+                }
+            })
+            .response
+            .on_hover_text("component options");
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
+            });
+        });
+    });
+    remove
+}
+
 /// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
 #[derive(Default)]
 pub(crate) struct MatEditResult {
@@ -1401,7 +1428,7 @@ impl EditorTabViewer<'_> {
                 // session state, assigned at runtime — not edited here.
                 if world.get::<floptle_core::Replicated>(e).is_some() {
                     ui.separator();
-                    let (_, _, remove) = component_header(ui, "🌐 Networked", false, true);
+                    let remove = component_header_no_copy(ui, "🌐 Networked", true);
                     if remove {
                         world.remove::<floptle_core::Replicated>(e);
                         cmd.inspector_changed = true;
@@ -1489,7 +1516,7 @@ impl EditorTabViewer<'_> {
                             _ => "mesh",
                         };
                         ui.separator();
-                        let (_, _, remove) = component_header(ui, "▦ Collider", false, true);
+                        let remove = component_header_no_copy(ui, "▦ Collider", true);
                         ui.small(format!(
                             "static {kind} collider — built from this node's geometry on Play. Walk on it / bump into it; no rigidbody needed. Scale the node to resize it."
                         ));
@@ -2075,7 +2102,7 @@ impl EditorTabViewer<'_> {
             }
             None => {
                 if self.selected_asset.is_none() {
-                    ui.weak("Nothing selected. Click an object, or a node in the Hierarchy.");
+                    ui.weak("Nothing selected. Click a node in the viewport or the Hierarchy.");
                 }
             }
         }
@@ -2114,7 +2141,7 @@ impl EditorTabViewer<'_> {
                         }
                     }
                     _ => {
-                        ui.label("Select an object to edit its material.");
+                        ui.label("Select a node to edit its material.");
                     }
                 });
             if !open {

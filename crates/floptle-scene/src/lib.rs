@@ -32,6 +32,11 @@ pub use vfx::{
     VFX_EXT,
 };
 
+/// A prefab asset (`*.prefab.ron`): a reusable node subtree in the same flat
+/// `Vec<NodeDoc>` format the editor's node clipboard uses — `parent` is an
+/// index into the list (`None` = a root), children carry local transforms.
+pub const PREFAB_EXT: &str = ".prefab.ron";
+
 /// A whole scene: a name, its lighting (the mandatory Lighting node), and the
 /// nodes in it. Project-wide render settings live separately in [`ProjectConfigDoc`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
