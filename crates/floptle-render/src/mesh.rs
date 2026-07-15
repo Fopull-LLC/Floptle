@@ -203,29 +203,25 @@ pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshD
     MeshData { vertices, indices }
 }
 
-/// A flat square of half-extent `half` in the XY plane, facing ±Z. Double-sided:
-/// a front face (normal +Z, UV 0..1) and a back face (normal −Z, reversed
-/// winding) so a textured — and especially a *transparent* — plane is visible
-/// from both sides rather than vanishing when viewed from behind. Stand it up as
-/// a sprite/decal or rotate it flat for a ground quad.
+/// A flat square of half-extent `half` in the XY plane, facing +Z. ONE face:
+/// no pass culls, so the same two triangles rasterize from either side, and
+/// the fragment paths flip the shading normal toward the viewer
+/// (`facing_normal` in raster.wgsl). A second, coplanar back face — the old
+/// approach — z-fights the front one (same depth, per-pixel ULP winner):
+/// with its mirrored UV and away normal, every uv-driven custom shader broke
+/// into criss-crossing unlit triangle shards.
 pub fn plane(half: f32) -> MeshData {
     // (u,v) corners of the square, mapped to [-1,1] in X and Y.
     let corners = [(0.0f32, 1.0f32), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)];
-    let mut vertices = Vec::with_capacity(8);
-    let mut indices = Vec::with_capacity(12);
-    for &(nz, wind) in &[(1.0f32, [0u32, 1, 2, 0, 2, 3]), (-1.0, [0, 2, 1, 0, 3, 2])] {
-        let base = vertices.len() as u32;
-        for &(u, v) in &corners {
-            vertices.push(Vertex {
-                pos: [(u * 2.0 - 1.0) * half, (v * 2.0 - 1.0) * half, 0.0],
-                normal: [0.0, 0.0, nz],
-                // Mirror U on the back face so text/textures read correctly from behind.
-                uv: [if nz > 0.0 { u } else { 1.0 - u }, 1.0 - v],
-            });
-        }
-        indices.extend(wind.iter().map(|i| base + i));
-    }
-    MeshData { vertices, indices }
+    let vertices = corners
+        .iter()
+        .map(|&(u, v)| Vertex {
+            pos: [(u * 2.0 - 1.0) * half, (v * 2.0 - 1.0) * half, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [u, 1.0 - v],
+        })
+        .collect();
+    MeshData { vertices, indices: vec![0, 1, 2, 0, 2, 3] }
 }
 
 // Small f32 vec helpers for the flat-shaded primitives below.
@@ -386,19 +382,19 @@ mod tests {
     }
 
     #[test]
-    fn plane_is_double_sided_and_flat() {
+    fn plane_is_one_face_and_flat() {
         let m = plane(0.7);
-        assert_eq!(m.vertices.len(), 8); // front + back, 4 verts each
-        assert_eq!(m.indices.len(), 12); // 2 faces × 2 tris × 3
+        // ONE face: a coplanar back face z-fights the front (uv shard glitch).
+        assert_eq!(m.vertices.len(), 4);
+        assert_eq!(m.indices.len(), 6);
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertices.len()));
-        // Flat in Z; corners span ±half in X and Y.
+        // Flat in Z; corners span ±half in X and Y; all normals +Z (the
+        // fragment paths flip toward the viewer — `facing_normal`).
         for v in &m.vertices {
             assert_eq!(v.pos[2], 0.0);
             assert!((v.pos[0].abs() - 0.7).abs() < 1e-6 && (v.pos[1].abs() - 0.7).abs() < 1e-6);
+            assert_eq!(v.normal, [0.0, 0.0, 1.0]);
         }
-        // One face points +Z, the other −Z.
-        assert!(m.vertices.iter().any(|v| v.normal[2] > 0.0));
-        assert!(m.vertices.iter().any(|v| v.normal[2] < 0.0));
     }
 
     #[test]

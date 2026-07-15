@@ -282,6 +282,7 @@ param to `1` in the Inspector and the ground-check probe draws itself.
 | `time` | Seconds since Play started |
 | `dt` | Seconds since the last frame (also the 2nd arg to `update`) |
 | `log("…")` | Print to the engine **Console** |
+| `print(anything, …)` | Console print that understands the whole engine: tables render **deeply** (nested, sorted keys, short arrays inline, cycle-safe), node handles print as `node "Player" (#4) at vec3(…)`, component/script handles by what they point at, vectors via their components. Multi-line output folds into a collapsible block in the Console. |
 
 The full Lua standard library (`math`, `string`, `table`, …) is available.
 

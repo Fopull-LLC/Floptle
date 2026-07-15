@@ -151,9 +151,17 @@ fn base_texel(in: VsOut) -> vec4<f32> {
     return base;
 }
 
+// The shading normal, flipped toward the viewer when the surface is seen
+// from behind. Nothing culls, so single-face geometry (the Plane primitive,
+// open meshes) renders from both sides — this keeps its lighting right from
+// either one. `view_pos` is camera-relative, so -view_pos IS the view ray.
+fn facing_normal(n: vec3<f32>, view_pos: vec3<f32>) -> vec3<f32> {
+    return select(-n, n, dot(n, -view_pos) >= 0.0);
+}
+
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
+    let n = facing_normal(normalize(in.normal), in.view_pos);
     let l = normalize(g.light_dir.xyz);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);

@@ -51,6 +51,28 @@
 > foam) seed into `shaders/examples/` per project (missing ones fill in on
 > open; deleting the folder opts out) and are compile-tested against the REAL
 > pass sources.
+>
+> **LIVE PER-NODE PREVIEWS** (§6's "live preview", realized Unity-style):
+> every node draws a thumbnail of its own value, updating in real time as the
+> graph is edited. One generated WGSL module per shader
+> (`floptle-shader::preview`) renders every tile into a grid atlas in a single
+> pass — fragment values on a lit soft dome (floats grayscale, vec2/vec3 as
+> color, vec4 alpha-composited over a checker; engine hooks get neutral
+> stand-ins and `fieldDistance` a ground plane so foam/contact looks read),
+> sdf values as the classic 2D distance cross-section (iso bands + zero
+> line). Literal numbers ride a uniform lane array instead of being baked in,
+> so DRAGGING any inline value or knob repaints thumbnails without a pipeline
+> rebuild (the pipeline only rebuilds when the generated WGSL changes).
+> Texture slots bind the textures of the first scene material using the
+> shader (checker fallback). 👁 in the header toggles all previews;
+> right-click a node to hide just its own. Editor side: `shader_preview.rs`;
+> probe: `preview_tiles_probe`. Also fixed: adding a knob/texture slot from
+> the palette now shows its node immediately (the view includes DECLARED
+> uniforms/textures, not just referenced ones), and the criss-cross triangle
+> glitch on `.flsl` materials — the Plane primitive's coplanar double face
+> z-fighting itself — is gone (single-face plane; all fragment paths flip the
+> shading normal toward the viewer via `facing_normal`; probe:
+> `flsl_prepass_probe`).
 
 This is Floptle's biggest lever for visuals nobody else can make (see
 [VISION](../VISION.md) §4.2). We *own the representation*, so we can add

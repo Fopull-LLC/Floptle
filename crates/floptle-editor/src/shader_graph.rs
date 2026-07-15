@@ -52,9 +52,9 @@ pub(crate) struct ShaderGraphState {
     pub(crate) path: Option<String>,
     mtime: Option<SystemTime>,
     src: String,
-    ir: Option<ShaderIr>,
+    pub(crate) ir: Option<ShaderIr>,
     ck: Option<Checked>,
-    view: Vec<GNode>,
+    pub(crate) view: Vec<GNode>,
     /// Session positions by reparse-stable node identity — the "nothing moves
     /// unless you move it" guarantee for nodes without a `//@layout` entry.
     pos_cache: HashMap<String, (f32, f32)>,
@@ -84,6 +84,11 @@ pub(crate) struct ShaderGraphState {
     dirty: bool,
     /// A transient toast: message + seconds left.
     status: Option<(String, f32)>,
+    /// Set by the tab each frame it draws; consumed by the preview driver
+    /// (the anim-tab visibility pattern) so the atlas only renders when seen.
+    pub(crate) tab_visible: bool,
+    /// Nodes whose preview thumbnail the user collapsed (session-local).
+    pv_hidden: BTreeSet<NodeKey>,
 }
 
 impl Default for ShaderGraphState {
@@ -111,9 +116,21 @@ impl Default for ShaderGraphState {
             pending_undo: None,
             dirty: false,
             status: None,
+            tab_visible: false,
+            pv_hidden: BTreeSet::new(),
         }
     }
 }
+
+/// Which nodes carry a live preview thumbnail — MUST mirror
+/// [`floptle_shader::preview::preview_targets`]'s skip rule (uniforms and
+/// constants already show their value as widgets).
+fn previewable(n: &GNode) -> bool {
+    !matches!(n.kind, NodeKind::Uniform(_) | NodeKind::Constant(_))
+}
+
+/// Thumbnail edge on the node (the atlas tile is 128 px, drawn slightly up).
+const PV_SIDE: f32 = 148.0;
 
 enum WireDrag {
     /// Dragging from a node's output — looking for an input port.
@@ -231,6 +248,7 @@ impl ShaderGraphState {
                 self.freeze_positions();
                 let view = std::mem::take(&mut self.view);
                 self.sel.retain(|k| view.iter().any(|n| n.key == *k));
+                self.pv_hidden.retain(|k| view.iter().any(|n| n.key == *k));
                 self.view = view;
             }
         }
@@ -484,6 +502,11 @@ impl EditorTabViewer<'_> {
     // ---- the tab --------------------------------------------------------------
 
     pub(crate) fn shader_graph_ui(&mut self, ui: &mut egui::Ui) {
+        // Arm the preview driver for next frame + keep animated previews live.
+        self.shader_graph.tab_visible = true;
+        if self.shader_preview.enabled && self.shader_graph.ir.is_some() {
+            ui.ctx().request_repaint();
+        }
         // External edits (VSCode, the Scripting tab, hot tools) re-sync the
         // graph — the same mtime watch the shader compiler runs.
         if let Some(path) = self.shader_graph.path.clone() {
@@ -639,6 +662,13 @@ impl EditorTabViewer<'_> {
             if ui.button("⛶").on_hover_text("frame the whole graph").clicked() {
                 self.shader_graph.scene_rect = Rect::ZERO;
             }
+            if ui
+                .selectable_label(self.shader_preview.enabled, "👁")
+                .on_hover_text("live previews on every node (right-click a node to hide just its own)")
+                .clicked()
+            {
+                self.shader_preview.enabled = !self.shader_preview.enabled;
+            }
             let path = self.shader_graph.path.clone().unwrap_or_default();
             if ui
                 .button("</>")
@@ -666,6 +696,9 @@ impl EditorTabViewer<'_> {
                     Color32::from_rgb(235, 100, 100),
                     egui::RichText::new(format!("⚠ {cache_err}")).small(),
                 );
+            } else if let Some(pe) = self.shader_preview.err.clone() {
+                // Preview-only trouble never blocks editing — mention quietly.
+                ui.weak(format!("previews paused: {pe}"));
             } else {
                 // A gentle nudge when the shader isn't visible anywhere.
                 let used = self
@@ -720,17 +753,30 @@ impl EditorTabViewer<'_> {
         let err_key = self.shader_graph.err_key.clone();
         let drag = self.shader_graph.drag.clone();
 
-        // Node rects (graph space + ORIGIN) — the wire endpoints.
-        let rect_of = |n: &GNode| -> Rect {
-            let pos = drag
-                .as_deref()
-                .and_then(|d| d.iter().find(|(k, _)| *k == n.key))
-                .map(|(_, p)| *p)
-                .unwrap_or(n.pos);
-            Rect::from_min_size(
-                Pos2::new(pos.0, pos.1) + ORIGIN,
-                egui::vec2(NODE_W, graph::node_height(n)),
-            )
+        // Node rects (graph space + ORIGIN) — the wire endpoints. A node with
+        // a live preview reserves the thumbnail strip below its body.
+        let pv_on = self.shader_preview.enabled;
+        let pv_hidden = self.shader_graph.pv_hidden.clone();
+        let pv_extra = move |n: &GNode| -> f32 {
+            if pv_on && previewable(n) && !pv_hidden.contains(&n.key) {
+                PV_SIDE + 6.0
+            } else {
+                0.0
+            }
+        };
+        let rect_of = {
+            let pv_extra = pv_extra.clone();
+            move |n: &GNode| -> Rect {
+                let pos = drag
+                    .as_deref()
+                    .and_then(|d| d.iter().find(|(k, _)| *k == n.key))
+                    .map(|(_, p)| *p)
+                    .unwrap_or(n.pos);
+                Rect::from_min_size(
+                    Pos2::new(pos.0, pos.1) + ORIGIN,
+                    egui::vec2(NODE_W, graph::node_height(n) + pv_extra(n)),
+                )
+            }
         };
         let mut rects: HashMap<NodeKey, Rect> = Default::default();
         for n in &view {
@@ -1073,6 +1119,18 @@ impl EditorTabViewer<'_> {
                 acts.push(Act::Delete(targets));
                 ui.close();
             }
+            if previewable(n) {
+                let hidden = self.shader_graph.pv_hidden.contains(&n.key);
+                let label = if hidden { "👁 Show preview" } else { "👁 Hide preview" };
+                if ui.button(label).clicked() {
+                    if hidden {
+                        self.shader_graph.pv_hidden.remove(&n.key);
+                    } else {
+                        self.shader_graph.pv_hidden.insert(n.key.clone());
+                    }
+                    ui.close();
+                }
+            }
         });
 
         // Title (or its rename editor).
@@ -1291,6 +1349,45 @@ impl EditorTabViewer<'_> {
                 });
             }
             _ => {}
+        }
+
+        // ---- the live preview thumbnail (what this node LOOKS like) ----
+        if self.shader_preview.enabled
+            && previewable(n)
+            && !self.shader_graph.pv_hidden.contains(&n.key)
+        {
+            let side = PV_SIDE.min(r.width() - 16.0);
+            let prect = Rect::from_min_size(
+                Pos2::new(r.center().x - side * 0.5, r.top() + graph::node_height(n) - 2.0),
+                egui::vec2(side, side),
+            );
+            match (self.shader_preview.tex_id, self.shader_preview.tiles.get(&n.key)) {
+                (Some(tex), Some(&tile)) => {
+                    ui.painter().image(tex, prect, self.shader_preview.tile_uv(tile), Color32::WHITE);
+                }
+                _ => {
+                    // Not compiled yet (fresh node / mid-edit type break):
+                    // keep the space so nothing jumps, show a quiet dash.
+                    ui.painter().rect_filled(
+                        prect,
+                        3.0,
+                        ui.visuals().extreme_bg_color.gamma_multiply(0.6),
+                    );
+                    ui.painter().text(
+                        prect.center(),
+                        Align2::CENTER_CENTER,
+                        "—",
+                        FontId::proportional(12.0),
+                        ui.visuals().weak_text_color(),
+                    );
+                }
+            }
+            ui.painter().rect_stroke(
+                prect,
+                3.0,
+                Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                StrokeKind::Inside,
+            );
         }
     }
 

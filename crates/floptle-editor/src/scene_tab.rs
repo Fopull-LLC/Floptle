@@ -204,8 +204,28 @@ impl EditorTabViewer<'_> {
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.toggle_value(self.show_gizmos, "◎ Gizmos")
-                            .on_hover_text("show selection/collider/camera/light gizmos in the viewport");
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            ui.toggle_value(self.show_gizmos, "◎ Gizmos")
+                                .on_hover_text("show viewport gizmos/overlays (H)");
+                            ui.menu_button("⏷", |ui| {
+                                ui.add_enabled_ui(*self.show_gizmos, |ui| {
+                                    let f = &mut *self.gizmo_filter;
+                                    ui.checkbox(&mut f.cameras, "Cameras");
+                                    ui.checkbox(&mut f.lights, "Lights & gravity");
+                                    ui.checkbox(&mut f.physics, "Rigidbodies & contacts");
+                                    ui.checkbox(&mut f.colliders, "Collider wireframes");
+                                    ui.checkbox(&mut f.particles, "Particle emitters");
+                                    ui.checkbox(&mut f.script, "Script gizmos (Lua)");
+                                    ui.separator();
+                                    if ui.button("All on").clicked() {
+                                        *f = crate::GizmoFilter::default();
+                                    }
+                                });
+                            })
+                            .response
+                            .on_hover_text("filter which gizmo types draw");
+                        });
                     });
                 });
         }
