@@ -10,6 +10,7 @@
 /// Materials; sdf ones on ◈ Field Shape nodes.
 pub const EXAMPLES: &[(&str, &str)] = &[
     ("plasma.flsl", PLASMA),
+    ("water.flsl", WATER),
     ("lavaFlow.flsl", LAVA_FLOW),
     ("toonPrint.flsl", TOON_PRINT),
     ("hologram.flsl", HOLOGRAM),
@@ -38,6 +39,33 @@ shader plasma {
   output color = vec4(inked, 1) * tint * instanceColor
 }
 //@layout { warped: (-912, 40), bands: (-684, 40), glow: (-456, 40), inked: (-228, 40), out: (0, 60) }
+"#;
+
+const WATER: &str = r#"// Water — drop it on a flat plane (or anything). Warped noise rolls the
+// surface, the fresnel angle blends deep water into shallow, crests sparkle,
+// and fieldDistance() foams the shoreline wherever the scene's terrain or
+// SDF shapes come near the surface — no masks, no setup.
+shader water {
+  stage fragment
+  blend alpha
+  uniform shallowColor: color = #3EC6C8
+  uniform deepColor: color = #14395C
+  uniform speed: float = 0.6 range(0, 3)
+  uniform waveScale: float = 4 range(0.5, 20)
+  uniform foam: float = 0.5 range(0, 2)
+  uniform clarity: float = 0.75 range(0.2, 1)
+
+  let flow = uv * waveScale + vec2(time * speed * 0.13, time * speed * 0.11)
+  let waves = fbm(domainWarp(flow, scale: 1.5, time: time * speed * 0.2), octaves: 4) * 0.5 + 0.5
+  let crest = smoothstep(0.62, 0.95, waves)
+  let facing = pow(1 - saturate(dot(normal, viewDir)), 2)
+  let body = mix(deepColor.rgb, shallowColor.rgb, facing * 0.6 + waves * 0.3)
+  let shore = 1 - saturate(fieldDistance(worldPos) / (foam + 0.001))
+  let lit = litSurface(body + crest * 0.35 + shore * shore * 0.9)
+
+  output color = vec4(lit, clarity + facing * (1 - clarity)) * instanceColor
+}
+//@layout { flow: (-912, 0), waves: (-684, 0), crest: (-456, 0), facing: (-684, 150), body: (-456, 150), shore: (-684, 300), lit: (-228, 120), out: (0, 120) }
 "#;
 
 const LAVA_FLOW: &str = r#"// Lava — scrolling, churning noise. Hot veins ride an "ember" palette while
