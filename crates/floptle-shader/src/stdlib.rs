@@ -120,8 +120,9 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "palette", inputs: &[req("t", F), req("name", SigTy::Str)], output: V3, stages: FRAG, emit: Emit::Special, doc: "A looping color ramp: \"sunset\", \"bruise\", \"neon\", \"ocean\", \"ember\", \"mono\".", category: "color" },
 
     // ---- texture -----------------------------------------------------------
-    OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Sample a declared texture slot (honors the material's tiling).", category: "texture" },
-    OpSpec { name: "baseTexture", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAG, emit: Emit::Special, doc: "The node's own base-color texture (defaults to the mesh uv).", category: "texture" },
+    OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Sample a declared texture slot (honors the slot's tiling block from the material).", category: "texture" },
+    OpSpec { name: "sampleTriplanar", inputs: &[req("tex", SigTy::Texture), req("p", V3), req("n", V3)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Project a slot's texture from three axes, blended by the normal — clean tiling with no UVs (scale/blend come from the slot's tiling block).", category: "texture" },
+    OpSpec { name: "baseTexture", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAG, emit: Emit::Special, doc: "The node's own base-color texture, through the material's tiling (pass a uv to sample it raw somewhere else).", category: "texture" },
 
     // ---- sdf ---------------------------------------------------------------
     OpSpec { name: "sphere", inputs: &[req("p", V3), opt("radius", F, 1.0)], output: F, stages: BOTH, emit: Emit::Fn("flsl_sd_sphere"), doc: "Distance to a sphere at the origin.", category: "sdf" },
@@ -418,5 +419,32 @@ fn flsl_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
         return sdf_ao(p, n);
     }
     return 1.0;
+}
+
+// A texture slot sampled through its material tiling block.
+// ta = (count.xy, offset.xy); tb = (mode, rotation_rad, triplanar_scale, blend).
+// The branch condition loads from a UNIFORM buffer, so control flow stays
+// uniform and plain textureSample is legal inside.
+fn flsl_tiled_sample(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, ta: vec4<f32>, tb: vec4<f32>) -> vec4<f32> {
+    let mode = u32(tb.x + 0.5);
+    if (mode == 1u) {
+        let c = cos(tb.y);
+        let sn = sin(tb.y);
+        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        return textureSample(t, s, m * ((uv - 0.5) * ta.xy) + 0.5 + ta.zw);
+    }
+    return textureSample(t, s, uv);
+}
+
+// Triplanar projection of a slot's texture: three axis samples blended by the
+// normal. scale = tile size in the units of `p`, blend = axis-edge sharpness.
+fn flsl_triplanar(t: texture_2d<f32>, s: sampler, p: vec3<f32>, n: vec3<f32>, scale: f32, blend: f32) -> vec4<f32> {
+    let sc = max(scale, 1e-4);
+    let q = p / sc;
+    var w = pow(abs(normalize(n)), vec3<f32>(max(blend, 0.5)));
+    w = w / (w.x + w.y + w.z);
+    return textureSample(t, s, q.zy) * w.x
+        + textureSample(t, s, q.xz) * w.y
+        + textureSample(t, s, q.xy) * w.z;
 }
 "#;

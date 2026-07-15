@@ -37,7 +37,7 @@ pub mod transform;
 
 pub use ecs::{Entity, World};
 pub use layers::Layers;
-pub use material::Material;
+pub use material::{Material, Tiling};
 pub use matter::{
     world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
     Collidable, GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent, ParticleSystem,

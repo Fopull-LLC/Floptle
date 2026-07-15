@@ -10,6 +10,15 @@ use floptle_render::MaterialParams;
 
 /// Convert a core [`Material`] into the renderer's per-instance [`MaterialParams`].
 pub(crate) fn material_params(m: &Material) -> MaterialParams {
+    let (tile_mode, tile, tile_rotation) = match m.tiling {
+        None => (0, [0.0; 4], 0.0),
+        Some(floptle_core::Tiling::Uv { count, offset, rotation }) => {
+            (1, [count[0], count[1], offset[0], offset[1]], rotation)
+        }
+        Some(floptle_core::Tiling::Triplanar { scale, blend }) => {
+            (2, [scale, blend, 0.0, 0.0], 0.0)
+        }
+    };
     MaterialParams {
         color: m.color,
         emissive: m.emissive,
@@ -22,6 +31,9 @@ pub(crate) fn material_params(m: &Material) -> MaterialParams {
         unlit: m.unlit,
         ambient: m.ambient,
         alpha: m.alpha,
+        tile_mode,
+        tile,
+        tile_rotation,
     }
 }
 

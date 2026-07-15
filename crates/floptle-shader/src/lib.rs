@@ -21,7 +21,9 @@ pub mod transpile;
 
 pub use ir::{Blend, IrError, ShaderIr, Stage, Ty, Uniform};
 pub use text::{parse, print, ParseError};
-pub use transpile::{transpile_fragment, validate, CompiledFragment, TranspileError, WgslDiag};
+pub use transpile::{
+    transpile_fragment, validate, CompiledFragment, TilingPack, TranspileError, WgslDiag,
+};
 
 /// File extension for the textual shader format ("FLoptle Shading Language").
 pub const SHADER_TEXT_EXT: &str = "flsl";
@@ -127,7 +129,8 @@ shader plasma {
         let compiled = compile_fragment(PLASMA).expect("compiles");
         assert_eq!(compiled.textures, vec!["ramp".to_string()]);
         assert_eq!(compiled.uniforms.len(), 2);
-        assert_eq!(compiled.param_block_size(), 32);
+        // 2 uniform slots + 2 tiling lanes for the one texture slot.
+        assert_eq!(compiled.param_block_size(), 64);
         assert!(compiled.chunk.contains("fn flsl_surface"));
         assert!(compiled.chunk.contains("@fragment"));
         transpile::validate(transpile::TEST_PRELUDE, &compiled.chunk)

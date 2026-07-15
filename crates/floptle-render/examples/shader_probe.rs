@@ -8,12 +8,12 @@
 
 use floptle_core::transform::Transform;
 use floptle_render::{
-    instance_of_mat, pass_prelude, uv_sphere, FlslBlend, Globals, Gpu, InstanceRaw,
+    cube, instance_of_mat, pass_prelude, uv_sphere, FlslBlend, Globals, Gpu, InstanceRaw,
     MaterialParams, MeshId, Projection, Raster, RenderCamera, TexId, TextureData,
 };
 use glam::{DVec3, Quat, Vec3};
 
-const W: u32 = 1440;
+const W: u32 = 1920;
 const H: u32 = 400;
 
 const PLASMA: &str = r#"
@@ -64,6 +64,18 @@ shader veil {
   let bands = 0.5 + 0.5 * sin(worldPos.y * 18 + time * 2)
 
   output color = vec4(body.rgb, 0.25 + 0.5 * bands)
+}
+"#;
+
+const SLOT_TILED: &str = r#"
+// A declared texture slot sampled through its material tiling block.
+shader slotTiled {
+  stage fragment
+  texture pattern
+
+  let base = sample(pattern, uv)
+
+  output color = vec4(litSurface(base.rgb), 1)
 }
 "#;
 
@@ -118,21 +130,31 @@ fn main() {
     let (littex_c, littex) = compile(LIT_TEXTURED);
     let (rim_c, rim) = compile(RIM_GLOW);
     let (veil_c, veil) = compile(VEIL);
+    let (slot_c, slot) = compile(SLOT_TILED);
 
     // One binding per material, defaults except where overridden.
     let mut bind = |compiled: &floptle_shader::CompiledFragment,
                     id,
                     overrides: &[(&str, [f32; 4])],
                     textures: &[Option<TexId>]| {
-        let params = compiled.pack_params(&|name| {
-            overrides.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
-        });
+        let params = compiled.pack_params(
+            &|name| overrides.iter().find(|(n, _)| *n == name).map(|(_, v)| *v),
+            &|_| None,
+        );
         raster.set_flsl_binding(&gpu, None, id, &params, textures)
     };
     let b_plasma = bind(&plasma_c, plasma, &[], &[]);
     let b_littex = bind(&littex_c, littex, &[], &[]);
     let b_rim = bind(&rim_c, rim, &[("power", [2.5, 0.0, 0.0, 0.0])], &[]);
     let b_veil = bind(&veil_c, veil, &[], &[]);
+    // The slot's tiling pack: 3×3 repeats rotated 30° (mode 1).
+    let slot_params = slot_c.pack_params(&|_| None, &|_| {
+        Some(floptle_shader::TilingPack {
+            a: [3.0, 3.0, 0.0, 0.0],
+            b: [1.0, 30f32.to_radians(), 0.0, 0.0],
+        })
+    });
+    let b_slot = raster.set_flsl_binding(&gpu, None, slot, &slot_params, &[Some(tex)]);
 
     let cam = RenderCamera::new(
         DVec3::new(0.0, 0.0, 7.0),
@@ -149,23 +171,35 @@ fn main() {
         ..Default::default()
     };
 
+    let box_mesh = raster.register(&gpu, &cube(0.75), None);
     let at = |i: usize| {
-        let x = -5.5 + i as f64 * 2.2;
+        let x = -7.7 + i as f64 * 2.2;
         Transform::from_translation(DVec3::new(x, 0.0, 0.0)).render_matrix(cam.world_position)
     };
     let mp = MaterialParams::flat([1.0, 1.0, 1.0]);
-    // Slot 0: a BUILT-IN material sphere for side-by-side comparison.
+    // Slot 0: a BUILT-IN material sphere for side-by-side comparison. Slots
+    // 6-7: the fixed-function TILING block (UV transform + triplanar), no
+    // shader involved.
     let mut shiny = MaterialParams::flat([0.75, 0.18, 0.18]);
     shiny.specular_strength = 1.0;
-    let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> =
-        vec![(sphere, None, instance_of_mat(at(0), &shiny))];
-    // The rim-glow sphere overlaps the veil one so additive-over-alpha shows.
+    let mut tiled = MaterialParams::flat([1.0, 1.0, 1.0]);
+    tiled.tile_mode = 1;
+    tiled.tile = [4.0, 2.0, 0.0, 0.0];
+    tiled.tile_rotation = 30.0;
+    let mut tri = MaterialParams::flat([1.0, 1.0, 1.0]);
+    tri.tile_mode = 2;
+    tri.tile = [0.4, 4.0, 0.0, 0.0];
+    let instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = vec![
+        (sphere, None, instance_of_mat(at(0), &shiny)),
+        (sphere, Some(tex), instance_of_mat(at(6), &tiled)),
+        (box_mesh, Some(tex), instance_of_mat(at(7), &tri)),
+    ];
     let flsl: Vec<floptle_render::FlslDraw> = vec![
         (sphere, None, b_plasma, instance_of_mat(at(1), &mp)),
         (sphere, Some(tex), b_littex, instance_of_mat(at(2), &mp)),
         (sphere, None, b_veil, instance_of_mat(at(3), &mp)),
         (sphere, None, b_rim, instance_of_mat(at(4), &mp)),
-        (sphere, Some(tex), b_littex, instance_of_mat(at(5), &mp)),
+        (sphere, None, b_slot, instance_of_mat(at(5), &mp)),
     ];
 
     raster.draw_scene_with(
@@ -179,7 +213,7 @@ fn main() {
         None,
     );
     save_png(&gpu, &color_tex, &out);
-    println!("wrote {out} — built-in / plasma / litTextured / veil(alpha) / rimGlow(additive) / litTextured");
+    println!("wrote {out} — built-in / plasma / litTextured / veil(alpha) / rimGlow(additive) / slotTiled / uv-tiled / triplanar-cube");
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, path: &str) {

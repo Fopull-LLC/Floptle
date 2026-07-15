@@ -76,7 +76,10 @@ impl Editor {
             else {
                 continue; // never compiled — the node keeps its built-in look
             };
-            let params = compiled.pack_params(&|name| mat.shader_params.get(name).copied());
+            let params = compiled.pack_params(
+                &|name| mat.shader_params.get(name).copied(),
+                &|slot| mat.shader_tiling.get(slot).map(tiling_pack),
+            );
             let slot_paths = compiled
                 .textures
                 .iter()
@@ -274,6 +277,20 @@ impl Editor {
                     .unwrap_or(1);
                 Some((line, first.to_string()))
             }
+        }
+    }
+}
+
+/// A core [`Tiling`](floptle_core::Tiling) as the transpiler's packed param
+/// lanes (rotation converted to radians here — the GPU never sees degrees).
+fn tiling_pack(t: &floptle_core::Tiling) -> floptle_shader::TilingPack {
+    match *t {
+        floptle_core::Tiling::Uv { count, offset, rotation } => floptle_shader::TilingPack {
+            a: [count[0], count[1], offset[0], offset[1]],
+            b: [1.0, rotation.to_radians(), 0.0, 0.0],
+        },
+        floptle_core::Tiling::Triplanar { scale, blend } => {
+            floptle_shader::TilingPack { a: [0.0; 4], b: [2.0, 0.0, scale, blend] }
         }
     }
 }

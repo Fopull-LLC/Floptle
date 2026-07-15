@@ -57,6 +57,7 @@ fn main() {
         unlit: false,
         ambient: 1.0,
         alpha: 1.0,
+        ..MaterialParams::flat([1.0, 1.0, 1.0])
     };
 
     let a = 0.7f32;

@@ -91,7 +91,7 @@ impl Default for Globals {
 pub struct InstanceRaw {
     pub model: [[f32; 4]; 4],
     pub normal_mat: [[f32; 4]; 3],
-    /// Base color tint (rgb) + unused a.
+    /// Base color tint (rgb) + alpha.
     pub color: [f32; 4],
     /// Emissive color (rgb) + strength (a).
     pub emissive: [f32; 4],
@@ -99,8 +99,12 @@ pub struct InstanceRaw {
     pub specular: [f32; 4],
     /// x = shininess, y = rim strength, z = unlit (0/1), w = ambient multiplier.
     pub params: [f32; 4],
-    /// Rim/fresnel color (rgb) + unused a.
+    /// Rim/fresnel color (rgb); w = packed tiling flags — an exact small int:
+    /// `mode (0 off | 1 uv | 2 triplanar) + round(rotation_degrees * 10) * 4`.
     pub rim: [f32; 4],
+    /// Tiling data: Uv mode = (count.x, count.y, offset.x, offset.y);
+    /// Triplanar = (scale, blend, 0, 0). All-zero when tiling is off.
+    pub tile: [f32; 4],
 }
 
 /// The look of a surface — the artist-facing material (retro-friendly: emissive,
@@ -120,6 +124,13 @@ pub struct MaterialParams {
     pub ambient: f32,
     /// Opacity (1 = opaque). Below 1 the instance is alpha-blended over the scene.
     pub alpha: f32,
+    /// Base-texture tiling: 0 = off (plain mesh UVs), 1 = UV transform,
+    /// 2 = triplanar. See [`InstanceRaw::tile`] for the data lanes.
+    pub tile_mode: u8,
+    /// Uv: (count.x, count.y, offset.x, offset.y); Triplanar: (scale, blend, 0, 0).
+    pub tile: [f32; 4],
+    /// UV-mode rotation in degrees around the UV center (quantized to 0.1°).
+    pub tile_rotation: f32,
 }
 
 impl MaterialParams {
@@ -137,11 +148,14 @@ impl MaterialParams {
             unlit: false,
             ambient: 1.0,
             alpha: 1.0,
+            tile_mode: 0,
+            tile: [0.0; 4],
+            tile_rotation: 0.0,
         }
     }
 }
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 12] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
@@ -154,6 +168,8 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 12] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 144, shader_location: 12 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 160, shader_location: 13 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 176, shader_location: 14 },
+    // Tiling data — location 15 (the last free slot under the 16-attribute floor).
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 192, shader_location: 15 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -1405,6 +1421,16 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
         emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],
         specular: [m.specular[0], m.specular[1], m.specular[2], m.specular_strength],
         params: [m.shininess, m.rim_strength, if m.unlit { 1.0 } else { 0.0 }, m.ambient],
-        rim: [m.rim[0], m.rim[1], m.rim[2], 0.0],
+        // rim.w = packed tiling flags: mode + rotation deci-degrees (exact small
+        // int in f32 — well under 2^24). Rotation only means anything in mode 1.
+        rim: [
+            m.rim[0],
+            m.rim[1],
+            m.rim[2],
+            (m.tile_mode.min(2) as u32
+                + (m.tile_rotation.rem_euclid(360.0) * 10.0).round() as u32 * 4)
+                as f32,
+        ],
+        tile: m.tile,
     }
 }

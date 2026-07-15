@@ -49,22 +49,44 @@ pub struct CompiledFragment {
     pub line_map: Vec<(u32, Span)>,
 }
 
+/// A texture slot's tiling packed into its two param-block lanes (mirrors the
+/// generated `t{i}a`/`t{i}b` fields): `a` = (count.xy, offset.xy),
+/// `b` = (mode 0|1|2, rotation_radians, triplanar_scale, blend).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TilingPack {
+    pub a: [f32; 4],
+    pub b: [f32; 4],
+}
+
 impl CompiledFragment {
-    /// Size in bytes of the group(3) params UBO: one vec4 slot per uniform
-    /// (never zero — an empty block still binds a 16-byte buffer).
+    /// Size in bytes of the group(3) params UBO: one vec4 slot per uniform +
+    /// two per texture slot's tiling (never zero — an empty block still binds
+    /// a 16-byte buffer).
     pub fn param_block_size(&self) -> u64 {
-        (self.uniforms.len().max(1) * 16) as u64
+        ((self.uniforms.len() + 2 * self.textures.len()).max(1) * 16) as u64
     }
 
     /// Pack this shader's uniform values (material overrides where given,
-    /// declared defaults otherwise) into param-block bytes.
-    pub fn pack_params(&self, overrides: &dyn Fn(&str) -> Option<[f32; 4]>) -> Vec<u8> {
+    /// declared defaults otherwise) + per-slot tiling into param-block bytes.
+    pub fn pack_params(
+        &self,
+        overrides: &dyn Fn(&str) -> Option<[f32; 4]>,
+        tiling: &dyn Fn(&str) -> Option<TilingPack>,
+    ) -> Vec<u8> {
         let mut out = vec![0u8; self.param_block_size() as usize];
-        for (i, u) in self.uniforms.iter().enumerate() {
-            let v = overrides(&u.name).unwrap_or(u.default);
+        let mut write = |slot: usize, v: [f32; 4]| {
             for (l, val) in v.iter().enumerate() {
-                out[i * 16 + l * 4..i * 16 + l * 4 + 4].copy_from_slice(&val.to_le_bytes());
+                out[slot * 16 + l * 4..slot * 16 + l * 4 + 4]
+                    .copy_from_slice(&val.to_le_bytes());
             }
+        };
+        for (i, u) in self.uniforms.iter().enumerate() {
+            write(i, overrides(&u.name).unwrap_or(u.default));
+        }
+        for (i, name) in self.textures.iter().enumerate() {
+            let t = tiling(name).unwrap_or_default();
+            write(self.uniforms.len() + 2 * i, t.a);
+            write(self.uniforms.len() + 2 * i + 1, t.b);
         }
         out
     }
@@ -101,11 +123,15 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 
     w.line(format!("// generated from shader `{}` — edit the .flsl, not this", ir.name), None);
     w.line("struct FlslParams {".into(), None);
-    if ir.uniforms.is_empty() {
+    if ir.uniforms.is_empty() && ir.textures.is_empty() {
         w.line("    _pad: vec4<f32>,".into(), None);
     }
     for (i, u) in ir.uniforms.iter().enumerate() {
         w.line(format!("    u{i}: vec4<f32>, // {}", u.name), None);
+    }
+    for (i, name) in ir.textures.iter().enumerate() {
+        w.line(format!("    t{i}a: vec4<f32>, // {name} tiling: count.xy, offset.xy"), None);
+        w.line(format!("    t{i}b: vec4<f32>, // {name} tiling: mode, rot, scale, blend"), None);
     }
     w.line("};".into(), None);
     w.line("@group(3) @binding(0) var<uniform> P: FlslParams;".into(), None);
@@ -284,15 +310,30 @@ impl<'a> Writer<'a> {
                         return Err(TranspileError::new("internal: sample slot", e.span));
                     };
                     let uv = self.emit_resolved(&call.args[1], Some(Ty::Vec2))?;
-                    Ok(format!("textureSample(flsl_tex{slot}, flsl_samp{slot}, {uv})"))
+                    Ok(format!(
+                        "flsl_tiled_sample(flsl_tex{slot}, flsl_samp{slot}, {uv}, P.t{slot}a, P.t{slot}b)"
+                    ))
+                }
+                "sampleTriplanar" => {
+                    let ResolvedArg::Texture(slot) = call.args[0] else {
+                        return Err(TranspileError::new("internal: sample slot", e.span));
+                    };
+                    let p = self.emit_resolved(&call.args[1], Some(Ty::Vec3))?;
+                    let n = self.emit_resolved(&call.args[2], Some(Ty::Vec3))?;
+                    Ok(format!(
+                        "flsl_triplanar(flsl_tex{slot}, flsl_samp{slot}, {p}, {n}, P.t{slot}b.z, P.t{slot}b.w)"
+                    ))
                 }
                 "baseTexture" => {
-                    let uv = match &call.args[0] {
-                        // Omitted → the mesh's own uv.
-                        ResolvedArg::Default(_) => "in.uv".to_string(),
-                        a => self.emit_resolved(a, Some(Ty::Vec2))?,
-                    };
-                    Ok(format!("textureSample(tex, samp, {uv})"))
+                    match &call.args[0] {
+                        // Omitted → the node's own texture THROUGH its material
+                        // tiling (the raster pass's helper — instance-driven).
+                        ResolvedArg::Default(_) => Ok("base_texel(in)".to_string()),
+                        a => {
+                            let uv = self.emit_resolved(a, Some(Ty::Vec2))?;
+                            Ok(format!("textureSample(tex, samp, {uv})"))
+                        }
+                    }
                 }
                 "litSurface" => {
                     let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
@@ -511,10 +552,14 @@ struct VsOut {
     @location(5) specular: vec4<f32>,
     @location(6) params: vec4<f32>,
     @location(7) rim: vec4<f32>,
+    @location(8) tile: vec4<f32>,
+    @location(9) lpos: vec3<f32>,
+    @location(10) lnorm: vec3<f32>,
 };
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
+fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 "#;
