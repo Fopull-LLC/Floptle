@@ -116,6 +116,81 @@ pub(crate) fn component_header_no_copy(ui: &mut egui::Ui, title: &str, can_remov
     remove
 }
 
+/// The tiling controls for one texture binding: an Off / Tile / Triplanar mode
+/// row, then the active mode's fields. Returns true when anything changed.
+/// Shared by the base-texture row and each shader texture slot (proposal §8:
+/// tiling is per-BINDING; wrap/filter stay per-texture in the Assets panel).
+fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
+    use floptle_core::Tiling;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let mode = match t {
+            None => 0,
+            Some(Tiling::Uv { .. }) => 1,
+            Some(Tiling::Triplanar { .. }) => 2,
+        };
+        let mut pick = |ui: &mut egui::Ui, m: usize, label: &str, hover: &str| {
+            if ui.selectable_label(mode == m, label).on_hover_text(hover).clicked() && mode != m {
+                *t = match m {
+                    1 => Some(Tiling::uv()),
+                    2 => Some(Tiling::triplanar()),
+                    _ => None,
+                };
+                changed = true;
+            }
+        };
+        pick(ui, 0, "off", "plain mesh UVs — exactly as before");
+        pick(ui, 1, "tile", "repeat/scroll/rotate across the mesh UVs");
+        pick(
+            ui,
+            2,
+            "triplanar",
+            "project from the object's three axes — clean tiling on shapes with stretched or no UVs",
+        );
+    });
+    match t {
+        None => {}
+        Some(Tiling::Uv { count, offset, rotation }) => {
+            ui.horizontal(|ui| {
+                ui.label("count");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut count[0]).speed(0.05).range(0.01..=1000.0))
+                    .on_hover_text("repeats across the surface (x)")
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut count[1]).speed(0.05).range(0.01..=1000.0))
+                    .on_hover_text("repeats across the surface (y)")
+                    .changed();
+                ui.label("offset");
+                changed |=
+                    ui.add(egui::DragValue::new(&mut offset[0]).speed(0.01)).changed();
+                changed |=
+                    ui.add(egui::DragValue::new(&mut offset[1]).speed(0.01)).changed();
+                ui.label("rot°");
+                changed |= ui
+                    .add(egui::DragValue::new(rotation).speed(0.5))
+                    .on_hover_text("rotation around the UV center (degrees)")
+                    .changed();
+            });
+        }
+        Some(Tiling::Triplanar { scale, blend }) => {
+            ui.horizontal(|ui| {
+                ui.label("tile size");
+                changed |= ui
+                    .add(egui::DragValue::new(scale).speed(0.02).range(0.01..=1000.0))
+                    .on_hover_text("one tile spans this many object units")
+                    .changed();
+                ui.label("blend");
+                changed |= ui
+                    .add(egui::Slider::new(blend, 0.5..=8.0))
+                    .on_hover_text("axis-edge sharpness")
+                    .changed();
+            });
+        }
+    }
+    changed
+}
+
 /// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
 #[derive(Default)]
 pub(crate) struct MatEditResult {
@@ -158,6 +233,12 @@ pub(crate) fn material_props_ui(
             m.texture = pick;
             r.changed = true;
         }
+        ui.end_row();
+        // Tiling applies to the base texture (the mesh's own or the override).
+        ui.label("tiling");
+        ui.vertical(|ui| {
+            r.changed |= tiling_ui(ui, &mut m.tiling);
+        });
         ui.end_row();
         ui.label("emissive");
         ui.horizontal(|ui| {
@@ -300,6 +381,24 @@ pub(crate) fn material_props_ui(
                                     }
                                     r.changed = true;
                                 }
+                                ui.end_row();
+                                // The slot's own tiling block (read by sample()
+                                // / sampleTriplanar() in the shader).
+                                ui.label("");
+                                ui.vertical(|ui| {
+                                    let mut t = m.shader_tiling.get(slot).copied();
+                                    if tiling_ui(ui, &mut t) {
+                                        match t {
+                                            Some(t) => {
+                                                m.shader_tiling.insert(slot.clone(), t);
+                                            }
+                                            None => {
+                                                m.shader_tiling.remove(slot);
+                                            }
+                                        }
+                                        r.changed = true;
+                                    }
+                                });
                                 ui.end_row();
                             }
                         },

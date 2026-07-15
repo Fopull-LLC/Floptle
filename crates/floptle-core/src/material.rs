@@ -6,6 +6,29 @@
 //! Blinn-Phong specular (color + shininess + strength), a rim/fresnel edge term,
 //! an **unlit** (fullbright/flat) toggle, and an ambient-light multiplier.
 
+/// How a texture binding tiles across a surface — per BINDING (this material's
+/// use of the image), while wrap/filter stay per-texture settings. The
+/// "drag on and tile, no shader required" block (proposal §8).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tiling {
+    /// Transform the mesh UVs: `count` repeats across the 0..1 span, scrolled
+    /// by `offset`, rotated by `rotation` degrees around the UV center.
+    Uv { count: [f32; 2], offset: [f32; 2], rotation: f32 },
+    /// Project from the three object axes and blend by the surface normal —
+    /// clean tiling on shapes with stretched or absent UVs. `scale` = tile
+    /// size in object units, `blend` = axis-edge sharpness.
+    Triplanar { scale: f32, blend: f32 },
+}
+
+impl Tiling {
+    pub fn uv() -> Self {
+        Tiling::Uv { count: [1.0, 1.0], offset: [0.0, 0.0], rotation: 0.0 }
+    }
+    pub fn triplanar() -> Self {
+        Tiling::Triplanar { scale: 1.0, blend: 4.0 }
+    }
+}
+
 /// The surface look attached to a node (a component). Default is a plain white
 /// matte — applying it changes nothing until the artist dials in properties.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +67,12 @@ pub struct Material {
     /// Texture bindings for the shader's declared slots (slot name → project-
     /// relative texture path). Absent slots bind a 1×1 white.
     pub shader_textures: std::collections::BTreeMap<String, String>,
+    /// How the base `texture` tiles (`None` = plain mesh UVs, exactly as
+    /// before). Applies to the built-in look AND a shader's `baseTexture()`.
+    pub tiling: Option<Tiling>,
+    /// Per-slot tiling for the shader's texture slots (absent = plain UVs) —
+    /// honored by the stdlib `sample()` / `sampleTriplanar()` ops.
+    pub shader_tiling: std::collections::BTreeMap<String, Tiling>,
 }
 
 impl Default for Material {
@@ -64,6 +93,8 @@ impl Default for Material {
             shader: None,
             shader_params: std::collections::BTreeMap::new(),
             shader_textures: std::collections::BTreeMap::new(),
+            tiling: None,
+            shader_tiling: std::collections::BTreeMap::new(),
         }
     }
 }

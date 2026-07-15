@@ -61,7 +61,8 @@ struct VsIn {
     @location(11) emissive: vec4<f32>,  // rgb, a = strength
     @location(12) specular: vec4<f32>,  // rgb, a = strength
     @location(13) params: vec4<f32>,    // shininess, rim_strength, unlit, ambient_mul
-    @location(14) rim: vec4<f32>,       // rgb
+    @location(14) rim: vec4<f32>,       // rgb; w = packed tiling flags (mode + rot·10·4)
+    @location(15) tile: vec4<f32>,      // uv: count.xy, offset.xy | triplanar: scale, blend
 };
 
 struct VsOut {
@@ -80,6 +81,12 @@ struct VsOut {
     @location(5) specular: vec4<f32>,
     @location(6) params: vec4<f32>,
     @location(7) rim: vec4<f32>,
+    @location(8) tile: vec4<f32>,
+    // Object-local position + normal: what triplanar projects along, so the
+    // texture STICKS to the object (camera-relative space would swim under the
+    // floating origin, ADR-0015).
+    @location(9) lpos: vec3<f32>,
+    @location(10) lnorm: vec3<f32>,
 };
 
 @vertex
@@ -97,7 +104,51 @@ fn vs(in: VsIn) -> VsOut {
     out.specular = in.specular;
     out.params = in.params;
     out.rim = in.rim;
+    out.tile = in.tile;
+    out.lpos = in.pos;
+    out.lnorm = in.normal;
     return out;
+}
+
+// The base texture sampled through the material's tiling block (rim.w flags +
+// the tile lanes). Mode 0 is EXACTLY the pre-tiling `textureSample` — sampled
+// first, unconditionally, which also satisfies WGSL's uniform-control-flow rule
+// for implicit derivatives; the tiled paths use explicit gradients because the
+// mode comes from per-instance data (not provably uniform).
+fn base_texel(in: VsOut) -> vec4<f32> {
+    // Everything needing uniform control flow (the implicit-derivative sample
+    // and the explicit derivatives) runs BEFORE any branching on instance data.
+    let base = textureSample(tex, samp, in.uv);
+    let duvdx = dpdx(in.uv);
+    let duvdy = dpdy(in.uv);
+    let dlx = dpdx(in.lpos);
+    let dly = dpdy(in.lpos);
+    let flags = u32(in.rim.w + 0.5);
+    let mode = flags & 3u;
+    if (mode == 1u) {
+        // Rotate around the UV center, repeat `count` times, scroll by offset.
+        let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
+        let c = cos(rot);
+        let sn = sin(rot);
+        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        let uv = m * ((in.uv - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
+        return textureSampleGrad(tex, samp, uv, m * (duvdx * in.tile.xy), m * (duvdy * in.tile.xy));
+    }
+    if (mode == 2u) {
+        // Triplanar: three object-axis projections blended by the local normal.
+        let s = max(in.tile.x, 1e-4);
+        let sharp = max(in.tile.y, 0.5);
+        let p = in.lpos / s;
+        let dx = dlx / s;
+        let dy = dly / s;
+        var w = pow(abs(normalize(in.lnorm)), vec3<f32>(sharp));
+        w = w / (w.x + w.y + w.z);
+        let cx = textureSampleGrad(tex, samp, p.zy, dx.zy, dy.zy);
+        let cy = textureSampleGrad(tex, samp, p.xz, dx.xz, dy.xz);
+        let cz = textureSampleGrad(tex, samp, p.xy, dx.xy, dy.xy);
+        return cx * w.x + cy * w.y + cz * w.z;
+    }
+    return base;
 }
 
 @fragment
@@ -106,7 +157,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(g.light_dir.xyz);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
-    let texel = textureSample(tex, samp, in.uv);
+    let texel = base_texel(in);
     let albedo = texel.rgb * in.color.rgb;
     let emissive = in.emissive.rgb * in.emissive.a;
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha.
@@ -169,7 +220,9 @@ fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
 // marches the shadow field — the expensive part) and caps the raymarch per pixel.
 @fragment
 fn fs_depth(in: VsOut) {
-    let a = textureSample(tex, samp, in.uv).a * in.color.a;
+    // Same tiled sampling as the color pass, so the conservative alpha test
+    // sees the texels that will actually shade.
+    let a = base_texel(in).a * in.color.a;
     if (a < 0.99) {
         discard;
     }

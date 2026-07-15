@@ -1028,6 +1028,41 @@ pub struct MaterialDoc {
     pub shader_params: std::collections::BTreeMap<String, [f32; 4]>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shader_textures: std::collections::BTreeMap<String, String>,
+    /// The base texture's tiling block + per-shader-slot tiling (proposal §8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiling: Option<TilingDoc>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shader_tiling: std::collections::BTreeMap<String, TilingDoc>,
+}
+
+/// RON mirror of [`floptle_core::Tiling`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum TilingDoc {
+    Uv { count: [f32; 2], offset: [f32; 2], rotation: f32 },
+    Triplanar { scale: f32, blend: f32 },
+}
+
+impl TilingDoc {
+    pub fn to_tiling(self) -> floptle_core::Tiling {
+        match self {
+            TilingDoc::Uv { count, offset, rotation } => {
+                floptle_core::Tiling::Uv { count, offset, rotation }
+            }
+            TilingDoc::Triplanar { scale, blend } => {
+                floptle_core::Tiling::Triplanar { scale, blend }
+            }
+        }
+    }
+    pub fn from_tiling(t: floptle_core::Tiling) -> Self {
+        match t {
+            floptle_core::Tiling::Uv { count, offset, rotation } => {
+                TilingDoc::Uv { count, offset, rotation }
+            }
+            floptle_core::Tiling::Triplanar { scale, blend } => {
+                TilingDoc::Triplanar { scale, blend }
+            }
+        }
+    }
 }
 
 fn white3() -> [f32; 3] {
@@ -1064,6 +1099,12 @@ impl MaterialDoc {
             shader: self.shader.clone(),
             shader_params: self.shader_params.clone(),
             shader_textures: self.shader_textures.clone(),
+            tiling: self.tiling.map(TilingDoc::to_tiling),
+            shader_tiling: self
+                .shader_tiling
+                .iter()
+                .map(|(k, v)| (k.clone(), v.to_tiling()))
+                .collect(),
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -1083,6 +1124,12 @@ impl MaterialDoc {
             shader: m.shader.clone(),
             shader_params: m.shader_params.clone(),
             shader_textures: m.shader_textures.clone(),
+            tiling: m.tiling.map(TilingDoc::from_tiling),
+            shader_tiling: m
+                .shader_tiling
+                .iter()
+                .map(|(k, v)| (k.clone(), TilingDoc::from_tiling(*v)))
+                .collect(),
         }
     }
 }
