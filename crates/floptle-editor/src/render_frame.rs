@@ -1144,6 +1144,7 @@ impl Editor {
         let audio_sys = &mut self.audio;
         let mixer_ui_state = &mut self.mixer_ui;
         let anim_ui_state = &mut self.anim_ui;
+        let shader_graph_state = &mut self.shader_graph;
         let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
         let net_hosting = self.net_server.is_some();
@@ -1686,6 +1687,7 @@ impl Editor {
                 mixer: &mut project.mixer,
                 particles_active,
                 anim_ui: anim_ui_state,
+                shader_graph: shader_graph_state,
                 mesh_registry,
                 pointer_down,
                 playing,
@@ -4144,6 +4146,9 @@ impl Editor {
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
             });
         }
+        if let Some(path) = cmd.open_shader_graph {
+            self.open_shader_in_graph(&path);
+        }
         if let Some(key) = cmd.open_particle_editor {
             cmd.focus_particles = true;
             self.vfx_ui.open(key);
@@ -4300,6 +4305,13 @@ impl Editor {
         }
         if let Some(dir) = cmd.new_shader_in {
             self.new_shader(&dir);
+            // The graph tab's ✚ New: show the fresh shader on the canvas too
+            // (the naming modal from new_shader stays up over it).
+            if cmd.new_shader_to_graph
+                && let Some((p, _)) = self.rename_target.clone()
+            {
+                self.open_shader_in_graph(&p);
+            }
         }
         if let Some(path) = cmd.rename_asset {
             // Seed the rename modal with the current base name (the extension is shown as a

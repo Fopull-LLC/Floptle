@@ -292,7 +292,11 @@ impl<'a> EditorTabViewer<'a> {
             ));
         } else if crate::assets::is_audio(path) {
             self.cmd.preview_audio = Some(path.to_string());
-        } else if is_script(path) || is_markdown(path) || crate::assets::is_shader(path) {
+        } else if crate::assets::is_shader(path) {
+            // Shaders open in the graph by default — the beginner front door;
+            // the tab's `</>` button (and the context menu) reach the text.
+            self.cmd.open_shader_graph = Some(path.to_string());
+        } else if is_script(path) || is_markdown(path) {
             self.cmd.open_script_pref = Some(path.to_string());
         }
     }
@@ -309,6 +313,10 @@ impl<'a> EditorTabViewer<'a> {
                 ui.close();
             }
             ui.separator();
+        }
+        if crate::assets::is_shader(path) && ui.button("◈ Open in Shader Graph").clicked() {
+            self.cmd.open_shader_graph = Some(path.to_string());
+            ui.close();
         }
         let openable = is_script(path) || is_markdown(path) || crate::assets::is_shader(path);
         if openable && ui.button("🖊 Open in Scripting tab").clicked() {

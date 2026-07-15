@@ -11,9 +11,12 @@
 //! - [`text`]      : `.flsl` text format ⇄ IR (round-trippable parse/print).
 //! - [`transpile`] : checked IR → a WGSL chunk for the renderer's concat seam.
 //! - [`stdlib`]    : the op registry + the WGSL support library.
-//! - `graph`       : graph view ⇄ IR mapping (a later phase — the text core
-//!   carries the layout metadata it will need).
+//! - [`graph`]     : the node-graph view ⇄ IR mapping (nodes/ports/wires +
+//!   graph-edit mutations; the editor's canvas renders it).
+//! - [`examples`]  : the built-in worked-example shaders seeded into projects.
 
+pub mod examples;
+pub mod graph;
 pub mod ir;
 pub mod stdlib;
 pub mod text;

@@ -52,6 +52,7 @@ mod matter_catalog;
 mod net;
 mod play;
 mod prefab;
+mod shader_graph;
 mod shaders;
 mod prefs;
 mod project;
@@ -252,6 +253,11 @@ struct EditorCmd {
     open_script: Option<String>,
     /// Open a script in the user's PREFERRED editor (in-engine or external).
     open_script_pref: Option<String>,
+    /// Open a `.flsl` in the ◈ Shaders graph tab.
+    open_shader_graph: Option<String>,
+    /// The graph tab's ✚ New: after `new_shader_in` runs, open the fresh file
+    /// in the graph (instead of only the text editor).
+    new_shader_to_graph: bool,
     /// Jump to a Console line's source: (script name, 1-based line).
     open_log_source: Option<(String, u32)>,
     /// Focus the Scripting tab (e.g. after a double-click-to-open).
@@ -513,6 +519,8 @@ struct EditorTabViewer<'a> {
     particles_active: bool,
     /// Animation UI state (graph window + Animating tab).
     anim_ui: &'a mut anim_ui::AnimUiState,
+    /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
+    shader_graph: &'a mut shader_graph::ShaderGraphState,
     /// Registered models — rig lookups for the animation UI.
     mesh_registry: &'a HashMap<String, MeshAsset>,
     /// A pointer button is down this frame (asset saves coalesce to release).
@@ -586,6 +594,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::AnimGraph => self.anim_graph_tab_ui(ui),
             EditorTab::Particles => self.particles_ui(ui),
             EditorTab::Mixer => self.mixer_ui(ui),
+            EditorTab::ShaderGraph => self.shader_graph_ui(ui),
         }
     }
 }
@@ -1696,6 +1705,8 @@ struct Editor {
     flsl_shape_slots: HashMap<Entity, usize>,
     /// The (entity, shader, generation) set the current splice was built from.
     flsl_field_key: Vec<(Entity, String, u64)>,
+    /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
+    shader_graph: shader_graph::ShaderGraphState,
     /// The terrain fields (id-keyed) + texture palette when Play started.
     /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
     /// it — Stop restores from here so unsaved sculpts survive Play and a
@@ -2118,12 +2129,21 @@ impl ApplicationHandler for Editor {
                                 // controls (undo/redo/save) still fire everywhere.
                                 let in_timeline = matches!(
                                     self.focused_tab,
-                                    Some(EditorTab::Animation | EditorTab::AnimGraph | EditorTab::Particles)
+                                    Some(
+                                        EditorTab::Animation
+                                            | EditorTab::AnimGraph
+                                            | EditorTab::Particles
+                                            | EditorTab::ShaderGraph
+                                    )
                                 );
+                                // The ◈ Shaders canvas has its own undo stack
+                                // (printed sources) — scene undo stays out.
+                                let in_graph =
+                                    matches!(self.focused_tab, Some(EditorTab::ShaderGraph));
                                 if self.ctrl {
                                     match code {
-                                        KeyCode::KeyZ => self.undo(),
-                                        KeyCode::KeyY => self.redo(),
+                                        KeyCode::KeyZ if !in_graph => self.undo(),
+                                        KeyCode::KeyY if !in_graph => self.redo(),
                                         KeyCode::KeyS => self.save_all(),
                                         // Scene-mutating — not while a timeline has focus.
                                         KeyCode::KeyC if !in_timeline => self.copy_selected(),

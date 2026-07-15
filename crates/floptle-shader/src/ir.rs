@@ -101,7 +101,7 @@ pub struct Uniform {
 }
 
 /// The built-in values a shader can read (stage-dependent availability).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Input {
     /// Mesh UV (`vec2`). Fragment only.
     Uv,
