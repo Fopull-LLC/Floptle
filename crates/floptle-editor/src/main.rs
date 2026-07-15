@@ -53,6 +53,7 @@ mod net;
 mod play;
 mod prefab;
 mod shader_graph;
+mod shader_preview;
 mod shaders;
 mod prefs;
 mod project;
@@ -483,6 +484,7 @@ struct EditorTabViewer<'a> {
     /// Selected particle track's emitter/force gizmo (colored screen segments).
     particle_gizmo: &'a [(Vec2, Vec2, [f32; 3])],
     show_gizmos: &'a mut bool,
+    gizmo_filter: &'a mut GizmoFilter,
     grabbed: Option<Handle>,
     tool: Tool,
     scene_rect: &'a mut Option<egui::Rect>,
@@ -521,6 +523,8 @@ struct EditorTabViewer<'a> {
     anim_ui: &'a mut anim_ui::AnimUiState,
     /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
     shader_graph: &'a mut shader_graph::ShaderGraphState,
+    /// The graph's per-node preview atlas (tiles drawn on the nodes).
+    shader_preview: &'a mut shader_preview::ShaderGraphPreview,
     /// Registered models — rig lookups for the animation UI.
     mesh_registry: &'a HashMap<String, MeshAsset>,
     /// A pointer button is down this frame (asset saves coalesce to release).
@@ -1418,8 +1422,12 @@ struct Editor {
     /// Their projected viewport segments (physical px) + color, rebuilt per frame.
     script_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
     /// Master toggle for ALL viewport gizmos/overlays (a button at the viewport's top
-    /// right). Off = a clean view; the selected node's collider still hides too.
+    /// right, or the H key). Off = a clean view; the selected node's collider still
+    /// hides too.
     show_gizmos: bool,
+    /// Per-category gizmo visibility (the ⏷ menu beside the master toggle) —
+    /// tune what draws without giving up the rest.
+    gizmo_filter: GizmoFilter,
     /// Show the terrain's collision surface as a wireframe overlay (View menu toggle).
     show_terrain_collider: bool,
     /// Show EVERY mesh collider's wireframe (View menu). The selected mesh-collider node
@@ -1707,6 +1715,8 @@ struct Editor {
     flsl_field_key: Vec<(Entity, String, u64)>,
     /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
     shader_graph: shader_graph::ShaderGraphState,
+    /// The graph's live per-node preview atlas (pipeline + egui texture).
+    shader_preview: shader_preview::ShaderGraphPreview,
     /// The terrain fields (id-keyed) + texture palette when Play started.
     /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
     /// it — Stop restores from here so unsaved sculpts survive Play and a
@@ -1821,6 +1831,30 @@ struct MeshAsset {
     parts: Vec<MeshId>,
     size: f32,
     rig: Option<anim::RigAsset>,
+}
+
+/// Which gizmo categories draw while the master ◎ toggle is on — the ⏷ menu
+/// beside it. Everything defaults ON; the filter narrows, never adds.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct GizmoFilter {
+    /// Camera frusta.
+    pub(crate) cameras: bool,
+    /// Point-light ranges, gravity volumes, the sun-direction arrow.
+    pub(crate) lights: bool,
+    /// Rigidbody outlines + contact crosses.
+    pub(crate) physics: bool,
+    /// Terrain / mesh / primitive collider wireframes.
+    pub(crate) colliders: bool,
+    /// Particle emitter shapes + force arrows.
+    pub(crate) particles: bool,
+    /// Lua `gizmo.*` debug draws.
+    pub(crate) script: bool,
+}
+
+impl Default for GizmoFilter {
+    fn default() -> Self {
+        Self { cameras: true, lights: true, physics: true, colliders: true, particles: true, script: true }
+    }
 }
 
 /// An offscreen target the Inspector renders an asset preview into (a spinning
@@ -2158,6 +2192,8 @@ impl ApplicationHandler for Editor {
                                         KeyCode::KeyF => self.focus_selected(),
                                         KeyCode::KeyQ => self.selection.clear(), // unselect
                                         KeyCode::KeyG => self.grid.show = !self.grid.show, // toggle grid
+                                        // Gizmos master toggle — H, beside G like the grid.
+                                        KeyCode::KeyH => self.show_gizmos = !self.show_gizmos,
                                         KeyCode::ArrowUp => self.step_selection(-1),
                                         KeyCode::ArrowDown => self.step_selection(1),
                                         KeyCode::Enter | KeyCode::NumpadEnter => {

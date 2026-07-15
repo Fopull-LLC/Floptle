@@ -18,6 +18,7 @@
 pub mod examples;
 pub mod graph;
 pub mod ir;
+pub mod preview;
 pub mod stdlib;
 pub mod text;
 pub mod transpile;

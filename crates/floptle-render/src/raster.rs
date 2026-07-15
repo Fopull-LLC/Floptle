@@ -931,6 +931,12 @@ impl Raster {
         self.textures.get(id.0 as usize).map(|t| &t.bind)
     }
 
+    /// The raw texture view of a registered material texture — for editor
+    /// passes (the shader-graph preview) that bind scene textures themselves.
+    pub fn texture_view(&self, id: TexId) -> Option<&wgpu::TextureView> {
+        self.textures.get(id.0 as usize).map(|t| &t.view)
+    }
+
     /// Register a standalone material texture (RGBA8) with the given sampling, returning
     /// its handle. Bound per-instance in `draw_scene` to re-texture a shape regardless
     /// of its mesh. Re-registering the same image with new settings returns a fresh id.

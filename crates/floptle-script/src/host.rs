@@ -29,6 +29,135 @@ use crate::{
     VfxCmd, VfxInfo,
 };
 
+/// Render any Lua value as readable Console text: primitives plainly, engine
+/// handles by IDENTITY (`node "Player" (#4)`, `component "RigidBody" of …`),
+/// userdata via `__tostring` (vec3/vec2 print their components), and tables
+/// DEEPLY — short arrays inline, everything else as an indented block with
+/// sorted keys, cycle detection, and depth/entry caps so a self-referential
+/// or huge table can never wedge a frame.
+fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>) -> String {
+    const MAX_DEPTH: usize = 4;
+    match v {
+        Value::Nil => "nil".into(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Integer(n) => n.to_string(),
+        Value::Number(n) => n.to_string(),
+        // Bare at the top level (what you print reads as you wrote it),
+        // quoted inside tables (so "" vs nil vs 5 stay distinguishable).
+        Value::String(s) if depth == 0 => s.to_string_lossy().to_string(),
+        Value::String(s) => format!("\"{}\"", s.to_string_lossy()),
+        Value::Function(_) => "<function>".into(),
+        Value::Thread(_) => "<thread>".into(),
+        Value::LightUserData(_) => "<pointer>".into(),
+        Value::UserData(_) => v.to_string().unwrap_or_else(|_| "<userdata>".into()),
+        Value::Error(e) => format!("<error: {e}>"),
+        Value::Table(t) => {
+            if depth >= MAX_DEPTH {
+                return "{…}".into();
+            }
+            let p = t.to_pointer();
+            if seen.contains(&p) {
+                return "<cycle>".into();
+            }
+            seen.push(p);
+            let out = pretty_table(t, depth, seen);
+            seen.pop();
+            out
+        }
+        _ => "<value>".into(),
+    }
+}
+
+/// The table arm of [`pretty_value`]: engine handles first, then arrays
+/// (inline when short), then key-sorted blocks.
+fn pretty_table(t: &Table, depth: usize, seen: &mut Vec<*const std::ffi::c_void>) -> String {
+    // Engine handles are `{__id, …}` tables with a metatable — print WHAT
+    // they point at, not their internals.
+    if let Ok(Some(id)) = t.raw_get::<Option<u32>>("__id") {
+        if let Ok(Some(comp)) = t.raw_get::<Option<String>>("__comp") {
+            return format!("component \"{comp}\" (node #{id})");
+        }
+        if let Ok(Some(script)) = t.raw_get::<Option<String>>("__script") {
+            return format!("script \"{script}\" (node #{id})");
+        }
+        // A node handle: name + position through its own metatable getters.
+        let name = t.get::<Option<String>>("name").ok().flatten();
+        let pos = t
+            .get::<Value>("pos")
+            .ok()
+            .filter(|p| !p.is_nil())
+            .and_then(|p| p.to_string().ok());
+        return match (name, pos) {
+            (Some(n), Some(p)) => format!("node \"{n}\" (#{id}) at {p}"),
+            (Some(n), None) => format!("node \"{n}\" (#{id})"),
+            _ => format!("node #{id} (not in the scene)"),
+        };
+    }
+
+    const MAX_ENTRIES: usize = 40;
+    let mut items: Vec<(Value, Value)> = Vec::new();
+    let mut extra = 0usize;
+    for pair in t.clone().pairs::<Value, Value>() {
+        let Ok((k, v)) = pair else { continue };
+        if items.len() < MAX_ENTRIES {
+            items.push((k, v));
+        } else {
+            extra += 1;
+        }
+    }
+    if items.is_empty() && extra == 0 {
+        return "{}".into();
+    }
+    // Array part: keys exactly 1..=n (any order) render without keys.
+    let is_array = extra == 0
+        && items.iter().all(|(k, _)| matches!(k, Value::Integer(i) if *i >= 1))
+        && {
+            let mut ks: Vec<i64> = items
+                .iter()
+                .filter_map(|(k, _)| if let Value::Integer(i) = k { Some(*i) } else { None })
+                .collect();
+            ks.sort_unstable();
+            ks.iter().enumerate().all(|(i, &k)| k == i as i64 + 1)
+        };
+    let pad = "  ".repeat(depth + 1);
+    let close_pad = "  ".repeat(depth);
+    if is_array {
+        items.sort_by_key(|(k, _)| if let Value::Integer(i) = k { *i } else { 0 });
+        let vals: Vec<String> =
+            items.iter().map(|(_, v)| pretty_value(v, depth + 1, seen)).collect();
+        let width: usize = vals.iter().map(|s| s.len() + 2).sum();
+        if width <= 64 && vals.iter().all(|s| !s.contains('\n')) {
+            return format!("{{{}}}", vals.join(", "));
+        }
+        let body: Vec<String> = vals.iter().map(|v| format!("{pad}{v},")).collect();
+        return format!("{{\n{}\n{close_pad}}}", body.join("\n"));
+    }
+    // Map: sort by rendered key so output is stable run to run.
+    let mut rows: Vec<(String, String)> = items
+        .iter()
+        .map(|(k, v)| {
+            let key = match k {
+                Value::String(s) => {
+                    let s = s.to_string_lossy().to_string();
+                    let ident = !s.is_empty()
+                        && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                        && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+                    if ident { s } else { format!("[\"{s}\"]") }
+                }
+                other => format!("[{}]", pretty_value(other, depth + 1, seen)),
+            };
+            (key, pretty_value(v, depth + 1, seen))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut body: Vec<String> =
+        rows.iter().map(|(k, v)| format!("{pad}{k} = {v},")).collect();
+    if extra > 0 {
+        body.push(format!("{pad}… (+{extra} more)"));
+    }
+    format!("{{\n{}\n{close_pad}}}", body.join("\n"))
+}
+
 /// Which lifecycle pass a script run is: the per-frame pass (`start`/`update`),
 /// the per-gameplay-tick pass (`fixedUpdate`), or the post-physics camera pass
 /// (`lateUpdate` — after the interpolated transform writeback, so followers
@@ -72,18 +201,17 @@ impl ScriptHost {
         {
             let sink = logs.clone();
             if let Ok(print) = lua.create_function(move |lua, args: Variadic<Value>| {
+                // Deep, Console-ready rendering of ANY value: nested tables,
+                // node/component/script handles, vec3s — see `pretty_value`.
                 let parts: Vec<String> = args
                     .iter()
-                    .map(|v| match v {
-                        Value::String(s) => s.to_string_lossy().to_string(),
-                        Value::Integer(n) => n.to_string(),
-                        Value::Number(n) => n.to_string(),
-                        Value::Boolean(b) => b.to_string(),
-                        Value::Nil => "nil".to_string(),
-                        other => format!("{other:?}"),
-                    })
+                    .map(|v| pretty_value(v, 0, &mut Vec::new()))
                     .collect();
-                let msg = parts.join("\t");
+                let msg = if parts.iter().any(|p| p.contains('\n')) {
+                    parts.join("\n")
+                } else {
+                    parts.join("\t")
+                };
                 eprintln!("[lua] {msg}");
                 sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
                 Ok(())
@@ -1972,5 +2100,54 @@ impl ScriptHost {
             src.error = Some(msg.clone());
         }
         self.record_error(name, msg);
+    }
+}
+
+#[cfg(test)]
+mod pretty_tests {
+    use super::*;
+
+    #[test]
+    fn prints_tables_arrays_and_strings_deeply() {
+        let lua = Lua::new();
+        let v: Value = lua
+            .load("return {b = 2, a = 1, list = {1, 2, 3}, s = \"hi\", nested = {x = {y = true}}}")
+            .eval()
+            .unwrap();
+        let s = pretty_value(&v, 0, &mut Vec::new());
+        assert!(s.contains("a = 1"), "{s}");
+        assert!(s.contains("list = {1, 2, 3}"), "short arrays inline: {s}");
+        assert!(s.contains("s = \"hi\""), "nested strings quoted: {s}");
+        assert!(s.contains("y = true"), "recurses: {s}");
+        // Keys are sorted for stable output.
+        assert!(s.find("a = 1").unwrap() < s.find("b = 2").unwrap(), "{s}");
+    }
+
+    #[test]
+    fn cycles_and_depth_never_hang() {
+        let lua = Lua::new();
+        let cyc: Value = lua.load("local t = {}; t.me = t; return t").eval().unwrap();
+        let s = pretty_value(&cyc, 0, &mut Vec::new());
+        assert!(s.contains("<cycle>"), "{s}");
+        let deep: Value = lua
+            .load("local t = {}; local c = t; for _ = 1, 10 do c.next = {}; c = c.next end; return t")
+            .eval()
+            .unwrap();
+        let s = pretty_value(&deep, 0, &mut Vec::new());
+        assert!(s.contains("{…}"), "depth caps: {s}");
+    }
+
+    #[test]
+    fn engine_handles_print_by_identity() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        t.raw_set("__id", 7u32).unwrap();
+        t.raw_set("__comp", "RigidBody").unwrap();
+        let s = pretty_value(&Value::Table(t), 0, &mut Vec::new());
+        assert_eq!(s, "component \"RigidBody\" (node #7)");
+        let t = lua.create_table().unwrap();
+        t.raw_set("__id", 3u32).unwrap();
+        let s = pretty_value(&Value::Table(t), 0, &mut Vec::new());
+        assert!(s.starts_with("node #3"), "{s}");
     }
 }

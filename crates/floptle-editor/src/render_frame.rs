@@ -211,6 +211,8 @@ impl Editor {
         // this is the last safe point before it.
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
+        // The ◈ Shaders tab's per-node preview atlas (only while it's visible).
+        self.update_shader_graph_preview(elapsed);
 
         let (
             Some(gpu),
@@ -295,7 +297,7 @@ impl Editor {
         // the viewport gizmos toggle still hides them. (Projected for the SURFACE
         // camera; in split view the tab viewer paints them on the Scene side only.)
         self.script_gizmo_lines.clear();
-        if self.show_gizmos && !self.script_gizmos.is_empty() {
+        if self.show_gizmos && self.gizmo_filter.script && !self.script_gizmos.is_empty() {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             let cmds = &self.script_gizmos;
             let out = &mut self.script_gizmo_lines;
@@ -345,13 +347,18 @@ impl Editor {
                 Light(f32),
                 Gravity(bool, f32), // radial?, radius
             }
+            let filter = self.gizmo_filter;
             let gizmos: Vec<(Entity, Giz)> = self
                 .world
                 .query::<Matter>()
                 .filter_map(|(e, m)| match m {
-                    Matter::Camera { fov_y, active } => Some((e, Giz::Cam(*fov_y, *active))),
-                    Matter::PointLight { range, .. } => Some((e, Giz::Light(*range))),
-                    Matter::GravityVolume { mode, radius, .. } => {
+                    Matter::Camera { fov_y, active } if filter.cameras => {
+                        Some((e, Giz::Cam(*fov_y, *active)))
+                    }
+                    Matter::PointLight { range, .. } if filter.lights => {
+                        Some((e, Giz::Light(*range)))
+                    }
+                    Matter::GravityVolume { mode, radius, .. } if filter.lights => {
                         Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
                     }
                     _ => None,
@@ -388,7 +395,9 @@ impl Editor {
             // The directional "sun" Light has no world position, so its direction gizmo
             // only shows when the Lighting node is selected — anchored in front of the
             // editor camera so it's always framed, pointing along the light direction.
-            if self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some()) {
+            if filter.lights
+                && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
+            {
                 let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
                 let anchor = cam.world_position + fwd * 6.0;
                 let dir = self
@@ -403,8 +412,11 @@ impl Editor {
                 }
             }
             // Rigidbody collider outlines, so physics bodies are visible/placeable.
-            let bodies: Vec<(Entity, floptle_core::RigidBody)> =
-                self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect();
+            let bodies: Vec<(Entity, floptle_core::RigidBody)> = if filter.physics {
+                self.world.query::<floptle_core::RigidBody>().map(|(e, rb)| (e, *rb)).collect()
+            } else {
+                Vec::new()
+            };
             for (e, rb) in bodies {
                 let wt = floptle_core::world_transform(&self.world, e);
                 let p = wt.translation;
@@ -434,7 +446,7 @@ impl Editor {
             }
             // Collision telegraph: a small cross at each contact resolved this step.
             // (Contacts are sim-frame — origin-relative — so convert to world here.)
-            if let Some(sim) = self.sim.as_ref() {
+            if let Some(sim) = self.sim.as_ref().filter(|_| filter.physics) {
                 let cs = 0.15;
                 for c in &sim.world.contacts {
                     let cp = sim.world.origin
@@ -454,7 +466,7 @@ impl Editor {
             // that terrain's shape changes; here we add each node's f64 anchor and
             // re-project — so a moved terrain's wireframe follows for free.
             // Coarseness scales with each grid so the line count stays sane.
-            if self.show_terrain_collider {
+            if self.show_terrain_collider && filter.colliders {
                 for (&e, t) in &self.terrains {
                     if !self.terrain_wire_world.iter().any(|(we, _)| *we == e) {
                         let stride = (t.baked.dims.into_iter().max().unwrap_or(64) / 48).max(2);
@@ -495,7 +507,9 @@ impl Editor {
                 })
                 .collect();
             for (e, path) in mesh_colliders {
-                if !self.show_mesh_colliders && !self.selection.contains(&e) {
+                if !filter.colliders
+                    || (!self.show_mesh_colliders && !self.selection.contains(&e))
+                {
                     continue;
                 }
                 if !self.mesh_wire_cache.contains_key(&path) {
@@ -530,7 +544,9 @@ impl Editor {
                 })
                 .collect();
             for (e, shape) in shape_colliders {
-                if !self.show_mesh_colliders && !self.selection.contains(&e) {
+                if !filter.colliders
+                    || (!self.show_mesh_colliders && !self.selection.contains(&e))
+                {
                     continue;
                 }
                 let wt = floptle_core::world_transform(&self.world, e);
@@ -576,7 +592,9 @@ impl Editor {
                         .copied()
                         .filter(|&e| self.world.get::<floptle_core::ParticleSystem>(e).is_some())
                 });
-            if let (Some(node), Some(doc)) = (particle_node, self.vfx_ui.doc.as_ref()) {
+            if let (Some(node), Some(doc)) =
+                (particle_node.filter(|_| filter.particles), self.vfx_ui.doc.as_ref())
+            {
                 use floptle_scene::{VfxForceDoc, VfxShapeDoc, VfxSpaceDoc};
                 let wt = floptle_core::world_transform(&self.world, node);
                 let m_shape = Mat4::from_scale_rotation_translation(
@@ -1135,6 +1153,7 @@ impl Editor {
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
+        let gizmo_filter = &mut self.gizmo_filter;
         let grabbed = self.grabbed;
         let tool = self.tool;
         let context_menu = self.context_menu;
@@ -1145,6 +1164,7 @@ impl Editor {
         let mixer_ui_state = &mut self.mixer_ui;
         let anim_ui_state = &mut self.anim_ui;
         let shader_graph_state = &mut self.shader_graph;
+        let shader_preview_state = &mut self.shader_preview;
         let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
         let net_hosting = self.net_server.is_some();
@@ -1668,6 +1688,7 @@ impl Editor {
                 mesh_wire,
                 particle_gizmo,
                 show_gizmos,
+                gizmo_filter,
                 grabbed,
                 tool,
                 scene_rect: &mut *scene_rect,
@@ -1688,6 +1709,7 @@ impl Editor {
                 particles_active,
                 anim_ui: anim_ui_state,
                 shader_graph: shader_graph_state,
+                shader_preview: shader_preview_state,
                 mesh_registry,
                 pointer_down,
                 playing,

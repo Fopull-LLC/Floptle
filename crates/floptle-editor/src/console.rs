@@ -167,7 +167,7 @@ impl EditorTabViewer<'_> {
                 if rows.is_empty() {
                     ui.weak("No console output. Press F1 to play — script print/log and errors appear here.");
                 }
-                for (lvl, msg, src, n) in &rows {
+                for (i, (lvl, msg, src, n)) in rows.iter().enumerate() {
                     let color = match lvl {
                         LogLevel::Debug => egui::Color32::from_gray(205),
                         LogLevel::Warn => egui::Color32::from_rgb(240, 200, 90),
@@ -178,6 +178,45 @@ impl EditorTabViewer<'_> {
                         LogLevel::Warn => "Δ",
                         LogLevel::Error => "⊗",
                     };
+                    // Structured prints (tables, nodes — anything multi-line)
+                    // fold into a collapsible block titled by their first line,
+                    // so a big dump never floods the feed.
+                    if msg.contains('\n') {
+                        let first = msg.lines().next().unwrap_or("");
+                        let lines = msg.lines().count();
+                        let title = egui::RichText::new(format!(
+                            "{icon} {first} ⋯ ({lines} lines){}",
+                            if *n > 1 { format!("  ×{n}") } else { String::new() }
+                        ))
+                        .color(color)
+                        .monospace();
+                        let r = egui::CollapsingHeader::new(title)
+                            .id_salt(("console-block", i))
+                            .show(ui, |ui| {
+                                if let Some((name, line)) = src
+                                    && ui
+                                        .link(
+                                            egui::RichText::new(format!("{name}:{line}"))
+                                                .monospace(),
+                                        )
+                                        .clicked()
+                                {
+                                    jump = Some(((*name).clone(), *line));
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(*msg).color(color).monospace(),
+                                    )
+                                    .selectable(true),
+                                );
+                            });
+                        if r.header_response.double_clicked()
+                            && let Some((name, line)) = src
+                        {
+                            jump = Some(((*name).clone(), *line));
+                        }
+                        continue;
+                    }
                     let resp = ui
                         .horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;

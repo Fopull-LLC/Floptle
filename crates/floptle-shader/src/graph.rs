@@ -346,6 +346,15 @@ pub fn build_view(ir: &ShaderIr, ck: Option<&Checked>) -> Vec<GNode> {
         b.visit_let(i);
     }
 
+    // Every declared uniform/texture is a node too, even before anything
+    // reads it — a freshly added knob has to APPEAR to be wireable at all.
+    for u in &ir.uniforms {
+        b.emit_source(NodeKey::Uniform(u.name.clone()));
+    }
+    for t in &ir.textures {
+        b.emit_source(NodeKey::Texture(t.clone()));
+    }
+
     let mut nodes = b.nodes;
     resolve_positions(ir, &mut nodes);
     nodes
@@ -1723,6 +1732,21 @@ shader plasma {
         let (fbm_id, _) = find_call(&ir, "fbm");
         let p = site_value(&ir, Site::Arg { call: fbm_id, slot: 0 }).unwrap();
         assert!(matches!(ir.expr(p).kind, ExprKind::Input(Input::Uv)));
+    }
+
+    #[test]
+    fn fresh_knobs_and_slots_appear_before_anything_reads_them() {
+        // The palette's "knob"/"texture slot" entries only DECLARE — the view
+        // must still show them or adding one looks like nothing happened.
+        let mut ir = parse("shader s {\n  stage fragment\n  output color = vec4(1, 1, 1, 1)\n}\n")
+            .unwrap();
+        let k = add_uniform_node(&mut ir, false, (5.0, 6.0)).unwrap();
+        let t = add_texture_node(&mut ir, (7.0, 8.0)).unwrap();
+        let ir = reload(&ir);
+        let view = build_view(&ir, None);
+        let uni = view.iter().find(|n| n.key == k).expect("knob node visible");
+        assert_eq!(uni.pos, (5.0, 6.0), "layout entry places it");
+        assert!(view.iter().any(|n| n.key == t), "texture slot node visible");
     }
 
     #[test]

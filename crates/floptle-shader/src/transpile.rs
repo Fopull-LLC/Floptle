@@ -185,8 +185,8 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// surface path (raster.wgsl `fs`) refactored over an authored albedo — sun +
 /// marched shadows + AO + point lights + the node Material's specular/rim.
 /// MUST stay in sync with `fs` in raster.wgsl.
-const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, albedo: vec3<f32>) -> vec3<f32> {
-    let n = normalize(in.normal);
+pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, albedo: vec3<f32>) -> vec3<f32> {
+    let n = facing_normal(normalize(in.normal), in.view_pos);
     let l = normalize(g.light_dir.xyz);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
@@ -214,7 +214,7 @@ const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, albedo: vec3<f32>) -> 
 
 /// What the emitter's inputs/uniforms resolve to — the stage's data source.
 #[derive(Clone, Copy)]
-enum EmitCtx {
+pub(crate) enum EmitCtx {
     /// Surface shaders: `in: VsOut` varyings + the group(3) param block.
     Fragment,
     /// Field shapes: `q` = shape-local position, uniforms ride the globals'
@@ -222,22 +222,57 @@ enum EmitCtx {
     Sdf { slot: usize },
 }
 
+/// The preview transpiler's live-scalar registry: every literal number (and
+/// color literal) in the shader gets a lane in a uniform array instead of
+/// being baked into the WGSL, so dragging an inline value updates the preview
+/// WITHOUT a pipeline rebuild. Lane order is emission order (deterministic).
+#[derive(Default)]
+pub(crate) struct DynNums {
+    /// (expr, lanes) in allocation order; a slot's base lane is the sum of
+    /// the preceding slots' lanes.
+    pub(crate) slots: Vec<(ExprId, u8)>,
+    by_expr: std::collections::BTreeMap<u32, usize>,
+    lanes: usize,
+}
+
+/// 64 vec4s — the `PV.nums` array in the preview prelude. Literals past the
+/// cap fall back to baked constants (still correct, just not live-draggable).
+pub(crate) const MAX_DYN_LANES: usize = 256;
+
+impl DynNums {
+    fn alloc(&mut self, id: ExprId, lanes: u8) -> Option<usize> {
+        if let Some(&b) = self.by_expr.get(&id.0) {
+            return Some(b);
+        }
+        if self.lanes + lanes as usize > MAX_DYN_LANES {
+            return None;
+        }
+        let base = self.lanes;
+        self.lanes += lanes as usize;
+        self.by_expr.insert(id.0, base);
+        self.slots.push((id, lanes));
+        Some(base)
+    }
+}
+
 /// Incremental chunk writer that records the line map.
-struct Writer<'a> {
-    ir: &'a ShaderIr,
-    ck: &'a Checked,
+pub(crate) struct Writer<'a> {
+    pub(crate) ir: &'a ShaderIr,
+    pub(crate) ck: &'a Checked,
     ctx: EmitCtx,
-    out: String,
+    pub(crate) out: String,
     lines: u32,
     line_map: Vec<(u32, Span)>,
+    /// When set, literal numbers/colors emit as `pvn(lane)` reads (preview).
+    pub(crate) dyn_nums: Option<std::cell::RefCell<DynNums>>,
 }
 
 impl<'a> Writer<'a> {
-    fn new(ir: &'a ShaderIr, ck: &'a Checked, ctx: EmitCtx) -> Self {
-        Self { ir, ck, ctx, out: String::new(), lines: 0, line_map: Vec::new() }
+    pub(crate) fn new(ir: &'a ShaderIr, ck: &'a Checked, ctx: EmitCtx) -> Self {
+        Self { ir, ck, ctx, out: String::new(), lines: 0, line_map: Vec::new(), dyn_nums: None }
     }
 
-    fn line(&mut self, s: String, span: Option<Span>) {
+    pub(crate) fn line(&mut self, s: String, span: Option<Span>) {
         if let Some(span) = span {
             self.line_map.push((self.lines, span));
         }
@@ -246,30 +281,48 @@ impl<'a> Writer<'a> {
         self.lines += 1;
     }
 
-    fn raw(&mut self, s: &str) {
+    pub(crate) fn raw(&mut self, s: &str) {
         self.out.push_str(s);
         self.lines += s.matches('\n').count() as u32;
     }
 
+    /// Allocate live-scalar lanes for `id` when in preview mode.
+    fn dyn_lane(&self, id: ExprId, lanes: u8) -> Option<usize> {
+        self.dyn_nums.as_ref().and_then(|d| d.borrow_mut().alloc(id, lanes))
+    }
+
     /// Emit one expression as a WGSL expression string.
-    fn emit(&self, id: ExprId) -> Result<String, TranspileError> {
+    pub(crate) fn emit(&self, id: ExprId) -> Result<String, TranspileError> {
         let e = self.ir.expr(id);
         Ok(match &e.kind {
-            ExprKind::Num(n) => wgsl_num(*n),
-            ExprKind::ColorLit(c) => format!(
-                "vec4<f32>({}, {}, {}, {})",
-                wgsl_num(c[0] as f64),
-                wgsl_num(c[1] as f64),
-                wgsl_num(c[2] as f64),
-                wgsl_num(c[3] as f64)
-            ),
+            ExprKind::Num(n) => match self.dyn_lane(id, 1) {
+                Some(b) => format!("pvn({b}u)"),
+                None => wgsl_num(*n),
+            },
+            ExprKind::ColorLit(c) => match self.dyn_lane(id, 4) {
+                Some(b) => format!(
+                    "vec4<f32>(pvn({b}u), pvn({}u), pvn({}u), pvn({}u))",
+                    b + 1,
+                    b + 2,
+                    b + 3
+                ),
+                None => format!(
+                    "vec4<f32>({}, {}, {}, {})",
+                    wgsl_num(c[0] as f64),
+                    wgsl_num(c[1] as f64),
+                    wgsl_num(c[2] as f64),
+                    wgsl_num(c[3] as f64)
+                ),
+            },
             ExprKind::Str(_) | ExprKind::Texture(_) => {
                 // Only reachable as resolved call params, which never emit here.
                 return Err(TranspileError::new("internal: bare texture/string", e.span));
             }
             ExprKind::Input(i) => match (self.ctx, i) {
                 (EmitCtx::Fragment, Input::Uv) => "in.uv".into(),
-                (EmitCtx::Fragment, Input::Normal) => "normalize(in.normal)".into(),
+                (EmitCtx::Fragment, Input::Normal) => {
+                    "facing_normal(normalize(in.normal), in.view_pos)".into()
+                }
                 (EmitCtx::Fragment, Input::WorldPos) => "in.view_pos".into(),
                 (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
                 (_, Input::Time) => "G.params.x".into(),
@@ -694,4 +747,5 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
+fn facing_normal(n: vec3<f32>, view_pos: vec3<f32>) -> vec3<f32> { return select(-n, n, dot(n, -view_pos) >= 0.0); }
 "#;
