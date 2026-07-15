@@ -132,6 +132,17 @@ fn previewable(n: &GNode) -> bool {
 /// Thumbnail edge on the node (the atlas tile is 128 px, drawn slightly up).
 const PV_SIDE: f32 = 148.0;
 
+/// The per-node pad every layout pass uses: reserve the preview strip on
+/// preview-capable nodes. Constant (independent of the 👁 toggle) so fresh
+/// layouts are deterministic and never stack nodes into each other.
+fn graph_pad(n: &GNode) -> f32 {
+    if previewable(n) {
+        PV_SIDE + 6.0
+    } else {
+        0.0
+    }
+}
+
 enum WireDrag {
     /// Dragging from a node's output — looking for an input port.
     FromOut(NodeKey),
@@ -162,6 +173,8 @@ enum Act {
     Delete(Vec<NodeKey>),
     /// Duplicate the listed nodes and select the copies.
     Duplicate(Vec<NodeKey>),
+    /// Re-run the auto-layout over the whole graph (one undoable commit).
+    Arrange,
     Undo,
     Redo,
 }
@@ -218,7 +231,7 @@ impl ShaderGraphState {
                         (None, Some((format!("{l}:{c}: {}", e.message), e.span)))
                     }
                 };
-                self.view = graph::build_view(&ir, ck.as_ref());
+                self.view = graph::build_view_padded(&ir, ck.as_ref(), &graph_pad);
                 self.err_key = err.as_ref().and_then(|(_, span)| {
                     // Pin the error to the smallest node whose span contains it.
                     let mut best: Option<(u32, NodeKey)> = None;
@@ -288,7 +301,7 @@ impl ShaderGraphState {
     /// touching disk — positions stay frozen.
     fn rebuild_view(&mut self) {
         if let Some(ir) = &self.ir {
-            self.view = graph::build_view(ir, self.ck.as_ref());
+            self.view = graph::build_view_padded(ir, self.ck.as_ref(), &graph_pad);
             self.freeze_positions();
         }
     }
@@ -449,6 +462,22 @@ impl ShaderGraphState {
                             for k in &keys {
                                 let _ = graph::delete_node(ir, k);
                             }
+                            Ok(())
+                        }),
+                        strict: false,
+                    },
+                    project_root,
+                    ide,
+                );
+            }
+            Act::Arrange => {
+                // Fresh positions for everything: drop the session freeze so
+                // the new layout isn't overridden by remembered spots.
+                self.pos_cache.clear();
+                self.apply(
+                    Act::Commit {
+                        edit: Box::new(|ir| {
+                            graph::arrange(ir, None, &graph_pad);
                             Ok(())
                         }),
                         strict: false,
@@ -660,6 +689,15 @@ impl EditorTabViewer<'_> {
                 acts.push(Act::Redo);
             }
             if ui.button("⛶").on_hover_text("frame the whole graph").clicked() {
+                self.shader_graph.scene_rect = Rect::ZERO;
+            }
+            if ui
+                .button("⇅")
+                .on_hover_text("auto-arrange all nodes (spaced for previews; undoable)")
+                .clicked()
+            {
+                acts.push(Act::Arrange);
+                // Re-frame after the shuffle so the tidied graph is in view.
                 self.shader_graph.scene_rect = Rect::ZERO;
             }
             if ui
