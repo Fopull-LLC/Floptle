@@ -67,6 +67,13 @@ pub(crate) fn is_vfx(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(floptle_scene::VFX_EXT)
 }
 
+/// A `.flsl` shader — the shader IR's text form (ADR-0007), assignable on a
+/// Material and editable in the Scripting tab or VSCode.
+pub(crate) fn is_shader(path: &str) -> bool {
+    path.to_ascii_lowercase()
+        .ends_with(&format!(".{}", floptle_shader::SHADER_TEXT_EXT))
+}
+
 /// An audio clip (`.wav/.ogg/.mp3/.flac`) — playable by the sound system.
 pub(crate) fn is_audio(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
@@ -105,6 +112,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
     } else if is_prefab(path) {
         ("⬡", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
+    } else if is_shader(path) {
+        ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader (ADR-0007)
     } else if is_audio(path) {
         ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
     } else if path.to_ascii_lowercase().ends_with(".ron") {

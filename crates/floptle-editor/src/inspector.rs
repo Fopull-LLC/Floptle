@@ -132,6 +132,7 @@ pub(crate) fn material_props_ui(
     presets: &[(String, floptle_scene::MaterialDoc)],
     asset_tree: &[crate::assets::AssetEntry],
     name_buf: &mut String,
+    flsl: &crate::shaders::FlslCache,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
 
@@ -171,6 +172,142 @@ pub(crate) fn material_props_ui(
         r.changed |= ui.checkbox(&mut m.unlit, "fullbright / flat").changed();
         ui.end_row();
     });
+
+    // ---- custom shader (ADR-0007): pick a .flsl; its exposed uniforms and
+    // texture slots become the rows below, live-editing the group(3) params.
+    egui::Grid::new("mat_shader").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+        ui.label("shader").on_hover_text(
+            "a custom .flsl look — \"Built-in\" is the classic material above.\n\
+             Make one with Assets → right-click → ◈ New Shader.",
+        );
+        let cur = m
+            .shader
+            .as_deref()
+            .map(|p| {
+                Path::new(p)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string())
+            })
+            .unwrap_or_else(|| "Built-in".into());
+        if let Some(pick) = crate::ui_widgets::asset_picker(
+            ui,
+            egui::Id::new("mat_shader"),
+            &cur,
+            Some("Built-in"),
+            asset_tree,
+            crate::assets::is_shader,
+            160.0,
+        ) {
+            m.shader = pick;
+            // A different shader is a different schema — stale overrides would
+            // silently misfill the new param block.
+            m.shader_params.clear();
+            m.shader_textures.clear();
+            r.changed = true;
+        }
+        ui.end_row();
+    });
+    if let Some(shader_path) = m.shader.clone() {
+        match flsl.get(&shader_path) {
+            None => {
+                ui.small("compiling…");
+            }
+            Some(entry) => {
+                if let Some(err) = &entry.error {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(235, 100, 100),
+                        egui::RichText::new(format!("⚠ {err}")).small(),
+                    );
+                }
+                if let Some((compiled, _)) = &entry.compiled {
+                    egui::Grid::new("mat_shader_rows").num_columns(2).spacing([8.0, 5.0]).show(
+                        ui,
+                        |ui| {
+                            for u in &compiled.uniforms {
+                                ui.label(&u.name);
+                                let mut v =
+                                    m.shader_params.get(&u.name).copied().unwrap_or(u.default);
+                                let mut ch = false;
+                                if u.is_color {
+                                    ch |= ui
+                                        .color_edit_button_rgba_unmultiplied(&mut v)
+                                        .changed();
+                                } else {
+                                    match u.ty {
+                                        floptle_shader::Ty::Float => {
+                                            ch |= match u.range {
+                                                Some((lo, hi)) => ui
+                                                    .add(egui::Slider::new(&mut v[0], lo..=hi))
+                                                    .changed(),
+                                                None => ui
+                                                    .add(
+                                                        egui::DragValue::new(&mut v[0])
+                                                            .speed(0.02),
+                                                    )
+                                                    .changed(),
+                                            };
+                                        }
+                                        ty => {
+                                            let lanes = ty.lanes() as usize;
+                                            ui.horizontal(|ui| {
+                                                for lane in v.iter_mut().take(lanes) {
+                                                    ch |= ui
+                                                        .add(
+                                                            egui::DragValue::new(lane)
+                                                                .speed(0.02),
+                                                        )
+                                                        .changed();
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                if ch {
+                                    m.shader_params.insert(u.name.clone(), v);
+                                    r.changed = true;
+                                }
+                                ui.end_row();
+                            }
+                            for (i, slot) in compiled.textures.iter().enumerate() {
+                                ui.label(slot);
+                                let cur = m
+                                    .shader_textures
+                                    .get(slot)
+                                    .map(|p| {
+                                        Path::new(p)
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| p.clone())
+                                    })
+                                    .unwrap_or_else(|| "none".into());
+                                if let Some(pick) = crate::ui_widgets::asset_picker(
+                                    ui,
+                                    egui::Id::new(("mat_shader_tex", i)),
+                                    &cur,
+                                    Some("none"),
+                                    asset_tree,
+                                    crate::assets::is_texture,
+                                    160.0,
+                                ) {
+                                    match pick {
+                                        Some(p) => {
+                                            m.shader_textures.insert(slot.clone(), p);
+                                        }
+                                        None => {
+                                            m.shader_textures.remove(slot);
+                                        }
+                                    }
+                                    r.changed = true;
+                                }
+                                ui.end_row();
+                            }
+                        },
+                    );
+                }
+            }
+        }
+    }
 
     // These only affect the lit path, so grey them out when unlit.
     ui.add_enabled_ui(!m.unlit, |ui| {
@@ -999,7 +1136,7 @@ impl EditorTabViewer<'_> {
                     }
                     ui.indent("material_props", |ui| {
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -2124,7 +2261,7 @@ impl EditorTabViewer<'_> {
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);

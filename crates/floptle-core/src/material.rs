@@ -32,6 +32,18 @@ pub struct Material {
     /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
     /// over what's behind it; multiplied by any base-color texture's own alpha.
     pub alpha: f32,
+    /// A custom `.flsl` shader (project-relative path) — the shader-IR path
+    /// (ADR-0007). `None` = the built-in look above. When set, the shader's
+    /// exposed uniforms/texture slots (below) drive the surface; the fields
+    /// above still feed it (`instanceColor`, `litSurface`'s specular/rim) and
+    /// the base `texture` remains its `baseTexture()`.
+    pub shader: Option<String>,
+    /// Overrides for the shader's exposed uniforms (name → one vec4 slot,
+    /// unused lanes zero). Absent names use the shader's declared defaults.
+    pub shader_params: std::collections::BTreeMap<String, [f32; 4]>,
+    /// Texture bindings for the shader's declared slots (slot name → project-
+    /// relative texture path). Absent slots bind a 1×1 white.
+    pub shader_textures: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Material {
@@ -49,6 +61,9 @@ impl Default for Material {
             unlit: false,
             ambient: 1.0,
             alpha: 1.0,
+            shader: None,
+            shader_params: std::collections::BTreeMap::new(),
+            shader_textures: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -26,3 +26,5 @@ fontdue = "0.9"
 [dev-dependencies]
 # Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
 png = "0.18"
+# examples/shader_probe.rs compiles .flsl through the production path.
+floptle-shader = { path = "../floptle-shader" }
