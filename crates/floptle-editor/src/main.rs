@@ -51,6 +51,7 @@ mod lua_support;
 mod matter_catalog;
 mod net;
 mod play;
+mod prefab;
 mod prefs;
 mod project;
 mod render_frame;
@@ -280,8 +281,13 @@ struct EditorCmd {
     rename_asset: Option<String>,
     /// Commit a rename from the modal: (current path, new file/folder name).
     do_rename: Option<(String, String)>,
-    /// Delete this asset file/folder (absolute path).
-    delete_asset: Option<String>,
+    /// Delete these asset files/folders (absolute paths) — opens the confirm.
+    delete_asset: Option<Vec<String>>,
+    /// Save these nodes (whole subtrees) as ONE prefab file in the folder.
+    save_prefab: Option<(Vec<Entity>, PathBuf)>,
+    /// Place a prefab instance: (asset path, optional parent node). No parent =
+    /// spawn in front of the camera; a parent keeps the authored local offset.
+    instantiate_prefab: Option<(String, Option<Entity>)>,
     /// Move these asset files/folders (absolute paths) into a destination folder.
     move_assets: Option<(Vec<String>, PathBuf)>,
     /// Extract a model's embedded animation clips to assets/animations/ (a model path).
@@ -298,7 +304,7 @@ struct EditorCmd {
     /// Focus (or open) the ◎ Controller graph dock tab.
     focus_anim_graph: bool,
     /// CONFIRMED asset deletion (from the delete modal) — actually deletes.
-    do_delete_asset: Option<String>,
+    do_delete_asset: Option<Vec<String>>,
     /// Folder the new controller should be created in (absolute; None = default).
     new_anim_controller_dir: Option<String>,
 }
@@ -419,6 +425,8 @@ struct EditorTabViewer<'a> {
     layer_names: &'a [String],
     /// The Inspector's "add tag" text field buffer.
     tag_edit: &'a mut String,
+    /// See `Editor::hier_scrolled` — scroll-to-selection bookkeeping.
+    hier_scrolled: &'a mut Option<Entity>,
     /// Whether the floating Material Editor window is open.
     show_material_editor: &'a mut bool,
     asset_tree: &'a [AssetEntry],
@@ -1642,6 +1650,9 @@ struct Editor {
     add_component_filter: String,
     /// Text being typed into the Inspector's "add tag" field.
     tag_edit: String,
+    /// The last selection primary the Hierarchy auto-scrolled to (so a viewport
+    /// pick scrolls the tree exactly once, not every frame).
+    hier_scrolled: Option<Entity>,
     /// Text being typed into Project Settings' "new layer" field.
     layer_new: String,
     /// Play mode: scripts run; the pre-play authored scene is restored on stop.
@@ -1661,6 +1672,9 @@ struct Editor {
     /// scene for the session; Stop restores both alongside the snapshot so the
     /// editor's scene saves back to its own file, not the played one's.
     play_scene_name: Option<(String, String)>,
+    /// Parsed prefab files by path (mtime-validated) — `spawn("…")` every tick
+    /// must not re-read + re-parse the asset.
+    prefab_cache: HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<floptle_scene::NodeDoc>)>,
     /// The terrain fields (id-keyed) + texture palette when Play started.
     /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
     /// it — Stop restores from here so unsaved sculpts survive Play and a
@@ -1732,7 +1746,7 @@ struct Editor {
     /// The quit modal confirmed — the next CloseRequested exits for real.
     quit_confirmed: bool,
     /// An asset delete awaiting confirmation (absolute path).
-    delete_confirm: Option<String>,
+    delete_confirm: Option<Vec<String>>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,

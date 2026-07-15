@@ -14,6 +14,12 @@ impl Editor {
     }
 
     pub(crate) fn push_history(&mut self, snap: Snapshot) {
+        // Play-mode changes are a simulation, not edits: Stop reverts the whole
+        // world, so they must never become undo points (undoing after Stop
+        // would re-apply discarded play-state) or mark the scene "unsaved".
+        if self.playing {
+            return;
+        }
         self.history.redo.clear();
         self.history.undo.push(snap);
         while self.history.undo.len() > self.history.max {
@@ -23,7 +29,11 @@ impl Editor {
     }
 
     /// Record the current scene as an undo point (call BEFORE a discrete edit).
+    /// A no-op during Play — see [`Self::push_history`].
     pub(crate) fn record(&mut self) {
+        if self.playing {
+            return;
+        }
         let s = self.snapshot();
         self.push_history(Snapshot::Scene(s));
     }

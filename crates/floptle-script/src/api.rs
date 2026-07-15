@@ -1017,6 +1017,20 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     }
     // Tags: node:hasTag("enemy") → bool; node:addTag / node:removeTag edit the
     // list (dedup on add, no-op removes are fine). Reads see this frame's
+    // node:destroy() — remove this node (and its whole subtree) from the scene.
+    // Queued like every other write: the driver despawns after the pass, so the
+    // handle stays safely readable for the rest of this call.
+    {
+        let q = shared.destroy_queue.clone();
+        methods.set(
+            "destroy",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                q.borrow_mut().push(e);
+                Ok(())
+            })?,
+        )?;
+    }
     // pending edits (read-your-writes), the ECS component updates after the pass.
     {
         let scene = shared.scene.clone();

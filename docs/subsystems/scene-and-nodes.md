@@ -319,3 +319,60 @@ terrain. Fixes (all in concert):
   holds simulation state and possibly another scene entirely.
 - Opening a scene from the editor while playing stops Play first, so the
   unsaved-changes prompt and its save operate on real edit state.
+
+## Prefabs, subtree clipboard, spawn/destroy, multi-select (2026-07-14)
+
+**Subtree capture is the shared foundation** (`Editor::subtree_docs` /
+`spawn_docs` in scene_ops.rs): roots + all descendants serialize to a flat
+`Vec<NodeDoc>` whose `parent` fields are in-list indices (`None` = root).
+Children keep local transforms + bone attachments; roots bake their WORLD
+transform. Copy / duplicate / paste now carry children (they used to capture
+single flat nodes — pasting a parent silently lost its subtree), and
+`delete_selected` removes whole subtrees instead of orphaning children to the
+scene root. Also fixed: `spawn_node` dropped the `cast_shadow` opt-out.
+
+**Prefabs** (`prefab.rs`, `PREFAB_EXT = ".prefab.ron"`): the same flat format
+as a file — a saved clipboard IS a valid prefab (the loader tolerates the
+`//floptle-nodes-v1` tag line). Create: drag Hierarchy node(s) into the
+Assets panel (folder rows, grid background, tree empty space → prefabs/) or
+right-click → "⬡ Save as Prefab". Instantiate: drag the asset into the
+viewport (cursor placement), onto a Hierarchy row (spawns as child, authored
+local offset), the empty Hierarchy area, or context menu "⬡ Add to scene"
+(camera-front). Blue ⬡ icon; instantiate is blocked during Play (Console
+points at `spawn()`).
+
+**Lua runtime**: `spawn(prefab [, pos [, fn]])` queues a `SpawnRequest`
+(host-side Rc queue, like spawnEffect); the editor drains after script passes
+(`apply_script_spawns`), spawns the subtree (mtime-cached parse,
+`Editor::prefab_cache`), registers meshes + `sim.add_body_for` per entity,
+then invokes the callback with the new root's handle via
+`ScriptHost::call_spawn_callback` (re-syncs the mirror first, flushes after —
+same pattern as call_touch). `destroy(node)` / `node:destroy()` queue entity
+indices; the drain despawns whole subtrees + bodies, routes net-tracked nodes
+through `Session::despawn` on the server, and refuses client-side destroys of
+replicated nodes. `net.spawn` also accepts prefab names/paths now (first root
+only — replication is per-node). Scripts/animators/vfx/audio self-wire via
+their per-frame query loops; prediction replays never run scripts, so no
+double-spawn. Scene switches clear pending queues (`reset_instances`).
+
+**Multi-select**: Hierarchy now matches the Assets browser — plain click =
+single, Ctrl/Cmd = toggle, Shift = range over the VISIBLE row order (DFS,
+collapsed subtrees skipped); the clicked row becomes primary. Assets: delete
+runs on the whole multi-selection ("Delete N files" + listing confirm modal);
+`delete_asset`/`do_delete_asset` cmds are now `Vec<String>`
+(`Editor::delete_assets`, one tree rebuild).
+
+**UX audit fixes** (same pass): `record()`/`push_history` no-op during Play
+(play edits polluted undo + left phantom scene_dirty after Stop);
+`set_active_camera` records undo; Networked/Collider/AnimController headers
+use `component_header_no_copy` (their "Copy values" did nothing); folder
+context menus unified tree+grid (`folder_menu`: New/Rename/Reveal/Delete —
+grid tiles had NO menu, folders were un-renamable); file tile/row open+menu
+logic deduped (`asset_open`/`asset_file_menu`); hierarchy menu gained Paste +
+shortcut hints; viewport Add menu now uses the shared `node_new_menu` catalog
+(was a stale 3-item copy); Hierarchy auto-scrolls to the selection primary
+(`hier_scrolled` once-per-change); rename modal titled "Rename", preserves
+compound extensions (`.prefab.ron`/`.vfx.ron` used to get mangled), and
+follows `asset_selection`; layer delete is a two-step inline confirm; Edit
+menu greys out selection-dependent items; Cube/Sphere/Blob tooltips;
+"object"→"node" terminology.

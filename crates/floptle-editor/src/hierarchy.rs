@@ -49,15 +49,36 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
+        // The flat VISIBLE row order (DFS, collapsed subtrees skipped) — the
+        // range for Shift-click select, matching the Assets browser.
+        let mut visible: Vec<Entity> = Vec::new();
+        {
+            let mut stack: Vec<Entity> = roots.iter().rev().copied().collect();
+            while let Some(e) = stack.pop() {
+                visible.push(e);
+                if !self.collapsed.contains(&e)
+                    && let Some(kids) = children.get(&e)
+                {
+                    stack.extend(kids.iter().rev());
+                }
+            }
+        }
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             for r in roots {
-                self.hierarchy_node(ui, r, &children, &names, 0);
+                self.hierarchy_node(ui, r, &children, &names, &visible, 0);
             }
-            // Empty area below the tree: drop a node here to unparent it; right-click
-            // for the New menu (create at scene root).
+            // Empty area below the tree: drop a node here to unparent it, or a
+            // prefab asset to place an instance; right-click for the New menu
+            // (create at scene root).
             let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
             if let Some(p) = bg.dnd_release_payload::<NodePayload>() {
                 self.cmd.reparent = Some((p.0, None));
+            }
+            if let Some(p) = bg.dnd_release_payload::<AssetPayload>()
+                && crate::assets::is_prefab(&p.path)
+            {
+                self.cmd.instantiate_prefab = Some((p.path.clone(), None));
             }
             bg.context_menu(|ui| {
                 ui.menu_button("✚ New", |ui| self.node_new_menu(ui, None));
@@ -77,11 +98,11 @@ impl<'a> EditorTabViewer<'a> {
 /// menu-bar Add menu all list the same things).
 pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Option<Entity>) {
         let mut pick: Option<MatterDoc> = None;
-        if ui.button("■ Cube").clicked() {
+        if ui.button("■ Cube").on_hover_text("a box primitive — the go-to building block (floors, walls, crates)").clicked() {
             pick = Some(new_cube());
             ui.close();
         }
-        if ui.button("○ Sphere").clicked() {
+        if ui.button("○ Sphere").on_hover_text("a sphere primitive").clicked() {
             pick = Some(new_sphere());
             ui.close();
         }
@@ -93,7 +114,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(new_plane());
             ui.close();
         }
-        if ui.button("◑ Blob").clicked() {
+        if ui.button("◑ Blob").on_hover_text("an SDF metaball — nearby blobs melt together (organic/surreal shapes)").clicked() {
             pick = Some(MatterDoc::Blob { scale: 1.0 });
             ui.close();
         }
@@ -158,6 +179,7 @@ impl EditorTabViewer<'_> {
         e: Entity,
         children: &HashMap<Entity, Vec<Entity>>,
         names: &HashMap<Entity, String>,
+        visible: &[Entity],
         depth: usize,
     ) {
         let name = names.get(&e).cloned().unwrap_or_default();
@@ -222,9 +244,21 @@ impl EditorTabViewer<'_> {
         }
         resp.dnd_set_drag_payload(NodePayload(e));
 
-        // Highlight when a node/script is dragged over this row.
+        // Follow the selection: when the PRIMARY changes (a viewport pick, a
+        // paste, a duplicate…), scroll its row into view — once, not per frame.
+        if selected
+            && self.selection.last() == Some(&e)
+            && *self.hier_scrolled != Some(e)
+        {
+            resp.scroll_to_me(Some(egui::Align::Center));
+            *self.hier_scrolled = Some(e);
+        }
+
+        // Highlight when a node / script / prefab is dragged over this row.
         if resp.dnd_hover_payload::<NodePayload>().is_some()
-            || resp.dnd_hover_payload::<AssetPayload>().is_some_and(|p| is_script(&p.path))
+            || resp
+                .dnd_hover_payload::<AssetPayload>()
+                .is_some_and(|p| is_script(&p.path) || crate::assets::is_prefab(&p.path))
         {
             ui.painter().rect_stroke(
                 resp.rect,
@@ -237,12 +271,30 @@ impl EditorTabViewer<'_> {
         if resp.clicked() {
             *self.selected_asset = None;
             *self.bone_selection = None;
-            if ui.input(|i| i.modifiers.shift) {
+            // Same model as the Assets browser: plain = single, Ctrl/Cmd =
+            // toggle, Shift = range from the current primary in visible order.
+            let m = ui.input(|i| i.modifiers);
+            if m.command || m.ctrl {
                 if let Some(pos) = self.selection.iter().position(|x| *x == e) {
                     self.selection.remove(pos);
                 } else {
                     self.selection.push(e);
                 }
+            } else if m.shift
+                && let Some(&anchor) = self.selection.last()
+                && let (Some(a), Some(b)) = (
+                    visible.iter().position(|&x| x == anchor),
+                    visible.iter().position(|&x| x == e),
+                )
+            {
+                let (lo, hi) = (a.min(b), a.max(b));
+                let mut range = visible[lo..=hi].to_vec();
+                // The clicked row becomes the primary (selection order matters).
+                if let Some(pos) = range.iter().position(|&x| x == e) {
+                    let x = range.remove(pos);
+                    range.push(x);
+                }
+                *self.selection = range;
             } else {
                 self.selection.clear();
                 self.selection.push(e);
@@ -258,35 +310,52 @@ impl EditorTabViewer<'_> {
                 self.cmd.reparent = Some((e, None));
                 ui.close();
             }
+            if ui
+                .button("⬡ Save as Prefab")
+                .on_hover_text("save this node (and its children) as a reusable asset in prefabs/ — or drag it into the Assets panel")
+                .clicked()
+            {
+                let roots = if self.selection.len() > 1 { self.selection.clone() } else { vec![e] };
+                self.cmd.save_prefab = Some((roots, self.project_root.join("prefabs")));
+                ui.close();
+            }
             ui.separator();
-            if ui.button("Duplicate").clicked() {
+            if ui.button("Duplicate  (Ctrl+D)").clicked() {
                 self.cmd.duplicate = true;
                 ui.close();
             }
-            if ui.button("Copy").clicked() {
+            if ui.button("Copy  (Ctrl+C)").clicked() {
                 self.cmd.copy = true;
                 ui.close();
             }
-            if ui.button("Delete").clicked() {
+            if ui.button("Paste  (Ctrl+V)").clicked() {
+                self.cmd.paste = true;
+                ui.close();
+            }
+            if ui.button("Delete  (Del)").clicked() {
                 self.cmd.delete = true;
                 ui.close();
             }
         });
-        // Drops: a node re-parents under me; a script attaches to me.
+        // Drops: a node re-parents under me; a script attaches to me; a prefab
+        // asset spawns an instance as my child.
         if let Some(p) = resp.dnd_release_payload::<NodePayload>()
             && p.0 != e {
                 self.cmd.reparent = Some((p.0, Some(e)));
             }
-        if let Some(p) = resp.dnd_release_payload::<AssetPayload>()
-            && is_script(&p.path) {
+        if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
+            if is_script(&p.path) {
                 self.cmd.drop_script_on = Some((p.path.clone(), e));
+            } else if crate::assets::is_prefab(&p.path) {
+                self.cmd.instantiate_prefab = Some((p.path.clone(), Some(e)));
             }
+        }
 
         // Recurse into children unless this folder is collapsed.
         if !self.collapsed.contains(&e)
             && let Some(kids) = children.get(&e) {
                 for &c in kids {
-                    self.hierarchy_node(ui, c, children, names, depth + 1);
+                    self.hierarchy_node(ui, c, children, names, visible, depth + 1);
                 }
             }
 

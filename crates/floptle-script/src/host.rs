@@ -557,10 +557,66 @@ impl ScriptHost {
             }
         }
 
+        // `spawn(prefab [, pos [, fn]])` — queue a prefab instance. The driver
+        // spawns the subtree after this pass (physics/animators/scripts wire up
+        // automatically); the optional callback receives the new root's handle
+        // right after it exists — the "configure what I just spawned" hook:
+        //   spawn("bullet", node.pos + dir, function(b) b.vx = dir.x * 40 end)
+        let spawn_requests: Rc<RefCell<Vec<crate::SpawnRequest>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let q = spawn_requests.clone();
+            if let Ok(f) = lua.create_function(
+                move |lua, (name, a, b): (String, Value, Value)| {
+                    let (mut pos, mut cb) = (None, None);
+                    for v in [a, b] {
+                        match v {
+                            Value::Nil => {}
+                            Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
+                            other => match crate::math_api::vec3_of(&other) {
+                                Some(p) => pos = Some([p.x, p.y, p.z]),
+                                None => {
+                                    return Err(mlua::Error::runtime(
+                                        "spawn(prefab [, pos [, fn]]): pos must be a vec3/node and fn a function",
+                                    ))
+                                }
+                            },
+                        }
+                    }
+                    q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb });
+                    Ok(())
+                },
+            ) {
+                let _ = lua.globals().set("spawn", f);
+            }
+        }
+        // `destroy(node)` — queue a node (and its whole subtree) for removal.
+        // Also available as `node:destroy()` (installed with the handle API).
+        let destroy_queue: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let q = destroy_queue.clone();
+            if let Ok(f) = lua.create_function(move |_, v: Value| {
+                let eid = match &v {
+                    Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                    _ => None,
+                };
+                match eid {
+                    Some(id) => {
+                        q.borrow_mut().push(id);
+                        Ok(())
+                    }
+                    None => Err(mlua::Error::runtime("destroy(node): pass a node or node handle")),
+                }
+            }) {
+                let _ = lua.globals().set("destroy", f);
+            }
+        }
+
         // The cross-node / cross-script reference layer: a scene-graph mirror plus Lua
         // `node`/`script` handles and the `find`/`findScript` globals (see
         // `install_handle_api`). Shared (interior-mutable) with the handle closures.
         let shared = Shared {
+            destroy_queue: destroy_queue.clone(),
             scene: Rc::new(RefCell::new(SceneMirror::default())),
             bodies: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -643,6 +699,8 @@ impl ScriptHost {
             audio_info: audio_bridges.info.clone(),
             gizmos,
             spawn_effects,
+            spawn_requests,
+            destroy_queue,
             net,
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
@@ -676,6 +734,14 @@ impl ScriptHost {
             self.drop_net_instance(&k);
         }
         self.envs.borrow_mut().clear();
+        // Queued spawn/destroy requests must not leak across a scene switch
+        // (their entities/prefabs belong to the old scene's session).
+        for req in self.spawn_requests.borrow_mut().drain(..) {
+            if let Some(cb) = req.cb {
+                let _ = self.lua.remove_registry_value(cb);
+            }
+        }
+        self.destroy_queue.borrow_mut().clear();
     }
 
     /// Feed each animated entity's controller state for this frame (before `run`),
@@ -724,6 +790,32 @@ impl ScriptHost {
     /// (asset key, world position). The editor spawns a detached instance for each.
     pub fn take_spawn_effects(&self) -> Vec<crate::SpawnedEffect> {
         std::mem::take(&mut *self.spawn_effects.borrow_mut())
+    }
+
+    /// Drain the prefab instances scripts requested via `spawn(...)`. The driver
+    /// spawns each subtree, then calls [`Self::call_spawn_callback`] per request.
+    pub fn take_spawn_requests(&self) -> Vec<crate::SpawnRequest> {
+        std::mem::take(&mut *self.spawn_requests.borrow_mut())
+    }
+
+    /// Drain the nodes scripts asked to remove via `destroy(...)` (entity indices).
+    pub fn take_destroy_requests(&self) -> Vec<u32> {
+        std::mem::take(&mut *self.destroy_queue.borrow_mut())
+    }
+
+    /// Invoke a `spawn(...)` request's callback with the freshly spawned root's
+    /// node handle. The world is re-mirrored first (the node didn't exist at the
+    /// last sync) and the callback's writes are flushed straight back — so
+    /// `spawn("bullet", p, function(b) b.vx = 40 end)` lands the same frame.
+    pub fn call_spawn_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
+        self.sync_scene(world);
+        let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
+        let Ok(node) = new_node_handle(&self.lua, eid) else { return };
+        if let Err(err) = f.call::<()>(node) {
+            self.record_error("spawn", format!("spawn callback: {err}"));
+        }
+        let _ = self.lua.remove_registry_value(cb);
+        self.flush_scene(world);
     }
 
     /// Call `func(node)` on every script instance attached to entity `eid` whose

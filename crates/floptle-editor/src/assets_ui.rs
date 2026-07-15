@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use floptle_scene::MaterialDoc;
 
 use crate::assets::{
-    asset_kind_icon, asset_rel_path, is_markdown, is_scene, is_script, reveal_in_explorer,
-    truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
+    asset_kind_icon, asset_rel_path, is_markdown, is_prefab, is_scene, is_script,
+    reveal_in_explorer, truncate_label, AssetEntry, AssetPayload, FilterMode, WrapMode,
 };
+use crate::hierarchy::NodePayload;
 use crate::inspector::material_props_ui;
 use crate::{anim, anim_ui, EditorTabViewer, PreviewView};
 
@@ -33,7 +34,7 @@ impl<'a> EditorTabViewer<'a> {
                 *self.assets_grid = true;
             }
             ui.separator();
-            ui.small("Ctrl/Shift-click to multi-select · drag onto a folder to move, onto the scene to spawn, onto a picker to assign · right-click for New");
+            ui.small("Ctrl/Shift-click to multi-select · drag onto a folder to move, onto the scene to spawn, onto a picker to assign · drag a node HERE to make a prefab · right-click for New");
         });
         ui.separator();
         if *self.assets_grid {
@@ -50,9 +51,44 @@ impl<'a> EditorTabViewer<'a> {
                 ui.allocate_response(ui.available_size(), egui::Sense::click())
             })
             .inner;
+        // Drop a Hierarchy node on the empty space → save it as a prefab
+        // (lands in the canonical prefabs/ folder; drop on a folder to aim).
+        self.node_drop_makes_prefab(ui, &resp, &root.join("prefabs"));
         resp.context_menu(|ui| {
             self.new_asset_menu(ui, &root);
         });
+    }
+
+    /// Accept a dragged Hierarchy node on `resp`: highlight while hovered and
+    /// save the node (whole subtree; the multi-selection if it's part of one)
+    /// as a prefab file in `dir` on release.
+    fn node_drop_makes_prefab(&mut self, ui: &egui::Ui, resp: &egui::Response, dir: &Path) {
+        if resp.dnd_hover_payload::<NodePayload>().is_some() {
+            ui.painter().rect_stroke(
+                resp.rect.shrink(2.0),
+                5.0,
+                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                egui::Area::new(egui::Id::new("prefab-drop-tip"))
+                    .fixed_pos(pos + egui::vec2(14.0, 14.0))
+                    .order(egui::Order::Tooltip)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.small("⬡ save as prefab");
+                        });
+                    });
+            }
+        }
+        if let Some(p) = resp.dnd_release_payload::<NodePayload>() {
+            let roots = if self.selection.contains(&p.0) && self.selection.len() > 1 {
+                self.selection.clone()
+            } else {
+                vec![p.0]
+            };
+            self.cmd.save_prefab = Some((roots, dir.to_path_buf()));
+        }
     }
 
     /// Handle a click on file `path` in the browser: plain = single-select,
@@ -167,8 +203,10 @@ impl<'a> EditorTabViewer<'a> {
                     }
                 }
             });
-            // Right-click empty space ⏵ New menu.
+            // Right-click empty space ⏵ New menu; drop a Hierarchy node here
+            // ⏵ save it as a prefab in the folder you're looking at.
             let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
+            self.node_drop_makes_prefab(ui, &bg, &dir);
             bg.context_menu(|ui| self.new_asset_menu(ui, &dir));
         });
         if let Some(d) = enter {
@@ -177,7 +215,8 @@ impl<'a> EditorTabViewer<'a> {
     }
 
     /// A folder tile: double-click to descend, and a DROP TARGET — release a
-    /// dragged asset (or the whole selection) on it to move the files inside.
+    /// dragged asset (or the whole selection) on it to move the files inside,
+    /// or a Hierarchy node to save it as a prefab here.
     pub(crate) fn folder_tile(&mut self, ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
         let resp = self.tile_frame(ui, "🗀", egui::Color32::from_rgb(225, 200, 130), name, false);
         if resp.dnd_hover_payload::<AssetPayload>().is_some() {
@@ -191,7 +230,28 @@ impl<'a> EditorTabViewer<'a> {
         if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
             self.cmd.move_assets = Some((self.move_sources(&p.path), dir.to_path_buf()));
         }
+        self.node_drop_makes_prefab(ui, &resp, dir);
+        resp.context_menu(|ui| self.folder_menu(ui, dir));
         resp
+    }
+
+    /// The shared folder context menu (tree header + grid tile): New…, then
+    /// Rename / Reveal / Delete — the same verbs files get.
+    fn folder_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
+        self.new_asset_menu(ui, dir);
+        ui.separator();
+        if ui.button("🖊 Rename…").clicked() {
+            self.cmd.rename_asset = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        if ui.button("🗀 Open in file explorer").clicked() {
+            reveal_in_explorer(dir);
+            ui.close();
+        }
+        if ui.button("🗑 Delete folder").clicked() {
+            self.cmd.delete_asset = Some(vec![dir.to_string_lossy().to_string()]);
+            ui.close();
+        }
     }
 
     /// A file tile: select on click (Ctrl/Shift multi-select via `order`), open on
@@ -199,66 +259,95 @@ impl<'a> EditorTabViewer<'a> {
     pub(crate) fn asset_file_tile(&mut self, ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, path: &str, order: &[String]) {
         let selected = self.asset_is_selected(path);
         let resp = self.tile_frame(ui, icon, color, name, selected);
-        // Every asset is a drag source — drop a model/script on the scene, or any
-        // asset (texture, audio, clip…) onto a matching Inspector picker to fill it.
+        // Every asset is a drag source — drop a model/script/prefab on the scene,
+        // or any asset (texture, audio, clip…) onto a matching Inspector picker.
         resp.dnd_set_drag_payload(AssetPayload { path: path.to_string() });
         if resp.clicked() {
             self.asset_click(ui, path, order);
         }
-        let openable = is_script(path) || is_markdown(path);
         if resp.double_clicked() {
-            if is_scene(path) {
-                self.cmd.open_scene = Some(path.to_string());
-            } else if anim_ui::is_anim_ctl(path) {
-                self.cmd.open_anim_graph = Some(anim::asset_key(
-                    Path::new(path),
-                    self.project_root,
-                    floptle_scene::ANIM_CTL_EXT,
-                ));
-            } else if crate::assets::is_vfx(path) {
-                self.cmd.open_particle_editor = Some(anim::asset_key(
-                    Path::new(path),
-                    self.project_root,
-                    floptle_scene::VFX_EXT,
-                ));
-            } else if crate::assets::is_audio(path) {
-                self.cmd.preview_audio = Some(path.to_string());
-            } else if openable {
-                self.cmd.open_script_pref = Some(path.to_string());
-            }
+            self.asset_open(path);
         }
         let dir = Path::new(path).parent().map(|p| p.to_path_buf());
-        resp.context_menu(|ui| {
-            if openable && ui.button("🖊 Open in Scripting tab").clicked() {
-                self.cmd.open_script = Some(path.to_string());
-                self.cmd.focus_scripting = true;
+        resp.context_menu(|ui| self.asset_file_menu(ui, path, dir.as_deref()));
+    }
+
+    /// Double-click open dispatch for a file, shared by the tree row and grid
+    /// tile: scenes open, editors (anim graph / particles) focus, audio
+    /// previews, scripts/markdown open in the IDE. Other kinds just select.
+    fn asset_open(&mut self, path: &str) {
+        if is_scene(path) {
+            self.cmd.open_scene = Some(path.to_string());
+        } else if anim_ui::is_anim_ctl(path) {
+            self.cmd.open_anim_graph = Some(anim::asset_key(
+                Path::new(path),
+                self.project_root,
+                floptle_scene::ANIM_CTL_EXT,
+            ));
+        } else if crate::assets::is_vfx(path) {
+            self.cmd.open_particle_editor = Some(anim::asset_key(
+                Path::new(path),
+                self.project_root,
+                floptle_scene::VFX_EXT,
+            ));
+        } else if crate::assets::is_audio(path) {
+            self.cmd.preview_audio = Some(path.to_string());
+        } else if is_script(path) || is_markdown(path) {
+            self.cmd.open_script_pref = Some(path.to_string());
+        }
+    }
+
+    /// The shared file context menu (tree row + grid tile).
+    fn asset_file_menu(&mut self, ui: &mut egui::Ui, path: &str, dir: Option<&Path>) {
+        if is_prefab(path) {
+            if ui
+                .button("⬡ Add to scene")
+                .on_hover_text("place an instance in front of the camera — or just drag the prefab into the viewport")
+                .clicked()
+            {
+                self.cmd.instantiate_prefab = Some((path.to_string(), None));
                 ui.close();
             }
-            if ui.button("🗀 Open in file explorer").clicked() {
-                reveal_in_explorer(Path::new(path));
-                ui.close();
-            }
-            if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
-                ui.ctx().copy_text(asset_rel_path(path, self.project_root));
-                ui.close();
-            }
-            if ui.button("⎘ Copy full path").clicked() {
-                ui.ctx().copy_text(path.to_string());
-                ui.close();
-            }
-            if ui.button("🖊 Rename…").clicked() {
-                self.cmd.rename_asset = Some(path.to_string());
-                ui.close();
-            }
-            if ui.button("🗑 Delete").clicked() {
-                self.cmd.delete_asset = Some(path.to_string());
-                ui.close();
-            }
-            if let Some(d) = &dir {
-                ui.separator();
-                self.new_asset_menu(ui, d);
-            }
-        });
+            ui.separator();
+        }
+        let openable = is_script(path) || is_markdown(path);
+        if openable && ui.button("🖊 Open in Scripting tab").clicked() {
+            self.cmd.open_script = Some(path.to_string());
+            self.cmd.focus_scripting = true;
+            ui.close();
+        }
+        if ui.button("🗀 Open in file explorer").clicked() {
+            reveal_in_explorer(Path::new(path));
+            ui.close();
+        }
+        if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
+            ui.ctx().copy_text(asset_rel_path(path, self.project_root));
+            ui.close();
+        }
+        if ui.button("⎘ Copy full path").clicked() {
+            ui.ctx().copy_text(path.to_string());
+            ui.close();
+        }
+        if ui.button("🖊 Rename…").clicked() {
+            self.cmd.rename_asset = Some(path.to_string());
+            ui.close();
+        }
+        // Deleting a file that's part of the multi-selection deletes the whole
+        // selection (after the confirm) — the menu says how many up front.
+        let targets = self.move_sources(path);
+        let del_label = if targets.len() > 1 {
+            format!("🗑 Delete {} files", targets.len())
+        } else {
+            "🗑 Delete".to_string()
+        };
+        if ui.button(del_label).clicked() {
+            self.cmd.delete_asset = Some(targets);
+            ui.close();
+        }
+        if let Some(d) = dir {
+            ui.separator();
+            self.new_asset_menu(ui, d);
+        }
     }
 
     /// Paint one tile (a framed icon over a name), returning its click_and_drag
@@ -339,8 +428,9 @@ impl<'a> EditorTabViewer<'a> {
                         .show(ui, |ui| {
                             self.asset_node_ui(ui, children, &child_dir);
                         });
-                    // Drop a dragged asset (or the selection) here to move it in.
-                    let hr = &header.header_response;
+                    // Drop a dragged asset (or the selection) here to move it in,
+                    // or a Hierarchy node to save it as a prefab in this folder.
+                    let hr = header.header_response.clone();
                     if hr.dnd_hover_payload::<AssetPayload>().is_some() {
                         ui.painter().rect_stroke(
                             hr.rect,
@@ -353,20 +443,12 @@ impl<'a> EditorTabViewer<'a> {
                         self.cmd.move_assets =
                             Some((self.move_sources(&p.path), child_dir.clone()));
                     }
-                    header.header_response.context_menu(|ui| {
-                        self.new_asset_menu(ui, &child_dir);
-                        ui.separator();
-                        if ui.button("🗑 Delete folder").clicked() {
-                            self.cmd.delete_asset = Some(child_dir.to_string_lossy().to_string());
-                            ui.close();
-                        }
-                    });
+                    self.node_drop_makes_prefab(ui, &hr, &child_dir);
+                    hr.context_menu(|ui| self.folder_menu(ui, &child_dir));
                 }
                 AssetEntry::File { name, path } => {
-                    let script = is_script(path);
-                    // Every asset drags (scene spawn for models/scripts; picker-fill
-                    // for textures/audio/clips/…).
-                    let draggable = true;
+                    // Every asset drags (scene spawn for models/scripts/prefabs;
+                    // picker-fill for textures/audio/clips/…).
                     let selected = self.asset_is_selected(path);
                     let (icon, _) = asset_kind_icon(path);
                     let grip = "¦";
@@ -377,76 +459,25 @@ impl<'a> EditorTabViewer<'a> {
                     // only be dragged, never opened.) One click_and_drag widget lets
                     // egui tell a tap from a drag cleanly: tap ⏵ select / double-tap
                     // ⏵ open; press-and-move ⏵ drag a payload onto the scene or a node.
-                    let resp = if draggable {
-                        let text = if selected {
-                            egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
-                        } else {
-                            egui::RichText::new(label)
-                        };
-                        let r = ui.add(
-                            egui::Label::new(text)
-                                .selectable(false)
-                                .sense(egui::Sense::click_and_drag()),
-                        );
-                        r.dnd_set_drag_payload(AssetPayload { path: path.clone() });
-                        r
+                    let text = if selected {
+                        egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
                     } else {
-                        ui.selectable_label(selected, label)
+                        egui::RichText::new(label)
                     };
+                    let resp = ui.add(
+                        egui::Label::new(text)
+                            .selectable(false)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
+                    resp.dnd_set_drag_payload(AssetPayload { path: path.clone() });
                     if resp.clicked() {
                         self.asset_click(ui, path, &order);
                     }
-                    let openable = script || is_markdown(path);
                     if resp.double_clicked() {
-                        if is_scene(path) {
-                            self.cmd.open_scene = Some(path.clone());
-                        } else if anim_ui::is_anim_ctl(path) {
-                            self.cmd.open_anim_graph = Some(anim::asset_key(
-                                Path::new(path),
-                                self.project_root,
-                                floptle_scene::ANIM_CTL_EXT,
-                            ));
-                        } else if crate::assets::is_vfx(path) {
-                            self.cmd.open_particle_editor = Some(anim::asset_key(
-                                Path::new(path),
-                                self.project_root,
-                                floptle_scene::VFX_EXT,
-                            ));
-                        } else if crate::assets::is_audio(path) {
-                            self.cmd.preview_audio = Some(path.clone());
-                        } else if openable {
-                            self.cmd.open_script_pref = Some(path.clone());
-                        }
+                        self.asset_open(&path.clone());
                     }
-                    resp.context_menu(|ui| {
-                        if openable && ui.button("🖊 Open in Scripting tab").clicked() {
-                            self.cmd.open_script = Some(path.clone());
-                            self.cmd.focus_scripting = true;
-                            ui.close();
-                        }
-                        if ui.button("🗀 Open in file explorer").clicked() {
-                            reveal_in_explorer(Path::new(path));
-                            ui.close();
-                        }
-                        if ui.button("⎘ Copy asset path").on_hover_text("the path after Assets/ — paste into assets.getFile(\"…\")").clicked() {
-                            ui.ctx().copy_text(asset_rel_path(path, self.project_root));
-                            ui.close();
-                        }
-                        if ui.button("⎘ Copy full path").clicked() {
-                            ui.ctx().copy_text(path.clone());
-                            ui.close();
-                        }
-                        if ui.button("🖊 Rename…").clicked() {
-                            self.cmd.rename_asset = Some(path.clone());
-                            ui.close();
-                        }
-                        if ui.button("🗑 Delete").clicked() {
-                            self.cmd.delete_asset = Some(path.clone());
-                            ui.close();
-                        }
-                        ui.separator();
-                        self.new_asset_menu(ui, dir);
-                    });
+                    let path = path.clone();
+                    resp.context_menu(|ui| self.asset_file_menu(ui, &path, Some(dir)));
                 }
             }
         }

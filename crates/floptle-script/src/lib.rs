@@ -239,6 +239,14 @@ pub struct ScriptHost {
     /// `spawnEffect(key, x, y, z)`. The editor spawns a detached instance at each
     /// point; it plays once and auto-despawns.
     spawn_effects: Rc<RefCell<Vec<SpawnedEffect>>>,
+    /// Prefab instances scripts requested this frame via `spawn(prefab, …)` —
+    /// drained by the driver, which spawns the subtree + wires physics, then
+    /// invokes each request's callback with the new root's handle.
+    spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
+    /// Nodes scripts asked to remove via `destroy(node)` / `node:destroy()`
+    /// (entity indices) — drained by the driver, which despawns the subtree
+    /// and its physics bodies.
+    destroy_queue: Rc<RefCell<Vec<u32>>>,
     /// The `net.*` bridge: queued session commands, mirrored session state,
     /// `net.on` handlers, and the current-instance marker (docs/netcode-design.md §8).
     net: net_api::SharedNet,
@@ -424,6 +432,16 @@ struct SceneMirror {
     dirty: std::collections::HashSet<u32>,
 }
 
+/// A prefab instance a script requested via `spawn(prefab [, pos [, fn]])`:
+/// the prefab name/path, an optional world position for its first root, and
+/// an optional callback (a Lua registry key) the driver invokes with the new
+/// root's node handle once it exists (`ScriptHost::call_spawn_callback`).
+pub struct SpawnRequest {
+    pub prefab: String,
+    pub pos: Option<[f64; 3]>,
+    pub cb: Option<mlua::RegistryKey>,
+}
+
 /// The interior-mutable state the Lua handle closures share with the host: the scene
 /// mirror, the physics body bridges, and the per-(entity, script) environments.
 #[derive(Clone)]
@@ -464,6 +482,8 @@ struct Shared {
     vfx_info: Rc<RefCell<HashMap<u32, VfxInfo>>>,
     /// Particle commands queued by `node:particles()` handles this frame.
     vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
+    /// `destroy(node)` / `node:destroy()` requests (entity indices).
+    destroy_queue: Rc<RefCell<Vec<u32>>>,
 }
 
 /// One queued two-way `params.X = ...` write: a number or a string.
@@ -1952,6 +1972,70 @@ mod tests {
         // An undefined hook is a clean no-op.
         host.call_touch(&mut world, e.index(), "onTriggerEnter", wall.index(), [0.0; 3], [0.0; 3]);
         assert!(host.errors().is_empty());
+    }
+
+    /// `spawn(prefab, pos, fn)` queues a request (with the position and the
+    /// callback), `destroy(node)` / `node:destroy()` queue entity indices, and
+    /// the driver-invoked callback configures the freshly spawned node.
+    #[test]
+    fn spawn_and_destroy_queue_and_callback_configures_the_new_node() {
+        let dir = std::env::temp_dir().join("floptle_script_test_spawn");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "spawner",
+            "function update(node, dt)\n\
+               if not done then\n\
+                 done = true\n\
+                 spawn(\"bullet\", vec3(1, 2, 3), function(b)\n\
+                   b.x = 42\n\
+                 end)\n\
+                 destroy(node)\n\
+                 local victim = find(\"Victim\")\n\
+                 victim:destroy()\n\
+               end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "spawner".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        world.insert(e, floptle_core::Matter::Empty);
+        let victim = world.spawn();
+        world.insert(victim, Transform::IDENTITY);
+        world.insert(victim, floptle_core::Name("Victim".into()));
+        world.insert(victim, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let mut spawns = host.take_spawn_requests();
+        assert_eq!(spawns.len(), 1);
+        let req = spawns.remove(0);
+        assert_eq!(req.prefab, "bullet");
+        assert_eq!(req.pos, Some([1.0, 2.0, 3.0]));
+        let destroys = host.take_destroy_requests();
+        assert_eq!(destroys, vec![e.index(), victim.index()], "both destroy forms queue");
+        assert!(host.take_spawn_requests().is_empty(), "drain empties the queue");
+
+        // The driver spawns the prefab (simulated here) and hands the callback
+        // the new root — its writes flush straight to the ECS.
+        let bullet = world.spawn();
+        world.insert(bullet, Transform::IDENTITY);
+        world.insert(bullet, floptle_core::Name("bullet".into()));
+        world.insert(bullet, floptle_core::Matter::Empty);
+        host.call_spawn_callback(&mut world, req.cb.expect("callback captured"), bullet.index());
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(bullet).unwrap().translation.x, 42.0);
     }
 
     #[test]

@@ -515,7 +515,7 @@ impl Editor {
     /// (Re)apply the HOST's script filters from the remote-owned Predicted
     /// set: those nodes leave the global passes (they run per tick with their
     /// owner's replayed input) — everything else runs under the host normally.
-    fn net_apply_host_filters(&mut self) {
+    pub(crate) fn net_apply_host_filters(&mut self) {
         let mut skip = std::collections::HashSet::new();
         let mut fskip = std::collections::HashSet::new();
         for (e, _) in &self.net_remote_predicted {
@@ -1585,28 +1585,52 @@ impl Editor {
         if self.net_server.is_none() {
             return;
         }
-        let full = self.project_root.join(path);
-        let doc = match std::fs::read_to_string(&full).map_err(|e| e.to_string()).and_then(|s| {
-            floptle_scene::from_ron(&s).map_err(|e| e.to_string())
-        }) {
-            Ok(d) => d,
-            Err(e) => {
-                self.console.push(
-                    floptle_script::LogLevel::Warn,
-                    format!("net.spawn(\"{path}\"): {e}"),
-                    None,
-                );
-                return;
+        // Accepts a scene file (its first node spawns) or a PREFAB — by name
+        // ("bullet") or path ("prefabs/bullet.prefab.ron"). Replication is
+        // single-node, so a multi-node prefab spawns its first root only.
+        let first = if path.ends_with(floptle_scene::PREFAB_EXT)
+            || self.resolve_prefab_request(path).is_some()
+        {
+            let full = self
+                .resolve_prefab_request(path)
+                .unwrap_or_else(|| self.project_root.join(path));
+            match crate::prefab::load_prefab_docs(&full) {
+                Ok(docs) => docs.into_iter().find(|d| d.parent.is_none()),
+                Err(e) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("net.spawn(\"{path}\"): {e}"),
+                        None,
+                    );
+                    return;
+                }
+            }
+        } else {
+            let full = self.project_root.join(path);
+            match std::fs::read_to_string(&full)
+                .map_err(|e| e.to_string())
+                .and_then(|s| floptle_scene::from_ron(&s).map_err(|e| e.to_string()))
+            {
+                Ok(d) => d.nodes.first().cloned(),
+                Err(e) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("net.spawn(\"{path}\"): {e}"),
+                        None,
+                    );
+                    return;
+                }
             }
         };
-        let Some(mut node) = doc.nodes.first().cloned() else {
+        let Some(mut node) = first else {
             self.console.push(
                 floptle_script::LogLevel::Warn,
-                format!("net.spawn(\"{path}\"): the scene has no nodes"),
+                format!("net.spawn(\"{path}\"): no nodes in it"),
                 None,
             );
             return;
         };
+        node.parent = None;
         if let Some(p) = pos {
             node.transform.translation = p;
         }

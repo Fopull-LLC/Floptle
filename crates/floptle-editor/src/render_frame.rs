@@ -31,7 +31,6 @@ use crate::assets::{AssetPayload, build_assets, collect_texture_paths, is_model}
 use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active};
 use crate::gizmo::build_gizmo;
 use crate::hierarchy::{node_new_menu};
-use crate::matter_catalog::{new_cube, new_sphere};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
 use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
@@ -1012,6 +1011,7 @@ impl Editor {
         };
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
+        let has_selection = !self.selection.is_empty();
         let selection = &mut self.selection;
         let bone_selection = &mut self.bone_selection;
         let collapsed = &mut self.collapsed;
@@ -1084,6 +1084,7 @@ impl Editor {
         let add_component_filter = &mut self.add_component_filter;
         let layer_names = project.build_layers().names;
         let tag_edit = &mut self.tag_edit;
+        let hier_scrolled = &mut self.hier_scrolled;
         let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
         let script_errors = self.script_errors.as_slice();
@@ -1250,10 +1251,12 @@ impl Editor {
                         if ui.button("Undo  (Ctrl+Z)").clicked() { cmd.undo = true; ui.close(); }
                         if ui.button("Redo  (Ctrl+Y)").clicked() { cmd.redo = true; ui.close(); }
                         ui.separator();
-                        if ui.button("Copy  (Ctrl+C)").clicked() { cmd.copy = true; ui.close(); }
+                        // Selection-dependent items grey out with nothing selected
+                        // (Paste stays — it depends on the clipboard, not selection).
+                        if ui.add_enabled(has_selection, egui::Button::new("Copy  (Ctrl+C)")).clicked() { cmd.copy = true; ui.close(); }
                         if ui.button("Paste  (Ctrl+V)").clicked() { cmd.paste = true; ui.close(); }
-                        if ui.button("Duplicate  (Ctrl+D)").clicked() { cmd.duplicate = true; ui.close(); }
-                        if ui.button("Delete  (Del)").clicked() { cmd.delete = true; ui.close(); }
+                        if ui.add_enabled(has_selection, egui::Button::new("Duplicate  (Ctrl+D)")).clicked() { cmd.duplicate = true; ui.close(); }
+                        if ui.add_enabled(has_selection, egui::Button::new("Delete  (Del)")).clicked() { cmd.delete = true; ui.close(); }
                         ui.separator();
                         if ui.button("Project Settings…").clicked() {
                             *show_project_settings = true;
@@ -1603,6 +1606,7 @@ impl Editor {
                 add_component_filter,
                 layer_names: &layer_names,
                 tag_edit,
+                hier_scrolled,
                 show_material_editor,
                 asset_tree,
                 texture_settings,
@@ -1917,12 +1921,27 @@ impl Editor {
                                 cmd.rename_layer = Some((before, after));
                                 want_save_project = true;
                             }
-                            if ui
+                            // Removal is destructive and NOT undoable, so it's a
+                            // two-step click: 🗑 arms this row, ✔ commits, ✖ (or
+                            // clicking 🗑 on another row) disarms.
+                            let arm_id = egui::Id::new("layer-delete-armed");
+                            let armed: Option<usize> =
+                                ui.ctx().data(|d| d.get_temp(arm_id)).flatten();
+                            if armed == Some(i) {
+                                ui.small("delete?");
+                                if ui.small_button("✔").on_hover_text("yes, remove it — nodes still naming it act as Default (and warn at Play)").clicked() {
+                                    remove_idx = Some(i);
+                                    ui.ctx().data_mut(|d| d.insert_temp(arm_id, None::<usize>));
+                                }
+                                if ui.small_button("✖").clicked() {
+                                    ui.ctx().data_mut(|d| d.insert_temp(arm_id, None::<usize>));
+                                }
+                            } else if ui
                                 .small_button("🗑")
-                                .on_hover_text("remove this layer — nodes still naming it act as Default (and warn at Play)")
+                                .on_hover_text("remove this layer (asks to confirm)")
                                 .clicked()
                             {
-                                remove_idx = Some(i);
+                                ui.ctx().data_mut(|d| d.insert_temp(arm_id, Some(i)));
                             }
                         });
                     }
@@ -2134,40 +2153,30 @@ impl Editor {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_max_width(150.0);
                             if hit.is_some() {
-                                if ui.button("Duplicate").clicked() {
+                                if ui.button("Duplicate  (Ctrl+D)").clicked() {
                                     cmd.duplicate = true;
                                     cmd.close_menu = true;
                                 }
-                                if ui.button("Copy").clicked() {
+                                if ui.button("Copy  (Ctrl+C)").clicked() {
                                     cmd.copy = true;
                                     cmd.close_menu = true;
                                 }
-                                if ui.button("Delete").clicked() {
+                                if ui.button("Delete  (Del)").clicked() {
                                     cmd.delete = true;
                                     cmd.close_menu = true;
                                 }
                                 ui.separator();
                             }
-                            if ui.button("Paste").clicked() {
+                            if ui.button("Paste  (Ctrl+V)").clicked() {
                                 cmd.paste = true;
                                 cmd.close_menu = true;
                             }
+                            // The SAME node catalog as the Hierarchy's ✚ New and
+                            // the menu-bar Add — one list, no stale subset.
                             ui.menu_button("Add", |ui| {
-                                if ui.button("Cube").clicked() {
-                                    cmd.add = Some(new_cube());
-                                    cmd.close_menu = true;
-                                    ui.close();
-                                }
-                                if ui.button("Sphere").clicked() {
-                                    cmd.add = Some(new_sphere());
-                                    cmd.close_menu = true;
-                                    ui.close();
-                                }
-                                if ui.button("Blob").clicked() {
-                                    cmd.add = Some(MatterDoc::Blob { scale: 1.0 });
-                                    cmd.close_menu = true;
-                                    ui.close();
-                                }
+                                crate::hierarchy::node_new_menu(ui, &mut cmd, None);
+                                cmd.close_menu |=
+                                    cmd.add.is_some() || cmd.add_ui.is_some();
                             });
                         });
                     });
@@ -2205,12 +2214,19 @@ impl Editor {
             if let Some((path, buf)) = rename_target.as_mut() {
                 let mut open = true;
                 let mut close = false;
-                let ext = Path::new(path.as_str())
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| format!(".{e}"))
-                    .unwrap_or_default();
-                egui::Window::new("Name file")
+                // The fixed suffix = everything after the FIRST dot, so compound
+                // extensions (.prefab.ron, .vfx.ron) ride along whole. Folders
+                // have no suffix.
+                let ext = if Path::new(path.as_str()).is_dir() {
+                    String::new()
+                } else {
+                    Path::new(path.as_str())
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.find('.').map(|i| n[i..].to_string()))
+                        .unwrap_or_default()
+                };
+                egui::Window::new("Rename")
                     .open(&mut open)
                     .resizable(false)
                     .collapsible(false)
@@ -2319,29 +2335,45 @@ impl Editor {
             }
 
             // ---- delete asset confirmation (deletion is irreversible) ----
-            if let Some(path) = delete_confirm.clone() {
+            if let Some(paths) = delete_confirm.clone() {
                 let mut open = true;
                 let mut close = false;
-                let name = Path::new(&path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.clone());
-                let is_dir = Path::new(&path).is_dir();
+                let name = |p: &String| {
+                    Path::new(p)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone())
+                };
                 egui::Window::new("Delete asset")
                     .open(&mut open)
                     .resizable(false)
                     .collapsible(false)
                     .default_width(340.0)
                     .show(ui.ctx(), |ui| {
-                        if is_dir {
-                            ui.label(format!("Delete the folder \"{name}\" and everything in it?"));
-                        } else {
-                            ui.label(format!("Delete \"{name}\"?"));
+                        match paths.as_slice() {
+                            [p] if Path::new(p).is_dir() => {
+                                ui.label(format!(
+                                    "Delete the folder \"{}\" and everything in it?",
+                                    name(p)
+                                ));
+                            }
+                            [p] => {
+                                ui.label(format!("Delete \"{}\"?", name(p)));
+                            }
+                            many => {
+                                ui.label(format!("Delete these {} files?", many.len()));
+                                for p in many.iter().take(8) {
+                                    ui.small(format!("  {}", name(p)));
+                                }
+                                if many.len() > 8 {
+                                    ui.small(format!("  …and {} more", many.len() - 8));
+                                }
+                            }
                         }
                         ui.small("This can't be undone.");
                         ui.horizontal(|ui| {
                             if ui.button("🗑 Delete").clicked() {
-                                cmd.do_delete_asset = Some(path.clone());
+                                cmd.do_delete_asset = Some(paths.clone());
                                 close = true;
                             }
                             if ui.button("Cancel").clicked() {
@@ -3408,6 +3440,10 @@ impl Editor {
             // harness's ghost-client markers.
             self.script_gizmos = self.script_host.take_gizmos();
             self.net_ghost_gizmos();
+            // Prefab spawns + node destroys scripts queued this frame — applied
+            // before attachments/particles so a spawned node is complete (body,
+            // meshes, callback-configured) within this same frame.
+            self.apply_script_spawns();
             // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.
@@ -4232,25 +4268,40 @@ impl Editor {
             // Seed the rename modal with the current base name (the extension is shown as a
             // fixed suffix in the modal, so you edit just the name).
             let p = Path::new(&path);
+            // Seed with the BASE name (up to the first dot) — the modal shows
+            // the rest as a fixed suffix, compound extensions included.
+            let full = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let name = if p.is_dir() {
-                p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+                full
             } else {
-                p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+                full.split('.').next().unwrap_or_default().to_string()
             };
             self.rename_target = Some((path, name));
         }
         if let Some((from, to)) = cmd.do_rename {
             self.rename_asset(&from, &to);
         }
-        if let Some(path) = cmd.delete_asset {
-            // Deleting a file/folder is irreversible — always confirm first.
-            self.delete_confirm = Some(path);
+        if let Some(paths) = cmd.delete_asset {
+            // Deleting files/folders is irreversible — always confirm first.
+            self.delete_confirm = Some(paths);
         }
-        if let Some(path) = cmd.do_delete_asset {
-            self.delete_asset(&path);
+        if let Some(paths) = cmd.do_delete_asset {
+            self.delete_assets(&paths);
         }
         if let Some((sources, dest)) = cmd.move_assets {
             self.move_assets(&sources, &dest);
+        }
+        if let Some((roots, dir)) = cmd.save_prefab {
+            self.save_prefab(&roots, &dir);
+        }
+        if let Some((path, parent)) = cmd.instantiate_prefab {
+            // No parent = place in front of the camera (like Add-menu nodes);
+            // with a parent, the authored root transform is the local offset.
+            let at = parent.is_none().then(|| {
+                let cam = self.camera.render_camera();
+                cam.world_position + (cam.rotation * Vec3::NEG_Z * 5.0).as_dvec3()
+            });
+            self.instantiate_prefab(&path, at, parent);
         }
         if let Some(dir) = cmd.open_folder {
             // Empty path = "the project root" (the File-menu shortcut).

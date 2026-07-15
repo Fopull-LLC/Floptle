@@ -378,11 +378,15 @@ impl Editor {
             return;
         }
         let src = PathBuf::from(from);
-        let final_name = match src.extension().and_then(|e| e.to_str()) {
-            Some(ext) if !src.is_dir() && Path::new(typed).extension().is_none() => {
-                format!("{typed}.{ext}")
-            }
-            _ => typed.to_string(),
+        // The fixed suffix is everything after the FIRST dot — so compound
+        // extensions (.prefab.ron, .vfx.ron, .anim.ron) survive a rename that
+        // types just the base name.
+        let src_name = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let suffix = src_name.find('.').map(|i| &src_name[i..]).unwrap_or("");
+        let final_name = if !src.is_dir() && !typed.contains('.') && !suffix.is_empty() {
+            format!("{typed}{suffix}")
+        } else {
+            typed.to_string()
         };
         let dst = src.parent().unwrap_or(Path::new(".")).join(&final_name);
         if dst == src {
@@ -405,7 +409,12 @@ impl Editor {
             }
         }
         if self.selected_asset.as_deref() == Some(from) {
-            self.selected_asset = Some(dst_str);
+            self.selected_asset = Some(dst_str.clone());
+        }
+        for s in self.asset_selection.iter_mut() {
+            if s == from {
+                *s = dst_str.clone();
+            }
         }
         self.asset_tree = build_assets(&self.project_root);
     }
@@ -459,18 +468,27 @@ impl Editor {
         self.asset_tree = build_assets(&self.project_root);
     }
 
-    /// Delete a file or folder (recursively) and drop any references to it.
-    pub(crate) fn delete_asset(&mut self, path: &str) {
-        let p = Path::new(path);
-        let res = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
-        if let Err(e) = res {
-            eprintln!("  delete failed: {e}");
-            return;
-        }
-        self.ide.open.retain(|f| f.path != path);
-        self.ide.active = self.ide.active.filter(|&i| i < self.ide.open.len());
-        if self.selected_asset.as_deref() == Some(path) {
-            self.selected_asset = None;
+    /// Delete files/folders (recursively) and drop any references to them —
+    /// IDE tabs, the asset selection, the preview. One tree rebuild at the end.
+    pub(crate) fn delete_assets(&mut self, paths: &[String]) {
+        for path in paths {
+            let p = Path::new(path);
+            let res =
+                if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+            if let Err(e) = res {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("delete {path} failed: {e}"),
+                    None,
+                );
+                continue;
+            }
+            self.ide.open.retain(|f| f.path != *path);
+            self.ide.active = self.ide.active.filter(|&i| i < self.ide.open.len());
+            if self.selected_asset.as_deref() == Some(path.as_str()) {
+                self.selected_asset = None;
+            }
+            self.asset_selection.retain(|s| s != path);
         }
         self.asset_tree = build_assets(&self.project_root);
     }

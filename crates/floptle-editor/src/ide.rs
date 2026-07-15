@@ -2127,6 +2127,14 @@ const LUA_SNIPPETS: &[(&str, &[(&str, &str)])] = &[
                 "\n-- Press E near a dynamic prop to pick it up (it stops simulating and\n-- follows you); press E again to drop it (wakes at rest, falls).\ndefaults = { reach = 3.0, holdDist = 2.0 }\nlocal held\n\nfunction update(node, dt)\n  if input.pressed(\"e\") then\n    if held then\n      local rig = held:getcomponent(\"RigidBody\")\n      if rig then rig.kinematic = false end\n      held = nil\n    else\n      local dx, dz = -math.sin(node.yaw), -math.cos(node.yaw)\n      local h = raycast(node.x, node.y, node.z, dx, 0, dz, params.reach)\n      if h and h.node then\n        local rig = h.node:getcomponent(\"RigidBody\")\n        if rig then\n          rig.kinematic = true\n          held = h.node\n        end\n      end\n    end\n  end\n  if held and held.valid then\n    local dx, dz = -math.sin(node.yaw), -math.cos(node.yaw)\n    held.pos = node.pos + vec3(dx * params.holdDist, 0.5, dz * params.holdDist)\n  end\nend\n",
             ),
             (
+                "shoot a projectile (spawn a prefab)",
+                "\n-- Fires the \"bullet\" prefab where you're facing. Make the prefab by\n-- dragging a node into the Assets panel (give it a Dynamic rigidbody,\n-- gravity off, + a script whose onCollisionEnter calls node:destroy()).\ndefaults = { speed = 40.0, cooldown = 0.2 }\nlocal next_ok = 0\n\nfunction update(node, dt)\n  if input.pressed(\"mouse1\") and time >= next_ok then\n    next_ok = time + params.cooldown\n    local dir = vec3(-math.sin(node.yaw), 0, -math.cos(node.yaw))\n    spawn(\"bullet\", node.pos + dir * 1.5, function(b)\n      b.vx, b.vy, b.vz = dir.x * params.speed, 0, dir.z * params.speed\n    end)\n  end\nend\n",
+            ),
+            (
+                "destroy on touch (bullet / fragile prop)",
+                "\n-- Self-destructs when it hits anything solid (pair with a trigger\n-- rigidbody + onTriggerEnter to also damage what it passes through).\nfunction onCollisionEnter(node, other, hit)\n  spawnEffect(\"vfx/Impact\", hit.x, hit.y, hit.z)\n  node:destroy()\nend\n",
+            ),
+            (
                 "chase target (simple follow AI)",
                 "\n-- Chases the node named `target` while it's inside aggro range.\ndefaults = { target = \"Player\", speed = 3.0, aggro = 12.0, keep = 1.5 }\n\nfunction update(node, dt)\n  local prey = find(params.target)\n  if not prey then return end\n  local d = distance(node, prey)\n  if d < params.aggro and d > params.keep then\n    local dir = (prey.pos - node.pos):normalized()\n    node.pos = node.pos + dir * params.speed * dt\n    node.yaw = math.atan2(-dir.x, -dir.z) -- face the prey (forward = -Z)\n  end\nend\n",
             ),
@@ -2314,6 +2322,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "node", "params", "time", "dt", "defaults", "log", "start", "update", "fixedUpdate", "lateUpdate", "input", "math",
     "string", "table", "ipairs", "pairs", "print", "tostring", "tonumber", "pcall", "select",
     "raycast", "find", "findAll", "findScript", "findScriptInScene", "findScripts", "findTagged",
+    "spawn", "destroy", "spawnEffect",
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
@@ -2501,6 +2510,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:isPlaying", insert: ":isPlaying(", doc: "anim:isPlaying([state]) — is that state playing on any layer (or anything at all, with no argument)?" },
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
     ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end." },
+    ApiEntry { label: "spawn", insert: "spawn(", doc: "spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). \"bullet\" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame — spawn(\"bullet\", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects." },
+    ApiEntry { label: "destroy", insert: "destroy(", doc: "destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn)." },
+    ApiEntry { label: "node:destroy", insert: ":destroy()", doc: "node:destroy() — remove this node and its children (same as destroy(node)). The classic pickup: onTriggerEnter → award score → node:destroy()." },
     ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
     ApiEntry { label: "node:sound", insert: "node:sound()", doc: "node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip(\"audio/x.ogg\"), :seek(secs), :isPlaying(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent(\"AudioSource\")." },
     ApiEntry { label: "audio.play", insert: "audio.play(", doc: "audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play(\"audio/ding.ogg\") is flat 2D; pass x,y,z for a world point; pass a node to follow it. opts: {volume, pitch, pan, mode=\"Spatial|Distance|Flat\", falloff=\"Inverse|Linear|Exponential\", minDistance, maxDistance, track, endBehavior=\"Stop|Destroy|Loop\", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play(\"audio/hit.ogg\", h.x, h.y, h.z, { maxDistance = 35, track = \"SFX\" })" },
@@ -2797,6 +2809,38 @@ The portal recipe — one script, many portals (string param per instance):
 
 Events fire where physics runs (offline, the server, the predicted owner) —
 never during prediction replays, so they can't double-fire on corrections.",
+    ),
+    (
+        "Prefabs — spawn & destroy",
+        "\
+A PREFAB is a reusable node (with its whole child subtree) saved as an asset:
+drag a node from the Hierarchy into the Assets panel (or right-click it →
+⬡ Save as Prefab). Place instances by dragging the prefab into the viewport,
+onto a Hierarchy row (spawns as a child), or right-click → Add to scene.
+
+Scripts spawn and remove them at runtime:
+
+    spawn(\"bullet\")                                    -- authored spot
+    spawn(\"bullet\", node.pos + dir * 1.5)              -- at a position
+    spawn(\"bullet\", node.pos + dir * 1.5, function(b)  -- ...then configure it
+      b.vx = dir.x * 40
+    end)
+
+    destroy(other)    -- remove a node + its whole subtree
+    node:destroy()    -- method form (self-destruct a pickup/bullet)
+
+  • \"bullet\" finds prefabs/bullet.prefab.ron; \"weapons/sword\" and full
+    paths work too.
+  • The spawned node is complete immediately: rigidbodies simulate, scripts
+    fire start next pass, animators/particles/audio wire themselves.
+  • destroy is queued (applied after the pass) — the handle stays readable
+    for the rest of the call. Double-destroy is harmless.
+  • MULTIPLAYER: spawn()/destroy() are local. Replicated objects go through
+    the server: net.spawn(\"bullet\", {x=,y=,z=}) (accepts prefab names) +
+    net.despawn(node). destroy() on the server routes replicated nodes
+    through the session automatically; a client's call is refused.
+  • A spawned prop that should be SOLID needs a Rigidbody in Static mode
+    (a plain Collidable marker only bakes at Play start).",
     ),
     (
         "Vectors & math — vec3, vec2, distance",
