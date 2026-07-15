@@ -440,12 +440,15 @@ impl Editor {
             return;
         }
         let dst_str = dst.to_string_lossy().to_string();
-        // Follow the file in any open IDE tab and the asset selection.
+        // Follow the file in any open IDE tab, the graph tab and the selection.
         for f in &mut self.ide.open {
             if f.path == from {
                 f.path = dst_str.clone();
                 f.name = final_name.clone();
             }
+        }
+        if self.shader_graph.path.as_deref() == Some(from) {
+            self.shader_graph.path = Some(dst_str.clone());
         }
         if self.selected_asset.as_deref() == Some(from) {
             self.selected_asset = Some(dst_str.clone());
@@ -488,12 +491,15 @@ impl Editor {
         if moved.is_empty() {
             return;
         }
-        // Follow moved paths in open IDE tabs + the selection.
+        // Follow moved paths in open IDE tabs, the graph tab + the selection.
         for (from, to) in &moved {
             for f in &mut self.ide.open {
                 if &f.path == from {
                     f.path = to.clone();
                 }
+            }
+            if self.shader_graph.path.as_deref() == Some(from.as_str()) {
+                self.shader_graph.path = Some(to.clone());
             }
             if self.selected_asset.as_deref() == Some(from.as_str()) {
                 self.selected_asset = Some(to.clone());
@@ -552,6 +558,7 @@ impl Editor {
             }
         }
         seed_default_scripts(&self.scripts_dir());
+        seed_example_shaders(&self.project_root);
         write_lua_support(&self.project_root);
     }
 
@@ -678,6 +685,7 @@ impl Editor {
         }
         // Ship the default Lua scripts so the IDE/docs have something to show.
         seed_default_scripts(&root.join("scripts"));
+        seed_example_shaders(&root);
         self.open_project(root);
     }
 
@@ -922,6 +930,24 @@ pub(crate) fn open_in_file_manager(path: &Path) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// Seed the built-in example shaders into `<project>/shaders/examples/` —
+/// teaching material for the ◈ Shaders graph (each is a worked example of one
+/// corner of the system). Only when the folder doesn't exist yet: deleting it
+/// (or any one file) is a choice that sticks.
+pub(crate) fn seed_example_shaders(project_root: &Path) {
+    let dir = project_root.join("shaders").join("examples");
+    if dir.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("  example shaders: {e}");
+        return;
+    }
+    for (name, src) in floptle_shader::examples::EXAMPLES {
+        let _ = std::fs::write(dir.join(name), src);
+    }
 }
 
 /// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.

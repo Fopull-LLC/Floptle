@@ -21,6 +21,8 @@ pub(crate) enum EditorTab {
     Particles,
     /// The audio mixer: tracks, faders, effect chains, routing, meters.
     Mixer,
+    /// The shader node-graph canvas (a `.flsl`'s box-and-wire view).
+    ShaderGraph,
 }
 
 impl EditorTab {
@@ -38,6 +40,7 @@ impl EditorTab {
             EditorTab::AnimGraph => "◎ Controller",
             EditorTab::Particles => "✨ Particles",
             EditorTab::Mixer => "🎧 Mixer",
+            EditorTab::ShaderGraph => "◈ Shaders",
         }
     }
 }
@@ -70,7 +73,8 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
     // Scene (editor view), Game (active-camera view), and Scripting share the central
     // leaf — only the front tab renders, and which of Scene/Game is front picks the
     // camera. Scene first so the editor view is the default on launch.
-    let mut dock = DockState::new(vec![EditorTab::Scene, EditorTab::Game, EditorTab::Scripting]);
+    let mut dock =
+        DockState::new(vec![EditorTab::Scene, EditorTab::Game, EditorTab::Scripting, EditorTab::ShaderGraph]);
     let surface = dock.main_surface_mut();
     let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
     // Inspector + Terrain tabs share the right dock (Inspector shown first).
@@ -97,6 +101,16 @@ pub(crate) fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     let surface = dock.main_surface_mut();
     if let Some((node, tab)) = surface.find_tab(&EditorTab::Scripting) {
         let _ = surface.set_active_tab(node, tab);
+    }
+}
+
+/// Focus the ◈ Shaders (graph) tab — re-adding it if the user closed it. Used
+/// by double-clicking a `.flsl` asset and the Inspector's shader row.
+pub(crate) fn focus_shader_graph_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::ShaderGraph) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::ShaderGraph);
     }
 }
 

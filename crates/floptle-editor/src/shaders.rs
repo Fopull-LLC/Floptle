@@ -267,6 +267,7 @@ impl Editor {
 
     /// Drop every flsl cache (project switch — the raster pass was rebuilt).
     pub(crate) fn clear_flsl_state(&mut self) {
+        self.shader_graph = Default::default();
         self.flsl_cache.clear();
         self.flsl_binds.clear();
         self.flsl_free.clear();

@@ -192,10 +192,15 @@ pub fn parse(src: &str) -> Result<ShaderIr, ParseError> {
     if p.pos < p.toks.len() {
         return Err(ParseError::new("unexpected trailing content", p.toks[p.pos].span));
     }
-    // Keep only layout entries that name real lets.
+    // Keep only layout entries that name real things: lets by name, plus the
+    // graph view's namespaced source/sink keys (`in.uv`, `u.speed`, `tex.ramp`,
+    // `out`) — see `graph::is_view_layout_key`.
     p.ir.layout = layout
         .into_iter()
-        .filter(|(name, _)| p.ir.lets.iter().any(|(n, _)| n == name))
+        .filter(|(name, _)| {
+            p.ir.lets.iter().any(|(n, _)| n == name)
+                || crate::graph::is_view_layout_key(&p.ir, name)
+        })
         .collect();
     Ok(p.ir)
 }
