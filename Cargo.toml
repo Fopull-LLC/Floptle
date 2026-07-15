@@ -64,9 +64,9 @@ egui_dock = "0.20.1"                                     # dockable editor panel
 image = { version = "0.25", default-features = false, features = [
     "png", "jpeg", "webp", "bmp", "tga", "tiff", "gif", "qoi",
 ] } # loose texture decode — the formats VFX/game texture packs actually ship
+naga = { version = "29", features = ["wgsl-in"] }        # .flsl → WGSL validation — ADR-0007
 
 # Promoted in later phases:
-# naga        = "29"   # shader IR + WGSL transpile — Phase 3, ADR-0007
 # mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003
 # parry3d     = "*"    # triangle-mesh BVH for imported meshes — Phase 6, ADR-0012
 # rapier3d    = "*"    # OPTIONAL rigid-body dynamics only — later, ADR-0012
