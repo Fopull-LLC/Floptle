@@ -1,6 +1,8 @@
 # Floptle Shader System — Design Proposal
 
-**Status:** proposal / decision document
+**Status:** ACCEPTED — **phases 1–4 SHIPPED 2026-07-15** (core / fragment
+materials / tiling / Sdf stage; commits b676295, 5ce0b7b, e617c8c, fb23e37).
+Next: phase 5 (graph editor), phase 6 (CPU parity → Field Shape collision)
 **Author:** synthesis of ADR-0007 (shader IR, Accepted 2026-06-27), the 2026-06 pre-specs
 (`docs/subsystems/shaders.md`, `docs/subsystems/materials-and-textures.md`), and a deep
 research pass over the live workspace

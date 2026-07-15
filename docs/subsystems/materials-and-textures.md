@@ -13,6 +13,19 @@ offsetting, and projecting are **sampler + UV-transform settings** on the
 material — set them by dragging and clicking. Shaders are for *looks*; textures
 and their tiling are *data*.
 
+> **STATUS (2026-07-15): shipped, shaped by the code as it exists** (see
+> [`../shader-system-proposal.md`](../shader-system-proposal.md) §6 + §8). The
+> fixed-function `Material` component is permanent; `shader: Option<String>`
+> is an OPTIONAL `.flsl` reference on it, with `shader_params` /
+> `shader_textures` / per-slot `shader_tiling` maps. The **tiling block** is
+> live on both paths: `Tiling::Uv { count, offset, rotation }` or
+> `Tiling::Triplanar { scale, blend }` per BINDING (the base texture and each
+> shader slot), with mode/fields rows in the Inspector; wrap (`Repeat / Clamp /
+> Mirror` — this doc's mirror-on-alternate) and filtering stay per-texture
+> settings in the Assets panel. Triplanar projects in OBJECT space (stable
+> under the floating origin). §2's `material.ron` shape shipped as the
+> `MaterialDoc` fields instead of a new asset kind.
+
 ## 1. Separation of concerns
 
 Two distinct things, deliberately:
