@@ -119,7 +119,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
         ));
     }
 
-    let mut w = Writer::new(ir, ck);
+    let mut w = Writer::new(ir, ck, EmitCtx::Fragment);
 
     w.line(format!("// generated from shader `{}` — edit the .flsl, not this", ir.name), None);
     w.line("struct FlslParams {".into(), None);
@@ -212,18 +212,29 @@ const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, albedo: vec3<f32>) -> 
 }
 "#;
 
+/// What the emitter's inputs/uniforms resolve to — the stage's data source.
+#[derive(Clone, Copy)]
+enum EmitCtx {
+    /// Surface shaders: `in: VsOut` varyings + the group(3) param block.
+    Fragment,
+    /// Field shapes: `q` = shape-local position, uniforms ride the globals'
+    /// `shape_uniforms` array at this scene slot.
+    Sdf { slot: usize },
+}
+
 /// Incremental chunk writer that records the line map.
 struct Writer<'a> {
     ir: &'a ShaderIr,
     ck: &'a Checked,
+    ctx: EmitCtx,
     out: String,
     lines: u32,
     line_map: Vec<(u32, Span)>,
 }
 
 impl<'a> Writer<'a> {
-    fn new(ir: &'a ShaderIr, ck: &'a Checked) -> Self {
-        Self { ir, ck, out: String::new(), lines: 0, line_map: Vec::new() }
+    fn new(ir: &'a ShaderIr, ck: &'a Checked, ctx: EmitCtx) -> Self {
+        Self { ir, ck, ctx, out: String::new(), lines: 0, line_map: Vec::new() }
     }
 
     fn line(&mut self, s: String, span: Option<Span>) {
@@ -256,13 +267,22 @@ impl<'a> Writer<'a> {
                 // Only reachable as resolved call params, which never emit here.
                 return Err(TranspileError::new("internal: bare texture/string", e.span));
             }
-            ExprKind::Input(i) => match i {
-                Input::Uv => "in.uv".into(),
-                Input::Normal => "normalize(in.normal)".into(),
-                Input::WorldPos => "in.view_pos".into(),
-                Input::ViewDir => "normalize(-in.view_pos)".into(),
-                Input::Time => "G.params.x".into(),
-                Input::InstanceColor => "in.color".into(),
+            ExprKind::Input(i) => match (self.ctx, i) {
+                (EmitCtx::Fragment, Input::Uv) => "in.uv".into(),
+                (EmitCtx::Fragment, Input::Normal) => "normalize(in.normal)".into(),
+                (EmitCtx::Fragment, Input::WorldPos) => "in.view_pos".into(),
+                (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
+                (_, Input::Time) => "G.params.x".into(),
+                (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
+                // Sdf shaders author in shape-LOCAL space (the node's transform
+                // is applied by shape_local; distances scale back after).
+                (EmitCtx::Sdf { .. }, Input::WorldPos) => "q".into(),
+                (EmitCtx::Sdf { .. }, _) => {
+                    return Err(TranspileError::new(
+                        format!("`{}` is not available in sdf shaders", i.name()),
+                        e.span,
+                    ));
+                }
             },
             ExprKind::Uniform(u) => {
                 let access = match self.ir.uniforms[*u].ty {
@@ -271,7 +291,12 @@ impl<'a> Writer<'a> {
                     Ty::Vec3 => ".xyz",
                     Ty::Vec4 => "",
                 };
-                format!("P.u{u}{access}")
+                match self.ctx {
+                    EmitCtx::Fragment => format!("P.u{u}{access}"),
+                    EmitCtx::Sdf { slot } => {
+                        format!("G.shape_uniforms[{}u]{access}", slot * 16 + u)
+                    }
+                }
             }
             ExprKind::Let(l) => format!("l{l}_{}", self.ir.lets[*l].0),
             ExprKind::Binary(op, a, b) => {
@@ -473,6 +498,88 @@ fn wgsl_num(n: f64) -> String {
     }
 }
 
+/// An Sdf-stage shader compiled for one scene slot (0..4): a distance function
+/// for the shared field module and a color function for the raymarch surface
+/// pass. The node's transform/scale/bounding radius and the shader's uniform
+/// values ride the raymarch globals (`shape_pos/rot/aux/uniforms` arrays), so
+/// param edits are uniform writes — the code only changes when the shader or
+/// its slot does.
+#[derive(Clone, Debug)]
+pub struct CompiledSdf {
+    pub name: String,
+    pub uniforms: Vec<ir::Uniform>,
+    /// `fn flsl_shape{slot}_d(p: vec3<f32>) -> f32` — world-space distance,
+    /// bounding-sphere early-out included. For field.wgsl's custom block.
+    pub dist_fn: String,
+    /// `fn flsl_shape{slot}_col(p: vec3<f32>) -> vec3<f32>` — the surface
+    /// albedo (the shader's `output color`, or a neutral default). For
+    /// raymarch.wgsl's custom block.
+    pub col_fn: String,
+}
+
+/// Transpile a checked Sdf-stage shader for scene slot `slot`.
+pub fn transpile_sdf(ir: &ShaderIr, ck: &Checked, slot: usize) -> Result<CompiledSdf, TranspileError> {
+    if ir.stage != Some(Stage::Sdf) {
+        return Err(TranspileError::new("not an sdf shader", Span::default()));
+    }
+    if !ir.textures.is_empty() {
+        return Err(TranspileError::new(
+            "sdf shaders can't declare texture slots (distance is pure math)",
+            Span::default(),
+        ));
+    }
+    if ir.uniforms.len() > MAX_UNIFORMS {
+        return Err(TranspileError::new(
+            format!("a shader can expose at most {MAX_UNIFORMS} uniforms"),
+            Span::default(),
+        ));
+    }
+
+    let mut w = Writer::new(ir, ck, EmitCtx::Sdf { slot });
+    let lets = |w: &mut Writer| -> Result<(), TranspileError> {
+        for (i, (name, root)) in ir.lets.iter().enumerate() {
+            let expr = w.emit(*root)?;
+            let ty = ck.ty(*root).wgsl();
+            w.line(format!("    let l{i}_{name}: {ty} = {expr};"), Some(ir.expr(*root).span));
+        }
+        Ok(())
+    };
+
+    w.line(format!("fn flsl_shape{slot}_d(p: vec3<f32>) -> f32 {{"), None);
+    // The bounding sphere both skips distant evaluation AND is a valid
+    // conservative distance for the march (a lower bound of the true field).
+    w.line(format!(
+        "    let bound = length(p - G.shape_pos[{slot}].xyz) - G.shape_aux[{slot}].x;"
+    ), None);
+    w.line("    if (bound > 0.5) { return bound; }".into(), None);
+    w.line(format!("    let q = shape_local({slot}u, p);"), None);
+    lets(&mut w)?;
+    let sdf = ir.outputs["sdf"];
+    let expr = w.emit(sdf)?;
+    // Distances were authored in shape-local units — scale back to world.
+    w.line(
+        format!("    return ({expr}) * max(G.shape_pos[{slot}].w, 1e-6);"),
+        Some(ir.expr(sdf).span),
+    );
+    w.line("}".into(), None);
+    let dist_fn = std::mem::take(&mut w.out);
+
+    w.line(format!("fn flsl_shape{slot}_col(p: vec3<f32>) -> vec3<f32> {{"), None);
+    w.line(format!("    let q = shape_local({slot}u, p);"), None);
+    lets(&mut w)?;
+    match ir.outputs.get("color") {
+        Some(&col) => {
+            let expr = w.emit(col)?;
+            w.line(format!("    return {expr};"), Some(ir.expr(col).span));
+        }
+        None => w.line("    return vec3<f32>(0.85, 0.85, 0.85);".into(), None),
+    }
+    w.line("}".into(), None);
+    let col_fn = w.out;
+
+    Ok(CompiledSdf { name: ir.name.clone(), uniforms: ir.uniforms.clone(), dist_fn, col_fn })
+}
+
 /// A naga diagnostic mapped back toward the `.flsl` source.
 #[derive(Clone, Debug)]
 pub struct WgslDiag {
@@ -516,6 +623,31 @@ pub fn validate(prelude: &str, chunk: &str) -> Result<(), WgslDiag> {
                 chunk_line: line.and_then(to_chunk),
             })
         }
+    }
+}
+
+/// Validate an ALREADY-ASSEMBLED WGSL module (the renderer's spliced pass
+/// sources) with naga — parse + full validation, 1-based error line included.
+pub fn validate_module(src: &str) -> Result<(), WgslDiag> {
+    let module = match naga::front::wgsl::parse_str(src) {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(WgslDiag {
+                message: e.message().to_string(),
+                chunk_line: e.location(src).map(|l| l.line_number),
+            });
+        }
+    };
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    match validator.validate(&module) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(WgslDiag {
+            message: format!("{e}"),
+            chunk_line: e.spans().next().map(|(span, _)| span.location(src).line_number),
+        }),
     }
 }
 

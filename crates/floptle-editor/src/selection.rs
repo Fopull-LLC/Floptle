@@ -192,6 +192,11 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, 0.85 * scale * t.scale.x)
                 }
+                Matter::FieldShape { radius } => {
+                    // Pick by the authored bounding sphere (the shape lives inside it).
+                    let center = (t.translation - cam.world_position).as_vec3();
+                    ray_sphere(ro, rd, center, (radius * t.scale.x).max(0.1))
+                }
                 Matter::Mesh { asset_path } => {
                     let r = self.mesh_registry.get(asset_path).map(|a| a.size * 0.5).unwrap_or(1.0);
                     let center = (t.translation - cam.world_position).as_vec3();

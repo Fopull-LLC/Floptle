@@ -150,6 +150,11 @@ fn march_bound() -> f32 {
         reach = max(reach, G.blobs[i].w);
         maxc = max(maxc, length(G.blobs[i].xyz));
     }
+    let shapes = min(u32(G.shape_meta.x), 4u);
+    for (var i = 0u; i < shapes; i = i + 1u) {
+        reach = max(reach, G.shape_aux[i].x);
+        maxc = max(maxc, length(G.shape_pos[i].xyz));
+    }
     return reach * 60.0 + maxc + 100.0;
 }
 
@@ -231,10 +236,24 @@ fn volumes(p: vec3<f32>) -> VolFold {
 // re-draw the shell. Genuine terrain hits are inside a box; the grazing-gap fill
 // below only records/accepts points inside a box, so it needs no slack here.
 fn real_surface(p: vec3<f32>, thr: f32) -> bool {
+    // Field Shapes are always real surface (their own bounding-sphere march
+    // keeps rings away); checked first so shape-only scenes hit. Zero shapes
+    // short-circuits before evaluating the field.
+    if (G.shape_meta.x >= 0.5 && custom_d(p) < thr) { return true; }
     if (G.params.w < 0.5) { return true; }
     if (inside_volume_box_eps(p, 0.0)) { return true; }
     return G.params.y >= 0.5 && analytic_d(p) < thr;
 }
+
+//[flsl-color-custom-begin] — the renderer splices generated Field Shape color
+// functions over this block; the stubs keep the surface pass unchanged.
+fn custom_col(p: vec3<f32>) -> Matter {
+    return Matter(1e9, vec3<f32>(0.0));
+}
+fn nearest_shape(p: vec3<f32>) -> i32 {
+    return 0;
+}
+//[flsl-color-custom-end]
 
 // The whole field: every piece of matter folded together with smin.
 fn map(p: vec3<f32>) -> Matter {
@@ -245,13 +264,21 @@ fn map(p: vec3<f32>) -> Matter {
     // `1e9 + 1.0*(d - 1e9)`, and `d - 1e9` loses `d` entirely, so the field would
     // collapse to ~0 everywhere — a surface at the camera, every ray a false hit.
     // (This was the "glitchy giant sphere".)
+    var base: Matter;
     if (!v.any) {
-        return a;
+        base = a;
+    } else if (u32(G.params.y) == 0u) {
+        base = v.m;
+    } else {
+        base = smin_matter(a, v.m, max(G.params.z, 0.0001));
     }
-    if (u32(G.params.y) == 0u) {
-        return v.m;
+    // Field Shapes union in hard (min picks the nearer surface + its color;
+    // exact against the 1e9 stub — no f32 cancellation).
+    let c = custom_col(p);
+    if (c.d < base.d) {
+        return c;
     }
-    return smin_matter(a, v.m, max(G.params.z, 0.0001));
+    return base;
 }
 
 // Triplanar-sample a terrain palette layer at a box-relative position (world-stable,
@@ -503,7 +530,28 @@ fn fs(in: VOut) -> FsOut {
                 sh = sun_shadow(p, n, pix);
             }
             var col: vec3<f32>;
-            if (inside_volume_box_eps(p, 0.06)) {
+            if (G.shape_meta.x >= 0.5 && custom_d(p) <= m.d + 1e-4) {
+                // FIELD SHAPE: the hit is on an authored SDF shader — shade its
+                // albedo (`output color`) with the node Material's response,
+                // the same lighting model as terrain/blobs/meshes.
+                let si = clamp(nearest_shape(p), 0, 3);
+                let tinted = m.col * G.shape_tint[si].rgb;
+                let emissive = G.shape_emissive[si].rgb * G.shape_emissive[si].a;
+                let spar = G.shape_params[si];
+                if (spar.z > 0.5) {
+                    col = tinted + emissive; // unlit / fullbright
+                } else {
+                    let ambient = G.ambient.rgb * spar.w;
+                    col = tinted * (ambient + G.light_color.rgb * diff * sh);
+                    col = col + tinted * point_diffuse(p, n);
+                    let h = normalize(l + v);
+                    let shininess = max(spar.x, 1.0);
+                    let spec = pow(max(dot(n, h), 0.0), shininess) * G.shape_specular[si].a * select(0.0, 1.0, diff > 0.0);
+                    col = col + G.shape_specular[si].rgb * spec * G.light_color.rgb * sh;
+                    let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * spar.y;
+                    col = (col + G.shape_rim[si].rgb * rim_f) * occ + emissive;
+                }
+            } else if (inside_volume_box_eps(p, 0.06)) {
                 // TERRAIN: shade with its Material using the SAME model as the raster
                 // meshes (ambient×mul + diffuse, Blinn-Phong specular, rim, emissive,
                 // unlit), so terrain sits consistently next to everything else instead

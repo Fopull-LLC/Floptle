@@ -26,6 +26,7 @@ pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::Camera { .. } => "Camera",
         MatterDoc::PointLight { .. } => "Point Light",
         MatterDoc::GravityVolume { .. } => "Gravity Volume",
+        MatterDoc::FieldShape { .. } => "Field Shape",
         MatterDoc::Skybox { .. } => "Skybox",
         MatterDoc::PostProcess { .. } => "Post Processing",
     }
@@ -51,6 +52,7 @@ pub(crate) fn matter_kind_label(m: &Matter) -> &'static str {
         Matter::Camera { .. } => "Camera",
         Matter::PointLight { .. } => "Point Light",
         Matter::GravityVolume { .. } => "Gravity Volume",
+        Matter::FieldShape { .. } => "Field Shape",
         Matter::Skybox { .. } => "Skybox",
         Matter::PostProcess { .. } => "Post Processing",
     }
@@ -70,6 +72,7 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::Camera { .. } => "⌖",
         Matter::PointLight { .. } => "●",
         Matter::GravityVolume { .. } => "⬇",
+        Matter::FieldShape { .. } => "◈",
         Matter::Skybox { .. } => "◎",
         Matter::PostProcess { .. } => "✨",
     }
@@ -91,6 +94,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),
         ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
+        ("◈  Field Shape", Matter::FieldShape { radius: 1.5 }),
         ("◎  Skybox", Matter::default_skybox()),
     ]
 }

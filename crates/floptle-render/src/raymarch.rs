@@ -118,6 +118,22 @@ pub struct RaymarchGlobals {
     pub vol_tight_c: [[f32; 4]; 16],
     /// Per volume: xyz = the tight content box's half-extent (renderer-patched).
     pub vol_tight_h: [[f32; 4]; 16],
+    /// Field Shapes (ADR-0007 Sdf stage): x = active count (0..=4).
+    pub shape_meta: [f32; 4],
+    /// Per shape: xyz = camera-relative position, w = uniform scale.
+    pub shape_pos: [[f32; 4]; 4],
+    /// Per shape: the INVERSE rotation quaternion (xyzw).
+    pub shape_rot: [[f32; 4]; 4],
+    /// Per shape: x = bounding radius (world units — march/shadow/span bound).
+    pub shape_aux: [[f32; 4]; 4],
+    /// Shader-exposed uniform values, 16 vec4 slots per shape.
+    pub shape_uniforms: [[f32; 4]; 64],
+    /// Per-shape surface material (same model as `terrain_*` / `blob_*`).
+    pub shape_tint: [[f32; 4]; 4],
+    pub shape_emissive: [[f32; 4]; 4],
+    pub shape_specular: [[f32; 4]; 4],
+    pub shape_params: [[f32; 4]; 4],
+    pub shape_rim: [[f32; 4]; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -168,9 +184,22 @@ impl Default for RaymarchGlobals {
             // bounds — an unpatched volume behaves exactly like the full brick.
             vol_tight_c: [[0.0; 4]; 16],
             vol_tight_h: [[1e8, 1e8, 1e8, 0.0]; 16],
+            shape_meta: [0.0; 4],
+            shape_pos: [[0.0, 0.0, 0.0, 1.0]; 4],
+            shape_rot: [[0.0, 0.0, 0.0, 1.0]; 4],
+            shape_aux: [[1.0, 0.0, 0.0, 0.0]; 4],
+            shape_uniforms: [[0.0; 4]; 64],
+            shape_tint: [[1.0, 1.0, 1.0, 0.0]; 4],
+            shape_emissive: [[0.0; 4]; 4],
+            shape_specular: [[1.0, 1.0, 1.0, 0.0]; 4],
+            shape_params: [[16.0, 0.0, 0.0, 1.0]; 4],
+            shape_rim: [[0.0; 4]; 4],
         }
     }
 }
+
+/// Max Field Shapes (authored SDF shaders) folded into the field per scene.
+pub const MAX_FIELD_SHAPES: usize = 4;
 
 /// Max blobs the raymarch shader folds together in one pass.
 pub const MAX_BLOBS: usize = 16;
@@ -255,6 +284,9 @@ pub struct Raymarch {
     pipeline: wgpu::RenderPipeline,
     /// Silhouette-mask pipeline (writes 1.0 where the blob is hit, no depth).
     mask_pipeline: wgpu::RenderPipeline,
+    /// Kept so [`set_custom_field`](Self::set_custom_field) can rebuild the
+    /// pipelines with spliced Field Shape code (the bind layout never changes).
+    pipeline_layout: wgpu::PipelineLayout,
     globals_buf: wgpu::Buffer,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -298,9 +330,7 @@ impl Raymarch {
         // concatenated on — module-scope WGSL declarations are order-independent.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raymarch"),
-            source: wgpu::ShaderSource::Wgsl(
-                concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl")).into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(Self::assembled_source(None).into()),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -377,70 +407,7 @@ impl Raymarch {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raymarch"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                // LessEqual (not Always): when the depth prepass primed the buffer,
-                // field hits behind a mesh (and the sky at depth 1.0 under mesh
-                // pixels) must lose to the mesh depth. Unprimed frames clear the
-                // depth to 1.0 first, where LessEqual accepts everything - the
-                // original behavior.
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        // Silhouette-mask pipeline: same march, but writes 1.0 (no depth) into a
-        // single-channel mask for the selection-outline post-pass.
-        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raymarch-mask"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_mask"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: crate::outline::MASK_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &layout, &module);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-globals"),
@@ -491,6 +458,7 @@ impl Raymarch {
         Self {
             pipeline,
             mask_pipeline,
+            pipeline_layout: layout,
             globals_buf,
             bind_layout,
             sampler,
@@ -507,6 +475,126 @@ impl Raymarch {
             prime_view: None,
             bind_primed: None,
         }
+    }
+
+    /// The pass module's WGSL: `raymarch.wgsl + field.wgsl`, with the Field
+    /// Shape stub blocks spliced when code is given — `(field_code, color_code,
+    /// support)`. `None` returns the byte-identical baseline concatenation.
+    fn assembled_source(code: Option<(&str, &str, &str)>) -> String {
+        let base = concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"));
+        match code {
+            None => base.to_string(),
+            Some((field, color, support)) => {
+                let s = crate::raster::splice_block(
+                    base,
+                    "//[flsl-color-custom-begin]",
+                    "//[flsl-color-custom-end]",
+                    color,
+                );
+                let s = crate::raster::splice_block(
+                    &s,
+                    "//[flsl-field-custom-begin]",
+                    "//[flsl-field-custom-end]",
+                    field,
+                );
+                format!("{s}\n{support}")
+            }
+        }
+    }
+
+    fn build_pipelines(
+        gpu: &Gpu,
+        layout: &wgpu::PipelineLayout,
+        module: &wgpu::ShaderModule,
+    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+        let device = &gpu.device;
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                // LessEqual (not Always): when the depth prepass primed the buffer,
+                // field hits behind a mesh (and the sky at depth 1.0 under mesh
+                // pixels) must lose to the mesh depth. Unprimed frames clear the
+                // depth to 1.0 first, where LessEqual accepts everything - the
+                // original behavior.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Silhouette-mask pipeline: same march, but writes 1.0 (no depth) into a
+        // single-channel mask for the selection-outline post-pass.
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raymarch-mask"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_mask"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::outline::MASK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        (pipeline, mask_pipeline)
+    }
+
+    /// Splice (or clear, with `None`) the scene's Field Shape code into this
+    /// pass: `(custom_d distance functions, custom_col/nearest_shape color
+    /// functions, the stdlib support library)`. The caller MUST have
+    /// naga-validated the assembled source (same recipe as
+    /// [`assembled_source`]) first; per-shape transforms/uniforms then ride
+    /// the globals — no further rebuilds on edits.
+    pub fn set_custom_field(&mut self, gpu: &Gpu, code: Option<(&str, &str, &str)>) {
+        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raymarch"),
+            source: wgpu::ShaderSource::Wgsl(Self::assembled_source(code).into()),
+        });
+        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
+        self.pipeline = pipeline;
+        self.mask_pipeline = mask_pipeline;
+    }
+
+    /// The exact source [`set_custom_field`](Self::set_custom_field) would
+    /// build — for the editor to naga-validate BEFORE swapping pipelines.
+    pub fn preview_custom_source(code: Option<(&str, &str, &str)>) -> String {
+        Self::assembled_source(code)
     }
 
     /// Rebuild `bind` (fallback prime) and, when primed, `bind_primed` — after

@@ -45,10 +45,18 @@ impl Editor {
         if self.gpu.is_none() || self.raster.is_none() {
             return;
         }
+        // Field Shape nodes carry SDF-stage shaders — those go through
+        // `sync_field_shapes`, not the fragment-material path.
+        let field_shape: Vec<Entity> = self
+            .world
+            .query::<floptle_core::Matter>()
+            .filter(|(_, m)| matches!(m, floptle_core::Matter::FieldShape { .. }))
+            .map(|(e, _)| e)
+            .collect();
         let mats: Vec<(Entity, Material)> = self
             .world
             .query::<Material>()
-            .filter(|(_, m)| m.shader.is_some())
+            .filter(|(e, m)| m.shader.is_some() && !field_shape.contains(e))
             .map(|(e, m)| (e, m.clone()))
             .collect();
 
@@ -261,13 +269,26 @@ impl Editor {
         self.flsl_cache.clear();
         self.flsl_binds.clear();
         self.flsl_free.clear();
+        self.sdf_cache.clear();
+        self.flsl_field_key.clear();
+        // The passes persist across projects — un-splice any Field Shape code.
+        if !self.flsl_shape_slots.is_empty() {
+            if let (Some(gpu), Some(raster), Some(raymarch)) =
+                (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
+            {
+                raymarch.set_custom_field(gpu, None);
+                raster.set_custom_field(gpu, None);
+            }
+            self.flsl_shape_slots.clear();
+        }
     }
 
     /// The IDE's live `.flsl` diagnostic: (1-based line, message) for the
-    /// current text of an open buffer — parse + type errors, no GPU involved.
+    /// current text of an open buffer — parse + type errors (stage-agnostic:
+    /// fragment and sdf shaders both squiggle), no GPU involved.
     pub(crate) fn check_flsl_syntax(text: &str) -> Option<(usize, String)> {
-        match floptle_shader::compile_fragment(text) {
-            Ok(_) => None,
+        match floptle_shader::check_source(text) {
+            Ok(()) => None,
             Err(msg) => {
                 let first = msg.lines().next().unwrap_or(&msg);
                 let line = first
@@ -277,6 +298,294 @@ impl Editor {
                     .unwrap_or(1);
                 Some((line, first.to_string()))
             }
+        }
+    }
+}
+
+/// One Sdf-stage `.flsl` file's parse/check state (Field Shapes — proposal §7).
+pub(crate) struct SdfEntry {
+    mtime: Option<SystemTime>,
+    /// Parse + check result: per-slot transpilation happens at splice time,
+    /// and the Inspector reads the uniform schema from the IR.
+    pub(crate) parsed: Option<(floptle_shader::ShaderIr, floptle_shader::ir::Checked)>,
+    pub(crate) error: Option<String>,
+    /// Bumped on every successful recompile — the splice key.
+    generation: u64,
+}
+
+impl Editor {
+    /// Per-frame driver for Field Shapes: hot-reload their sdf shaders, and
+    /// when the (entity, shader, generation) set changes, transpile per slot
+    /// and splice `custom_d`/`custom_col` into BOTH passes. Runs right after
+    /// `ensure_flsl_materials` — same pattern, the field mirror's version.
+    pub(crate) fn sync_field_shapes(&mut self) {
+        if self.gpu.is_none() || self.raster.is_none() || self.raymarch.is_none() {
+            return;
+        }
+        // Stable slot order: by entity index (creation order survives frames).
+        let mut shapes: Vec<(Entity, String)> = self
+            .world
+            .query::<floptle_core::Matter>()
+            .filter(|(_, m)| matches!(m, floptle_core::Matter::FieldShape { .. }))
+            .filter_map(|(e, _)| {
+                let shader = self.world.get::<Material>(e).and_then(|m| m.shader.clone())?;
+                Some((e, shader))
+            })
+            .collect();
+        shapes.sort_by_key(|(e, _)| e.index());
+        let truncated = shapes.len() > floptle_render::MAX_FIELD_SHAPES;
+        shapes.truncate(floptle_render::MAX_FIELD_SHAPES);
+
+        let mut paths: Vec<String> = shapes.iter().map(|(_, p)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        for p in &paths {
+            self.ensure_sdf_shader(p);
+        }
+
+        let key: Vec<(Entity, String, u64)> = shapes
+            .iter()
+            .map(|(e, p)| {
+                (*e, p.clone(), self.sdf_cache.get(p).map(|s| s.generation).unwrap_or(0))
+            })
+            .collect();
+        if key == self.flsl_field_key {
+            return;
+        }
+        self.flsl_field_key = key;
+        if truncated {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "scene has more than {} Field Shapes — extras don't render",
+                    floptle_render::MAX_FIELD_SHAPES
+                ),
+                None,
+            );
+        }
+
+        // Transpile every shape for its slot; a shape whose shader is broken
+        // (or missing) simply drops out until it compiles.
+        let mut dist_fns = String::new();
+        let mut col_fns = String::new();
+        let mut slots: HashMap<Entity, usize> = HashMap::new();
+        for (e, path) in &shapes {
+            let Some((ir, ck)) =
+                self.sdf_cache.get(path).and_then(|s| s.parsed.as_ref())
+            else {
+                continue;
+            };
+            let slot = slots.len();
+            match floptle_shader::transpile_sdf(ir, ck, slot) {
+                Ok(c) => {
+                    dist_fns.push_str(&c.dist_fn);
+                    col_fns.push_str(&c.col_fn);
+                    slots.insert(*e, slot);
+                }
+                Err(err) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("◈ {path}: {}", err.message),
+                        None,
+                    );
+                }
+            }
+        }
+
+        if slots.is_empty() {
+            // Nothing splice-able: restore the byte-identical baseline passes.
+            if !self.flsl_shape_slots.is_empty() {
+                let (Some(gpu), Some(raster), Some(raymarch)) =
+                    (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
+                else {
+                    return;
+                };
+                raymarch.set_custom_field(gpu, None);
+                raster.set_custom_field(gpu, None);
+                self.flsl_shape_slots.clear();
+            }
+            return;
+        }
+
+        // The combined fold + nearest-shape picker over the live slots.
+        let n = slots.len();
+        let mut field_code = dist_fns;
+        field_code.push_str("fn custom_d(p: vec3<f32>) -> f32 {\n    var d = 1e9;\n");
+        for i in 0..n {
+            field_code.push_str(&format!("    d = min(d, flsl_shape{i}_d(p));\n"));
+        }
+        field_code.push_str("    return d;\n}\n");
+        let mut color_code = col_fns;
+        color_code.push_str(
+            "fn custom_col(p: vec3<f32>) -> Matter {\n    var m = Matter(1e9, vec3<f32>(0.0));\n",
+        );
+        for i in 0..n {
+            color_code.push_str(&format!(
+                "    let d{i} = flsl_shape{i}_d(p);\n    if (d{i} < m.d) {{ m = Matter(d{i}, flsl_shape{i}_col(p)); }}\n"
+            ));
+        }
+        color_code.push_str("    return m;\n}\n");
+        color_code.push_str(
+            "fn nearest_shape(p: vec3<f32>) -> i32 {\n    var bi = 0;\n    var bd = 1e9;\n",
+        );
+        for i in 0..n {
+            color_code.push_str(&format!(
+                "    let s{i} = flsl_shape{i}_d(p);\n    if (s{i} < bd) {{ bd = s{i}; bi = {i}; }}\n"
+            ));
+        }
+        color_code.push_str("    return bi;\n}\n");
+
+        // naga-gate BOTH assembled modules before swapping any pipeline —
+        // a bad splice must never panic the pass builders.
+        let support = floptle_shader::stdlib::SUPPORT_WGSL;
+        let rm_src = floptle_render::Raymarch::preview_custom_source(Some((
+            &field_code,
+            &color_code,
+            support,
+        )));
+        let raster_src = floptle_render::raster_custom_source(Some((&field_code, support)));
+        for (what, src) in [("raymarch", &rm_src), ("raster", &raster_src)] {
+            if let Err(d) = floptle_shader::validate_module(src) {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("◈ field shapes: generated {what} module rejected: {}", d.message),
+                    None,
+                );
+                return;
+            }
+        }
+        let (Some(gpu), Some(raster), Some(raymarch)) =
+            (self.gpu.as_ref(), self.raster.as_mut(), self.raymarch.as_mut())
+        else {
+            return;
+        };
+        raymarch.set_custom_field(gpu, Some((&field_code, &color_code, support)));
+        raster.set_custom_field(gpu, Some((&field_code, support)));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("◈ field: {n} shape{} spliced into the scene field", if n == 1 { "" } else { "s" }),
+            None,
+        );
+        self.flsl_shape_slots = slots;
+    }
+
+    /// Compile (or hot-reload) one Sdf-stage `.flsl` by material path.
+    fn ensure_sdf_shader(&mut self, rel: &str) {
+        let full = self.project_root.join(rel);
+        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        if let Some(entry) = self.sdf_cache.get(rel)
+            && entry.mtime == mtime
+        {
+            return;
+        }
+        let prev_gen = self.sdf_cache.get(rel).map(|s| s.generation).unwrap_or(0);
+        let outcome = std::fs::read_to_string(&full)
+            .map_err(|e| format!("can't read shader ({e})"))
+            .and_then(|src| floptle_shader::check_sdf(&src));
+        match outcome {
+            Ok(parsed) => {
+                self.sdf_cache.insert(
+                    rel.to_string(),
+                    SdfEntry {
+                        mtime,
+                        parsed: Some(parsed),
+                        error: None,
+                        generation: prev_gen + 1,
+                    },
+                );
+            }
+            Err(msg) => {
+                let changed =
+                    self.sdf_cache.get(rel).is_none_or(|e| e.error.as_deref() != Some(&msg));
+                if changed {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("◈ {rel}: {msg}"),
+                        None,
+                    );
+                }
+                let old = self.sdf_cache.remove(rel);
+                self.sdf_cache.insert(
+                    rel.to_string(),
+                    SdfEntry {
+                        mtime,
+                        parsed: old.and_then(|o| o.parsed),
+                        error: Some(msg),
+                        generation: prev_gen,
+                    },
+                );
+            }
+        }
+    }
+
+}
+
+/// Fill the raymarch globals' Field Shape arrays for this frame: camera-
+/// relative transforms, bounding radii, shader uniform values and the node
+/// Material's surface response. `only` parks every OTHER shape out of
+/// existence (the selection-outline mask marches just one). A free function
+/// over disjoint Editor fields so callers can hold the GPU stack borrowed.
+pub(crate) fn apply_field_shapes(
+    world: &floptle_core::World,
+    slots: &HashMap<Entity, usize>,
+    sdf: &SdfCache,
+    g: &mut floptle_render::RaymarchGlobals,
+    cam_pos: floptle_core::math::DVec3,
+    only: Option<Entity>,
+) {
+    let count = slots.values().max().map(|m| m + 1).unwrap_or(0);
+    g.shape_meta = [count as f32, 0.0, 0.0, 0.0];
+    for (&e, &slot) in slots {
+        if only.is_some_and(|o| o != e) || !world.is_alive(e) {
+            // Parked: unreachable position + zero bound = never surfaces.
+            g.shape_pos[slot] = [1e7, 1e7, 1e7, 1.0];
+            g.shape_aux[slot] = [0.0; 4];
+            continue;
+        }
+        {
+            let t = floptle_core::world_transform(world, e);
+            let rel = (t.translation - cam_pos).as_vec3();
+            let scale = t.scale.x.max(1e-4);
+            let radius = match world.get::<floptle_core::Matter>(e) {
+                Some(floptle_core::Matter::FieldShape { radius }) => *radius,
+                _ => 1.0,
+            };
+            let q = t.rotation.inverse();
+            g.shape_pos[slot] = [rel.x, rel.y, rel.z, scale];
+            g.shape_rot[slot] = [q.x, q.y, q.z, q.w];
+            g.shape_aux[slot] = [radius * scale, 0.0, 0.0, 0.0];
+            let Some(mat) = world.get::<Material>(e) else { continue };
+            if let Some((ir, _)) = mat
+                .shader
+                .as_deref()
+                .and_then(|p| sdf.get(p))
+                .and_then(|s| s.parsed.as_ref())
+            {
+                for (i, u) in ir.uniforms.iter().enumerate().take(16) {
+                    g.shape_uniforms[slot * 16 + i] =
+                        mat.shader_params.get(&u.name).copied().unwrap_or(u.default);
+                }
+            }
+            g.shape_tint[slot] = [mat.color[0], mat.color[1], mat.color[2], 0.0];
+            g.shape_emissive[slot] = [
+                mat.emissive[0],
+                mat.emissive[1],
+                mat.emissive[2],
+                mat.emissive_strength,
+            ];
+            g.shape_specular[slot] = [
+                mat.specular[0],
+                mat.specular[1],
+                mat.specular[2],
+                mat.specular_strength,
+            ];
+            g.shape_params[slot] = [
+                mat.shininess,
+                mat.rim_strength,
+                if mat.unlit { 1.0 } else { 0.0 },
+                mat.ambient,
+            ];
+            g.shape_rim[slot] = [mat.rim[0], mat.rim[1], mat.rim[2], 0.0];
         }
     }
 }
@@ -298,3 +607,4 @@ fn tiling_pack(t: &floptle_core::Tiling) -> floptle_shader::TilingPack {
 /// Editor-side registry fields, bundled for `Editor` (see main.rs).
 pub(crate) type FlslCache = HashMap<String, FlslEntry>;
 pub(crate) type FlslBinds = HashMap<Entity, FlslMatBind>;
+pub(crate) type SdfCache = HashMap<String, SdfEntry>;

@@ -22,7 +22,8 @@ pub mod transpile;
 pub use ir::{Blend, IrError, ShaderIr, Stage, Ty, Uniform};
 pub use text::{parse, print, ParseError};
 pub use transpile::{
-    transpile_fragment, validate, CompiledFragment, TilingPack, TranspileError, WgslDiag,
+    transpile_fragment, transpile_sdf, validate, validate_module, CompiledFragment, CompiledSdf,
+    TilingPack, TranspileError, WgslDiag,
 };
 
 /// File extension for the textual shader format ("FLoptle Shading Language").
@@ -52,6 +53,49 @@ pub fn compile_fragment(src: &str) -> Result<CompiledFragment, String> {
         let (l, c) = text::line_col(src, e.span.start);
         format!("{l}:{c}: {}", e.message)
     })
+}
+
+/// Parse + type-check only, either stage — the IDE's live diagnostic (a
+/// squiggle shouldn't care whether the file is destined for a mesh or a
+/// Field Shape). Errors carry a 1-based `line:col` prefix.
+pub fn check_source(src: &str) -> Result<(), String> {
+    let parsed = text::parse(src).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })?;
+    ir::check(&parsed).map_err(|errs| {
+        errs.iter()
+            .map(|e| {
+                let (l, c) = text::line_col(src, e.span.start);
+                format!("{l}:{c}: {}", e.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    Ok(())
+}
+
+/// Parse + type-check an Sdf-stage `.flsl` source, returning the pieces the
+/// editor caches (per-slot transpilation happens later, when the scene's
+/// Field Shape slots are assigned). Human-readable `line:col`-prefixed errors.
+pub fn check_sdf(src: &str) -> Result<(ShaderIr, ir::Checked), String> {
+    let parsed = text::parse(src).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })?;
+    let ck = ir::check(&parsed).map_err(|errs| {
+        errs.iter()
+            .map(|e| {
+                let (l, c) = text::line_col(src, e.span.start);
+                format!("{l}:{c}: {}", e.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    if parsed.stage != Some(Stage::Sdf) {
+        return Err("this is a fragment shader — assign it on a mesh Material, not a Field Shape".into());
+    }
+    Ok((parsed, ck))
 }
 
 /// The seed content for the editor's "New Shader…" — a small worked example

@@ -191,6 +191,49 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
     changed
 }
 
+/// Widget rows for a shader's exposed uniforms (shared by fragment materials
+/// and Field Shape sdf shaders): edits write into `m.shader_params`.
+fn shader_uniform_rows(
+    ui: &mut egui::Ui,
+    uniforms: &[floptle_shader::Uniform],
+    m: &mut Material,
+) -> bool {
+    let mut changed = false;
+    for u in uniforms {
+        ui.label(&u.name);
+        let mut v = m.shader_params.get(&u.name).copied().unwrap_or(u.default);
+        let mut ch = false;
+        if u.is_color {
+            ch |= ui.color_edit_button_rgba_unmultiplied(&mut v).changed();
+        } else {
+            match u.ty {
+                floptle_shader::Ty::Float => {
+                    ch |= match u.range {
+                        Some((lo, hi)) => {
+                            ui.add(egui::Slider::new(&mut v[0], lo..=hi)).changed()
+                        }
+                        None => ui.add(egui::DragValue::new(&mut v[0]).speed(0.02)).changed(),
+                    };
+                }
+                ty => {
+                    let lanes = ty.lanes() as usize;
+                    ui.horizontal(|ui| {
+                        for lane in v.iter_mut().take(lanes) {
+                            ch |= ui.add(egui::DragValue::new(lane).speed(0.02)).changed();
+                        }
+                    });
+                }
+            }
+        }
+        if ch {
+            m.shader_params.insert(u.name.clone(), v);
+            changed = true;
+        }
+        ui.end_row();
+    }
+    changed
+}
+
 /// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
 #[derive(Default)]
 pub(crate) struct MatEditResult {
@@ -208,6 +251,7 @@ pub(crate) fn material_props_ui(
     asset_tree: &[crate::assets::AssetEntry],
     name_buf: &mut String,
     flsl: &crate::shaders::FlslCache,
+    sdf: &crate::shaders::SdfCache,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
 
@@ -290,121 +334,89 @@ pub(crate) fn material_props_ui(
         ui.end_row();
     });
     if let Some(shader_path) = m.shader.clone() {
-        match flsl.get(&shader_path) {
-            None => {
-                ui.small("compiling…");
+        if let Some(entry) = flsl.get(&shader_path) {
+            if let Some(err) = &entry.error {
+                ui.colored_label(
+                    egui::Color32::from_rgb(235, 100, 100),
+                    egui::RichText::new(format!("⚠ {err}")).small(),
+                );
             }
-            Some(entry) => {
-                if let Some(err) = &entry.error {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(235, 100, 100),
-                        egui::RichText::new(format!("⚠ {err}")).small(),
-                    );
-                }
-                if let Some((compiled, _)) = &entry.compiled {
-                    egui::Grid::new("mat_shader_rows").num_columns(2).spacing([8.0, 5.0]).show(
-                        ui,
-                        |ui| {
-                            for u in &compiled.uniforms {
-                                ui.label(&u.name);
-                                let mut v =
-                                    m.shader_params.get(&u.name).copied().unwrap_or(u.default);
-                                let mut ch = false;
-                                if u.is_color {
-                                    ch |= ui
-                                        .color_edit_button_rgba_unmultiplied(&mut v)
-                                        .changed();
-                                } else {
-                                    match u.ty {
-                                        floptle_shader::Ty::Float => {
-                                            ch |= match u.range {
-                                                Some((lo, hi)) => ui
-                                                    .add(egui::Slider::new(&mut v[0], lo..=hi))
-                                                    .changed(),
-                                                None => ui
-                                                    .add(
-                                                        egui::DragValue::new(&mut v[0])
-                                                            .speed(0.02),
-                                                    )
-                                                    .changed(),
-                                            };
-                                        }
-                                        ty => {
-                                            let lanes = ty.lanes() as usize;
-                                            ui.horizontal(|ui| {
-                                                for lane in v.iter_mut().take(lanes) {
-                                                    ch |= ui
-                                                        .add(
-                                                            egui::DragValue::new(lane)
-                                                                .speed(0.02),
-                                                        )
-                                                        .changed();
-                                                }
-                                            });
-                                        }
+            if let Some((compiled, _)) = &entry.compiled {
+                egui::Grid::new("mat_shader_rows").num_columns(2).spacing([8.0, 5.0]).show(
+                    ui,
+                    |ui| {
+                        r.changed |= shader_uniform_rows(ui, &compiled.uniforms, m);
+                        for (i, slot) in compiled.textures.iter().enumerate() {
+                            ui.label(slot);
+                            let cur = m
+                                .shader_textures
+                                .get(slot)
+                                .map(|p| {
+                                    Path::new(p)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| p.clone())
+                                })
+                                .unwrap_or_else(|| "none".into());
+                            if let Some(pick) = crate::ui_widgets::asset_picker(
+                                ui,
+                                egui::Id::new(("mat_shader_tex", i)),
+                                &cur,
+                                Some("none"),
+                                asset_tree,
+                                crate::assets::is_texture,
+                                160.0,
+                            ) {
+                                match pick {
+                                    Some(p) => {
+                                        m.shader_textures.insert(slot.clone(), p);
+                                    }
+                                    None => {
+                                        m.shader_textures.remove(slot);
                                     }
                                 }
-                                if ch {
-                                    m.shader_params.insert(u.name.clone(), v);
-                                    r.changed = true;
-                                }
-                                ui.end_row();
+                                r.changed = true;
                             }
-                            for (i, slot) in compiled.textures.iter().enumerate() {
-                                ui.label(slot);
-                                let cur = m
-                                    .shader_textures
-                                    .get(slot)
-                                    .map(|p| {
-                                        Path::new(p)
-                                            .file_name()
-                                            .map(|s| s.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| p.clone())
-                                    })
-                                    .unwrap_or_else(|| "none".into());
-                                if let Some(pick) = crate::ui_widgets::asset_picker(
-                                    ui,
-                                    egui::Id::new(("mat_shader_tex", i)),
-                                    &cur,
-                                    Some("none"),
-                                    asset_tree,
-                                    crate::assets::is_texture,
-                                    160.0,
-                                ) {
-                                    match pick {
-                                        Some(p) => {
-                                            m.shader_textures.insert(slot.clone(), p);
+                            ui.end_row();
+                            // The slot's own tiling block (read by sample()
+                            // / sampleTriplanar() in the shader).
+                            ui.label("");
+                            ui.vertical(|ui| {
+                                let mut t = m.shader_tiling.get(slot).copied();
+                                if tiling_ui(ui, &mut t) {
+                                    match t {
+                                        Some(t) => {
+                                            m.shader_tiling.insert(slot.clone(), t);
                                         }
                                         None => {
-                                            m.shader_textures.remove(slot);
+                                            m.shader_tiling.remove(slot);
                                         }
                                     }
                                     r.changed = true;
                                 }
-                                ui.end_row();
-                                // The slot's own tiling block (read by sample()
-                                // / sampleTriplanar() in the shader).
-                                ui.label("");
-                                ui.vertical(|ui| {
-                                    let mut t = m.shader_tiling.get(slot).copied();
-                                    if tiling_ui(ui, &mut t) {
-                                        match t {
-                                            Some(t) => {
-                                                m.shader_tiling.insert(slot.clone(), t);
-                                            }
-                                            None => {
-                                                m.shader_tiling.remove(slot);
-                                            }
-                                        }
-                                        r.changed = true;
-                                    }
-                                });
-                                ui.end_row();
-                            }
-                        },
-                    );
-                }
+                            });
+                            ui.end_row();
+                        }
+                    },
+                );
             }
+        } else if let Some(entry) = sdf.get(&shader_path) {
+            // An sdf-stage shader: geometry, not a surface — its knobs still
+            // edit live (they ride the raymarch globals).
+            ui.small("◈ sdf stage — this shader IS the node's geometry (use on a Field Shape)");
+            if let Some(err) = &entry.error {
+                ui.colored_label(
+                    egui::Color32::from_rgb(235, 100, 100),
+                    egui::RichText::new(format!("⚠ {err}")).small(),
+                );
+            }
+            if let Some((ir, _)) = &entry.parsed {
+                egui::Grid::new("mat_sdf_rows").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+                    r.changed |= shader_uniform_rows(ui, &ir.uniforms, m);
+                });
+            }
+        } else {
+            ui.small("compiling…");
         }
     }
 
@@ -870,6 +882,19 @@ impl EditorTabViewer<'_> {
                                     .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
                                     .changed();
                             }
+                            Matter::FieldShape { radius } => {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(radius).speed(0.02).prefix("bounds radius ").range(0.05..=200.0))
+                                    .on_hover_text(
+                                        "the shape must fit inside this sphere (local units) — \
+                                         the march, shadows and culling all key off it",
+                                    )
+                                    .changed();
+                                ui.small(
+                                    "an sdf-stage .flsl (Material → Shader) IS this node's geometry — \
+                                     raymarched into the scene field. Visual only (no collision yet).",
+                                );
+                            }
                             Matter::Mesh { asset_path } => {
                                 ui.label("imported mesh");
                                 // Swap the model freely — pick any model in the project.
@@ -1235,7 +1260,7 @@ impl EditorTabViewer<'_> {
                     }
                     ui.indent("material_props", |ui| {
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -2360,7 +2385,7 @@ impl EditorTabViewer<'_> {
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
