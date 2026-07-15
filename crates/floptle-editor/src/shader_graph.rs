@@ -7,16 +7,26 @@
 //! all see the same shader, and an external text edit re-syncs the graph on
 //! its next frame (mtime watch, the house pattern).
 //!
+//! Interaction scheme (the node-editor standard): wheel zooms about the
+//! pointer, middle-drag pans, left-drag on empty canvas box-selects,
+//! left-drag on a node moves the whole selection, right-click adds nodes.
+//!
+//! Nodes NEVER move on their own: `//@layout` wins, and every auto-laid-out
+//! position is frozen in a session cache keyed by reparse-stable identities
+//! (`graph::stable_keys`) the moment it's first computed.
+//!
 //! Continuous edits (dragging a knob) mutate the in-memory IR live and flush
 //! to disk when the pointer releases (the anim-graph save-on-release
 //! pattern); structural edits (wire/add/delete) flush immediately. Undo here
 //! is graph-local: a stack of printed sources.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::SystemTime;
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder,
+    Align2, Color32, CornerRadius, CursorIcon, FontId, PointerButton, Pos2, Rect, Sense, Stroke,
+    StrokeKind, UiBuilder,
 };
 use floptle_shader::graph::{
     self, GNode, InlineVal, NodeKey, NodeKind, Site, NODE_HEADER_H, NODE_ROW_H, NODE_W,
@@ -33,6 +43,10 @@ use crate::{Editor, EditorTabViewer};
 /// inside the egui Scene's positive space.
 const ORIGIN: egui::Vec2 = egui::vec2(2400.0, 1200.0);
 
+/// The canvas zoom bounds (scene scale = screen px per graph unit).
+const ZOOM_MIN: f32 = 0.25;
+const ZOOM_MAX: f32 = 2.0;
+
 pub(crate) struct ShaderGraphState {
     /// The `.flsl` being edited (an asset-tree path, like `Material.shader`).
     pub(crate) path: Option<String>,
@@ -41,16 +55,21 @@ pub(crate) struct ShaderGraphState {
     ir: Option<ShaderIr>,
     ck: Option<Checked>,
     view: Vec<GNode>,
+    /// Session positions by reparse-stable node identity — the "nothing moves
+    /// unless you move it" guarantee for nodes without a `//@layout` entry.
+    pos_cache: HashMap<String, (f32, f32)>,
     /// First parse/type error: banner line + the node it pins to.
     err: Option<String>,
     err_key: Option<NodeKey>,
     /// The egui Scene's pan/zoom state (scene-space view rect).
     scene_rect: Rect,
-    sel: Option<NodeKey>,
+    sel: BTreeSet<NodeKey>,
     /// An in-flight wire drag.
     wire: Option<WireDrag>,
-    /// A node being dragged: its key and its live (graph-space) position.
-    drag: Option<(NodeKey, (f32, f32))>,
+    /// Nodes being dragged: each key with its live (graph-space) position.
+    drag: Option<Vec<(NodeKey, (f32, f32))>>,
+    /// An in-flight box selection (scene coords).
+    box_sel: Option<(Pos2, Pos2)>,
     /// In-node text editors mid-flight (title rename, uniform name, swizzle…).
     field_buf: Option<(egui::Id, String)>,
     /// The palette popup's search text + spawn position (graph space).
@@ -76,12 +95,14 @@ impl Default for ShaderGraphState {
             ir: None,
             ck: None,
             view: Vec::new(),
+            pos_cache: HashMap::new(),
             err: None,
             err_key: None,
             scene_rect: Rect::ZERO,
-            sel: None,
+            sel: BTreeSet::new(),
             wire: None,
             drag: None,
+            box_sel: None,
             field_buf: None,
             palette_search: String::new(),
             palette_at: (0.0, 0.0),
@@ -94,15 +115,15 @@ impl Default for ShaderGraphState {
     }
 }
 
-/// A boxed IR edit queued by the UI pass.
-type Edit = Box<dyn FnOnce(&mut ShaderIr) -> Result<(), String>>;
-
 enum WireDrag {
     /// Dragging from a node's output — looking for an input port.
     FromOut(NodeKey),
     /// Dragging from an empty input port — looking for a source node.
     FromIn(Site),
 }
+
+/// A boxed IR edit queued by the UI pass.
+type Edit = Box<dyn FnOnce(&mut ShaderIr) -> Result<(), String>>;
 
 /// Edits the UI pass queues up, applied after all borrows drop.
 enum Act {
@@ -112,10 +133,18 @@ enum Act {
     Commit { edit: Edit, strict: bool },
     /// A continuous edit (knob drag): applied in memory, flushed on release.
     Live(Edit),
-    Select(Option<NodeKey>),
-    /// Persist a node position (release of a node drag; promotes anons).
-    Place(NodeKey, (f32, f32)),
-    Delete(NodeKey),
+    /// Replace the selection.
+    Select(Vec<NodeKey>),
+    /// Extend the selection (shift-box).
+    SelectAdd(Vec<NodeKey>),
+    /// Toggle one node (ctrl/shift-click).
+    SelectToggle(NodeKey),
+    /// Persist node positions (release of a node drag; promotes anons).
+    Place(Vec<(NodeKey, (f32, f32))>),
+    /// Delete every listed node (best-effort — consumers fall to defaults).
+    Delete(Vec<NodeKey>),
+    /// Duplicate the listed nodes and select the copies.
+    Duplicate(Vec<NodeKey>),
     Undo,
     Redo,
 }
@@ -137,7 +166,7 @@ impl Editor {
 
 impl ShaderGraphState {
     /// Re-read the file and rebuild the whole graph state (parse + check +
-    /// view). Keeps the selection when the node still exists.
+    /// view). Keeps the selection when the nodes still exist.
     pub(crate) fn reload(&mut self, project_root: &Path) {
         let Some(path) = self.path.clone() else { return };
         let full = resolve_asset_path(project_root, &path);
@@ -199,12 +228,50 @@ impl ShaderGraphState {
                 self.err = err.map(|(msg, _)| msg);
                 self.ir = Some(ir);
                 self.ck = ck;
-                if let Some(sel) = &self.sel
-                    && !self.view.iter().any(|n| n.key == *sel)
-                {
-                    self.sel = None;
+                self.freeze_positions();
+                let view = std::mem::take(&mut self.view);
+                self.sel.retain(|k| view.iter().any(|n| n.key == *k));
+                self.view = view;
+            }
+        }
+    }
+
+    /// Pin every node's position for the session: `//@layout` entries refresh
+    /// the cache, cached nodes stay exactly where they were, and only a node
+    /// seen for the very first time keeps its auto-layout spot (then freezes).
+    ///
+    /// Two key families cover each other's blind spots: the name-anchored
+    /// keys (`graph::stable_keys`) survive rewires, and the name-free
+    /// sink-path keys survive renames/promotions — so neither kind of edit
+    /// can shuffle bystander nodes.
+    fn freeze_positions(&mut self) {
+        let named = graph::stable_keys(&self.view);
+        let pathed = sink_path_keys(&self.view);
+        for n in &mut self.view {
+            let nk = named.get(&n.key);
+            let pk = pathed.get(&n.key);
+            if !n.placed {
+                if let Some(&p) = nk.and_then(|k| self.pos_cache.get(k)) {
+                    n.pos = p;
+                } else if let Some(&p) = pk.and_then(|k| self.pos_cache.get(k)) {
+                    n.pos = p;
                 }
             }
+            if let Some(k) = nk {
+                self.pos_cache.insert(k.clone(), n.pos);
+            }
+            if let Some(k) = pk {
+                self.pos_cache.insert(k.clone(), n.pos);
+            }
+        }
+    }
+
+    /// Rebuild the view from the in-memory IR (live knob edits) without
+    /// touching disk — positions stay frozen.
+    fn rebuild_view(&mut self) {
+        if let Some(ir) = &self.ir {
+            self.view = graph::build_view(ir, self.ck.as_ref());
+            self.freeze_positions();
         }
     }
 
@@ -284,7 +351,13 @@ impl ShaderGraphState {
     /// Apply one queued edit.
     fn apply(&mut self, act: Act, project_root: &Path, ide: &mut IdeState) {
         match act {
-            Act::Select(k) => self.sel = k,
+            Act::Select(keys) => self.sel = keys.into_iter().collect(),
+            Act::SelectAdd(keys) => self.sel.extend(keys),
+            Act::SelectToggle(k) => {
+                if !self.sel.remove(&k) {
+                    self.sel.insert(k);
+                }
+            }
             Act::Undo => self.undo(project_root, ide),
             Act::Redo => self.redo(project_root, ide),
             Act::Live(edit) => {
@@ -298,7 +371,7 @@ impl ShaderGraphState {
                     self.dirty = true;
                     // The view renders from the IR — rebuild so the knob shows
                     // its new value this frame.
-                    self.view = graph::build_view(ir, self.ck.as_ref());
+                    self.rebuild_view();
                 }
             }
             Act::Commit { edit, strict } => {
@@ -333,31 +406,53 @@ impl ShaderGraphState {
                 self.dirty = true;
                 self.flush(project_root, ide, true, false);
             }
-            Act::Place(key, pos) => {
-                let promoted = self.commit_returning(
-                    move |ir| graph::set_position(ir, &key, pos),
+            Act::Place(moves) => {
+                let placed = self.commit_returning(
+                    move |ir| {
+                        moves
+                            .into_iter()
+                            .map(|(k, pos)| graph::set_position(ir, &k, pos))
+                            .collect::<Result<Vec<_>, _>>()
+                    },
                     project_root,
                     ide,
                 );
-                if let Some(k) = promoted {
-                    self.sel = Some(k);
+                if let Some(keys) = placed {
+                    self.sel = keys.into_iter().collect();
                 }
             }
-            Act::Delete(key) => {
-                self.sel = None;
+            Act::Delete(keys) => {
+                self.sel.clear();
                 self.apply(
                     Act::Commit {
-                        edit: Box::new(move |ir| graph::delete_node(ir, &key)),
+                        // Best-effort: deleting A may take a selected
+                        // downstream B's site with it — skip, don't abort.
+                        edit: Box::new(move |ir| {
+                            for k in &keys {
+                                let _ = graph::delete_node(ir, k);
+                            }
+                            Ok(())
+                        }),
                         strict: false,
                     },
                     project_root,
                     ide,
                 );
             }
+            Act::Duplicate(keys) => {
+                let copies = self.commit_returning(
+                    move |ir| graph::duplicate_nodes(ir, &keys),
+                    project_root,
+                    ide,
+                );
+                if let Some(keys) = copies {
+                    self.sel = keys.into_iter().collect();
+                }
+            }
         }
     }
 
-    /// A commit that returns a value (node placement returns the promoted key).
+    /// A commit that returns a value (placement/duplication return keys).
     fn commit_returning<T>(
         &mut self,
         edit: impl FnOnce(&mut ShaderIr) -> Result<T, String>,
@@ -416,6 +511,11 @@ impl EditorTabViewer<'_> {
         } else if let Some(err) = self.shader_graph.err.clone() {
             ui.add_space(16.0);
             ui.colored_label(Color32::from_rgb(235, 100, 100), format!("⚠ {err}"));
+            if ui.button("</> Open as text").clicked()
+                && let Some(p) = self.shader_graph.path.clone()
+            {
+                self.cmd.open_script_pref = Some(p);
+            }
         }
 
         for act in acts {
@@ -457,13 +557,36 @@ impl EditorTabViewer<'_> {
                 self.cmd.new_shader_in = Some(String::new());
                 self.cmd.new_shader_to_graph = true;
             }
-            let st = &self.shader_graph;
-            let Some(ir) = st.ir.as_ref() else {
-                if let Some((msg, _)) = &st.status {
+            let Some(ir) = self.shader_graph.ir.as_ref() else {
+                if let Some((msg, _)) = &self.shader_graph.status {
                     ui.colored_label(Color32::from_rgb(235, 170, 90), msg.clone());
                 }
                 return;
             };
+            let stage = ir.stage.unwrap_or(Stage::Fragment);
+            // ✚ Node — the palette without the right-click (dropped mid-view).
+            let btn = ui
+                .button("✚ Node")
+                .on_hover_text("add a node at the center of the view (or right-click the canvas)");
+            let center = {
+                let r = self.shader_graph.scene_rect;
+                if r.width() > 1.0 {
+                    (r.center().x - ORIGIN.x, r.center().y - ORIGIN.y)
+                } else {
+                    (0.0, -200.0)
+                }
+            };
+            if btn.clicked() {
+                self.shader_graph.palette_search.clear();
+            }
+            egui::Popup::menu(&btn).id(egui::Id::new("sg-add-node")).show(|ui| {
+                let mut search = std::mem::take(&mut self.shader_graph.palette_search);
+                if let Some(act) = palette_ui(ui, stage, &mut search, center) {
+                    acts.push(act);
+                    ui.close();
+                }
+                self.shader_graph.palette_search = search;
+            });
             ui.separator();
             match ir.stage {
                 Some(Stage::Sdf) => {
@@ -498,6 +621,7 @@ impl EditorTabViewer<'_> {
                 }
             }
             ui.separator();
+            let st = &self.shader_graph;
             if ui
                 .add_enabled(!st.undo.is_empty(), egui::Button::new("↶"))
                 .on_hover_text("undo (Ctrl+Z over the canvas)")
@@ -512,7 +636,7 @@ impl EditorTabViewer<'_> {
             {
                 acts.push(Act::Redo);
             }
-            if ui.button("⛶").on_hover_text("re-center the view").clicked() {
+            if ui.button("⛶").on_hover_text("frame the whole graph").clicked() {
                 self.shader_graph.scene_rect = Rect::ZERO;
             }
             let path = self.shader_graph.path.clone().unwrap_or_default();
@@ -558,6 +682,37 @@ impl EditorTabViewer<'_> {
     // ---- the canvas ------------------------------------------------------------
 
     fn shader_graph_canvas(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        // Wheel = zoom about the pointer (the node-editor standard). Steal the
+        // scroll before the Scene turns it into a pan; ctrl+wheel and pinch
+        // still zoom via the Scene, shift+wheel still pans sideways.
+        let canvas_rect = ui.available_rect_before_wrap();
+        if ui.rect_contains_pointer(canvas_rect) {
+            let (scroll, mods, ptr) =
+                ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers, i.pointer.latest_pos()));
+            if scroll != 0.0
+                && !mods.ctrl
+                && !mods.command
+                && !mods.shift
+                && let Some(ptr) = ptr
+            {
+                // Consume it the way ScrollArea does, so the Scene can't ALSO
+                // pan with the same wheel motion.
+                ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                let r = &mut self.shader_graph.scene_rect;
+                if r.width() > 0.0 && r.height() > 0.0 {
+                    // Mirror the Scene's letterboxed fit to find the anchor.
+                    let scale =
+                        (canvas_rect.width() / r.width()).min(canvas_rect.height() / r.height());
+                    let k = (scroll * 0.0035).exp();
+                    let k = (scale * k).clamp(ZOOM_MIN, ZOOM_MAX) / scale;
+                    if (k - 1.0).abs() > 1e-4 {
+                        let anchor = r.center() + (ptr - canvas_rect.center()) / scale;
+                        *r = Rect::from_min_size(anchor + (r.min - anchor) / k, r.size() / k);
+                    }
+                }
+            }
+        }
+
         // Read-only copies so node UIs can borrow freely while we queue edits.
         let view = self.shader_graph.view.clone();
         let ir = self.shader_graph.ir.clone().unwrap_or_default();
@@ -567,16 +722,17 @@ impl EditorTabViewer<'_> {
 
         // Node rects (graph space + ORIGIN) — the wire endpoints.
         let rect_of = |n: &GNode| -> Rect {
-            let pos = match &drag {
-                Some((k, p)) if *k == n.key => *p,
-                _ => n.pos,
-            };
+            let pos = drag
+                .as_deref()
+                .and_then(|d| d.iter().find(|(k, _)| *k == n.key))
+                .map(|(_, p)| *p)
+                .unwrap_or(n.pos);
             Rect::from_min_size(
                 Pos2::new(pos.0, pos.1) + ORIGIN,
                 egui::vec2(NODE_W, graph::node_height(n)),
             )
         };
-        let mut rects: std::collections::HashMap<NodeKey, Rect> = Default::default();
+        let mut rects: HashMap<NodeKey, Rect> = Default::default();
         for n in &view {
             rects.insert(n.key.clone(), rect_of(n));
         }
@@ -591,11 +747,11 @@ impl EditorTabViewer<'_> {
         let mut pointer_scene: Option<Pos2> = None;
 
         let scene = egui::Scene::new()
-            .zoom_range(0.25..=2.0)
+            .zoom_range(ZOOM_MIN..=ZOOM_MAX)
             .max_inner_size(egui::vec2(6000.0, 3000.0))
-            .drag_pan_buttons(egui::DragPanButtons::PRIMARY | egui::DragPanButtons::MIDDLE);
+            .drag_pan_buttons(egui::DragPanButtons::MIDDLE);
         let resp = scene.show(ui, &mut scene_rect, |ui| {
-            // Pointer in scene coords (for the wire-drag preview).
+            // Pointer in scene coords (wire preview + box select).
             if let Some(sp) = ui.input(|i| i.pointer.latest_pos())
                 && let Some(t) = ui.ctx().layer_transform_to_global(ui.layer_id())
             {
@@ -659,11 +815,24 @@ impl EditorTabViewer<'_> {
                     n,
                     r,
                     &ir,
-                    sel.as_ref() == Some(&n.key),
+                    &sel,
                     err_key.as_ref() == Some(&n.key),
                     acts,
                     &mut hover_in,
                     &mut hover_out,
+                );
+            }
+
+            // ---- the box-selection rectangle (over everything) ----
+            if let Some((a, b)) = self.shader_graph.box_sel {
+                let r = Rect::from_two_pos(a, b);
+                let col = ui.visuals().selection.stroke.color;
+                ui.painter().rect(
+                    r,
+                    0.0,
+                    col.gamma_multiply(0.12),
+                    Stroke::new(1.0, col),
+                    StrokeKind::Inside,
                 );
             }
         });
@@ -692,22 +861,51 @@ impl EditorTabViewer<'_> {
                 None => {}
             }
         }
+
+        // ---- box select (left-drag on empty canvas) ----
+        let bg = &resp.response;
+        if bg.drag_started_by(PointerButton::Primary)
+            && self.shader_graph.wire.is_none()
+            && self.shader_graph.drag.is_none()
+            && let Some(ptr) = pointer_scene
+        {
+            self.shader_graph.box_sel = Some((ptr, ptr));
+        }
+        if bg.dragged_by(PointerButton::Primary)
+            && let (Some(b), Some(ptr)) = (&mut self.shader_graph.box_sel, pointer_scene)
+        {
+            b.1 = ptr;
+        }
+        if bg.drag_stopped_by(PointerButton::Primary)
+            && let Some((a, b)) = self.shader_graph.box_sel.take()
+        {
+            let r = Rect::from_two_pos(a, b);
+            let hit: Vec<NodeKey> = view
+                .iter()
+                .filter(|n| r.intersects(rects[&n.key]))
+                .map(|n| n.key.clone())
+                .collect();
+            let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+            acts.push(if additive { Act::SelectAdd(hit) } else { Act::Select(hit) });
+        }
+
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.shader_graph.wire = None;
+            self.shader_graph.box_sel = None;
         }
 
         // ---- canvas-level interactions ----
         let stage = ir.stage.unwrap_or(Stage::Fragment);
-        if resp.response.clicked() {
-            acts.push(Act::Select(None));
+        if bg.clicked() && !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
+            acts.push(Act::Select(Vec::new()));
         }
-        if resp.response.secondary_clicked()
+        if bg.secondary_clicked()
             && let Some(ptr) = pointer_scene
         {
             self.shader_graph.palette_at = (ptr.x - ORIGIN.x, ptr.y - ORIGIN.y);
             self.shader_graph.palette_search.clear();
         }
-        resp.response.context_menu(|ui| {
+        bg.context_menu(|ui| {
             let at = self.shader_graph.palette_at;
             let mut search = std::mem::take(&mut self.shader_graph.palette_search);
             if let Some(act) = palette_ui(ui, stage, &mut search, at) {
@@ -716,20 +914,22 @@ impl EditorTabViewer<'_> {
             }
             self.shader_graph.palette_search = search;
         });
-        if resp.response.hovered() {
-            let (del, undo, redo) = ui.input(|i| {
+        if bg.hovered() {
+            let (del, undo, redo, dup) = ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
                     i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                     (i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
                         || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
+                    i.modifiers.command && i.key_pressed(egui::Key::D),
                 )
             });
-            if del
-                && self.shader_graph.field_buf.is_none()
-                && let Some(k) = self.shader_graph.sel.clone()
-            {
-                acts.push(Act::Delete(k));
+            let sel: Vec<NodeKey> = self.shader_graph.sel.iter().cloned().collect();
+            if del && self.shader_graph.field_buf.is_none() && !sel.is_empty() {
+                acts.push(Act::Delete(sel.clone()));
+            }
+            if dup && !sel.is_empty() {
+                acts.push(Act::Duplicate(sel));
             }
             if undo {
                 acts.push(Act::Undo);
@@ -738,9 +938,18 @@ impl EditorTabViewer<'_> {
                 acts.push(Act::Redo);
             }
         }
-        // Toast overlay, bottom-left of the canvas.
+        // First-visit hint + toast overlay, bottom of the canvas.
+        if view.len() <= 1 {
+            ui.painter().text(
+                bg.rect.center(),
+                Align2::CENTER_CENTER,
+                "right-click to add nodes",
+                FontId::proportional(14.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
         if let Some((msg, _)) = &self.shader_graph.status {
-            let at = resp.response.rect.left_bottom() + egui::vec2(12.0, -20.0);
+            let at = bg.rect.left_bottom() + egui::vec2(12.0, -20.0);
             ui.painter().text(
                 at,
                 Align2::LEFT_BOTTOM,
@@ -760,13 +969,25 @@ impl EditorTabViewer<'_> {
         n: &GNode,
         r: Rect,
         ir: &ShaderIr,
-        selected: bool,
+        sel: &BTreeSet<NodeKey>,
         errored: bool,
         acts: &mut Vec<Act>,
         hover_in: &mut Option<Site>,
         hover_out: &mut Option<NodeKey>,
     ) {
         let id = ui.id().with(("sg-node", &n.key));
+        let selected = sel.contains(&n.key);
+        let toggle_mod = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+        // The whole node selects on click — registered FIRST so the header,
+        // rows, dots and widgets all take precedence over it.
+        let body_resp = ui.interact(r, id.with("bodyclick"), Sense::click());
+        if body_resp.clicked() {
+            if toggle_mod {
+                acts.push(Act::SelectToggle(n.key.clone()));
+            } else {
+                acts.push(Act::Select(vec![n.key.clone()]));
+            }
+        }
         let p = ui.painter();
         let cat = node_color(ui, n);
         let fill = ui.visuals().widgets.inactive.bg_fill.gamma_multiply(1.05);
@@ -786,26 +1007,48 @@ impl EditorTabViewer<'_> {
         };
         p.rect_stroke(r, 6.0, stroke, StrokeKind::Inside);
 
-        // ---- header: drag to move, click to select, double-click to rename ----
-        let hresp = ui.interact(header, id.with("drag"), Sense::click_and_drag());
+        // ---- header: drag to move (the whole selection), click to select,
+        // double-click to rename ----
+        let hresp = ui
+            .interact(header, id.with("drag"), Sense::click_and_drag())
+            .on_hover_cursor(CursorIcon::Move);
         if hresp.drag_started() {
-            self.shader_graph.drag = Some((n.key.clone(), n.pos));
+            // Dragging an unselected node re-selects just it first.
+            let group: Vec<NodeKey> = if selected {
+                sel.iter().cloned().collect()
+            } else {
+                acts.push(Act::Select(vec![n.key.clone()]));
+                vec![n.key.clone()]
+            };
+            let starts = group
+                .into_iter()
+                .filter_map(|k| {
+                    self.shader_graph.view.iter().find(|x| x.key == k).map(|x| (k, x.pos))
+                })
+                .collect();
+            self.shader_graph.drag = Some(starts);
         }
         if hresp.dragged()
-            && let Some((k, pos)) = &mut self.shader_graph.drag
-            && *k == n.key
+            && let Some(d) = &mut self.shader_graph.drag
+            && d.iter().any(|(k, _)| *k == n.key)
         {
-            let d = hresp.drag_delta();
-            pos.0 += d.x;
-            pos.1 += d.y;
+            let delta = hresp.drag_delta();
+            for (_, pos) in d.iter_mut() {
+                pos.0 += delta.x;
+                pos.1 += delta.y;
+            }
         }
         if hresp.drag_stopped()
-            && let Some((k, pos)) = self.shader_graph.drag.take()
+            && let Some(d) = self.shader_graph.drag.take()
         {
-            acts.push(Act::Place(k, pos));
+            acts.push(Act::Place(d));
         }
         if hresp.clicked() {
-            acts.push(Act::Select(Some(n.key.clone())));
+            if toggle_mod {
+                acts.push(Act::SelectToggle(n.key.clone()));
+            } else {
+                acts.push(Act::Select(vec![n.key.clone()]));
+            }
         }
         let renamable = matches!(n.key, NodeKey::Let(_) | NodeKey::Anon(_));
         if hresp.double_clicked() && renamable {
@@ -813,13 +1056,21 @@ impl EditorTabViewer<'_> {
                 Some((id.with("rename"), n.name.clone().unwrap_or_default()));
         }
         hresp.context_menu(|ui| {
-            if renamable && ui.button("🖊 Rename…").clicked() {
+            let multi = selected && sel.len() > 1;
+            if renamable && !multi && ui.button("🖊 Rename…").clicked() {
                 self.shader_graph.field_buf =
                     Some((id.with("rename"), n.name.clone().unwrap_or_default()));
                 ui.close();
             }
-            if !matches!(n.key, NodeKey::Out) && ui.button("🗑 Delete").clicked() {
-                acts.push(Act::Delete(n.key.clone()));
+            let targets: Vec<NodeKey> =
+                if multi { sel.iter().cloned().collect() } else { vec![n.key.clone()] };
+            let word = if multi { format!(" {} nodes", targets.len()) } else { String::new() };
+            if ui.button(format!("⧉ Duplicate{word}")).on_hover_text("Ctrl+D").clicked() {
+                acts.push(Act::Duplicate(targets.clone()));
+                ui.close();
+            }
+            if !matches!(n.key, NodeKey::Out) && ui.button(format!("🗑 Delete{word}")).clicked() {
+                acts.push(Act::Delete(targets));
                 ui.close();
             }
         });
@@ -833,7 +1084,7 @@ impl EditorTabViewer<'_> {
             .is_some_and(|(fid, _)| *fid == id.with("rename"));
         if renaming {
             let key = n.key.clone();
-            self.node_text_editor(ui, title_rect, move |name| Act::Commit {
+            self.node_text_editor(ui, title_rect, id.with("rename-ui"), move |name| Act::Commit {
                 edit: Box::new(move |ir| match &key {
                     NodeKey::Let(old) => graph::rename_let(ir, old, &name),
                     NodeKey::Anon(e) => {
@@ -875,7 +1126,9 @@ impl EditorTabViewer<'_> {
         if !matches!(n.key, NodeKey::Out) {
             let at = Pos2::new(r.right(), r.top() + NODE_HEADER_H * 0.5);
             let dot = Rect::from_center_size(at, egui::vec2(16.0, 16.0));
-            let dresp = ui.interact(dot, id.with("out"), Sense::click_and_drag());
+            let dresp = ui
+                .interact(dot, id.with("out"), Sense::click_and_drag())
+                .on_hover_cursor(CursorIcon::PointingHand);
             let col = port_color(ui, n.ty, matches!(n.kind, NodeKind::Texture(_)));
             let radius = if dresp.hovered() { 6.0 } else { 4.5 };
             ui.painter().circle_filled(at, radius, col);
@@ -894,7 +1147,9 @@ impl EditorTabViewer<'_> {
                 r.top() + NODE_HEADER_H + i as f32 * NODE_ROW_H + NODE_ROW_H * 0.5,
             );
             let dot = Rect::from_center_size(at, egui::vec2(16.0, 16.0));
-            let dresp = ui.interact(dot, id.with(("in", i)), Sense::click_and_drag());
+            let dresp = ui
+                .interact(dot, id.with(("in", i)), Sense::click_and_drag())
+                .on_hover_cursor(CursorIcon::PointingHand);
             let col = port_color(ui, port.ty, port.is_texture);
             if port.wired.is_some() {
                 ui.painter().circle_filled(at, if dresp.hovered() { 6.0 } else { 4.5 }, col);
@@ -924,12 +1179,13 @@ impl EditorTabViewer<'_> {
                 *hover_in = Some(port.site);
             }
 
-            // The row: label + inline editor when unwired.
+            // The row: label + inline editor when unwired. Salted child ui so
+            // widget ids stay unique even if two nodes momentarily overlap.
             let row = Rect::from_min_size(
                 Pos2::new(r.left() + 10.0, r.top() + NODE_HEADER_H + i as f32 * NODE_ROW_H),
                 egui::vec2(r.width() - 18.0, NODE_ROW_H),
             );
-            ui.scope_builder(UiBuilder::new().max_rect(row), |ui| {
+            ui.scope_builder(UiBuilder::new().max_rect(row).id_salt(id.with(("row", i))), |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                 ui.horizontal_centered(|ui| {
                     ui.add(
@@ -955,13 +1211,15 @@ impl EditorTabViewer<'_> {
                 egui::vec2(r.width() - 18.0, NODE_ROW_H),
             )
         };
+        let salted =
+            |k: usize| UiBuilder::new().max_rect(body_row(k)).id_salt(id.with(("body", k)));
         match &n.kind {
             NodeKind::Uniform(u) => {
-                self.uniform_body(ui, id, body_row(0), body_row(1), body_row(2), body_row(3), ir, *u, acts);
+                self.uniform_body(ui, id, [salted(0), salted(1), salted(2), salted(3)], ir, *u, acts);
             }
             NodeKind::Texture(t) => {
                 if let Some(name) = ir.textures.get(*t).cloned() {
-                    ui.scope_builder(UiBuilder::new().max_rect(body_row(0)), |ui| {
+                    ui.scope_builder(salted(0), |ui| {
                         ui.horizontal_centered(|ui| {
                             ui.add(
                                 egui::Label::new(egui::RichText::new("slot").small())
@@ -978,7 +1236,7 @@ impl EditorTabViewer<'_> {
             }
             NodeKind::Swizzle(sw) => {
                 let key = n.key.clone();
-                ui.scope_builder(UiBuilder::new().max_rect(body_row(0)), |ui| {
+                ui.scope_builder(salted(0), |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new("take").small()).selectable(false),
@@ -998,7 +1256,7 @@ impl EditorTabViewer<'_> {
                 // A quick type switch: number / vec2 / vec3 / vec4 / color.
                 let site = n.inputs.first().map(|p| p.site);
                 let cur = n.inputs.first().and_then(|p| p.inline.clone());
-                ui.scope_builder(UiBuilder::new().max_rect(body_row(0)), |ui| {
+                ui.scope_builder(salted(0), |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
                     ui.horizontal_centered(|ui| {
                         let variants: [(&str, InlineVal); 5] = [
@@ -1038,22 +1296,19 @@ impl EditorTabViewer<'_> {
 
     /// The uniform node's body: name, type, default value, range — the
     /// declaration IS the Inspector schema, edited right on the node.
-    #[allow(clippy::too_many_arguments)]
     fn uniform_body(
         &mut self,
         ui: &mut egui::Ui,
         id: egui::Id,
-        name_row: Rect,
-        ty_row: Rect,
-        default_row: Rect,
-        range_row: Rect,
+        rows: [UiBuilder; 4],
         ir: &ShaderIr,
         u: usize,
         acts: &mut Vec<Act>,
     ) {
         let Some(uni) = ir.uniforms.get(u).cloned() else { return };
+        let [name_row, ty_row, default_row, range_row] = rows;
         // name
-        ui.scope_builder(UiBuilder::new().max_rect(name_row), |ui| {
+        ui.scope_builder(name_row, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new("knob").small()).selectable(false));
                 let old = uni.name.clone();
@@ -1064,7 +1319,7 @@ impl EditorTabViewer<'_> {
             });
         });
         // type
-        ui.scope_builder(UiBuilder::new().max_rect(ty_row), |ui| {
+        ui.scope_builder(ty_row, |ui| {
             ui.horizontal_centered(|ui| {
                 let cur = if uni.is_color { "color" } else { uni.ty.flsl() };
                 egui::ComboBox::from_id_salt(id.with("uty"))
@@ -1099,7 +1354,7 @@ impl EditorTabViewer<'_> {
             });
         });
         // default value
-        ui.scope_builder(UiBuilder::new().max_rect(default_row), |ui| {
+        ui.scope_builder(default_row, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
             ui.horizontal_centered(|ui| {
                 ui.add(egui::Label::new(egui::RichText::new("=").small()).selectable(false));
@@ -1129,7 +1384,7 @@ impl EditorTabViewer<'_> {
         });
         // range (float knobs get Inspector slider bounds)
         if uni.ty == Ty::Float && !uni.is_color {
-            ui.scope_builder(UiBuilder::new().max_rect(range_row), |ui| {
+            ui.scope_builder(range_row, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
                 ui.horizontal_centered(|ui| {
                     ui.add(
@@ -1261,6 +1516,7 @@ impl EditorTabViewer<'_> {
                         .selectable(false)
                         .sense(Sense::click()),
                 )
+                .on_hover_cursor(CursorIcon::Text)
                 .on_hover_text("click to edit");
             if resp.clicked() {
                 self.shader_graph.field_buf = Some((id, current.to_string()));
@@ -1290,10 +1546,11 @@ impl EditorTabViewer<'_> {
         &mut self,
         ui: &mut egui::Ui,
         rect: Rect,
+        salt: egui::Id,
         commit: impl FnOnce(String) -> Act,
         acts: &mut Vec<Act>,
     ) {
-        ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+        ui.scope_builder(UiBuilder::new().max_rect(rect).id_salt(salt), |ui| {
             let Some((_, buf)) = self.shader_graph.field_buf.as_mut() else { return };
             let resp = ui.add(egui::TextEdit::singleline(buf).desired_width(rect.width()));
             if !resp.has_focus() && !resp.lost_focus() {
@@ -1319,7 +1576,7 @@ fn palette_ui(
     at: (f32, f32),
 ) -> Option<Act> {
     let mut out: Option<Act> = None;
-    ui.set_min_width(230.0);
+    ui.set_min_width(240.0);
     let resp = ui.add(egui::TextEdit::singleline(search).hint_text("🔍 add node…"));
     if ui.memory(|m| m.focused().is_none()) {
         resp.request_focus();
@@ -1335,7 +1592,7 @@ fn palette_ui(
         }
     };
 
-    egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().max_height(380.0).min_scrolled_height(380.0).show(ui, |ui| {
         // ---- values ----
         type AddFn = fn(&mut ShaderIr, (f32, f32)) -> Result<NodeKey, String>;
         let values: [(&str, &str, AddFn); 8] = [
@@ -1408,6 +1665,43 @@ fn palette_ui(
             }
         }
     });
+    out
+}
+
+/// Name-FREE stable identities: each node keyed by its wire path from the
+/// output sink (port indices + op labels). Renaming/promoting a `let` leaves
+/// these untouched, so its downstream nodes keep their cached positions.
+fn sink_path_keys(view: &[GNode]) -> HashMap<NodeKey, String> {
+    let index_of: HashMap<&NodeKey, usize> =
+        view.iter().enumerate().map(|(i, n)| (&n.key, i)).collect();
+    let mut out: HashMap<NodeKey, String> = HashMap::new();
+    // Breadth-first from the sink; the first path to reach a node names it.
+    let mut queue: Vec<(usize, String)> = view
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| matches!(n.key, NodeKey::Out))
+        .map(|(i, _)| (i, "p".to_string()))
+        .collect();
+    let mut guard = 0;
+    while let Some((i, key)) = queue.pop() {
+        guard += 1;
+        if guard > 4096 {
+            break;
+        }
+        let n = &view[i];
+        if out.contains_key(&n.key) {
+            continue;
+        }
+        out.insert(n.key.clone(), key.clone());
+        for (pi, port) in n.inputs.iter().enumerate() {
+            if let Some(src) = &port.wired
+                && let Some(&si) = index_of.get(src)
+                && !out.contains_key(src)
+            {
+                queue.push((si, format!("{key}/{pi}.{}", view[si].op_label())));
+            }
+        }
+    }
     out
 }
 

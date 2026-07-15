@@ -869,6 +869,8 @@ impl Editor {
         // bake them into the scene file. End the recording (restoring the real
         // scene) first; the clip itself saves through its own dirty flag.
         self.stop_recording();
+        // Any pending graph-canvas edit lands on disk with everything else.
+        self.shader_graph.flush(&self.project_root, &mut self.ide, true, false);
         self.save_scene(); // clears scene_dirty ONLY on success + logs either way
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
             self.console.push(
@@ -934,20 +936,31 @@ pub(crate) fn open_in_file_manager(path: &Path) {
 
 /// Seed the built-in example shaders into `<project>/shaders/examples/` —
 /// teaching material for the ◈ Shaders graph (each is a worked example of one
-/// corner of the system). Only when the folder doesn't exist yet: deleting it
-/// (or any one file) is a choice that sticks.
+/// corner of the system). A project WITHOUT the folder gets the full set; an
+/// existing folder only gains examples it doesn't have yet (so new built-ins
+/// arrive with engine updates, edits to seeded files are never overwritten,
+/// and deleting the whole folder is the opt-out that sticks).
 pub(crate) fn seed_example_shaders(project_root: &Path) {
     let dir = project_root.join("shaders").join("examples");
-    if dir.exists() {
-        return;
-    }
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("  example shaders: {e}");
-        return;
+    // The stamp remembers that this project was seeded once — so a missing
+    // folder afterwards means the user deleted it, and it stays deleted.
+    let stamp = project_root.join(".floptle").join("examples_seeded");
+    if !dir.exists() {
+        if stamp.exists() {
+            return; // deleted on purpose
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
     }
     for (name, src) in floptle_shader::examples::EXAMPLES {
-        let _ = std::fs::write(dir.join(name), src);
+        let path = dir.join(name);
+        if !path.exists() {
+            let _ = std::fs::write(path, src);
+        }
     }
+    let _ = std::fs::create_dir_all(project_root.join(".floptle"));
+    let _ = std::fs::write(&stamp, "");
 }
 
 /// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.

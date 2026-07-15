@@ -587,6 +587,59 @@ pub fn node_height(n: &GNode) -> f32 {
     NODE_HEADER_H + n.inputs.len() as f32 * NODE_ROW_H + extra + 8.0
 }
 
+/// A REPARSE-STABLE identity string per node, for the editor's session
+/// position cache. `NodeKey::Anon` carries an arena index that shifts on
+/// every reprint→reparse; but an anonymous node hangs off exactly one
+/// consumer port, so "consumer's stable key / port index" names it stably
+/// for as long as the structure around it is unchanged. Named nodes and
+/// sources are stable by name.
+pub fn stable_keys(nodes: &[GNode]) -> BTreeMap<NodeKey, String> {
+    // consumer[src] = (consumer node index, port index) — first wire wins.
+    let index_of: BTreeMap<NodeKey, usize> =
+        nodes.iter().enumerate().map(|(i, n)| (n.key.clone(), i)).collect();
+    let mut consumer: Vec<Option<(usize, usize)>> = vec![None; nodes.len()];
+    for (ci, n) in nodes.iter().enumerate() {
+        for (pi, p) in n.inputs.iter().enumerate() {
+            if let Some(src) = &p.wired
+                && let Some(&si) = index_of.get(src)
+                && consumer[si].is_none()
+            {
+                consumer[si] = Some((ci, pi));
+            }
+        }
+    }
+    fn key_of(
+        i: usize,
+        nodes: &[GNode],
+        consumer: &[Option<(usize, usize)>],
+        memo: &mut Vec<Option<String>>,
+        depth: usize,
+    ) -> String {
+        if let Some(k) = &memo[i] {
+            return k.clone();
+        }
+        let k = match &nodes[i].key {
+            NodeKey::Let(n) => format!("let.{n}"),
+            NodeKey::Input(inp) => format!("in.{}", inp.name()),
+            NodeKey::Uniform(n) => format!("u.{n}"),
+            NodeKey::Texture(n) => format!("tex.{n}"),
+            NodeKey::Out => "out".into(),
+            NodeKey::Anon(_) => match (depth < 64).then_some(consumer[i]).flatten() {
+                Some((ci, pi)) => {
+                    format!("{}/{pi}", key_of(ci, nodes, consumer, memo, depth + 1))
+                }
+                None => format!("orphan.{i}"),
+            },
+        };
+        memo[i] = Some(k.clone());
+        k
+    }
+    let mut memo: Vec<Option<String>> = vec![None; nodes.len()];
+    (0..nodes.len())
+        .map(|i| (nodes[i].key.clone(), key_of(i, nodes, &consumer, &mut memo, 0)))
+        .collect()
+}
+
 /// Fill node positions: `//@layout` entries win; everything unplaced is
 /// auto-laid-out by dependency depth (sources left, sink right), stacked
 /// downward per column in emission order. Deterministic.
@@ -1293,6 +1346,72 @@ pub fn set_position(ir: &mut ShaderIr, key: &NodeKey, pos: (f32, f32)) -> Result
     Ok(key)
 }
 
+/// Duplicate a set of nodes: each named/anonymous value node becomes a fresh
+/// `let` copying its whole expression (anonymous ones are named first).
+/// References BETWEEN duplicated nodes point at the copies; references to
+/// everything else (sources, unselected lets) are shared, like Blender.
+/// Sources and the sink don't duplicate. Returns the new nodes' keys.
+pub fn duplicate_nodes(ir: &mut ShaderIr, keys: &[NodeKey]) -> Result<Vec<NodeKey>, EditError> {
+    // Everything duplicable becomes a let index first.
+    let mut lets: Vec<usize> = Vec::new();
+    for key in keys {
+        match key {
+            NodeKey::Let(n) => {
+                if let Some(i) = ir.lets.iter().position(|(x, _)| x == n) {
+                    lets.push(i);
+                }
+            }
+            NodeKey::Anon(e) => lets.push(promote_to_let(ir, *e)?),
+            _ => {}
+        }
+    }
+    lets.sort_unstable();
+    lets.dedup();
+    if lets.is_empty() {
+        return Err("nothing duplicable selected (sources and the output stay single)".into());
+    }
+    fn deep_copy(
+        ir: &mut ShaderIr,
+        at: ExprId,
+        remap: &BTreeMap<usize, usize>,
+    ) -> ExprId {
+        let kind = match ir.expr(at).kind.clone() {
+            ExprKind::Let(l) => ExprKind::Let(remap.get(&l).copied().unwrap_or(l)),
+            ExprKind::Call { op, args } => {
+                let args = args
+                    .into_iter()
+                    .map(|a| CallArg { name: a.name, value: deep_copy(ir, a.value, remap) })
+                    .collect();
+                ExprKind::Call { op, args }
+            }
+            ExprKind::Binary(op, a, b) => {
+                let (a, b) = (deep_copy(ir, a, remap), deep_copy(ir, b, remap));
+                ExprKind::Binary(op, a, b)
+            }
+            ExprKind::Neg(a) => ExprKind::Neg(deep_copy(ir, a, remap)),
+            ExprKind::Swizzle(a, sw) => ExprKind::Swizzle(deep_copy(ir, a, remap), sw),
+            leaf => leaf,
+        };
+        ir.push(kind, Span::default())
+    }
+    // Ascending order so intra-set references hit already-made copies.
+    let mut remap: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    for &i in &lets {
+        let (name, root) = ir.lets[i].clone();
+        let copy = deep_copy(ir, root, &remap);
+        let fresh = fresh_name(ir, &name);
+        ir.lets.push((fresh.clone(), copy));
+        remap.insert(i, ir.lets.len() - 1);
+        if let Some(&(x, y)) = ir.layout.get(&name) {
+            ir.layout.insert(fresh.clone(), (x + 32.0, y + 32.0));
+        }
+        out.push(NodeKey::Let(fresh));
+    }
+    sort_lets(ir).map_err(|_| "loop".to_string())?;
+    Ok(out)
+}
+
 /// Add a stdlib-op node as a fresh named let, with beginner-friendly required
 /// args (spatial args wire to `uv`/`worldPos`, palettes get a name, texture
 /// args take slot 0). Returns the new node's key.
@@ -1656,6 +1775,51 @@ shader plasma {
         let ir = reload(&ir);
         crate::ir::check(&ir).expect("checks after renames");
         assert_eq!(ir.layout.get("melted"), Some(&(120.0, 80.0)), "layout followed the rename");
+    }
+
+    #[test]
+    fn stable_keys_survive_reprint() {
+        // Anon arena indices shift across print/parse; stable keys must not —
+        // they anchor the editor's session position cache.
+        let ir = parse(PLASMA).unwrap();
+        let ck = crate::ir::check(&ir).unwrap();
+        let view = build_view(&ir, Some(&ck));
+        let keys_a: std::collections::BTreeSet<String> =
+            stable_keys(&view).into_values().collect();
+        let ir2 = reload(&ir);
+        let ck2 = crate::ir::check(&ir2).unwrap();
+        let view2 = build_view(&ir2, Some(&ck2));
+        let keys_b: std::collections::BTreeSet<String> =
+            stable_keys(&view2).into_values().collect();
+        assert_eq!(keys_a, keys_b);
+        // And every node got a distinct identity.
+        assert_eq!(keys_a.len(), view.len());
+    }
+
+    #[test]
+    fn duplicate_copies_trees_and_remaps_internal_refs() {
+        let mut ir = parse(PLASMA).unwrap();
+        // Duplicate warped + n together: n's copy must read warped's copy.
+        let new = duplicate_nodes(
+            &mut ir,
+            &[NodeKey::Let("warped".into()), NodeKey::Let("n".into())],
+        )
+        .unwrap();
+        assert_eq!(new.len(), 2);
+        let ir = reload(&ir);
+        crate::ir::check(&ir).expect("checks after duplicate");
+        let n1 = ir.lets.iter().position(|(n, _)| n == "n1").expect("n1 exists");
+        let w1 = ir.lets.iter().position(|(n, _)| n == "warped1").expect("warped1 exists");
+        // n1's fbm reads warped1, not warped.
+        let root = ir.lets[n1].1;
+        let ExprKind::Call { args, .. } = &ir.expr(root).kind else { panic!("fbm call") };
+        assert!(matches!(ir.expr(args[0].value).kind, ExprKind::Let(l) if l == w1));
+        // The originals are untouched and layout offsets applied.
+        assert!(ir.lets.iter().any(|(n, _)| n == "warped"));
+        assert_eq!(ir.layout.get("warped1"), Some(&(152.0, 112.0)));
+        // Duplicating only a source is refused with a friendly message.
+        let mut ir = ir;
+        assert!(duplicate_nodes(&mut ir, &[NodeKey::Input(Input::Time)]).is_err());
     }
 
     /// First call expression named `op` (tests address args through it).

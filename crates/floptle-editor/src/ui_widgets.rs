@@ -37,7 +37,11 @@ pub(crate) fn asset_picker(
         .width(pw)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
+            // A CONSTANT popup size: content used to dictate the height, so
+            // the popup grew and shrank between opens (and got uselessly tiny
+            // on short lists). Fixed frame, scroll inside.
             ui.set_min_width(pw);
+            ui.set_min_height(430.0);
             let qid = id.with("q");
             let gid = id.with("grid");
             let mut q: String = ui.data(|d| d.get_temp(qid).unwrap_or_default());
@@ -74,7 +78,7 @@ pub(crate) fn asset_picker(
                 ui.close();
             }
             let ql = q.to_lowercase();
-            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(380.0).min_scrolled_height(380.0).show(ui, |ui| {
                 if ql.is_empty() {
                     picker_tree(ui, tree, accept, selected_text, grid, qid, &mut picked);
                 } else {
@@ -406,7 +410,7 @@ pub(crate) fn searchable_picker(
                 done(ui);
             }
             let ql = q.to_lowercase();
-            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(300.0).min_scrolled_height(300.0).show(ui, |ui| {
                 for p in items.iter().filter(|p| ql.is_empty() || p.to_lowercase().contains(&ql)) {
                     let name = p.rsplit('/').next().unwrap_or(p);
                     if ui

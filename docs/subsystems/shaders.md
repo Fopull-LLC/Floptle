@@ -41,9 +41,16 @@
 > re-print the `.flsl` to disk (graph-local undo), the Scripting-tab buffer
 > follows, external text edits re-sync the graph by mtime, and hot reload
 > shows every change live in the scene. Double-clicking a `.flsl` opens the
-> graph; `</>` jumps to text. Nine commented example shaders
-> (`floptle-shader::examples`) seed into `shaders/examples/` per project and
-> are compile-tested against the REAL pass sources.
+> graph; `</>` jumps to text. Navigation is the node-editor standard (wheel
+> zooms about the pointer, middle-drag pans, left-drag box-selects) with full
+> multi-select: ctrl/shift-click, group move, group delete, Ctrl+D duplicate
+> (intra-selection wires follow the copies). Positions are STABLE — layout
+> entries plus a session cache keyed by two reparse-stable identities mean a
+> node only ever moves when dragged. Ten commented example shaders
+> (`floptle-shader::examples`, incl. `water.flsl` with fieldDistance shoreline
+> foam) seed into `shaders/examples/` per project (missing ones fill in on
+> open; deleting the folder opts out) and are compile-tested against the REAL
+> pass sources.
 
 This is Floptle's biggest lever for visuals nobody else can make (see
 [VISION](../VISION.md) §4.2). We *own the representation*, so we can add
