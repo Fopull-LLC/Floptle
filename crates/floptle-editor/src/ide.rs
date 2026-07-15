@@ -1245,6 +1245,67 @@ impl EditorTabViewer<'_> {
                     }
                 });
             }
+            ui.add_space(10.0);
+            ui.separator();
+            ui.strong("Shader stdlib (.flsl)");
+            ui.small(
+                "Custom material looks (ADR-0007): Assets → right-click → ◈ New Shader, then \
+                 Inspector → Material → Shader to assign. `uniform`s become Inspector knobs, \
+                 `texture` slots take drag-and-drop textures, and every op below can be wired \
+                 by name — also editable in VSCode.",
+            );
+            ui.add_space(4.0);
+            {
+                let inputs: Vec<String> = floptle_shader::ir::Input::all()
+                    .iter()
+                    .map(|i| format!("{}: {}", i.name(), i.ty().flsl()))
+                    .collect();
+                let inputs_line = format!("inputs — {}", inputs.join(", "));
+                if !searching || inputs_line.to_ascii_lowercase().contains(&q) {
+                    hits += 1;
+                    ui.monospace(
+                        egui::RichText::new(inputs_line)
+                            .color(egui::Color32::from_rgb(190, 140, 255)),
+                    );
+                    ui.add_space(2.0);
+                }
+            }
+            for cat in ["math", "noise", "color", "texture", "sdf", "engine"] {
+                let ops: Vec<&floptle_shader::stdlib::OpSpec> = floptle_shader::stdlib::OPS
+                    .iter()
+                    .filter(|o| o.category == cat)
+                    .filter(|o| {
+                        !searching
+                            || o.name.to_ascii_lowercase().contains(&q)
+                            || o.doc.to_ascii_lowercase().contains(&q)
+                    })
+                    .collect();
+                if ops.is_empty() {
+                    continue;
+                }
+                hits += ops.len();
+                let hdr = egui::CollapsingHeader::new(format!("◈ {cat}  ({})", ops.len()))
+                    .id_salt(("flsl_cat", cat));
+                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(false) };
+                hdr.show(ui, |ui| {
+                    for o in ops {
+                        let args: Vec<String> = o
+                            .inputs
+                            .iter()
+                            .map(|i| match i.default {
+                                Some(d) => format!("{}: {d}", i.name),
+                                None => i.name.to_string(),
+                            })
+                            .collect();
+                        ui.monospace(
+                            egui::RichText::new(format!("{}({})", o.name, args.join(", ")))
+                                .color(egui::Color32::from_rgb(190, 140, 255)),
+                        );
+                        ui.indent(("flsl_doc", o.name), |ui| ui.small(o.doc));
+                        ui.add_space(2.0);
+                    }
+                });
+            }
             if searching && hits == 0 {
                 ui.add_space(8.0);
                 ui.label(format!(
@@ -1428,6 +1489,7 @@ impl EditorTabViewer<'_> {
 
         // ---- the code editor ----
         let is_lua = self.ide.open[i].path.ends_with(".lua");
+        let is_flsl = crate::assets::is_shader(&self.ide.open[i].path);
         let font = egui::FontId::monospace(13.0);
         let lfont = font.clone();
         let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
@@ -1435,6 +1497,8 @@ impl EditorTabViewer<'_> {
             // No wrap (code editor) — logical lines == rows, so the gutter aligns.
             let mut job = if is_lua {
                 lua_highlight(buf.as_str(), lfont.clone(), &theme)
+            } else if is_flsl {
+                crate::theme::flsl_highlight(buf.as_str(), lfont.clone(), &theme)
             } else {
                 plain_job(buf.as_str(), lfont.clone(), &theme)
             };

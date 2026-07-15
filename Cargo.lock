@@ -1326,6 +1326,7 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-rules",
+ "floptle-shader",
  "floptle-ui",
  "fontdue",
  "glam",
@@ -1396,7 +1397,7 @@ dependencies = [
 name = "floptle-shader"
 version = "0.0.0"
 dependencies = [
- "floptle-core",
+ "naga",
 ]
 
 [[package]]

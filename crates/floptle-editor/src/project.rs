@@ -369,6 +369,35 @@ impl Editor {
         self.rename_target = Some((p, String::new()));
     }
 
+    /// Create a new `.flsl` shader in `dir` (or the project's `shaders/` folder when the
+    /// target isn't shader-ish), seeded from the worked-example template, opened in the
+    /// IDE with the naming modal up — the same flow as a new Lua script.
+    pub(crate) fn new_shader(&mut self, dir: &str) {
+        let dirp = PathBuf::from(dir);
+        let target_dir = if dir.replace('\\', "/").contains("/shaders") {
+            dirp
+        } else {
+            self.project_root.join("shaders")
+        };
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            eprintln!("  new shader failed: {e}");
+            return;
+        }
+        let path = unique_path(&target_dir, "shader", Some("flsl"));
+        if let Err(e) = std::fs::write(&path, floptle_shader::NEW_SHADER_TEMPLATE) {
+            eprintln!("  new shader failed: {e}");
+            return;
+        }
+        self.asset_tree = build_assets(&self.project_root);
+        let p = path.to_string_lossy().to_string();
+        self.ide.open_file(&p);
+        if let Some(dock) = self.dock_state.as_mut() {
+            focus_scripting_tab(dock);
+        }
+        self.selected_asset = Some(p.clone());
+        self.rename_target = Some((p, String::new()));
+    }
+
     /// Rename a file/folder to `new_name` within its current parent directory. If the
     /// typed name has no extension, the original file's extension is kept (so naming a new
     /// `.lua` script "player" yields "player.lua", and a rename can't drop the extension).
@@ -599,6 +628,9 @@ impl Editor {
         self.load_texture_settings();
         self.texture_registry.clear();
         self.texture_registry_setting.clear();
+        // Shader pipelines/bindings live in the (kept) raster pass but their
+        // TexIds and paths belong to the old project — recompile fresh.
+        self.clear_flsl_state();
         self.selection.clear();
         self.selected_asset = None;
         self.ide = IdeState::default();

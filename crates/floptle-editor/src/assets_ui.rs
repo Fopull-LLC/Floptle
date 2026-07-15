@@ -292,7 +292,7 @@ impl<'a> EditorTabViewer<'a> {
             ));
         } else if crate::assets::is_audio(path) {
             self.cmd.preview_audio = Some(path.to_string());
-        } else if is_script(path) || is_markdown(path) {
+        } else if is_script(path) || is_markdown(path) || crate::assets::is_shader(path) {
             self.cmd.open_script_pref = Some(path.to_string());
         }
     }
@@ -310,7 +310,7 @@ impl<'a> EditorTabViewer<'a> {
             }
             ui.separator();
         }
-        let openable = is_script(path) || is_markdown(path);
+        let openable = is_script(path) || is_markdown(path) || crate::assets::is_shader(path);
         if openable && ui.button("🖊 Open in Scripting tab").clicked() {
             self.cmd.open_script = Some(path.to_string());
             self.cmd.focus_scripting = true;
@@ -397,6 +397,10 @@ impl<'a> EditorTabViewer<'a> {
         }
         if ui.button("🖊 New Lua Script").clicked() {
             self.cmd.new_script_in = Some(dir.to_string_lossy().to_string());
+            ui.close();
+        }
+        if ui.button("◈ New Shader").clicked() {
+            self.cmd.new_shader_in = Some(dir.to_string_lossy().to_string());
             ui.close();
         }
         if ui.button("⎙ New Scene").clicked() {
@@ -617,7 +621,7 @@ impl<'a> EditorTabViewer<'a> {
             return;
         }
         ui.separator();
-        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf);
+        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache);
         if let Some(name) = r.save_as
             && !name.is_empty() {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));

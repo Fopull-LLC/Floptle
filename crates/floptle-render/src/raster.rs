@@ -199,17 +199,74 @@ pub struct Raster {
     /// Standalone material textures (decoupled from meshes), bound per-instance so
     /// a Material can re-texture any shape. Indexed by [`TexId`].
     textures: Vec<TexBind>,
+    /// Compiled `.flsl` fragment pipelines (ADR-0007), indexed by [`FlslShaderId`].
+    flsl_shaders: Vec<FlslShader>,
+    /// Live material bindings (group(3) params + textures), indexed by [`FlslBindingId`].
+    flsl_bindings: Vec<FlslBinding>,
+    /// The group-0/1/2 layouts, kept so flsl pipelines can be built later.
+    globals_layout: wgpu::BindGroupLayout,
+    field_layout: wgpu::BindGroupLayout,
+}
+
+/// The WGSL every raster-pass module starts from: the pass shader + the shared
+/// distance-field module. Public so the editor can naga-validate a generated
+/// `.flsl` chunk against the REAL seam before asking for a pipeline.
+pub fn pass_prelude() -> &'static str {
+    concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl"))
 }
 
 /// A registered material texture: its bind group + the texture kept alive for it.
+/// The view + sampling ride along so flsl material bind groups (group(3)) can
+/// re-bind the same image with its own sampler.
 struct TexBind {
     bind: wgpu::BindGroup,
+    view: wgpu::TextureView,
+    sampling: TexSampling,
     _texture: wgpu::Texture,
 }
 
 /// A handle to a material texture registered with [`Raster::register_texture`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TexId(pub u32);
+
+/// A compiled `.flsl` fragment shader registered with
+/// [`Raster::register_flsl_shader`]: one pipeline (opaque- or blended-phase)
+/// whose module is `raster.wgsl + field.wgsl + the generated chunk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlslShaderId(pub u32);
+
+/// A material's live binding of one flsl shader: its group(3) params UBO +
+/// texture slots. Created per material instance by the editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlslBindingId(pub u32);
+
+/// How a Fragment-stage `.flsl` shader composites (mirror of the shader IR's
+/// blend declaration — kept local so floptle-render stays decoupled).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlslBlend {
+    Opaque,
+    Alpha,
+    Additive,
+}
+
+struct FlslShader {
+    pipeline: wgpu::RenderPipeline,
+    group3_layout: wgpu::BindGroupLayout,
+    tex_slots: usize,
+    /// Opaque-phase shaders draw with the opaque bucket (depth write on);
+    /// blended ones draw after the transparent bucket (no depth write).
+    opaque: bool,
+}
+
+struct FlslBinding {
+    shader: FlslShaderId,
+    params_buf: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// One custom-shader draw: mesh + optional base-texture override (group(1),
+/// also what the depth prepass alpha-tests) + the material's flsl binding.
+pub type FlslDraw = (MeshId, Option<TexId>, FlslBindingId, InstanceRaw);
 
 impl Raster {
     pub fn new(gpu: &Gpu) -> Self {
@@ -220,9 +277,7 @@ impl Raster {
         // so meshes RECEIVE field sun-shadows and true SDF AO.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raster"),
-            source: wgpu::ShaderSource::Wgsl(
-                concat!(include_str!("raster.wgsl"), "\n", include_str!("field.wgsl")).into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(pass_prelude().into()),
         });
 
         // Group 0: frame globals (uniform).
@@ -485,6 +540,226 @@ impl Raster {
             instance_cap,
             meshes: Vec::new(),
             textures: Vec::new(),
+            flsl_shaders: Vec::new(),
+            flsl_bindings: Vec::new(),
+            globals_layout,
+            field_layout,
+        }
+    }
+
+    /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
+    /// transpiler's generated WGSL **including its stdlib support**, concatenated
+    /// onto [`pass_prelude`] here. The caller MUST have naga-validated the
+    /// assembled source first (`floptle_shader::validate` with this prelude) —
+    /// this builds the pipeline unconditionally. `replace` swaps an existing
+    /// shader in place (hot reload): live bindings stay valid when the slot
+    /// count is unchanged; the editor rebuilds them right after anyway.
+    pub fn register_flsl_shader(
+        &mut self,
+        gpu: &Gpu,
+        chunk: &str,
+        tex_slots: usize,
+        blend: FlslBlend,
+        replace: Option<FlslShaderId>,
+    ) -> FlslShaderId {
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raster-flsl"),
+            source: wgpu::ShaderSource::Wgsl(format!("{}\n{chunk}", pass_prelude()).into()),
+        });
+
+        // Group 3: the shader's param UBO + its declared texture slots.
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }];
+        for i in 0..tex_slots as u32 {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1 + 2 * i,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 2 + 2 * i,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let group3_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raster-flsl-material"),
+            entries: &entries,
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raster-flsl"),
+            bind_group_layouts: &[
+                Some(&self.globals_layout),
+                Some(&self.tex_layout),
+                Some(&self.field_layout),
+                Some(&group3_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        let opaque = matches!(blend, FlslBlend::Opaque);
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raster-flsl"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(opaque),
+                depth_compare: Some(if opaque {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Less
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_flsl"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: match blend {
+                        FlslBlend::Opaque => None,
+                        FlslBlend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
+                        FlslBlend::Additive => Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                    },
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let shader = FlslShader { pipeline, group3_layout, tex_slots, opaque };
+        match replace {
+            Some(id) if (id.0 as usize) < self.flsl_shaders.len() => {
+                self.flsl_shaders[id.0 as usize] = shader;
+                id
+            }
+            _ => {
+                self.flsl_shaders.push(shader);
+                FlslShaderId(self.flsl_shaders.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Whether a registered flsl shader draws in the opaque phase (depth-write)
+    /// — opaque flsl instances also join the depth prepass.
+    pub fn flsl_shader_is_opaque(&self, id: FlslShaderId) -> bool {
+        self.flsl_shaders.get(id.0 as usize).is_some_and(|s| s.opaque)
+    }
+
+    /// Create (or, with `replace`, rebuild in place) a material's live binding
+    /// of a compiled shader: its params UBO (packed by the transpiler's layout)
+    /// + one texture per declared slot (`None` = the 1×1 white default).
+    pub fn set_flsl_binding(
+        &mut self,
+        gpu: &Gpu,
+        replace: Option<FlslBindingId>,
+        shader: FlslShaderId,
+        params: &[u8],
+        textures: &[Option<TexId>],
+    ) -> FlslBindingId {
+        let default_sampler = self.sampler_for(gpu, TexSampling::default());
+        let sh = &self.flsl_shaders[shader.0 as usize];
+        let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-flsl-params"),
+            size: (params.len().max(16)) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&params_buf, 0, params);
+
+        let default_view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut entries =
+            vec![wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() }];
+        // Per-slot samplers reuse the texture's own registered sampling.
+        let samplers: Vec<wgpu::Sampler> = (0..sh.tex_slots)
+            .map(|i| {
+                let sampling = textures
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .and_then(|t| self.textures.get(t.0 as usize))
+                    .map(|t| t.sampling)
+                    .unwrap_or_default();
+                self.samplers.get(&sampling).cloned().unwrap_or_else(|| default_sampler.clone())
+            })
+            .collect();
+        for (i, sampler) in samplers.iter().enumerate() {
+            let view = textures
+                .get(i)
+                .copied()
+                .flatten()
+                .and_then(|t| self.textures.get(t.0 as usize))
+                .map(|t| &t.view)
+                .unwrap_or(&default_view);
+            entries.push(wgpu::BindGroupEntry {
+                binding: (1 + 2 * i) as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: (2 + 2 * i) as u32,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-flsl-material"),
+            layout: &sh.group3_layout,
+            entries: &entries,
+        });
+        let binding = FlslBinding { shader, params_buf, bind };
+        match replace {
+            Some(id) if (id.0 as usize) < self.flsl_bindings.len() => {
+                self.flsl_bindings[id.0 as usize] = binding;
+                id
+            }
+            _ => {
+                self.flsl_bindings.push(binding);
+                FlslBindingId(self.flsl_bindings.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Update a binding's param block in place — the "param edits are uniform
+    /// writes, never a recompile" contract.
+    pub fn write_flsl_params(&self, gpu: &Gpu, id: FlslBindingId, params: &[u8]) {
+        if let Some(b) = self.flsl_bindings.get(id.0 as usize) {
+            gpu.queue.write_buffer(&b.params_buf, 0, params);
         }
     }
 
@@ -552,7 +827,7 @@ impl Raster {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
-        self.textures.push(TexBind { bind, _texture: texture });
+        self.textures.push(TexBind { bind, view, sampling, _texture: texture });
         id
     }
 
@@ -688,6 +963,25 @@ impl Raster {
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
+        self.draw_scene_with(gpu, color, depth, globals, instances, &[], clear, field);
+    }
+
+    /// [`draw_scene`](Self::draw_scene) plus custom-shader draws: flsl
+    /// instances bucket by (mesh, texture, binding) and draw in the same pass —
+    /// opaque-phase shaders right after the built-in opaque bucket (before
+    /// transparency), blended ones last.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_scene_with(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        clear: Option<[f64; 4]>,
+        field: Option<&wgpu::BindGroup>,
+    ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         // Clear when we own the frame; Load when a prior pass (raymarch) already
@@ -740,6 +1034,42 @@ impl Raster {
         let opaque_buckets = bucketize(true, &mut raws);
         let transparent_buckets = bucketize(false, &mut raws);
 
+        // flsl buckets: (mesh, texture, binding) — phase comes from the SHADER
+        // (its blend declaration), not the instance alpha.
+        let flsl_bucketize = |want_opaque: bool,
+                              raws: &mut Vec<InstanceRaw>|
+         -> Vec<(usize, Option<u32>, u32, u32, u32)> {
+            let mut buckets = Vec::new();
+            let mut keys: Vec<(usize, Option<u32>, u32)> = Vec::new();
+            for (id, tex, bind, _) in flsl {
+                let Some(b) = self.flsl_bindings.get(bind.0 as usize) else { continue };
+                let Some(sh) = self.flsl_shaders.get(b.shader.0 as usize) else { continue };
+                if sh.opaque != want_opaque {
+                    continue;
+                }
+                let k = (id.0 as usize, tex.map(|t| t.0), bind.0);
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+            for (mesh_idx, tex_key, bind_id) in keys {
+                let start = raws.len() as u32;
+                for (id, tex, bind, raw) in flsl {
+                    if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key && bind.0 == bind_id
+                    {
+                        raws.push(*raw);
+                    }
+                }
+                let count = raws.len() as u32 - start;
+                if count > 0 {
+                    buckets.push((mesh_idx, tex_key, bind_id, start, count));
+                }
+            }
+            buckets
+        };
+        let flsl_opaque = flsl_bucketize(true, &mut raws);
+        let flsl_blended = flsl_bucketize(false, &mut raws);
+
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
@@ -783,12 +1113,32 @@ impl Raster {
                     rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
                 }
             };
+            let draw_flsl =
+                |rp: &mut wgpu::RenderPass<'_>, buckets: &[(usize, Option<u32>, u32, u32, u32)]| {
+                    for &(mesh_idx, tex_key, bind_id, start, count) in buckets {
+                        let binding = &self.flsl_bindings[bind_id as usize];
+                        let shader = &self.flsl_shaders[binding.shader.0 as usize];
+                        let mesh = &self.meshes[mesh_idx];
+                        let bind = match tex_key {
+                            Some(t) => &self.textures[t as usize].bind,
+                            None => &mesh.tex_bind,
+                        };
+                        rp.set_pipeline(&shader.pipeline);
+                        rp.set_bind_group(1, bind, &[]);
+                        rp.set_bind_group(3, &binding.bind, &[]);
+                        rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                        rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                    }
+                };
             rp.set_pipeline(&self.pipeline);
             draw(&mut rp, &opaque_buckets);
+            draw_flsl(&mut rp, &flsl_opaque);
             if !transparent_buckets.is_empty() {
                 rp.set_pipeline(&self.transparent_pipeline);
                 draw(&mut rp, &transparent_buckets);
             }
+            draw_flsl(&mut rp, &flsl_blended);
         }
         gpu.queue.submit([encoder.finish()]);
     }
@@ -818,6 +1168,20 @@ impl Raster {
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         main_depth: &wgpu::Texture,
     ) -> bool {
+        self.depth_prepass_with(gpu, globals, instances, &[], main_depth)
+    }
+
+    /// [`depth_prepass`](Self::depth_prepass) plus custom-shader draws:
+    /// opaque-phase flsl instances prime depth too (their group(1) base texture
+    /// drives the same conservative alpha discard).
+    pub fn depth_prepass_with(
+        &mut self,
+        gpu: &Gpu,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        flsl: &[FlslDraw],
+        main_depth: &wgpu::Texture,
+    ) -> bool {
         let size = main_depth.size();
         let recreated = match &self.prepass_tex {
             Some((t, _)) => t.size() != size,
@@ -843,12 +1207,28 @@ impl Raster {
 
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
+        // Opaque-SHADER flsl draws join in — their phase comes from the shader,
+        // not the instance alpha.
         const OPAQUE_CUTOFF: f32 = 0.999;
+        let flsl_opaque = |bind: &FlslBindingId| {
+            self.flsl_bindings
+                .get(bind.0 as usize)
+                .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
+                .is_some_and(|s| s.opaque)
+        };
         let mut raws: Vec<InstanceRaw> = Vec::new();
         let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
         let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
         for (id, tex, raw) in instances {
             if raw.color[3] >= OPAQUE_CUTOFF {
+                let k = (id.0 as usize, tex.map(|t| t.0));
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
+        for (id, tex, bind, _) in flsl {
+            if flsl_opaque(bind) {
                 let k = (id.0 as usize, tex.map(|t| t.0));
                 if !keys.contains(&k) {
                     keys.push(k);
@@ -862,6 +1242,11 @@ impl Raster {
                     && id.0 as usize == mesh_idx
                     && tex.map(|t| t.0) == tex_key
                 {
+                    raws.push(*raw);
+                }
+            }
+            for (id, tex, bind, raw) in flsl {
+                if flsl_opaque(bind) && id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
                     raws.push(*raw);
                 }
             }

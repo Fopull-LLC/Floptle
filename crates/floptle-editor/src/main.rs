@@ -52,6 +52,7 @@ mod matter_catalog;
 mod net;
 mod play;
 mod prefab;
+mod shaders;
 mod prefs;
 mod project;
 mod render_frame;
@@ -261,6 +262,8 @@ struct EditorCmd {
     new_folder_in: Option<String>,
     /// Create a new blank Lua script inside this directory (absolute path).
     new_script_in: Option<String>,
+    /// Create a new `.flsl` shader inside this directory (absolute path).
+    new_shader_in: Option<String>,
     /// Attach a named `.lua` script to an entity (seed params from its defaults).
     attach_named: Option<(String, Entity)>,
     /// Open this file in the user's external editor (ADR-0011).
@@ -417,6 +420,9 @@ struct EditorTabViewer<'a> {
     entity_names: &'a [(Entity, String)],
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
+    /// Compiled `.flsl` shaders — the Inspector's Material section reads the
+    /// selected shader's uniform/texture schema (and error) from here.
+    flsl_cache: &'a shaders::FlslCache,
     /// The component clipboard (read-only here; copy/paste route through `cmd`).
     component_clip: &'a Option<ComponentClip>,
     /// Search text for the Inspector's "➕ Add Component" menu.
@@ -1675,6 +1681,12 @@ struct Editor {
     /// Parsed prefab files by path (mtime-validated) — `spawn("…")` every tick
     /// must not re-read + re-parse the asset.
     prefab_cache: HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<floptle_scene::NodeDoc>)>,
+    /// Compiled `.flsl` shaders by project-relative path (mtime hot reload).
+    flsl_cache: shaders::FlslCache,
+    /// Live group(3) material bindings per shader-material entity.
+    flsl_binds: shaders::FlslBinds,
+    /// Retired binding slots, reused before growing the raster's registry.
+    flsl_free: Vec<floptle_render::FlslBindingId>,
     /// The terrain fields (id-keyed) + texture palette when Play started.
     /// Terrain lives OUTSIDE the scene doc, so `play_snapshot` doesn't carry
     /// it — Stop restores from here so unsaved sculpts survive Play and a

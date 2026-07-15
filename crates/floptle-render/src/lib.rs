@@ -47,8 +47,8 @@ pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInsta
 pub use post::{PostSettings, PostStack, SsaoFrame};
 pub use ui::{Ui, UiBatch, UiInstance, UiPlane, UiTex};
 pub use raster::{
-    instance_of, instance_of_mat, Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId,
-    TexSampling, TexWrap,
+    instance_of, instance_of_mat, pass_prelude, FlslBindingId, FlslBlend, FlslDraw, FlslShaderId,
+    Globals, InstanceRaw, MaterialParams, Raster, TexFilter, TexId, TexSampling, TexWrap,
 };
 pub use raymarch::{Raymarch, RaymarchGlobals, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS};
 pub use retro::Retro;

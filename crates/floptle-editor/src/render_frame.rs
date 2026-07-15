@@ -115,6 +115,10 @@ impl Editor {
         // BEFORE the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
         self.ensure_vfx_assets();
+        // Compile/hot-reload `.flsl` shader materials + refresh their group(3)
+        // bindings — the gathers below (main, Game viewport, camera preview)
+        // all read `flsl_binds`, so this must run before any of them.
+        self.ensure_flsl_materials();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
         // playhead. This must run BEFORE anything gathers draw data — the UI
@@ -691,6 +695,9 @@ impl Editor {
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // Custom-shader draws (a Material with a compiled `.flsl`): same
+        // instance data, drawn through the shader's own pipeline + group(3).
+        let mut flsl_draws: Vec<floptle_render::FlslDraw> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part).
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
@@ -723,15 +730,22 @@ impl Editor {
                 .as_ref()
                 .and_then(|m| m.texture.as_deref())
                 .and_then(|p| self.texture_registry.get(p).copied());
+            let flsl = self.flsl_binds.get(e).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {
                     if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
-                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
+                        let raw = instance_of_mat(model, &mp);
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
+                        }
                     }
                 }
                 Matter::Blob { scale } => {
+                    // Blobs render in the raymarch pass — a custom fragment
+                    // shader doesn't apply (the Sdf stage is their world).
                     let mp = mat.as_ref().map(material_params).unwrap_or_else(blob_default_material);
                     blobs.push((t.translation, scale * t.scale.x, mp));
                 }
@@ -740,7 +754,7 @@ impl Editor {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch, &mut instances);
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render elsewhere.
@@ -1602,6 +1616,7 @@ impl Editor {
                 entity_names: &entity_names,
                 materials,
                 mat_name_buf,
+                flsl_cache: &self.flsl_cache,
                 component_clip,
                 add_component_filter,
                 layer_names: &layer_names,
@@ -2544,7 +2559,7 @@ impl Editor {
                     // runs) and caps the raymarch at the nearest mesh per pixel.
                     let depth_tex =
                         if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
-                    if raster.depth_prepass(gpu, globals, &instances, depth_tex) {
+                    if raster.depth_prepass_with(gpu, globals, &instances, &flsl_draws, depth_tex) {
                         raymarch.set_depth_prime(gpu, raster.prepass_view());
                     }
                     raymarch.draw_into_primed(gpu, color, depth, rm);
@@ -2553,8 +2568,8 @@ impl Editor {
                     raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
                 };
-                raster.draw_scene(
-                    gpu, color, depth, globals, &instances, raster_clear,
+                raster.draw_scene_with(
+                    gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
                     Some(raymarch.field_bind()),
                 );
                 // The reference grid is an editor aid — Scene view only.
@@ -2811,12 +2826,14 @@ impl Editor {
         self.apply_frame_commands(cmd, frame_pointer_down);
     }
 
-    /// Live Lua syntax check for the active IDE file (drives the red squiggle).
+    /// Live syntax check for the active IDE file (drives the red squiggle):
+    /// Lua through the script host, `.flsl` through the shader compiler.
     fn check_active_script_syntax(&mut self) {
-        // Live Lua syntax check for the active IDE file (drives red squiggles).
         self.ide_diag = self.ide.active.and_then(|i| self.ide.open.get(i)).and_then(|f| {
             if f.path.ends_with(".lua") {
                 self.script_host.check_syntax(&f.text)
+            } else if crate::assets::is_shader(&f.path) {
+                Editor::check_flsl_syntax(&f.text)
             } else {
                 None
             }
@@ -4264,6 +4281,9 @@ impl Editor {
         if let Some(dir) = cmd.new_script_in {
             self.new_script(&dir);
         }
+        if let Some(dir) = cmd.new_shader_in {
+            self.new_shader(&dir);
+        }
         if let Some(path) = cmd.rename_asset {
             // Seed the rename modal with the current base name (the extension is shown as a
             // fixed suffix in the modal, so you edit just the name).
@@ -4413,6 +4433,9 @@ impl Editor {
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // Custom `.flsl` materials draw offscreen too (bindings were refreshed
+        // by ensure_flsl_materials before any gather this frame).
+        let mut flsl_draws: Vec<floptle_render::FlslDraw> = Vec::new();
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part),
         // exactly like the main gather — so offscreen views animate skinned meshes too.
@@ -4427,13 +4450,18 @@ impl Editor {
                 .as_ref()
                 .and_then(|m| m.texture.as_deref())
                 .and_then(|p| self.texture_registry.get(p).copied());
+            let flsl = self.flsl_binds.get(ent).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {
                     if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                         let model = t.render_matrix(cam.world_position);
                         let mp =
                             mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
-                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
+                        let raw = instance_of_mat(model, &mp);
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
+                        }
                     }
                 }
                 Matter::Blob { scale } => {
@@ -4459,7 +4487,7 @@ impl Editor {
                         let pose = self.anim.poses.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
                             gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch,
-                            &mut instances,
+                            &mut instances, flsl, &mut flsl_draws,
                         );
                     }
                 }
@@ -4571,8 +4599,8 @@ impl Editor {
                 raymarch.upload_globals(gpu, rm);
                 Some(clear.map(|c| c as f64))
             };
-            raster.draw_scene(
-                gpu, color, depth, globals, &instances, raster_clear,
+            raster.draw_scene_with(
+                gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
                 Some(raymarch.field_bind()),
             );
             if !vfx_batches.is_empty() {
@@ -4612,10 +4640,18 @@ fn push_mesh_instances(
     mp: &MaterialParams,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+    flsl: Option<floptle_render::FlslBindingId>,
+    flsl_out: &mut Vec<floptle_render::FlslDraw>,
 ) {
+    // A node's custom `.flsl` material routes every part through the shader's
+    // pipeline instead of the built-in one — same instance data either way.
+    let mut push = |mid: MeshId, raw: InstanceRaw| match flsl {
+        Some(b) => flsl_out.push((mid, tex, b, raw)),
+        None => instances.push((mid, tex, raw)),
+    };
     let Some(rig) = asset.rig.as_ref() else {
         for &mid in &asset.parts {
-            instances.push((mid, tex, instance_of_mat(model, mp)));
+            push(mid, instance_of_mat(model, mp));
         }
         return;
     };
@@ -4625,10 +4661,10 @@ fn push_mesh_instances(
         if let Some(Some(skin)) = rig.skins.get(i) {
             anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
             raster.update_mesh_vertices(gpu, mid, skin_scratch);
-            instances.push((mid, tex, instance_of_mat(model, mp)));
+            push(mid, instance_of_mat(model, mp));
         } else {
             let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
-            instances.push((mid, tex, instance_of_mat(model * local, mp)));
+            push(mid, instance_of_mat(model * local, mp));
         }
     }
 }

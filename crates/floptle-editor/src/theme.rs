@@ -252,3 +252,107 @@ pub(crate) fn plain_job(text: &str, font: egui::FontId, theme: &CodeTheme) -> eg
     );
     job
 }
+
+/// `.flsl` structure keywords (declarations + stage/blend names + types).
+const FLSL_KEYWORDS: [&str; 15] = [
+    "shader", "stage", "blend", "uniform", "texture", "let", "output", "range", "fragment",
+    "sdf", "opaque", "alpha", "additive", "float", "color",
+];
+
+/// Every stdlib op + built-in input name, straight from the shader registry —
+/// autocomplete-grade accuracy with zero duplicated word lists.
+fn flsl_api_words() -> &'static std::collections::HashSet<&'static str> {
+    static WORDS: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    WORDS.get_or_init(|| {
+        let mut set: std::collections::HashSet<&'static str> =
+            floptle_shader::stdlib::OPS.iter().map(|o| o.name).collect();
+        for i in floptle_shader::ir::Input::all() {
+            set.insert(i.name());
+        }
+        for v in ["vec2", "vec3", "vec4"] {
+            set.insert(v);
+        }
+        set
+    })
+}
+
+/// Syntax highlighting for `.flsl` shaders — the Lua highlighter's structure
+/// with `//` comments, `#RRGGBB` colors as numbers, and the shader word sets.
+pub(crate) fn flsl_highlight(
+    text: &str,
+    font: egui::FontId,
+    theme: &CodeTheme,
+) -> egui::text::LayoutJob {
+    use egui::Color32;
+    let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let c_kw = rgb(theme.kw);
+    let c_api = rgb(theme.api);
+    let c_str = rgb(theme.string);
+    let c_num = rgb(theme.num);
+    let c_com = rgb(theme.comment);
+    let c_def = rgb(theme.text);
+
+    let mut job = egui::text::LayoutJob::default();
+    let mut push = |s: &str, color: Color32| {
+        job.append(s, 0.0, egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() });
+    };
+
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            let s = i;
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            push(&text[s..i], c_com);
+        } else if c == b'"' {
+            let s = i;
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'"' || b[i] == b'\n' {
+                    i = (i + 1).min(b.len());
+                    break;
+                }
+                i += 1;
+            }
+            push(&text[s..i], c_str);
+        } else if c == b'#' {
+            // A #RRGGBB[AA] color literal reads as one "number".
+            let s = i;
+            i += 1;
+            while i < b.len() && (b[i] as char).is_ascii_hexdigit() {
+                i += 1;
+            }
+            push(&text[s..i], c_num);
+        } else if c.is_ascii_digit() {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.') {
+                i += 1;
+            }
+            push(&text[s..i], c_num);
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let word = &text[s..i];
+            let color = if FLSL_KEYWORDS.contains(&word) {
+                c_kw
+            } else if flsl_api_words().contains(word) {
+                c_api
+            } else {
+                c_def
+            };
+            push(word, color);
+        } else {
+            let ch = text[i..].chars().next().unwrap();
+            let l = ch.len_utf8();
+            push(&text[i..i + l], c_def);
+            i += l;
+        }
+    }
+    job
+}

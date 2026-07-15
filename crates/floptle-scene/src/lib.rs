@@ -1020,6 +1020,14 @@ pub struct MaterialDoc {
     pub ambient: f32,
     #[serde(default = "one_f32")]
     pub alpha: f32,
+    /// Custom `.flsl` shader path (ADR-0007) + its uniform overrides and
+    /// texture-slot bindings. All default-empty so pre-shader files still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shader_params: std::collections::BTreeMap<String, [f32; 4]>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shader_textures: std::collections::BTreeMap<String, String>,
 }
 
 fn white3() -> [f32; 3] {
@@ -1053,6 +1061,9 @@ impl MaterialDoc {
             unlit: self.unlit,
             ambient: self.ambient,
             alpha: self.alpha,
+            shader: self.shader.clone(),
+            shader_params: self.shader_params.clone(),
+            shader_textures: self.shader_textures.clone(),
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -1069,6 +1080,9 @@ impl MaterialDoc {
             unlit: m.unlit,
             ambient: m.ambient,
             alpha: m.alpha,
+            shader: m.shader.clone(),
+            shader_params: m.shader_params.clone(),
+            shader_textures: m.shader_textures.clone(),
         }
     }
 }
