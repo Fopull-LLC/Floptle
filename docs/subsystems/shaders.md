@@ -9,6 +9,26 @@
 > [`./renderer.md`](./renderer.md), and materials in
 > [`./materials-and-textures.md`](./materials-and-textures.md).
 
+> **STATUS (2026-07-15): text core SHIPPED — phases 1–4 of
+> [`../shader-system-proposal.md`](../shader-system-proposal.md)** (which
+> supersedes this pre-spec's integration details). What's live:
+> `floptle-shader` (IR arena + checker, round-trippable `.flsl` parse/print,
+> WGSL transpile, naga validation with `.flsl` line mapping, stdlib v1);
+> **Fragment stage** — `Material.shader` names a `.flsl`, one pipeline per
+> shader with a generated group(3) param UBO + up to 8 texture slots, drawn
+> beside the built-in look (which stays byte-identical when unused); **Sdf
+> stage** — a **Field Shape** node's shader IS its geometry, spliced into
+> `map_d`/`map` (renders, casts/receives shadows + AO, up to 4 per scene,
+> visual-only until the CPU evaluator); the **tiling block** (UV
+> count/offset/rotation + triplanar, per binding, both paths); Inspector rows
+> generated from `uniform`/`texture` declarations; mtime hot reload with
+> last-good-pipeline fallback; `.flsl` syntax highlighting, live squiggles and
+> a stdlib Docs section in the Scripting tab; `◈ New Shader` in Assets.
+> Divergences from this pre-spec: stdlib identifiers are **camelCase**, the
+> stage is named `sdf` (not raymarch), `Vertex`/light/post stages are reserved
+> (proposal §9), and the **graph editor is the next phase** — this doc's §6
+> mock is still the target. Probes: `shader_probe`, `field_shape_probe`.
+
 This is Floptle's biggest lever for visuals nobody else can make (see
 [VISION](../VISION.md) §4.2). We *own the representation*, so we can add
 non-standard nodes — raymarch/SDF warps, feedback, impossible color transport —

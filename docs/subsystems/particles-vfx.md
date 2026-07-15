@@ -1,5 +1,10 @@
 # Particles & VFX (`floptle-vfx`)
 
+> **Superseded in part** by [../particle-system-proposal.md](../particle-system-proposal.md)
+> (2026-07-03): tracks absorb groups, emit events become draggable clips + bursts +
+> automation lanes, mesh particles and field integration are added. This doc stays as
+> the original design record until the implementation lands and it is rewritten.
+
 Timeline-driven particle authoring: name an effect, give it a lifetime, drop
 particle groups onto a video-editor-style timeline, and shape every property
 with a constant or a hand-drawn curve.
