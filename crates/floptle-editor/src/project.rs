@@ -323,6 +323,16 @@ impl Editor {
         self.project_root.join("scripts")
     }
 
+    /// Resolve an asset path the way the rest of the editor does (`ensure_texture`,
+    /// the IDE): the asset tree stores paths as walked from `project_root` — which
+    /// may itself be relative (the default is plain `assets`) — so a stored path is
+    /// usually already resolvable AS-IS. Only a bare project-relative path (e.g. a
+    /// hand-edited `shaders/foo.flsl` in a scene file) needs the root joined on.
+    /// Joining unconditionally double-prefixes the root: `assets/assets/…` (ENOENT).
+    pub(crate) fn resolve_asset_path(&self, path: &str) -> PathBuf {
+        resolve_asset_path(&self.project_root, path)
+    }
+
     // ---- asset file operations (the in-engine create / rename / delete) --------
     /// Create a new folder inside `dir` (auto-numbered if `new_folder` is taken),
     /// then rescan so it appears in the browser.
@@ -914,6 +924,16 @@ pub(crate) fn open_in_file_manager(path: &Path) {
         .spawn();
 }
 
+/// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.
+pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() || p.exists() {
+        p
+    } else {
+        project_root.join(path)
+    }
+}
+
 /// An empty scene (just lighting) — used when a project is closed.
 /// A default camera node (active) looking at the origin from up + back, so every new
 /// scene starts with a viewpoint that play mode can render from.
@@ -1045,5 +1065,39 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
             },
             default_camera_node(),
         ],
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    /// The bug this guards: the asset picker stores paths as walked from
+    /// `project_root` (default: the RELATIVE `assets`), and joining that root on
+    /// again gave `assets/assets/…` — "can't read shader (os error 2)".
+    #[test]
+    fn asset_paths_resolve_without_double_join() {
+        let dir = std::env::temp_dir().join(format!("floptle-resolve-{}", std::process::id()));
+        let root = dir.join("assets");
+        std::fs::create_dir_all(root.join("shaders")).unwrap();
+        std::fs::write(root.join("shaders/s.flsl"), "shader s { stage fragment }").unwrap();
+
+        // Absolute (project opened by full path): used as-is.
+        let abs = root.join("shaders/s.flsl");
+        assert_eq!(resolve_asset_path(&root, abs.to_str().unwrap()), abs);
+        // Tree path already carrying the (relative) root: used as-is, NOT re-joined.
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        assert_eq!(
+            resolve_asset_path(Path::new("assets"), "assets/shaders/s.flsl"),
+            PathBuf::from("assets/shaders/s.flsl"),
+        );
+        // Bare project-relative (hand-edited scene file): root joined on.
+        assert_eq!(
+            resolve_asset_path(Path::new("assets"), "shaders/missing.flsl"),
+            PathBuf::from("assets/shaders/missing.flsl"),
+        );
+        std::env::set_current_dir(cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
