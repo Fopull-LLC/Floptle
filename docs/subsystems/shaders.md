@@ -25,9 +25,25 @@
 > last-good-pipeline fallback; `.flsl` syntax highlighting, live squiggles and
 > a stdlib Docs section in the Scripting tab; `◈ New Shader` in Assets.
 > Divergences from this pre-spec: stdlib identifiers are **camelCase**, the
-> stage is named `sdf` (not raymarch), `Vertex`/light/post stages are reserved
-> (proposal §9), and the **graph editor is the next phase** — this doc's §6
-> mock is still the target. Probes: `shader_probe`, `field_shape_probe`.
+> stage is named `sdf` (not raymarch), and `Vertex`/light/post stages are
+> reserved (proposal §9). Probes: `shader_probe`, `field_shape_probe`.
+>
+> **Phase 5 — the ◈ Shaders GRAPH EDITOR — is live too** (this doc's §2
+> two-view diagram, realized): a pan/zoom node canvas (`floptle-shader::graph`
+> projects the same IR; the editor's `shader_graph.rs` renders it). Every
+> call/operator is a node, literal args edit inline on the port, named `let`s
+> keep their names, and anything anonymous is promoted to a `let` the moment
+> you drag it. Wires type-check on connect (a bad wire bounces with the
+> checker's message); node positions ride the `//@layout` trailing annotation
+> (lets by name, sources as `in.uv` / `u.speed` / `tex.slot`, the sink as
+> `out`). Right-click = a searchable palette built from the stdlib registry +
+> knobs (uniforms), texture slots, constants, combine/split and inputs. Edits
+> re-print the `.flsl` to disk (graph-local undo), the Scripting-tab buffer
+> follows, external text edits re-sync the graph by mtime, and hot reload
+> shows every change live in the scene. Double-clicking a `.flsl` opens the
+> graph; `</>` jumps to text. Nine commented example shaders
+> (`floptle-shader::examples`) seed into `shaders/examples/` per project and
+> are compile-tested against the REAL pass sources.
 
 This is Floptle's biggest lever for visuals nobody else can make (see
 [VISION](../VISION.md) §4.2). We *own the representation*, so we can add
