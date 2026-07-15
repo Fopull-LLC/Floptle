@@ -298,6 +298,17 @@ fn slot_args<'a>(op: &OpSpec, args: &'a [CallArg]) -> Vec<Option<&'a CallArg>> {
 /// Build the whole graph view from a (possibly not-type-clean) IR. `ck` adds
 /// port/output types when the shader checks.
 pub fn build_view(ir: &ShaderIr, ck: Option<&Checked>) -> Vec<GNode> {
+    build_view_padded(ir, ck, &|_| 0.0)
+}
+
+/// [`build_view`] with per-node EXTRA height fed into the auto-layout — the
+/// editor passes each node's preview-thumbnail strip so freshly laid-out
+/// columns never stack nodes into each other.
+pub fn build_view_padded(
+    ir: &ShaderIr,
+    ck: Option<&Checked>,
+    extra_h: &dyn Fn(&GNode) -> f32,
+) -> Vec<GNode> {
     let mut b = ViewBuilder { ir, ck, nodes: Vec::new(), seen: BTreeMap::new() };
 
     // The sink first (so it exists even with no outputs wired).
@@ -356,8 +367,25 @@ pub fn build_view(ir: &ShaderIr, ck: Option<&Checked>) -> Vec<GNode> {
     }
 
     let mut nodes = b.nodes;
-    resolve_positions(ir, &mut nodes);
+    resolve_positions(ir, &mut nodes, extra_h);
     nodes
+}
+
+/// Re-run the auto-layout over EVERY node (ignoring current positions) and
+/// store the result as `//@layout` entries — the "Arrange" button. Anonymous
+/// nodes stay unpinned (they re-stack beside their consumers on each build).
+pub fn arrange(ir: &mut ShaderIr, ck: Option<&Checked>, extra_h: &dyn Fn(&GNode) -> f32) {
+    ir.layout.clear();
+    let nodes = build_view_padded(ir, ck, extra_h);
+    let r = |v: f32| {
+        let v = v.round();
+        if v == 0.0 { 0.0 } else { v } // normalize -0 (column x = -0·w)
+    };
+    for n in &nodes {
+        if let Some(k) = n.key.layout_key() {
+            ir.layout.insert(k, (r(n.pos.0), r(n.pos.1)));
+        }
+    }
 }
 
 struct ViewBuilder<'a> {
@@ -651,8 +679,9 @@ pub fn stable_keys(nodes: &[GNode]) -> BTreeMap<NodeKey, String> {
 
 /// Fill node positions: `//@layout` entries win; everything unplaced is
 /// auto-laid-out by dependency depth (sources left, sink right), stacked
-/// downward per column in emission order. Deterministic.
-fn resolve_positions(ir: &ShaderIr, nodes: &mut [GNode]) {
+/// downward per column in emission order. Deterministic. `extra_h` adds the
+/// host's per-node display height (preview thumbnails) to the stacking.
+fn resolve_positions(ir: &ShaderIr, nodes: &mut [GNode], extra_h: &dyn Fn(&GNode) -> f32) {
     // Wire map: node -> the nodes it feeds (for depth).
     let index_of: BTreeMap<NodeKey, usize> =
         nodes.iter().enumerate().map(|(i, n)| (n.key.clone(), i)).collect();
@@ -702,7 +731,7 @@ fn resolve_positions(ir: &ShaderIr, nodes: &mut [GNode]) {
         let d = depth[i];
         let x = -(d as f32) * (NODE_W + 60.0);
         let y = col_y[d];
-        col_y[d] = y + node_height(&nodes[i]) + 24.0;
+        col_y[d] = y + node_height(&nodes[i]) + extra_h(&nodes[i]) + 24.0;
         nodes[i].pos = (x, y);
     }
 }
@@ -1773,6 +1802,32 @@ shader plasma {
         disconnect(&mut ir, Site::Output(OutName::Color)).unwrap();
         assert!(!ir.outputs.contains_key("color"));
         crate::ir::check(&reload(&ir)).expect("checks");
+    }
+
+    #[test]
+    fn arrange_spaces_columns_by_display_height() {
+        let mut ir = parse(PLASMA).unwrap();
+        // Mirror the editor: most nodes carry a ~154px preview strip.
+        let extra =
+            |n: &GNode| if matches!(n.kind, NodeKind::Uniform(_)) { 0.0 } else { 154.0 };
+        arrange(&mut ir, None, &extra);
+        let view = build_view_padded(&ir, None, &extra);
+        for a in &view {
+            for b in &view {
+                if a.key == b.key || (a.pos.0 - b.pos.0).abs() > 1.0 || a.pos.1 >= b.pos.1 {
+                    continue;
+                }
+                assert!(
+                    b.pos.1 + 0.5 >= a.pos.1 + node_height(a) + extra(a),
+                    "{:?} overlaps {:?}",
+                    a.key,
+                    b.key
+                );
+            }
+        }
+        // Every placeable node got pinned, and the layout survives a reprint.
+        let back = reload(&ir);
+        assert_eq!(back.layout, ir.layout);
     }
 
     #[test]

@@ -65,7 +65,10 @@
 > rebuild (the pipeline only rebuilds when the generated WGSL changes).
 > Texture slots bind the textures of the first scene material using the
 > shader (checker fallback). 👁 in the header toggles all previews;
-> right-click a node to hide just its own. Editor side: `shader_preview.rs`;
+> right-click a node to hide just its own. Auto-layout spaces columns for the
+> thumbnail strip, and the header's ⇅ **Arrange** re-lays-out the whole graph
+> (one undoable commit) — the fix for graphs saved before previews existed.
+> Editor side: `shader_preview.rs`;
 > probe: `preview_tiles_probe`. Also fixed: adding a knob/texture slot from
 > the palette now shows its node immediately (the view includes DECLARED
 > uniforms/textures, not just referenced ones), and the criss-cross triangle
