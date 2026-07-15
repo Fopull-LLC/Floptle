@@ -154,10 +154,11 @@ impl Editor {
         }
     }
 
-    /// Compile (or hot-reload) one `.flsl` by project-relative path. Keeps the
-    /// last good pipeline on failure; Console-reports each new error once.
+    /// Compile (or hot-reload) one `.flsl` by its Material path (asset-tree or
+    /// project-relative). Keeps the last good pipeline on failure;
+    /// Console-reports each new error once.
     fn ensure_flsl_shader(&mut self, rel: &str) {
-        let full = self.project_root.join(rel);
+        let full = self.resolve_asset_path(rel);
         let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
         if let Some(entry) = self.flsl_cache.get(rel)
             && entry.mtime == mtime
@@ -471,7 +472,7 @@ impl Editor {
 
     /// Compile (or hot-reload) one Sdf-stage `.flsl` by material path.
     fn ensure_sdf_shader(&mut self, rel: &str) {
-        let full = self.project_root.join(rel);
+        let full = self.resolve_asset_path(rel);
         let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
         if let Some(entry) = self.sdf_cache.get(rel)
             && entry.mtime == mtime
