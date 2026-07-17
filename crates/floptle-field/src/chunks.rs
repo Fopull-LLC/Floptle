@@ -414,6 +414,24 @@ impl ChunkField {
         }
     }
 
+    /// Overwrite the given chunks with `src`'s (cloning present ones, removing
+    /// absent ones) — the MIRROR primitive: after an edit lands on an authority
+    /// field, copying the touched chunks into a collider's working copy makes the
+    /// two agree *byte-for-byte* by construction, instead of trusting a re-run of
+    /// the same op to converge (any drift there is a player standing on air).
+    pub fn copy_chunks_from(&mut self, src: &ChunkField, coords: &[[i32; 3]]) {
+        for c in coords {
+            match src.chunks.get(c) {
+                Some(chunk) => {
+                    self.chunks.insert(*c, chunk.clone());
+                }
+                None => {
+                    self.chunks.remove(c);
+                }
+            }
+        }
+    }
+
     /// Apply a sculpt brush; returns the chunk coords whose voxels changed (the remesh
     /// set). Mirrors the dense [`crate::Terrain::sculpt`] semantics, including
     /// [`BrushProfile`], so sculpting feels identical.
@@ -1693,6 +1711,42 @@ mod tests {
         let k = (1.0 - BrushProfile::default().hardness) * radius * 0.5;
         let deep = center - Vec3::Y * (r_eff + k + 0.8);
         assert!(f.d(deep) < 0.0, "crater reaches deeper than ball + blend: d = {}", f.d(deep));
+    }
+
+    /// The collider-mirror primitive: after sculpting an authority field, copying
+    /// the touched chunks + one renormalize ring into a stale clone makes the two
+    /// agree byte-for-byte (renormalize spills constraint writes one chunk out —
+    /// copying only `touched` leaves ring chunks stale, which IS a divergence).
+    #[test]
+    fn copy_chunks_from_syncs_a_stale_mirror_exactly() {
+        let mut authority = rolling_terrain();
+        let mut mirror = authority.clone();
+        let touched = authority.sculpt(
+            Brush::Lower,
+            Vec3::new(5.0, 0.0, -3.0),
+            6.0,
+            0.9,
+            BrushProfile::default(),
+        );
+        assert!(!touched.is_empty());
+        let mut region: Vec<[i32; 3]> = Vec::new();
+        for c in &touched {
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        region.push([c[0] + dx, c[1] + dy, c[2] + dz]);
+                    }
+                }
+            }
+        }
+        region.sort_unstable();
+        region.dedup();
+        mirror.copy_chunks_from(&authority, &region);
+        assert_eq!(
+            authority.to_bytes(),
+            mirror.to_bytes(),
+            "mirror must be byte-identical to the authority after the copy"
+        );
     }
 
     /// Sparsity is the whole point: memory must track the SURFACE, not the volume.

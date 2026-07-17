@@ -4603,9 +4603,16 @@ impl Editor {
                     self.terrain_brush.color,
                 );
                 if let Some(t) = self.terrains.get_mut(&e) {
+                    // Mirror cover = chunks present BEFORE ∪ AFTER the fill, so
+                    // chunks the fill removed clear from the sim copy too.
+                    let mut coords = t.field.all_chunk_coords();
                     t.field.fill_bounds(top, floor, inset, color);
                     t.rebuild_shadow();
                     self.terrain_gpu_dirty = true;
+                    coords.extend(t.field.all_chunk_coords());
+                    coords.sort_unstable();
+                    coords.dedup();
+                    self.mirror_terrain_chunks_to_sim(e, &coords);
                 }
             }
         if cmd.focus_terrain {

@@ -336,6 +336,7 @@ impl Editor {
             self.pending_scene = None;
             self.play_t = 0.0;
             self.paused = false;
+            self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
             // and no stale per-tick input edges from before Play.
             self.game_tick.reset();
