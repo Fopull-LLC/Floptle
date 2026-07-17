@@ -1,0 +1,32 @@
+// Day breeze — a bright blue day with cumulus decks scrolling by. The trick
+// every cloudy sky here reuses: project the ray onto a flat cloud layer
+// (divide xz by height) so the noise gets real perspective, then fade the
+// deck out right at the horizon where that projection stretches to infinity.
+shader dayBreeze {
+  stage sky
+  uniform zenith: color = #2A66C8
+  uniform horizon: color = #A9CCEA
+  uniform cloudColor: color = #FFFFFF
+  uniform sunDir: vec3 = vec3(0.55, 0.4, 0.25)
+  uniform cover: float = 0.5 range(0, 1)
+  uniform drift: float = 1 range(0, 4)
+
+  let up = saturate(skyDir.y)
+  let base = mix(horizon.rgb, zenith.rgb, pow(up, 0.55))
+  let sun = normalize(sunDir)
+  let toSun = saturate(dot(skyDir, sun))
+  let disc = pow(toSun, 900) * 1.5 + pow(toSun, 40) * 0.25
+  let sp = skyDir.xz / (max(skyDir.y, 0.0) * 2.2 + 0.25)
+  let scrolled = vec2(time * 0.035 * drift, time * 0.018 * drift)
+  let puffs = fbm(sp * 3 + scrolled, octaves: 5) * 0.5 + 0.5
+  let detail = fbm(sp * 9 - scrolled * 2.2, octaves: 4) * 0.5 + 0.5
+  let shape = puffs * 0.85 + detail * 0.25
+  let hfade = smoothstep(0.015, 0.12, skyDir.y)
+  let dens = smoothstep(0.97 - cover * 0.9, 1.13 - cover * 0.9, shape) * hfade
+  let flatBase = saturate(detail * 1.6 - 0.45)
+  let cloudCol = mix(cloudColor.rgb * 1.04, mix(base, cloudColor.rgb, 0.3), flatBase)
+  let silver = pow(toSun, 10) * 0.5
+  let sky = mix(base, cloudCol + cloudColor.rgb * silver * dens, dens) + vec3(1, 0.96, 0.86) * disc * (1 - dens)
+  output color = mix(sky, horizon.rgb * 0.75, saturate(-skyDir.y * 3))
+}
+//@layout { base: (-1596, 0), cloudCol: (-1140, 0), dens: (-1368, 1024), detail: (-2280, 256), disc: (-1140, 534), flatBase: (-1368, 534), hfade: (-1596, 1836), in.skyDir: (-4560, 0), in.time: (-4104, 256), out: (0, 0), puffs: (-2280, 914), scrolled: (-3420, 256), shape: (-1824, 1938), silver: (-1596, 1302), sky: (-456, 0), sp: (-3420, 0), sun: (-2508, 256), toSun: (-2052, 526), u.cloudColor: (-1824, 768), u.cover: (-2280, 768), u.drift: (-3876, 512), u.horizon: (-2052, 0), u.sunDir: (-2736, 300), u.zenith: (-2052, 146), up: (-2052, 292) }

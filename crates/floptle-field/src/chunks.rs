@@ -687,6 +687,58 @@ impl ChunkField {
         self.set_voxel(i, d, None);
     }
 
+    /// Fill a region from an **analytic SDF** — the procedural-generation primitive
+    /// (planetoids, cave systems, any shape math can describe). `sdf` is sampled at
+    /// every voxel of `[min, max]` (padded by the band); values are UNIONED with
+    /// what's there (`min`), colours come from `color` where the sdf wrote. Deep
+    /// solid collapses to interior sentinels via `compact`, so a filled planet costs
+    /// its surface, not its volume. The SDF should be ≈1-Lipschitz like every field
+    /// write (bounded noise displacement on a distance is fine — the sphere-trace
+    /// steps half-distances for exactly this reason).
+    pub fn fill_with(
+        &mut self,
+        min: Vec3,
+        max: Vec3,
+        sdf: impl Fn(Vec3) -> f32,
+        color: impl Fn(Vec3) -> [f32; 3],
+    ) {
+        let band = self.band();
+        let lo = (min - Vec3::splat(band + self.voxel)) / self.voxel;
+        let hi = (max + Vec3::splat(band + self.voxel)) / self.voxel;
+        let mut touched = Vec::new();
+        for iz in lo.z.floor() as i32..=hi.z.ceil() as i32 {
+            for iy in lo.y.floor() as i32..=hi.y.ceil() as i32 {
+                for ix in lo.x.floor() as i32..=hi.x.ceil() as i32 {
+                    let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
+                    let d = sdf(p);
+                    if d >= band {
+                        continue; // far air: the sentinel already says this
+                    }
+                    let cur = self.voxel_at([ix, iy, iz]);
+                    if d.min(cur) >= cur - 1e-6 && d > -band {
+                        continue; // no-op write near the surface: skip the materialize
+                    }
+                    let c = color(p);
+                    let cu = [
+                        (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                        255,
+                    ];
+                    self.set_voxel([ix, iy, iz], d.min(cur), Some(cu));
+                    touched.push(chunk_of([ix, iy, iz]));
+                }
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        // Generators routinely bend distances (noise-displaced spheres are not true
+        // SDFs) — project back onto the 1-Lipschitz constraint like the Smooth brush
+        // does, so raycasts and shadow marches stay honest.
+        self.renormalize(&touched);
+        self.compact(&touched);
+    }
+
     /// Collapse fully-saturated chunks to sentinels. Called automatically by the brushes;
     /// exposed for bulk writers that use [`Self::write_voxel`] directly.
     pub fn compact_all(&mut self) {

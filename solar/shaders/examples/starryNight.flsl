@@ -1,0 +1,33 @@
+// Starry night — a worley star field wheeling slowly overhead (the night
+// turns!) under a milky way. Worley puts ONE feature point in each unit cell,
+// so `floor(p)` is a stable per-star id: feed it to valueNoise and you get a
+// per-star random that culls, sizes and twinkles that star independently.
+shader starryNight {
+  stage sky
+  uniform skyLow: color = #101830
+  uniform skyHigh: color = #04060D
+  uniform density: float = 0.65 range(0, 1)
+  uniform twinkle: float = 1 range(0, 4)
+  uniform spin: float = 1 range(0, 5)
+  uniform milkyWay: float = 0.8 range(0, 2)
+  uniform bandPole: vec3 = vec3(0.5, 0.3, 0.8)
+
+  let up = saturate(skyDir.y)
+  let base = mix(skyLow.rgb, skyHigh.rgb, pow(up, 0.6))
+  let ca = cos(time * 0.008 * spin)
+  let sa = sin(time * 0.008 * spin)
+  let turned = vec3(skyDir.x * ca - skyDir.z * sa, skyDir.y, skyDir.x * sa + skyDir.z * ca)
+  let sp = turned * 34
+  let rnd = valueNoise(floor(sp) + 0.5)
+  let core = 1 - smoothstep(0.03, 0.14, worley(sp))
+  let blink = 0.55 + 0.45 * sin(time * (1 + rnd * 2.5) * twinkle + rnd * 40)
+  let stars = core * step(1 - density * 0.75, rnd) * (0.4 + rnd) * blink * 1.5
+  let offAxis = dot(turned, normalize(bandPole))
+  let bandMask = exp(offAxis * offAxis * -22)
+  let dust = fbm(turned * 5, octaves: 5) * 0.5 + 0.5
+  let dustColor = mix(vec3(0.3, 0.38, 0.55), vec3(0.7, 0.6, 0.65), dust)
+  let wisp = bandMask * milkyWay * (dust * dust * 0.45 + 0.06)
+  let sky = base + vec3(0.85, 0.92, 1) * stars + dustColor * wisp + skyLow.rgb * pow(1 - up, 4) * 0.35
+  output color = mix(sky, skyHigh.rgb * 0.6, saturate(-skyDir.y * 3))
+}
+//@layout { bandMask: (-1596, 782), base: (-1140, 0), blink: (-1824, 512), ca: (-5244, 256), core: (-2280, 0), dust: (-2052, 768), dustColor: (-1140, 534), in.skyDir: (-5472, 0), in.time: (-5928, 0), offAxis: (-2280, 1002), out: (0, 0), rnd: (-3648, 0), sa: (-5244, 746), sky: (-456, 0), sp: (-4332, 0), stars: (-1368, 768), turned: (-4560, 0), u.bandPole: (-2736, 1258), u.density: (-2964, 0), u.milkyWay: (-1596, 1016), u.skyHigh: (-1596, 146), u.skyLow: (-1596, 0), u.spin: (-5700, 256), u.twinkle: (-2964, 402), up: (-1596, 292), wisp: (-1140, 812) }
