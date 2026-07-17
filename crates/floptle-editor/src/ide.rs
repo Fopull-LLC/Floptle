@@ -2390,7 +2390,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
-    "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng",
+    "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2402,6 +2402,7 @@ const API_CATEGORIES: &[&str] = &[
     "input — keyboard & mouse",
     "networking — net.*, synced",
     "terrain — runtime sculpt & queries",
+    "persistence — save.*",
     "components — getcomponent",
     "animation — node:animator",
     "audio — sounds & the mixer",
@@ -2431,6 +2432,8 @@ fn api_category(label: &str) -> &'static str {
         || matches!(label, "synced" | "replicated" | "onRpc")
     {
         "networking — net.*, synced"
+    } else if label.starts_with("save.") {
+        "persistence — save.*"
     } else if label.starts_with("terrain") {
         "terrain — runtime sculpt & queries"
     } else if label.starts_with("gizmo") {
@@ -2540,6 +2543,11 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "terrain.height", insert: "terrain.height(", doc: "terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor." },
     ApiEntry { label: "rng", insert: "rng(", doc: "rng(seed) — a DETERMINISTIC random stream: same seed, same sequence, every machine. r:next() in [0,1), r:range(a,b), r:int(a,b) inclusive, r:pick(list). Use for gameplay that must reproduce (loot, procgen scatter, server replays); math.random stays for throwaway rolls." },
     ApiEntry { label: "math.noise", insert: "math.noise(", doc: "math.noise(x, y, z [, seed]) — seeded value noise, one octave, about -1..1, identical on every machine (the same numbers the engine's Rust generators use). Scale the inputs to pick a frequency." },
+    ApiEntry { label: "save.set", insert: "save.set(", doc: "save.set(\"gold\", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values follow the synced-var guardrails (numbers/strings/bools/tables, depth <= 4, <= 1 KB). Flushed on Stop + every few seconds during Play." },
+    ApiEntry { label: "save.get", insert: "save.get(", doc: "save.get(\"gold\" [, default]) — the stored value, else the default, else nil. save.get(\"who\").hp reads into stored tables." },
+    ApiEntry { label: "save.delete", insert: "save.delete(", doc: "save.delete(\"gold\") — remove a key; true if something was removed." },
+    ApiEntry { label: "save.slot", insert: "save.slot(", doc: "save.slot(\"slot2\") — switch the active save slot (the old one flushes first); save.slot() reads the current name. Each slot is its own file under save/." },
+    ApiEntry { label: "save.flush", insert: "save.flush()", doc: "save.flush() — write the store to disk NOW (checkpoints, before risky sections). Returns false on an IO error (also shown in the Console)." },
     ApiEntry { label: "math.fbm", insert: "math.fbm(", doc: "math.fbm(x, y, z [, octaves [, seed]]) — seeded fractal noise (default 4 octaves, rotated so features never align to the axes), about -1..1. Terrain-style variation for scripts: scatter decorations, vary spawns, wobble paths." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },

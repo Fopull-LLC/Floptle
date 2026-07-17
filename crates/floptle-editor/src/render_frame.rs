@@ -3671,6 +3671,11 @@ impl Editor {
                     // This tick's terrain edits (`fixedUpdate` digs) land BEFORE the
                     // step: the tick that dug the hole also falls into it.
                     self.drain_script_terrain_ops();
+                    // Bound crash loss on `save.*` data: flush every ~5 s of ticks
+                    // (a clean no-op while the store is unchanged).
+                    if self.game_tick_no.is_multiple_of(300) {
+                        self.script_host.flush_save();
+                    }
                     if let Some(sim) = self.sim.as_mut() {
                         sim.step_tick(self.game_tick.step, focus);
                     }

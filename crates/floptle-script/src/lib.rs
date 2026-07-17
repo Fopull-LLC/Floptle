@@ -60,6 +60,7 @@ mod host;
 mod math_api;
 mod net_api;
 mod preprocess;
+mod save_api;
 mod terrain_api;
 
 pub(crate) use api::install_handle_api;
@@ -201,6 +202,9 @@ pub struct ScriptHost {
     /// The project root, so `assets.getFile` / `assets.getContents` can resolve paths the
     /// dev writes relative to it (the `Assets/` folder). Set by the editor each frame.
     project_root: Rc<RefCell<PathBuf>>,
+    /// The `save.*` persistent store (roadmap A2): per-slot key→NetValue map,
+    /// lazily loaded, flushed by the editor on Stop + periodically during Play.
+    save_state: Rc<RefCell<save_api::SaveState>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
@@ -2070,6 +2074,50 @@ mod tests {
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 111.0);
+    }
+
+    #[test]
+    fn save_api_round_trips_across_hosts() {
+        // set → flush writes save/<slot>.ron; a FRESH host (a new play session /
+        // process) reads the same values back. Tables survive; defaults fill gaps.
+        let root = std::env::temp_dir().join("floptle_script_test_save_root");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        let dir = std::env::temp_dir().join("floptle_script_test_save_scripts");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "writer",
+            "function update(node, dt)\n  save.set(\"gold\", 42)\n  save.set(\"who\", {name=\"Ty\", hp=7})\n  save.flush()\nend\n",
+        );
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  local who = save.get(\"who\")\n  node.x = save.get(\"gold\", 0) + (who and who.hp or 0) * 1000 + save.get(\"missing\", 5)\nend\n",
+        );
+        let run = |kind: &str| -> f64 {
+            let mut world = World::default();
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: kind.into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+            let mut host = ScriptHost::new();
+            host.set_project_root(root.clone());
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+            assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+            world.get::<Transform>(e).unwrap().translation.x
+        };
+        run("writer");
+        assert!(root.join("save/main.ron").exists(), "flush wrote the slot file");
+        assert_eq!(run("reader"), 42.0 + 7000.0 + 5.0);
     }
 
     fn hull(eid: u32, x: f32) -> floptle_physics::BodyHull {
