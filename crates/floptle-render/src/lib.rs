@@ -39,8 +39,8 @@ pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
 pub use mesh::{
-    capsule, cone, cube, cylinder, plane, pyramid, uv_sphere, GpuMesh, MeshData, MeshId,
-    TextureData, Vertex,
+    capsule, chunk_mesh_data, cone, cube, cylinder, plane, pyramid, uv_sphere, GpuMesh, MeshData,
+    MeshId, TextureData, Vertex,
 };
 pub use outline::Outline;
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};

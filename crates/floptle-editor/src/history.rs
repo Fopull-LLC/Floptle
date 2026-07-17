@@ -80,6 +80,29 @@ impl Editor {
         cur
     }
 
+    /// Swap a paint id's colors for `colors`, returning what was there — the exact
+    /// shape of `swap_terrain_bytes`, so undo/redo is a value swap and the ECS is
+    /// never touched (entity ids don't survive a Scene restore).
+    pub(crate) fn swap_paint_colors(
+        &mut self,
+        id: u32,
+        colors: &[Vec<[u8; 4]>],
+    ) -> Option<Vec<Vec<[u8; 4]>>> {
+        let blocks = self.paint_data.get(&id)?.clone();
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+            return None;
+        };
+        let mut cur = Vec::with_capacity(blocks.parts.len());
+        for (i, &(base, count)) in blocks.parts.iter().enumerate() {
+            cur.push(raster.paint_block(base, count));
+            if let Some(c) = colors.get(i) {
+                raster.paint_restore(gpu, base, c);
+            }
+        }
+        self.vpaint_epoch += 1; // texture-paint mirrors resync (paint_tex)
+        Some(cur)
+    }
+
     pub(crate) fn undo(&mut self) {
         if self.playing {
             return; // stop play before editing history
@@ -97,6 +120,16 @@ impl Editor {
             Some(Snapshot::Terrain(id, prev)) => {
                 if let Some(cur) = self.swap_terrain_bytes(id, &prev) {
                     self.history.redo.push(Snapshot::Terrain(id, cur));
+                }
+            }
+            Some(Snapshot::VertexPaint(id, prev)) => {
+                if let Some(cur) = self.swap_paint_colors(id, &prev) {
+                    self.history.redo.push(Snapshot::VertexPaint(id, cur));
+                }
+            }
+            Some(Snapshot::TexPaint(entries)) => {
+                if let Some(redo) = self.swap_tex_paint(entries) {
+                    self.history.redo.push(redo);
                 }
             }
             None => {}
@@ -119,7 +152,49 @@ impl Editor {
                     self.history.undo.push(Snapshot::Terrain(id, cur));
                 }
             }
+            Some(Snapshot::VertexPaint(id, next)) => {
+                if let Some(cur) = self.swap_paint_colors(id, &next) {
+                    self.history.undo.push(Snapshot::VertexPaint(id, cur));
+                }
+            }
+            Some(Snapshot::TexPaint(entries)) => {
+                if let Some(undo) = self.swap_tex_paint(entries) {
+                    self.history.undo.push(undo);
+                }
+            }
             None => {}
         }
+    }
+
+    /// Swap a texture-paint stroke's nodes between their snapshot state and the current
+    /// one, returning the inverse snapshot (for the opposite stack). A `None` target for a
+    /// node = "no paint before this stroke", so it REMOVES that node's paint entirely —
+    /// undoing a first-ever stroke reveals the untouched node, which is the point. Removed
+    /// nodes have no inverse (redo can't recreate a dropped canvas); if the whole stroke
+    /// was removals, there's nothing to redo at all.
+    fn swap_tex_paint(&mut self, entries: Vec<(u32, Option<Vec<Vec<u8>>>)>) -> Option<Snapshot> {
+        let mut inverse = Vec::new();
+        for (id, target) in entries {
+            match target {
+                Some(images) => {
+                    if let Some(cur) = self.tex_paint_snapshot(id) {
+                        self.tex_paint_restore(id, &images);
+                        inverse.push((id, Some(cur)));
+                    }
+                }
+                None => {
+                    // Bind first so the world query's borrow ends before the &mut call.
+                    let ent = self
+                        .world
+                        .query::<floptle_core::TexturePaint>()
+                        .find(|(_, tp)| tp.id == id)
+                        .map(|(e, _)| e);
+                    if let Some(ent) = ent {
+                        self.clear_texture_paint(ent);
+                    }
+                }
+            }
+        }
+        (!inverse.is_empty()).then_some(Snapshot::TexPaint(inverse))
     }
 }

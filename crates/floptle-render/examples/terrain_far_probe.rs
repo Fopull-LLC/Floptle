@@ -37,8 +37,8 @@ fn main() {
     let mut a = Terrain::flat([96, 40, 96], [0.0; 3], [12.0, 6.0, 12.0], 0.0, [0.35, 0.6, 0.28]);
     let mut b = Terrain::flat([96, 40, 96], [0.0; 3], [12.0, 6.0, 12.0], 0.0, [0.30, 0.45, 0.62]);
     for _ in 0..30 {
-        a.sculpt(Brush::Raise, [-5.0, 0.5, 0.0], 4.0, 1.0);
-        b.sculpt(Brush::Raise, [5.0, 1.0, 0.0], 4.0, 1.0);
+        a.sculpt(Brush::Raise, [-5.0, 0.5, 0.0], 4.0, 1.0, floptle_field::BrushProfile::default());
+        b.sculpt(Brush::Raise, [5.0, 1.0, 0.0], 4.0, 1.0, floptle_field::BrushProfile::default());
     }
     // The whole scene lives ten million units out (per-axis f32 ulp there: a full unit).
     let far = DVec3::new(1.0e7, 0.0, 1.0e7);

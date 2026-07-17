@@ -8,9 +8,13 @@
 --      Idle / Walk / Run / Jump states for full control).
 --   3. Make a Camera node, mark it Active, attach third_person_camera.lua.
 --
---   W A S D   move relative to the camera
---   SPACE     jump (when grounded)
---   SHIFT     run
+--   W A S D            move relative to the camera
+--   SPACE               jump (when grounded)
+--   DOUBLE-TAP a move key to RUN — release movement to drop back to a walk
+--                       (single presses just walk)
+--   SHIFT               toggle shift lock (the camera script owns the mode;
+--                       while locked — or in first person — the character
+--                       faces the camera's yaw instead of its travel)
 --
 -- Movement is camera-relative: pushing W walks away from the camera, and the
 -- "Model" child smoothly turns to face where you're going. Animation states
@@ -20,6 +24,7 @@
 defaults = {
   walk = 4.5,
   run = 8.0,
+  double_tap = 0.3, -- max seconds between taps to trigger a run
   jump = 7.0,
   turn = 12.0,      -- how quickly the model turns to face movement (rad/s-ish)
   walk_anim_at = 0.4, -- speed above which Walk plays
@@ -33,6 +38,9 @@ local model       -- the "Model" child we rotate to face movement
 local cam         -- the third_person_camera script (for camera-relative moves)
 local heading = 0 -- the model's current facing (smoothed)
 local states      -- resolved animation state names (see resolve_states)
+local rig
+local running = false               -- run mode: armed by a double-tap
+local tap = { w = -10, a = -10, s = -10, d = -10 } -- last press time per key
 
 local function normalize(x, y, z)
   local l = math.sqrt(x * x + y * y + z * z)
@@ -65,6 +73,7 @@ function start(node)
   anim = vis:animator()
   cam = findScript("third_person_camera")
   heading = (model and model.yaw) or node.yaw
+  rig = node:getcomponent("RigidBody")
 end
 
 function update(node, dt)
@@ -72,9 +81,15 @@ function update(node, dt)
   -- the very first frame).
   if anim and not states then states = resolve_states() end
 
-  -- Move relative to the CAMERA's yaw (fall back to our own yaw without one).
-  local yaw = node.yaw
-  if cam and cam.node and cam.node.valid then yaw = cam.node.yaw end
+  -- Move relative to the VIEW yaw. input.aimYaw() is the active camera's yaw
+  -- captured with the input snapshot — in multiplayer it rides the input
+  -- command, so the server and prediction replay use EXACTLY the angle you
+  -- saw (reading the camera node directly can never match across machines).
+  local yaw = input.aimYaw()
+  if not yaw then
+    yaw = node.yaw
+    if cam and cam.node and cam.node.valid then yaw = cam.node.yaw end
+  end
 
   -- "up" = −gravity (works on flat worlds and radial planets alike).
   local ux, uy, uz = node.up_x, node.up_y, node.up_z
@@ -95,7 +110,17 @@ function update(node, dt)
   local il = math.sqrt(f * f + s * s)
   if il > 1 then f, s = f / il, s / il end
 
-  local speed = input.key("shift") and params.run or params.walk
+  -- RUN = double-tap any movement key. Releasing all movement drops back to
+  -- a walk; you run again only on the next double-tap (single taps walk).
+  for _, k in ipairs({ "w", "a", "s", "d" }) do
+    if input.pressed(k) then
+      if time - tap[k] < params.double_tap then running = true end
+      tap[k] = time
+    end
+  end
+  if f == 0 and s == 0 then running = false end
+
+  local speed = running and params.run or params.walk
 
   -- Grounding, with forgiveness: the physics contact flag OR a short ray
   -- straight down — running down a slope leaves the ground for a few frames
@@ -117,8 +142,10 @@ function update(node, dt)
 
   -- Keep the vertical (gravity/jump) part, steer the horizontal part.
   local vup = node.vx * ux + node.vy * uy + node.vz * uz
+  local startingJump = false
   if grounded and input.pressed("space") then
     vup = params.jump
+    startingJump = true
   end
   local mx = (fx * f + rx * s) * speed
   local my = (fy * f + ry * s) * speed
@@ -127,16 +154,37 @@ function update(node, dt)
   node.vy = my + uy * vup
   node.vz = mz + uz * vup
 
-  -- Turn the visual to face travel (the capsule itself never rotates).
+  -- Turn the visual (the capsule itself never rotates). SHIFT LOCK (or first
+  -- person — read from the camera script's exposed state) faces the CAMERA's
+  -- yaw, Y axis only, even while standing still; otherwise face travel. The
+  -- camera script is local to this machine, so in multiplayer the server's
+  -- replay may face a remote model slightly differently — cosmetic only (the
+  -- movement itself uses input.aimYaw(), which rides the input command).
   local moving = (f ~= 0 or s ~= 0)
-  if model and moving then
-    local want = math.atan2(-mx, -mz) -- engine forward is −Z (atan2: LuaJIT/5.1)
+  if not cam then cam = findScript("third_person_camera") end
+  local locked = cam and (cam.shiftlock or cam.firstPerson)
+  if model and (moving or locked) then
+    local want
+    if locked then
+      want = yaw                      -- face away from the camera (its view yaw)
+    else
+      want = math.atan2(-mx, -mz)     -- engine forward is −Z (atan2: LuaJIT/5.1)
+    end
     local diff = want - heading
     while diff > math.pi do diff = diff - 2 * math.pi end
     while diff < -math.pi do diff = diff + 2 * math.pi end
     local step = math.min(1.0, params.turn * dt)
     heading = heading + diff * step
     model.yaw = heading
+  end
+  
+  -- No sliding down slopes when standing still and no sticking to walls
+  if (not moving) and grounded and node.grounded then
+    rig.friction = 1
+    rig.lock_y = not true
+  else
+    rig.friction = 0
+	rig.lock_y = false
   end
 
   -- Drive the animation from what the body is actually doing (the forgiving

@@ -330,9 +330,10 @@ impl Parser<'_> {
         self.ir.stage = Some(match name.as_str() {
             "fragment" => Stage::Fragment,
             "sdf" => Stage::Sdf,
+            "sky" => Stage::Sky,
             other => {
                 return Err(ParseError::new(
-                    format!("unknown stage `{other}` (fragment | sdf)"),
+                    format!("unknown stage `{other}` (fragment | sdf | sky)"),
                     span,
                 ));
             }
@@ -613,6 +614,7 @@ pub fn print(ir: &ShaderIr) -> String {
     match ir.stage {
         Some(Stage::Fragment) | None => s.push_str("  stage fragment\n"),
         Some(Stage::Sdf) => s.push_str("  stage sdf\n"),
+        Some(Stage::Sky) => s.push_str("  stage sky\n"),
     }
     match ir.blend {
         Blend::Opaque => {}

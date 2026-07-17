@@ -173,8 +173,11 @@ impl EditorTabViewer<'_> {
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            for t in [Tool::Select, Tool::Move, Tool::Rotate, Tool::Scale, Tool::Rect, Tool::Sculpt] {
-                                if ui.selectable_label(self.tool == t, t.label()).clicked() {
+                            // Ordered by Tool::ALL — i.e. by keybind, so what you see
+                            // left-to-right is what 1..7 select.
+                            for t in Tool::ALL {
+                                let hit = ui.selectable_label(self.tool == t, t.label());
+                                if hit.on_hover_text(format!("{} ({})", t.label(), t.digit())).clicked() {
                                     self.cmd.set_tool = Some(t);
                                 }
                             }
@@ -281,6 +284,22 @@ impl EditorTabViewer<'_> {
                     [pt(a), pt(b)],
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 200, 255)),
                 );
+            }
+        }
+
+        // Vertex-paint telegraph: a ring on the surface under the cursor, so a dab is
+        // never a surprise. Magenta, to read as clearly NOT the terrain brush.
+        if let Some(viz) = self.paint_viz.filter(|_| !game) {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("vertex_brush")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            if viz.ring.len() >= 2 {
+                let mut pts: Vec<egui::Pos2> = viz.ring.iter().map(|v| pt(*v)).collect();
+                pts.push(pts[0]); // close the loop
+                painter.line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 120, 220)));
             }
         }
 

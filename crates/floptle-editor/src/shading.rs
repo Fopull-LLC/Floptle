@@ -31,6 +31,14 @@ pub(crate) fn material_params(m: &Material) -> MaterialParams {
         unlit: m.unlit,
         ambient: m.ambient,
         alpha: m.alpha,
+        // Paint is a property of the GEOMETRY, not the material — the caller fills these
+        // from `Raster::mesh_paint_base` / `Raster::dyn_paint_base` once it knows which
+        // mesh is being drawn (terrain chunks take the latter), and sets `paint_modulate`
+        // based on whether the paint is brush work (2×) or a glTF import (×1).
+        paint_base: 0,
+        terrain_paint_base: 0,
+        paint_modulate: false,
+        terrain_splat: false,
         tile_mode,
         tile,
         tile_rotation,
@@ -237,7 +245,7 @@ pub(crate) fn skybox_uniforms(
     world: &floptle_core::World,
 ) -> ([f32; 4], [f32; 4], [[f32; 4]; 3], [f32; 3]) {
     let found = world.query::<Matter>().find_map(|(e, m)| match m {
-        Matter::Skybox { color, size, texture, tint } => {
+        Matter::Skybox { color, size, texture, tint, .. } => {
             Some((e, *color, *size, texture.is_some(), *tint))
         }
         _ => None,

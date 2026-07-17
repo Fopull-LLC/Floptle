@@ -49,7 +49,7 @@ fn main() {
     // the hill's cast shadow (and the proxies') reads cleanly.
     let mut t = Terrain::flat([128, 48, 128], [0.0; 3], [16.0, 6.0, 16.0], 0.0, [0.35, 0.6, 0.28]);
     for _ in 0..45 {
-        t.sculpt(Brush::Raise, [-9.0, 1.0, 0.0], 4.5, 1.0);
+        t.sculpt(Brush::Raise, [-9.0, 1.0, 0.0], 4.5, 1.0, floptle_field::BrushProfile::default());
     }
 
     let mut raster = Raster::new(&gpu);

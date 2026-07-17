@@ -74,6 +74,15 @@ pub struct NodeDoc {
     /// Marks a Mesh node as a static walkable collider (its triangles collide at Play).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mesh_collider: bool,
+    /// Stable key for this node's vertex paint, if it has any. The colors themselves
+    /// live in `<project>/paint/<scene>.vpaint` — per-vertex arrays don't belong in a
+    /// scene `.ron`, the same call terrain fields make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint: Option<u32>,
+    /// Texture-paint id (the node carries a hand-painted texture) — its images live in the
+    /// editor's store keyed by this stable id, exactly like `paint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tex_paint: Option<u32>,
     /// The "collidable" switch: a static collider auto-shaped from this node's geometry
     /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -466,6 +475,10 @@ pub enum MatterDoc {
         texture: Option<String>,
         #[serde(default = "white3")]
         tint: [f32; 3],
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shader: Option<String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        shader_params: std::collections::BTreeMap<String, [f32; 4]>,
     },
     /// The scene's post-processing chain (a mandatory node — self-healed on load).
     PostProcess {
@@ -582,12 +595,16 @@ impl From<&Matter> for MatterDoc {
                 radius: *radius,
             },
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
-            Matter::Skybox { color, size, texture, tint } => MatterDoc::Skybox {
-                color: *color,
-                size: *size,
-                texture: texture.clone(),
-                tint: *tint,
-            },
+            Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
+                MatterDoc::Skybox {
+                    color: *color,
+                    size: *size,
+                    texture: texture.clone(),
+                    tint: *tint,
+                    shader: shader.clone(),
+                    shader_params: shader_params.clone(),
+                }
+            }
             Matter::PostProcess {
                 enabled,
                 bloom,
@@ -639,12 +656,16 @@ impl MatterDoc {
                 radius: *radius,
             },
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
-            MatterDoc::Skybox { color, size, texture, tint } => Matter::Skybox {
-                color: *color,
-                size: *size,
-                texture: texture.clone(),
-                tint: *tint,
-            },
+            MatterDoc::Skybox { color, size, texture, tint, shader, shader_params } => {
+                Matter::Skybox {
+                    color: *color,
+                    size: *size,
+                    texture: texture.clone(),
+                    tint: *tint,
+                    shader: shader.clone(),
+                    shader_params: shader_params.clone(),
+                }
+            }
             MatterDoc::PostProcess {
                 enabled,
                 bloom,
@@ -1220,6 +1241,12 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if node.collidable {
         world.insert(e, floptle_core::Collidable);
     }
+    if let Some(id) = node.paint {
+        world.insert(e, floptle_core::VertexPaint { id });
+    }
+    if let Some(id) = node.tex_paint {
+        world.insert(e, floptle_core::TexturePaint { id });
+    }
     if node.trigger {
         world.insert(e, floptle_core::Trigger);
     }
@@ -1352,6 +1379,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
+        let paint = world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
+        let tex_paint = world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         let trigger = world.get::<floptle_core::Trigger>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
@@ -1379,6 +1408,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             material,
             rigidbody,
             mesh_collider,
+            paint,
+            tex_paint,
             collidable,
             trigger,
             visible,
@@ -1449,6 +1480,8 @@ mod tests {
                         lock_rot: [true, false, true],
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
+                    paint: None,
+                    tex_paint: None,
                     collidable: true,    // exercise the collidable round-trip
                     trigger: true,       // exercise the trigger round-trip
                     visible: false,      // exercise the visible round-trip
@@ -1522,6 +1555,8 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    paint: None,
+                    tex_paint: None,
                     collidable: false,
                     trigger: false,
                     visible: true,
@@ -1548,6 +1583,8 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    paint: None,
+                    tex_paint: None,
                     collidable: false,
                     trigger: false,
                     visible: true,
@@ -1571,6 +1608,8 @@ mod tests {
                     material: None,
                     rigidbody: None,
                     mesh_collider: false,
+                    paint: None,
+                    tex_paint: None,
                     collidable: false,
                     trigger: false,
                     visible: true,
@@ -1686,6 +1725,37 @@ mod tests {
             world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::PostProcess { .. })).collect();
         assert_eq!(posts.len(), 1, "self-heal must not duplicate an authored PostProcess node");
         assert_eq!(*posts[0].1, authored);
+    }
+
+    #[test]
+    fn skybox_shader_params_round_trip() {
+        // A sky shader plus its Inspector knob overrides survive World → RON → World.
+        // These `shader_params` are what make the built-in skies customizable templates.
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Name("Skybox".into()));
+        world.insert(e, Transform::IDENTITY);
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("cover".into(), [0.85, 0.0, 0.0, 0.0]);
+        params.insert("zenith".into(), [0.1, 0.2, 0.6, 1.0]);
+        let authored = Matter::Skybox {
+            color: [0.5, 0.5, 0.52],
+            size: 500.0,
+            texture: None,
+            tint: [1.0, 1.0, 1.0],
+            shader: Some("assets/shaders/examples/dayBreeze.flsl".into()),
+            shader_params: params,
+        };
+        world.insert(e, authored.clone());
+
+        let text = to_ron(&to_doc("sky", &world)).unwrap();
+        let mut world2 = World::new();
+        spawn_into(&from_ron(&text).unwrap(), &mut world2);
+
+        let skies: Vec<_> =
+            world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Skybox { .. })).collect();
+        assert_eq!(skies.len(), 1, "self-heal must not duplicate an authored Skybox");
+        assert_eq!(*skies[0].1, authored, "sky shader + knob overrides lost in round-trip");
     }
 }
 

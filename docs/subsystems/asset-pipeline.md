@@ -22,8 +22,10 @@ with the `gltf` crate, which gives direct buffer access for fast upload.
 
 **What we import:**
 
-- **Meshes** — positions, indices, **UVs** (all sets), **normals & tangents**
-  (computed if absent), vertex colors. Split per-primitive (per-material).
+- **Meshes** — positions, indices, **UVs** (set 0), **normals** (computed if absent),
+  and **vertex colors** (`COLOR_0` → `MeshData.colors`, the vertex-paint store — see
+  [`../vertex-paint-proposal.md`](../vertex-paint-proposal.md)). Split per-primitive
+  (per-material). *Tangents and UV sets beyond 0 are not imported yet.*
 - **PBR materials** — base color, metallic/roughness, normal, emissive,
   occlusion. These **seed** Floptle materials ([`./materials-and-textures.md`](./materials-and-textures.md))
   which we then enrich; glTF PBR maps onto a built-in `lit_textured`-style shader.

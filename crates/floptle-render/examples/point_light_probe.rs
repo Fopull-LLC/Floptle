@@ -57,6 +57,7 @@ fn main() {
         point_count: [1.0, 0.0, 0.0, 0.0],
         point_pos,
         point_color,
+        ..Default::default()
     };
 
     let mat = MaterialParams::flat([0.9, 0.9, 0.92]);

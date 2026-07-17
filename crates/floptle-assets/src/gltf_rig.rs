@@ -183,6 +183,9 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                 reader.read_joints(0).map(|j| j.into_u16().collect());
             let vweights: Option<Vec<[f32; 4]>> =
                 reader.read_weights(0).map(|w| w.into_f32().collect());
+            // COLOR_0 — vertex paint authored in Blender (normalized to RGBA8).
+            let vcolors: Option<Vec<[u8; 4]>> =
+                reader.read_colors(0).map(|c| c.into_rgba_u8().collect());
 
             let mat = prim.material();
             let key = mat.index().map(|i| i as i64).unwrap_or(-1);
@@ -236,6 +239,22 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                     }
                 }
                 debug_assert_eq!(stream.joints.len(), part.mesh.vertices.len());
+            }
+            // Same parallel-stream rule for vertex paint: a part mixing painted and
+            // unpainted primitives back-fills white (the identity for the albedo
+            // multiply), so paint never misaligns against geometry.
+            const WHITE: [u8; 4] = [255; 4];
+            if vcolors.is_some() || part.mesh.colors.is_some() {
+                let c = part.mesh.colors.get_or_insert_with(Vec::new);
+                c.resize(base as usize, WHITE);
+                match &vcolors {
+                    Some(src) => {
+                        c.extend(src.iter().take(positions.len()).copied());
+                        c.resize(base as usize + positions.len(), WHITE);
+                    }
+                    None => c.resize(base as usize + positions.len(), WHITE),
+                }
+                debug_assert_eq!(c.len(), part.mesh.vertices.len());
             }
         }
     }

@@ -19,6 +19,10 @@ pub enum Stage {
     /// A distance field: `output sdf` (+ optional `output color`) joins the
     /// scene's fused field (spliced into `map_d`/`map` — see the proposal §7).
     Sdf,
+    /// A procedural sky: `output color` becomes the environment color along a
+    /// ray direction (spliced into the raymarch's `sky_color`). The only input
+    /// that makes sense is the ray direction (`skyDir`) + time.
+    Sky,
 }
 
 /// How a Fragment-stage surface composites over the scene.
@@ -117,6 +121,9 @@ pub enum Input {
     /// The node's own Material tint + alpha (`vec4`) — so one shader composes
     /// with per-node coloring. Fragment only.
     InstanceColor,
+    /// The world-space RAY DIRECTION (`vec3`, normalized) for a Sky shader — the
+    /// direction the camera ray travels toward the horizon/zenith. Sky only.
+    SkyDir,
 }
 
 impl Input {
@@ -128,13 +135,14 @@ impl Input {
             Input::ViewDir => "viewDir",
             Input::Time => "time",
             Input::InstanceColor => "instanceColor",
+            Input::SkyDir => "skyDir",
         }
     }
 
     pub fn ty(self) -> Ty {
         match self {
             Input::Uv => Ty::Vec2,
-            Input::Normal | Input::WorldPos | Input::ViewDir => Ty::Vec3,
+            Input::Normal | Input::WorldPos | Input::ViewDir | Input::SkyDir => Ty::Vec3,
             Input::Time => Ty::Float,
             Input::InstanceColor => Ty::Vec4,
         }
@@ -148,6 +156,7 @@ impl Input {
             Input::ViewDir,
             Input::Time,
             Input::InstanceColor,
+            Input::SkyDir,
         ]
     }
 
@@ -159,8 +168,9 @@ impl Input {
     /// (no surface yet), so only position + time make sense there.
     pub fn in_stage(self, stage: Stage) -> bool {
         match stage {
-            Stage::Fragment => true,
+            Stage::Fragment => !matches!(self, Input::SkyDir),
             Stage::Sdf => matches!(self, Input::WorldPos | Input::Time),
+            Stage::Sky => matches!(self, Input::SkyDir | Input::Time),
         }
     }
 }
@@ -431,6 +441,20 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
                 errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
             }
         }
+        Stage::Sky => {
+            expect_output(ir, "color", &[Ty::Vec3, Ty::Vec4], &let_ty, &mut ck, &mut errors);
+            for name in ir.outputs.keys() {
+                if name != "color" {
+                    errors.push(IrError::new(
+                        format!("sky shaders output `color` only (got `{name}`)"),
+                        ir.expr(ir.outputs[name]).span,
+                    ));
+                }
+            }
+            if ir.blend != Blend::Opaque {
+                errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
+            }
+        }
     }
 
     if errors.is_empty() { Ok(ck) } else { Err(errors) }
@@ -556,6 +580,7 @@ fn stage_name(stage: Stage) -> &'static str {
     match stage {
         Stage::Fragment => "fragment",
         Stage::Sdf => "sdf",
+        Stage::Sky => "sky",
     }
 }
 

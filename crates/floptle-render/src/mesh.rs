@@ -39,6 +39,52 @@ impl Vertex {
 pub struct MeshData {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Per-vertex paint color (RGBA8), parallel to `vertices` — `None` for unpainted
+    /// geometry. It is a SEPARATE stream (like `SkinStream`'s joints/weights) rather
+    /// than a `Vertex` field for one hard reason: the raster vertex-attribute budget is
+    /// FULL at 16/16 (`Vertex::ATTRS` 0..2 + `INSTANCE_ATTRS` 3..15, against
+    /// `Limits::default()`'s 16), so a color attribute cannot exist. Colors reach the
+    /// GPU through the `vpaint` storage buffer instead, indexed by `vertex_index`.
+    /// Must be empty or exactly `vertices.len()` long.
+    pub colors: Option<Vec<[u8; 4]>>,
+}
+
+/// Renderable geometry from an extracted terrain chunk ([`floptle_field::mesh_chunk`]).
+///
+/// Positions come out FIELD-space (`origin + chunk-local`), not chunk-local, so that
+/// every chunk of one terrain can share a single instance matrix. That sharing is what
+/// makes the triplanar material continuous: triplanar projects along `lpos`, the
+/// OBJECT-space position, so per-chunk local coordinates would restart the texture at
+/// every chunk boundary — a grid of seams every 48 units. Field-space coordinates cost
+/// nothing in precision (a 4 km map is ±2000, ~1e-4 resolution in f32, against 1.5-unit
+/// voxels); the floating origin is handled where it always is, by the model matrix being
+/// camera-relative (ADR-0015).
+///
+/// UVs are zero: terrain has no meaningful unwrap, and its material is triplanar.
+///
+/// The colour's ALPHA byte carries the painted TEXTURE-SLOT INDEX (`Terrain::flat`: "0 =
+/// untextured", 1 = palette layer 0, …), NOT opacity — the terrain splat shader reads it as
+/// a slot and triplanar-samples the palette. The instance's `terrain_splat` flag tells the
+/// fragment shader to interpret alpha this way and force the surface opaque; without the
+/// flag a slot index would read as a near-zero alpha and the chunk would be discarded. The
+/// rasterizer interpolates alpha across the triangle, so a boundary between two slots reads
+/// a fractional value → a smooth crossfade between the two textures (matching the raymarch).
+pub fn chunk_mesh_data(m: &floptle_field::ChunkMesh) -> MeshData {
+    let o = m.origin;
+    MeshData {
+        vertices: m
+            .positions
+            .iter()
+            .zip(&m.normals)
+            .map(|(p, n)| Vertex {
+                pos: [p[0] + o[0], p[1] + o[1], p[2] + o[2]],
+                normal: *n,
+                uv: [0.0, 0.0],
+            })
+            .collect(),
+        indices: m.indices.clone(),
+        colors: Some(m.colors.clone()),
+    }
 }
 
 /// CPU image data for a material's base-color texture: tightly-packed `RGBA8`,
@@ -85,6 +131,47 @@ impl GpuMesh {
 
         Self { vbuf, ibuf, index_count: data.indices.len() as u32 }
     }
+
+    /// Empty buffers sized for `cap_verts`/`cap_indices` — a mesh whose geometry is
+    /// rewritten repeatedly ([`write`](Self::write)) rather than uploaded once. The
+    /// terrain chunk mesher is the first citizen: a sculpt dab changes a chunk's
+    /// triangle count every stroke, and re-creating buffers per dab would churn
+    /// allocations in the interaction loop. Draws nothing until written.
+    pub fn with_capacity(gpu: &Gpu, cap_verts: u32, cap_indices: u32) -> Self {
+        let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh-verts-dyn"),
+            size: (cap_verts.max(1) as u64) * std::mem::size_of::<Vertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ibuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh-indices-dyn"),
+            size: (cap_indices.max(1) as u64) * 4,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { vbuf, ibuf, index_count: 0 }
+    }
+
+    /// Overwrite the geometry of a [`with_capacity`](Self::with_capacity) mesh.
+    /// Returns `false` (writing nothing) when `data` exceeds the buffers — the caller
+    /// re-creates the slot at a larger capacity. Stale bytes past `index_count` are
+    /// left as they are: the draw range is `index_count`, so they are unreachable.
+    pub fn write(&mut self, gpu: &Gpu, data: &MeshData) -> bool {
+        let vbytes = std::mem::size_of_val(data.vertices.as_slice()) as u64;
+        let ibytes = std::mem::size_of_val(data.indices.as_slice()) as u64;
+        if vbytes > self.vbuf.size() || ibytes > self.ibuf.size() {
+            return false;
+        }
+        if vbytes > 0 {
+            gpu.queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&data.vertices));
+        }
+        if ibytes > 0 {
+            gpu.queue.write_buffer(&self.ibuf, 0, bytemuck::cast_slice(&data.indices));
+        }
+        self.index_count = data.indices.len() as u32;
+        true
+    }
 }
 
 /// Handle to a mesh registered with the render pass (index into its registry).
@@ -121,7 +208,7 @@ pub fn cube(half: f32) -> MeshData {
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 /// A latitude/longitude UV-sphere of the given `radius`. Normals are smooth (the
@@ -155,7 +242,7 @@ pub fn uv_sphere(radius: f32, rings: u32, sectors: u32) -> MeshData {
             indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 /// A capsule (a cylinder of length `2·half_height` capped by two hemispheres of
@@ -200,7 +287,7 @@ pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshD
             indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 /// A flat square of half-extent `half` in the XY plane, facing +Z. ONE face:
@@ -221,7 +308,7 @@ pub fn plane(half: f32) -> MeshData {
             uv: [u, 1.0 - v],
         })
         .collect();
-    MeshData { vertices, indices: vec![0, 1, 2, 0, 2, 3] }
+    MeshData { vertices, indices: vec![0, 1, 2, 0, 2, 3], colors: None }
 }
 
 // Small f32 vec helpers for the flat-shaded primitives below.
@@ -270,7 +357,7 @@ pub fn pyramid(half: f32, height: f32) -> MeshData {
         vertices.push(Vertex { pos: p, normal: n, uv: [p[0] / (2.0 * half) + 0.5, p[2] / (2.0 * half) + 0.5] });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 /// A cone of base `radius` and `height` along Y, apex up, centered (base at y=−height/2,
@@ -307,7 +394,7 @@ pub fn cone(radius: f32, height: f32, sectors: u32) -> MeshData {
     for j in 0..sectors {
         indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
     }
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 /// A cylinder of `radius` and half-height `half_height` along Y, centered on the origin.
@@ -346,7 +433,7 @@ pub fn cylinder(radius: f32, half_height: f32, sectors: u32) -> MeshData {
             indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
         }
     }
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, colors: None }
 }
 
 #[cfg(test)]

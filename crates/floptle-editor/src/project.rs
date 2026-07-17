@@ -253,9 +253,12 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.set_scene_file(&path);
         self.adopt_terrain();
+        self.adopt_paint();
+        self.adopt_tex_paint();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
+        self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         self.scene_dirty = false;
         self.asset_tree = build_assets(&self.project_root);
@@ -282,6 +285,8 @@ impl Editor {
         self.migrate_legacy_post(&doc);
         self.set_scene_file(p);
         self.adopt_terrain();
+        self.adopt_paint();
+        self.adopt_tex_paint();
         self.register_scene_meshes();
         self.selection.clear();
         self.selected_asset = None;
@@ -637,6 +642,8 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        self.adopt_paint();
+        self.adopt_tex_paint();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
@@ -657,6 +664,7 @@ impl Editor {
         // A different project's models live behind the same path strings, so drop the
         // old GPU-mesh cache before re-importing (else import_model early-returns).
         self.mesh_registry.clear();
+        self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         // Re-register any meshes the new scene references.
         let mesh_paths: Vec<String> = self
@@ -706,6 +714,7 @@ impl Editor {
         self.playing = false;
         self.paused = false;
         self.mesh_registry.clear();
+        self.paint_meshes.clear(); // stale CPU geometry would paint the wrong vertices
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
     }
 
@@ -769,6 +778,10 @@ impl Editor {
                 );
             }
         }
+        // Vertex paint: per-vertex arrays live beside the scene for the same reason
+        // terrain fields do — they have no business in a .ron.
+        self.save_paint();
+        self.save_tex_paint();
         // The texture PALETTE (which image fills each painted slot) is editor state,
         // not in the field — persist it so painted textures survive a reload.
         if !self.terrains.is_empty() {
@@ -777,6 +790,7 @@ impl Editor {
         }
         if ok {
             self.scene_dirty = false;
+            self.toast = Some(("💾  Saved".into(), 2.2)); // visible confirmation, not just Console
             let _ = std::fs::remove_file(self.autosave_path()); // saved for real
         }
         ok
@@ -846,6 +860,8 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        self.adopt_paint();
+        self.adopt_tex_paint();
         self.register_scene_meshes();
         self.selection.clear();
         self.history = History::default();
@@ -1001,6 +1017,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         material: None,
         rigidbody: None,
         mesh_collider: false,
+        paint: None,
+        tex_paint: None,
         collidable: false,
         trigger: false,
         visible: true,
@@ -1041,6 +1059,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                paint: None,
+                tex_paint: None,
                 collidable: false,
                 trigger: false,
                 visible: true,
@@ -1064,6 +1084,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                paint: None,
+                tex_paint: None,
                 collidable: false,
                 trigger: false,
                 visible: true,
@@ -1087,6 +1109,8 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                paint: None,
+                tex_paint: None,
                 collidable: false,
                 trigger: false,
                 visible: true,

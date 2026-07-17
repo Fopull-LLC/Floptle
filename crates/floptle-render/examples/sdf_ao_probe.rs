@@ -37,8 +37,8 @@ fn main() {
     let mut a = Terrain::flat([96, 40, 96], [0.0; 3], [12.0, 6.0, 12.0], 0.0, [0.35, 0.6, 0.28]);
     let mut b = Terrain::flat([96, 40, 96], [0.0; 3], [12.0, 6.0, 12.0], 0.0, [0.35, 0.6, 0.28]);
     for _ in 0..30 {
-        a.sculpt(Brush::Raise, [5.0, 1.0, 0.0], 3.5, 1.0);
-        b.sculpt(Brush::Raise, [-5.0, 1.0, 0.0], 3.5, 1.0);
+        a.sculpt(Brush::Raise, [5.0, 1.0, 0.0], 3.5, 1.0, floptle_field::BrushProfile::default());
+        b.sculpt(Brush::Raise, [-5.0, 1.0, 0.0], 3.5, 1.0, floptle_field::BrushProfile::default());
     }
     let origins = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(14.0, 0.0, 0.0)];
     let volumes = [&a, &b];

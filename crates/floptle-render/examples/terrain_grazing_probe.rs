@@ -45,11 +45,11 @@ fn main() {
     // Tall hills + a deep narrow ravine — lots of grazing silhouette edges.
     let mut terrain = Terrain::flat([112, 48, 112], [0.0, 0.0, 0.0], [16.0, 7.0, 16.0], 0.0, [0.35, 0.6, 0.28]);
     for _ in 0..40 {
-        terrain.sculpt(Brush::Raise, [-6.0, 1.0, -2.0], 4.5, 1.0);
-        terrain.sculpt(Brush::Raise, [5.0, 2.0, -7.0], 3.0, 1.0);
-        terrain.sculpt(Brush::Raise, [8.0, 1.0, 4.0], 3.5, 1.0);
-        terrain.sculpt(Brush::Lower, [0.5, 0.0, 1.0], 2.2, 1.0); // deep ravine
-        terrain.sculpt(Brush::Lower, [2.0, 0.0, -3.0], 1.8, 1.0);
+        terrain.sculpt(Brush::Raise, [-6.0, 1.0, -2.0], 4.5, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [5.0, 2.0, -7.0], 3.0, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [8.0, 1.0, 4.0], 3.5, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Lower, [0.5, 0.0, 1.0], 2.2, 1.0, floptle_field::BrushProfile::default()); // deep ravine
+        terrain.sculpt(Brush::Lower, [2.0, 0.0, -3.0], 1.8, 1.0, floptle_field::BrushProfile::default());
     }
 
     let mut raymarch = Raymarch::new(&gpu);

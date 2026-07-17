@@ -3,7 +3,24 @@
 //! type-switch list.
 
 use floptle_core::{Matter, Shape};
+use floptle_render::MeshData;
 use floptle_scene::{MatterDoc, ShapeDoc};
+
+/// The CPU geometry behind each built-in primitive — the ONE definition.
+///
+/// The renderer registers these at startup (`Editor::init`, mapping `Shape as usize`
+/// → `MeshId`) and the vertex-paint brush caches them for raycasting. Both MUST get
+/// byte-identical geometry: paint is indexed by `vertex_index`, so if these two ever
+/// disagreed on vertex count or order, the brush would paint the wrong vertices.
+/// Hence one function, called twice — never two copies of the parameters.
+pub(crate) fn primitive_mesh(shape: Shape) -> MeshData {
+    match shape {
+        Shape::Cube => floptle_render::cube(0.7),
+        Shape::Sphere => floptle_render::uv_sphere(0.85, 24, 36),
+        Shape::Capsule => floptle_render::capsule(0.5, 0.5, 16, 24),
+        Shape::Plane => floptle_render::plane(0.7),
+    }
+}
 
 pub(crate) fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }

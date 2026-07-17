@@ -236,6 +236,8 @@ mod tests {
             material: None,
             rigidbody: None,
             mesh_collider: false,
+            paint: None,
+            tex_paint: None,
             collidable: false,
             trigger: false,
             visible: true,

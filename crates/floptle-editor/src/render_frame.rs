@@ -43,6 +43,7 @@ impl Editor {
         // Terrain brush telegraph + throttled stroke (before the destructure, so it
         // can freely borrow `self`).
         self.terrain_frame_update();
+        self.vertex_paint_frame_update();
 
         // Inspector asset preview: render the spinning model/material (or load the
         // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
@@ -61,8 +62,21 @@ impl Editor {
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work — only structural changes re-upload into the
         // shared 3D atlas (where shadow-only mesh occluders also live).
+        //
+        // Capture the terrain dirty state BEFORE `sync_terrain_gpu` consumes it: the atlas
+        // upload feeds shadows/AO, then `sync_terrain_meshes` rebuilds the PRIMARY-ray
+        // chunk meshes from the same change (Terrain 2.0 / P2). Structural change = full
+        // re-derive; a sculpt dab re-meshes only the touched terrain.
+        let terrain_full_rebuild = self.terrain_gpu_dirty;
+        let terrain_region = self.terrain_region_dirty.map(|(e, mn, mx, _)| (e, mn, mx));
         self.sync_terrain_gpu();
+        self.sync_terrain_meshes(terrain_full_rebuild, terrain_region);
         self.sync_sky_texture();
+        self.sync_sky_shader();
+        // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;
+        // rebuild them when vertex paint changed this frame (no-op otherwise). AFTER
+        // `vertex_paint_frame_update` above, so a dab shows the same frame it lands.
+        self.sync_tex_paint_mirrors();
         // Keep the Inspector's script param list in sync with each script's `defaults`
         // (cheap: cached by file mtime, selected node only) so editing a script surfaces
         // new tunables and drops removed ones live.
@@ -213,6 +227,16 @@ impl Editor {
         self.update_game_viewport(elapsed);
         // The ◈ Shaders tab's per-node preview atlas (only while it's visible).
         self.update_shader_graph_preview(elapsed);
+
+        // Terrain surface material, resolved BEFORE the GPU destructure borrows `self.raster`
+        // out (`terrain_material` is `&self`): the meshed terrain draws with it in the raster
+        // pass (Terrain 2.0 / P2). Cheap; only read when terrains exist.
+        let terrain_base_mat = self.terrain_material();
+
+        // This frame's sky-shader uniforms (Inspector knobs over `.flsl` defaults), also
+        // resolved before the GPU destructure takes `&mut self` — both draw sites reuse it.
+        let sky_active = self.sky_shader.is_some();
+        let sky_uniform_vals = self.sky_uniform_values();
 
         let (
             Some(gpu),
@@ -685,6 +709,13 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
+            // Meshed terrain reads the per-slot NEAREST bitmask + triplanar scale here.
+            terrain_mask: [
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                0.22,
+                0.0,
+                0.0,
+            ],
         };
 
         // A model being dragged from Assets shows a live ghost at the cursor's
@@ -714,6 +745,20 @@ impl Editor {
 
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
+        // Resolved up front for the same reason as paint_bases: the draw loop holds a
+        // mutable borrow and can't call &self helpers.
+        let terrain_nearest_mask =
+            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings);
+        // Per-node vertex-paint bases, resolved BEFORE the draw loop (which borrows
+        // `raster` mutably, so it can't call &self helpers). Empty for unpainted scenes.
+        let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
+            .world
+            .query::<floptle_core::VertexPaint>()
+            .filter_map(|(e, vp)| {
+                let b = self.paint_data.get(&vp.id)?;
+                Some((e, b.parts.iter().map(|&(base, _)| base).collect()))
+            })
+            .collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
         // instance data, drawn through the shader's own pipeline + group(3).
@@ -746,6 +791,15 @@ impl Editor {
             // primitive's color (meshes default to white = untinted texture). A
             // material texture (resolved to a registered handle) re-textures the shape.
             let mat = self.world.get::<Material>(*e).cloned();
+            // A TEXTURE-PAINTED node ALSO draws its paint OVERLAY: the per-triangle atlas
+            // mesh, coplanar over the base, alpha-blended in the transparent pass. The base
+            // renders normally below — texture paint never changes how the node looks,
+            // it only draws over it.
+            if self.world.get::<floptle_core::TexturePaint>(*e).is_some() {
+                let model = t.render_matrix(cam.world_position);
+                let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *e, model, &mp, &mut instances);
+            }
             let tex = mat
                 .as_ref()
                 .and_then(|m| m.texture.as_deref())
@@ -755,7 +809,17 @@ impl Editor {
                 Matter::Primitive { shape, color } => {
                     if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
                         let model = t.render_matrix(cam.world_position);
-                        let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
+                        let mut mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
+                        // Every primitive of a shape shares ONE MeshId, so the node's
+                        // own block is the only way two cubes can be painted
+                        // differently. Falls back to the mesh's block (0 for built-ins).
+                        // Brush paint modulates 2× (paint light); a glTF import stays ×1.
+                        let brush = paint_bases
+                            .get(e)
+                            .and_then(|v| v.first().copied())
+                            .filter(|&b| b != 0);
+                        mp.paint_modulate = brush.is_some();
+                        mp.paint_base = brush.unwrap_or_else(|| raster.mesh_paint_base(mesh));
                         let raw = instance_of_mat(model, &mp);
                         match flsl {
                             Some(b) => flsl_draws.push((mesh, tex, b, raw)),
@@ -774,7 +838,8 @@ impl Editor {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                        let node_paint = paint_bases.get(e).map(|v| v.as_slice());
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, node_paint, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -789,6 +854,20 @@ impl Editor {
                 | Matter::PostProcess { .. } => {}
             }
         }
+
+        // Terrain 2.0 (P2): the terrains' extracted chunk meshes join the raster draw list,
+        // so they flow through the depth prepass, field shadows/AO, SSAO and post exactly
+        // like every other mesh. The raymarch no longer draws them (their volume is `w = 3`
+        // — shadow + AO, not drawn). This is the render swap that retires the up-close
+        // faceting / grazing-shadow stripes the raymarched terrain had.
+        crate::terrain_edit::push_terrain_instances(
+            &self.terrain_render,
+            &self.world,
+            raster,
+            &terrain_base_mat,
+            cam.world_position,
+            &mut instances,
+        );
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
@@ -850,6 +929,14 @@ impl Editor {
         // The scene's PostProcess node drives the whole post chain (per scene, not
         // per project): PostStack settings + the raymarch SDF-AO params.
         let (post_settings, rm_ao_params) = post_process_uniforms(&self.world);
+        // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
+        // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
+        // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)
+        let (sky_meta, sky_uniforms): ([f32; 4], [[f32; 4]; 16]) = if sky_active {
+            ([1.0, 0.0, 0.0, 0.0], sky_uniform_vals)
+        } else {
+            ([0.0; 4], [[0.0; 4]; 16])
+        };
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
@@ -874,7 +961,10 @@ impl Editor {
                 vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
                 vol_atlas: [[0.0; 4]; 16],
                 vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
-                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
+                // .w = per-slot NEAREST mask (bit i = slot i is Pixelated). The palette
+                // is one texture_2d_array with one sampler, so the shader can't pick a
+                // sampler per slot — it reads this mask and selects the result instead.
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
@@ -901,6 +991,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                sky_meta,
+                sky_uniforms,
                 // vol_tight_* are renderer-patched at draw time from the uploaded
                 // volumes; the default is "unbounded" (behaves like the full brick).
                 ..Default::default()
@@ -983,6 +1075,7 @@ impl Editor {
         let rm_draw = show_blobs
             || !self.terrains.is_empty()
             || sky_params[0] >= 0.5
+            || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
             || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
@@ -1079,11 +1172,12 @@ impl Editor {
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
         let show_quit_confirm = &mut self.show_quit_confirm;
-        let quit_confirmed = &mut self.quit_confirmed;
         let delete_confirm = &mut self.delete_confirm;
+        let toast = &mut self.toast;
         let scene_dirty_now = self.scene_dirty;
         let new_terrain_cfg = &mut self.new_terrain_cfg;
         let pending_open_scene = &mut self.pending_open_scene;
+        let vertex_brush = &mut self.vertex_brush;
         let terrain_brush = &mut self.terrain_brush;
         let terrain_detail = &mut self.terrain_detail;
         let terrain_textures = &mut self.terrain_textures;
@@ -1096,6 +1190,22 @@ impl Editor {
                 .sum();
             (self.terrains.len(), total)
         });
+        // The coarsest / most stretched voxel in the scene — the one that shows as a
+        // lattice. Reported in the Terrain tab because this number was invisible, which
+        // is precisely how a 9.17 × 0.50 × 9.17 terrain got authored without anyone
+        // being told.
+        let terrain_worst_voxel = self
+            .terrains
+            .values()
+            .map(|t| {
+                let v = Editor::terrain_voxel_size(t);
+                let aniso = v[0].max(v[1]).max(v[2]) / v[0].min(v[1]).min(v[2]).max(1e-6);
+                (v, aniso)
+            })
+            .max_by(|a, b| {
+                let key = |x: &([f32; 3], f32)| x.0[0].max(x.0[1]).max(x.0[2]);
+                key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+            });
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
         let show_preferences = &mut self.show_preferences;
@@ -1144,6 +1254,7 @@ impl Editor {
         let scene_name = self.scene_name.clone();
         let gizmo = self.gizmo.as_ref();
         let terrain_viz = self.terrain_viz.as_ref();
+        let paint_viz = self.paint_viz.as_ref();
         let camera_gizmos = self.camera_gizmos.as_slice();
         let light_gizmos = self.light_gizmos.as_slice();
         let body_gizmos = self.body_gizmos.as_slice();
@@ -1246,6 +1357,11 @@ impl Editor {
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
+        // Set inside the egui closure (which only holds field borrows), applied after it —
+        // the same deferral `want_save` uses. `want_save_all` = full Ctrl+S save on quit;
+        // `want_exit` = actually leave the app once the save has run.
+        let mut want_save_all = false;
+        let mut want_exit = false;
         let mut frame_pointer_down = false;
         let full_output = ctx.run_ui(raw_input, |ui| {
             let pointer_down = ui.input(|i| i.pointer.any_down());
@@ -1654,6 +1770,7 @@ impl Editor {
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
                 sdf_cache: &self.sdf_cache,
+                sky_uniforms: self.sky_shader.as_ref().map_or(&[], |(_, _, u)| u.as_slice()),
                 component_clip,
                 add_component_filter,
                 layer_names: &layer_names,
@@ -1664,11 +1781,13 @@ impl Editor {
                 texture_settings,
                 cam_preview,
                 has_active_camera,
+                vertex_brush,
                 terrain_brush,
                 terrain_detail,
                 terrain_textures,
                 terrain_present,
                 terrain_voxels,
+                terrain_worst_voxel,
                 assets_grid,
                 assets_grid_dir,
                 project_root,
@@ -1679,6 +1798,7 @@ impl Editor {
                 ide_diag,
                 gizmo,
                 terrain_viz,
+                paint_viz,
                 camera_gizmos,
                 light_gizmos,
                 body_gizmos,
@@ -2368,17 +2488,20 @@ impl Editor {
                             ui.label("Quit Floptle?");
                         }
                         ui.horizontal(|ui| {
+                            // Save & Quit: save everything, THEN close (the save runs after
+                            // this closure, then `about_to_wait` exits — a real close, not the
+                            // no-op ViewportCommand this app used to send).
                             if scene_dirty_now && ui.button("💾 Save & Quit").clicked() {
-                                want_save = true;
-                                *quit_confirmed = true;
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                                want_save_all = true;
+                                want_exit = true;
                                 close = true;
                             }
-                            if ui.button("Quit without saving").clicked() {
-                                *quit_confirmed = true;
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            // Discard: leave WITHOUT saving.
+                            if ui.button("Discard & Quit").clicked() {
+                                want_exit = true;
                                 close = true;
                             }
+                            // Cancel: just dismiss — no save, no exit.
                             if ui.button("Cancel").clicked() {
                                 close = true;
                             }
@@ -2386,6 +2509,30 @@ impl Editor {
                     });
                 if !open || close {
                     *show_quit_confirm = false;
+                }
+            }
+
+            // ---- transient toast (save confirmation etc.) — top-center, fades out ----
+            if let Some((msg, secs)) = toast.as_mut() {
+                *secs -= ui.input(|i| i.stable_dt).min(0.1);
+                if *secs <= 0.0 {
+                    *toast = None;
+                } else {
+                    let a = (*secs).clamp(0.0, 1.0); // fade over the last second
+                    egui::Area::new(egui::Id::new("save-toast"))
+                        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 48.0))
+                        .interactable(false)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .fill(egui::Color32::from_rgba_unmultiplied(30, 120, 60, (220.0 * a) as u8))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(msg.as_str())
+                                            .color(egui::Color32::from_white_alpha((255.0 * a) as u8))
+                                            .strong(),
+                                    );
+                                });
+                        });
                 }
             }
 
@@ -2472,7 +2619,32 @@ impl Editor {
                                     .suffix(" (y)"),
                             );
                         });
-                        ui.small("a flat slab renders perfectly smooth at any size — set \"detail\" in the Terrain tab higher before sculpting bumps into a large one.");
+                        // The size/detail pair silently decides quality, and the old
+                        // copy here ("set detail higher before sculpting a large one")
+                        // was actively misleading: detail is a CELL COUNT, so past a few
+                        // dozen units it cannot rescue anything. Show the real voxel
+                        // edge instead, live, and say plainly when it's too coarse.
+                        let (dims, vs) =
+                            crate::terrain_ui::new_terrain_preview(cfg.size_xz, cfg.thickness, *terrain_detail);
+                        let cells = dims.iter().map(|&d| d as u64).product::<u64>();
+                        ui.small(format!(
+                            "→ {}×{}×{} cells · voxel {vs:.2} units · {:.0} MB",
+                            dims[0], dims[1], dims[2],
+                            cells as f64 * 8.0 / 1.0e6,
+                        ));
+                        if vs > 1.5 {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(235, 170, 90),
+                                format!("⚠ {vs:.1} units per voxel — sculpted bumps will show the grid"),
+                            )
+                            .on_hover_text(
+                                "Detail is a cell COUNT, not a density, so it can't rescue a huge \
+                                 slab: the voxels just get bigger with the terrain. A flat slab \
+                                 stays smooth at any size, but the moment you sculpt, cells this \
+                                 big read as dark lattice lines and terraced steps. Prefer several \
+                                 smaller terrains laid side by side — overlapping ones blend.",
+                            );
+                        }
                         ui.horizontal(|ui| {
                             ui.label("color");
                             ui.color_edit_button_rgb(&mut cfg.color);
@@ -2855,13 +3027,21 @@ impl Editor {
             }
         }
 
-        if want_save || cmd.save_scene {
+        if want_save_all {
+            // Quit-time full save (scene + project + scripts), with its own toast.
+            self.save_all();
+        } else if want_save || cmd.save_scene {
             self.save_scene();
         }
         if want_save_project
             && let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
                 eprintln!("  save project failed: {e}");
             }
+        // A quit decision (Save & Quit / Discard & Quit): the save above has run, so leave
+        // now — `about_to_wait` sees this and exits the winit loop.
+        if want_exit {
+            self.pending_exit = true;
+        }
 
         self.apply_frame_commands(cmd, frame_pointer_down);
     }
@@ -2959,22 +3139,46 @@ impl Editor {
                 self.terrain_wire_world.retain(|(we, _)| *we != e);
             }
         }
+        // (see terrain_nearest_mask for the per-slot filter bits)
         // Re-upload the terrain texture palette when it changes. Each slot resolves
         // to a 256² layer (empty / unreadable slots become white so indices align).
         if self.terrain_textures_dirty {
+            // Every slot is resampled to the palette's 256². Honour the texture's OWN
+            // filter setting while doing it — a bilinear resize of pixel art destroys
+            // it here, before any sampler runs (this was half the "terrain textures are
+            // always blurry" bug; the other half was the hardcoded Linear sampler).
+            let settings = &self.texture_settings;
             let layers: Vec<floptle_render::TextureData> = self
                 .terrain_textures
                 .iter()
                 .map(|p| {
+                    let nearest = settings
+                        .get(p)
+                        .copied()
+                        .unwrap_or_default()
+                        .filter
+                        == crate::assets::FilterMode::Pixelated;
                     if !p.is_empty()
-                        && let Some(t) = floptle_assets::load_texture_sized(Path::new(p), 256, 256) {
-                            return t;
-                        }
+                        && let Some(t) =
+                            floptle_assets::load_texture_sized_filtered(Path::new(p), 256, 256, nearest)
+                    {
+                        return t;
+                    }
                     floptle_render::TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 }
                 })
                 .collect();
-            if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
-                raymarch.set_terrain_textures(gpu, &layers);
+            let mask =
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings)
+                    as u32;
+            if let Some(gpu) = self.gpu.as_ref() {
+                if let Some(raymarch) = self.raymarch.as_mut() {
+                    raymarch.set_terrain_textures(gpu, &layers);
+                }
+                // Meshed terrain (P2/P6) draws in the RASTER pass, so it needs its own copy
+                // of the palette + the same per-slot nearest mask.
+                if let Some(raster) = self.raster.as_mut() {
+                    raster.set_terrain_palette(gpu, &layers, mask);
+                }
             }
             self.terrain_textures_dirty = false;
         }
@@ -2994,6 +3198,86 @@ impl Editor {
             }
             self.sky_texture_loaded = sky_tex_path;
         }
+    }
+
+    /// Compile + splice the Skybox node's Sky-stage `.flsl` (a procedural sky). Recompiles
+    /// only on path/mtime change; a compile error keeps the last-good shader and logs.
+    /// `None` path clears back to the built-in sky.
+    fn sync_sky_shader(&mut self) {
+        let path = self.world.query::<Matter>().find_map(|(_, m)| match m {
+            Matter::Skybox { shader, .. } => shader.clone(),
+            _ => None,
+        });
+        let Some(path) = path else {
+            // No sky shader: clear if one was active.
+            if self.sky_shader.take().is_some()
+                && let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut())
+            {
+                raymarch.set_sky_shader(gpu, None);
+            }
+            return;
+        };
+        // Asset-tree paths already carry the root ("assets/shaders/…") — joining
+        // project_root onto them gave assets/assets/… ENOENT, so NO picked sky
+        // shader ever loaded (the Material-shader double-join bug, same fix).
+        let abs = self.resolve_asset_path(&path);
+        let mtime = std::fs::metadata(&abs)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        // Unchanged (same path + mtime) → nothing to do.
+        if self.sky_shader.as_ref().is_some_and(|(p, mt, _)| *p == path && *mt == mtime) {
+            return;
+        }
+        let Ok(src) = std::fs::read_to_string(&abs) else {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!("◈ sky shader {path} — can't read file"),
+                None,
+            );
+            return;
+        };
+        match floptle_shader::compile_sky(&src) {
+            Ok(compiled) => {
+                if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
+                    raymarch.set_sky_shader(
+                        gpu,
+                        Some((&compiled.sky_fn, floptle_shader::stdlib::SUPPORT_WGSL)),
+                    );
+                }
+                self.sky_shader = Some((path.clone(), mtime, compiled.uniforms.clone()));
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("◈ sky shader `{}` compiled", compiled.name),
+                    None,
+                );
+            }
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("◈ sky shader {path}: {e}"),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// This frame's `sky_uniforms`: each declared sky-shader uniform resolved to the
+    /// Skybox node's Inspector override (`shader_params`) or, absent one, the shader's
+    /// own `.flsl` default. Read fresh every frame so a knob drag is instant (no
+    /// recompile) — the mirror of how a Material packs its params.
+    fn sky_uniform_values(&self) -> [[f32; 4]; 16] {
+        let mut arr = [[0.0f32; 4]; 16];
+        let Some((_, _, schema)) = &self.sky_shader else { return arr };
+        let params = self.world.query::<Matter>().find_map(|(_, m)| match m {
+            Matter::Skybox { shader_params, .. } => Some(shader_params),
+            _ => None,
+        });
+        for (i, u) in schema.iter().take(16).enumerate() {
+            arr[i] = params.and_then(|p| p.get(&u.name).copied()).unwrap_or(u.default);
+        }
+        arr
     }
 
     /// Frame-time smoothing: SNAP the measured dt to the nearest whole multiple
@@ -4205,6 +4489,26 @@ impl Editor {
         if let Some((matter, parent)) = cmd.add_parented {
             self.add_parented(matter, parent);
         }
+        if cmd.paint_fill {
+            // Same target routing as Clear: filling VERTEX blocks while the UI says
+            // ▦ Texture would silently stomp vertex work.
+            if self.vertex_brush.target == crate::paint_ui::PaintTarget::Texture {
+                self.tex_fill_selected();
+            } else {
+                self.paint_fill_selected();
+            }
+        }
+        if cmd.paint_clear {
+            // Texture target → drop the painted texture (back to the original material tex);
+            // Vertex target → clear the per-vertex colors.
+            if self.vertex_brush.target == crate::paint_ui::PaintTarget::Texture {
+                for e in self.selection.clone() {
+                    self.clear_texture_paint(e);
+                }
+            } else {
+                self.paint_clear_selected();
+            }
+        }
         if cmd.open_new_terrain {
             self.new_terrain_cfg = Some(NewTerrainCfg::default());
         }
@@ -4221,6 +4525,12 @@ impl Editor {
             // sampler (and mips) on next use, and persist the change.
             self.texture_registry.remove(&path);
             self.texture_registry_setting.remove(&path);
+            // The terrain palette bakes its own 256² copy at load, so a filter change
+            // has to re-RESAMPLE it — a sampler swap alone can't un-blur a bilinear
+            // resize. Only re-upload if this texture is actually in the palette.
+            if self.terrain_textures.contains(&path) {
+                self.terrain_textures_dirty = true;
+            }
             self.save_texture_settings();
         }
         if let Some(e) = cmd.set_active_camera {
@@ -4462,6 +4772,11 @@ impl Editor {
     ) {
         let view_proj = cam.view_proj(aspect);
 
+        // Sky-shader uniforms (Inspector knobs over `.flsl` defaults), resolved before any
+        // GPU borrow — the offscreen / Game render reuses the same values as the editor view.
+        let sky_active = self.sky_shader.is_some();
+        let sky_uniform_vals = self.sky_uniform_values();
+
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let light = Vec3::from(light_node.direction).normalize_or_zero();
         let li = light_node.intensity;
@@ -4478,11 +4793,29 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
+            // Meshed terrain reads the per-slot NEAREST bitmask + triplanar scale here.
+            terrain_mask: [
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                0.22,
+                0.0,
+                0.0,
+            ],
         };
 
         // Camera-relative instances + blobs, exactly like the main gather.
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
+        // Per-node paint, resolved BEFORE the draw loop (which borrows `raster`
+        // mutably, so it can't call &self helpers). This path renders the world too, so
+        // painted props must look identical here. Empty for unpainted scenes.
+        let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
+            .world
+            .query::<floptle_core::VertexPaint>()
+            .filter_map(|(e, vp)| {
+                let b = self.paint_data.get(&vp.id)?;
+                Some((e, b.parts.iter().map(|&(base, _)| base).collect()))
+            })
+            .collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         // Custom `.flsl` materials draw offscreen too (bindings were refreshed
         // by ensure_flsl_materials before any gather this frame).
@@ -4497,6 +4830,13 @@ impl Editor {
             }
             let t = floptle_core::world_transform(&self.world, *ent);
             let mat = self.world.get::<Material>(*ent).cloned();
+            // Texture-painted node → ALSO push its paint overlay; the base draws normally
+            // below (see the main path).
+            if self.world.get::<floptle_core::TexturePaint>(*ent).is_some() {
+                let model = t.render_matrix(cam.world_position);
+                let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *ent, model, &mp, &mut instances);
+            }
             let tex = mat
                 .as_ref()
                 .and_then(|m| m.texture.as_deref())
@@ -4536,9 +4876,10 @@ impl Editor {
                             .map(material_params)
                             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                         let pose = self.anim.poses.get(ent).map(|v| v.as_slice());
+                        let node_paint = paint_bases.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
-                            gpu, raster, asset, pose, model, tex, &mp, &mut skin_scratch,
-                            &mut instances, flsl, &mut flsl_draws,
+                            gpu, raster, asset, pose, model, tex, &mp, node_paint,
+                            &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
                         );
                     }
                 }
@@ -4552,12 +4893,26 @@ impl Editor {
         // views too (previews + the split Game viewport).
         let (_, rm_ao_params) = post_process_uniforms(&self.world);
         let terrain_mat = self.terrain_material();
+        // Terrain 2.0 (P2): the meshed terrain draws in this offscreen/Game view too, or a
+        // docked Game viewport would show empty ground (its volume is `w = 3`, not drawn by
+        // the raymarch). Same instance push as the main Scene view.
+        if let Some(raster) = self.raster.as_ref() {
+            crate::terrain_edit::push_terrain_instances(
+                &self.terrain_render,
+                &self.world,
+                raster,
+                &terrain_mat,
+                cam.world_position,
+                &mut instances,
+            );
+        }
         let show_blobs = self.project.matter && !blobs.is_empty();
         // A textured skybox is DRAWN by the raymarch pass (missed rays sample the
         // sky) — keep it running even with no terrain/blobs in the scene.
         let rm_draw = show_blobs
             || !self.terrains.is_empty()
             || sky_params[0] >= 0.5
+            || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
             || !self.flsl_shape_slots.is_empty();
         let rm = {
             let mut arr = [[0.0f32; 4]; 16];
@@ -4584,7 +4939,15 @@ impl Editor {
                 vol_half: [[1.0, 1.0, 1.0, 0.5]; 16],
                 vol_atlas: [[0.0; 4]; 16],
                 vol_dims: [[1.0, 1.0, 1.0, 0.0]; 16],
-                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], 1.0],
+                // .w = per-slot NEAREST mask (bit i = slot i is Pixelated). The palette
+                // is one texture_2d_array with one sampler, so the shader can't pick a
+                // sampler per slot — it reads this mask and selects the result instead.
+                terrain_tint: [
+                    tm.color[0],
+                    tm.color[1],
+                    tm.color[2],
+                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                ],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
@@ -4614,6 +4977,11 @@ impl Editor {
                 // vol_tight_* are renderer-patched at draw time (default: unbounded).
                 ..Default::default()
             };
+            // Sky shader in the offscreen / Game view too.
+            if sky_active {
+                g.sky_meta = [1.0, 0.0, 0.0, 0.0];
+                g.sky_uniforms = sky_uniform_vals;
+            }
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
             g
@@ -4693,6 +5061,9 @@ fn push_mesh_instances(
     model: Mat4,
     tex: Option<TexId>,
     mp: &MaterialParams,
+    // This node's own per-part paint bases (the brush's work). `None` → fall back to
+    // whatever the mesh imported with, so Blender paint still shows on unpainted nodes.
+    node_paint: Option<&[u32]>,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
     flsl: Option<floptle_render::FlslBindingId>,
@@ -4704,9 +5075,21 @@ fn push_mesh_instances(
         Some(b) => flsl_out.push((mid, tex, b, raw)),
         None => instances.push((mid, tex, raw)),
     };
+    // Vertex paint is per-PART: import splits a model per-material into parts with
+    // their own vertex arrays, so each part owns its own paint block. Instances of a
+    // part share its base — same block, same draw call.
+    let painted = |raster: &floptle_render::Raster, mid: MeshId, part: usize| {
+        let mut m = *mp;
+        let brush = node_paint.and_then(|p| p.get(part).copied()).filter(|&b| b != 0);
+        // Brush paint modulates 2× (paint light AND shadow); imported glTF COLOR_0 stays a
+        // plain ×1 multiply, per the glTF convention (white = identity).
+        m.paint_modulate = brush.is_some();
+        m.paint_base = brush.unwrap_or_else(|| raster.mesh_paint_base(mid));
+        m
+    };
     let Some(rig) = asset.rig.as_ref() else {
-        for &mid in &asset.parts {
-            push(mid, instance_of_mat(model, mp));
+        for (i, &mid) in asset.parts.iter().enumerate() {
+            push(mid, instance_of_mat(model, &painted(raster, mid, i)));
         }
         return;
     };
@@ -4714,12 +5097,14 @@ fn push_mesh_instances(
     for (i, &mid) in asset.parts.iter().enumerate() {
         let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
         if let Some(Some(skin)) = rig.skins.get(i) {
+            // CPU skinning rewrites this part's VERTEX buffer every frame — but paint
+            // lives in `vpaint`, keyed by vertex_index, so the re-upload can't stomp it.
             anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
             raster.update_mesh_vertices(gpu, mid, skin_scratch);
-            push(mid, instance_of_mat(model, mp));
+            push(mid, instance_of_mat(model, &painted(raster, mid, i)));
         } else {
             let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
-            push(mid, instance_of_mat(model * local, mp));
+            push(mid, instance_of_mat(model * local, &painted(raster, mid, i)));
         }
     }
 }

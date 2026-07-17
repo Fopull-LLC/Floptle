@@ -20,9 +20,12 @@ impl Editor {
         self.tool = tool;
         self.grabbed = None;
         self.drag = None;
-        // Selecting Sculpt focuses the Terrain tools so the brush controls are at hand.
+        // Selecting a brush tool focuses its settings so the controls are at hand.
         if tool == Tool::Sculpt {
             self.focus_terrain();
+        }
+        if tool == Tool::Paint {
+            self.focus_paint();
         }
     }
 
@@ -374,7 +377,7 @@ impl Editor {
                 let p = start.translation + (outward * (applied * 0.5)).as_dvec3();
                 self.set_world_transform(e, Transform { translation: p, scale: sc, ..start });
             }
-            Tool::Select | Tool::Sculpt => {}
+            Tool::Select | Tool::Sculpt | Tool::Paint => {}
         }
     }
 

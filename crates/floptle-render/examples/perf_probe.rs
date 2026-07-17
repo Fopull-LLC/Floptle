@@ -40,10 +40,10 @@ fn main() {
         Terrain::flat([144, 96, 144], [0.0, 0.0, 0.0], [40.0, 27.0, 40.0], 0.0, [0.35, 0.6, 0.28]);
     for i in 0..6 {
         let spread = i as f32 * 1.4;
-        terrain.sculpt(Brush::Raise, [-14.0 + spread, 0.0, -9.0], 3.4, 1.0);
-        terrain.sculpt(Brush::Raise, [12.0, 0.0, 6.0 + spread], 3.0, 1.0);
-        terrain.sculpt(Brush::Raise, [18.0 - spread, 0.3, -18.0], 2.6, 1.0);
-        terrain.sculpt(Brush::Lower, [-6.0, 0.5, 18.0 - spread], 3.0, 1.0);
+        terrain.sculpt(Brush::Raise, [-14.0 + spread, 0.0, -9.0], 3.4, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [12.0, 0.0, 6.0 + spread], 3.0, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [18.0 - spread, 0.3, -18.0], 2.6, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Lower, [-6.0, 0.5, 18.0 - spread], 3.0, 1.0, floptle_field::BrushProfile::default());
     }
 
     // Report the terrain's real content height (what the tight bound sees): how

@@ -1,5 +1,5 @@
 //! Headless probe for the shader-graph node previews: builds the preview
-//! atlas module for a couple of example shaders (fragment + sdf) exactly like
+//! atlas module for example shaders (fragment + sdf + sky) exactly like
 //! the editor does, renders it with stand-in bindings, and writes PNGs.
 //!
 //! Run: cargo run -p floptle-render --example preview_tiles_probe -- <outdir>
@@ -14,12 +14,19 @@ const TILE: u32 = 128;
 
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
-    let shaders = [("water", src_of("water.flsl")), ("wobbleOrb", src_of("wobbleOrb.flsl"))];
+    let shaders = [
+        ("water", src_of("water.flsl")),
+        ("wobbleOrb", src_of("wobbleOrb.flsl")),
+        // A sky example, and deliberately the node-heaviest one: exercises the
+        // SkyPreview emit path AND the tile-budget priority (output + named
+        // lets must all land tiles even on a ~100-node graph).
+        ("starryNight", src_of("starryNight.flsl")),
+    ];
     let gpu = Gpu::headless(64, 64);
     for (name, src) in shaders {
-        let compiled = build(&src);
+        let (ir, compiled) = build(&src);
         let out = format!("{dir}/preview_{name}.png");
-        render_atlas(&gpu, &compiled, &out);
+        render_atlas(&gpu, &ir, &compiled, &out);
         println!("wrote {out} ({} tiles, {}x{})", compiled.tiles, compiled.cols, compiled.rows);
     }
 }
@@ -32,7 +39,7 @@ fn src_of(file: &str) -> String {
         .expect("example exists")
 }
 
-fn build(src: &str) -> CompiledPreview {
+fn build(src: &str) -> (ir::ShaderIr, CompiledPreview) {
     let ir = floptle_shader::parse(src).expect("parses");
     let ck = ir::check(&ir).expect("checks");
     let view = build_view(&ir, Some(&ck));
@@ -40,10 +47,10 @@ fn build(src: &str) -> CompiledPreview {
     let compiled = transpile_preview(&ir, &ck, &targets).expect("preview transpiles");
     floptle_shader::validate_module(&compiled.wgsl)
         .unwrap_or_else(|d| panic!("naga rejected preview: {}", d.message));
-    compiled
+    (ir, compiled)
 }
 
-fn render_atlas(gpu: &Gpu, compiled: &CompiledPreview, out: &str) {
+fn render_atlas(gpu: &Gpu, irr: &ir::ShaderIr, compiled: &CompiledPreview, out: &str) {
     let device = &gpu.device;
     let (w, h) = (compiled.cols * TILE, compiled.rows * TILE);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -80,7 +87,7 @@ fn render_atlas(gpu: &Gpu, compiled: &CompiledPreview, out: &str) {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries })
     };
     let layouts = match compiled.stage {
-        Stage::Fragment => {
+        Stage::Fragment | Stage::Sky => {
             let mut g2 = vec![ubo(0)];
             for i in 0..compiled.textures.len() as u32 {
                 g2.push(texture(1 + 2 * i));
@@ -152,17 +159,6 @@ fn render_atlas(gpu: &Gpu, compiled: &CompiledPreview, out: &str) {
     pv[2] = compiled.tiles as f32;
     pv[3] = TILE as f32;
     let mut lane = 4usize;
-    let irr = floptle_shader::parse(
-        floptle_shader::examples::EXAMPLES
-            .iter()
-            .find(|(_, s)| {
-                let x = floptle_shader::parse(s).unwrap();
-                x.name == ir_name(compiled)
-            })
-            .map(|(_, s)| *s)
-            .unwrap(),
-    )
-    .unwrap();
     for (id, lanes) in &compiled.dyn_slots {
         match &irr.expr(*id).kind {
             floptle_shader::ir::ExprKind::Num(n) if *lanes == 1 => pv[lane] = *n as f32,
@@ -224,7 +220,7 @@ fn render_atlas(gpu: &Gpu, compiled: &CompiledPreview, out: &str) {
     }
     let mut binds = Vec::new();
     match compiled.stage {
-        Stage::Fragment => {
+        Stage::Fragment | Stage::Sky => {
             binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),
@@ -307,15 +303,6 @@ fn render_atlas(gpu: &Gpu, compiled: &CompiledPreview, out: &str) {
     }
     gpu.queue.submit([encoder.finish()]);
     save_png(gpu, &target, w, h, out);
-}
-
-fn ir_name(c: &CompiledPreview) -> String {
-    // The probe only runs the two known examples; match by texture/uniform
-    // shape is overkill — recover the name from stage.
-    match c.stage {
-        Stage::Fragment => "water".into(),
-        Stage::Sdf => "wobbleOrb".into(),
-    }
 }
 
 fn save_png(gpu: &Gpu, tex: &wgpu::Texture, w: u32, h: u32, path: &str) {

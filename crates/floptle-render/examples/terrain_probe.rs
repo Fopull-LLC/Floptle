@@ -44,14 +44,14 @@ fn main() {
     // A flat grass field, then sculpt some hills + a dug pit, and paint a brown path.
     let mut terrain = Terrain::flat([112, 48, 112], [0.0, 0.0, 0.0], [16.0, 6.0, 16.0], 0.0, [0.35, 0.6, 0.28]);
     for _ in 0..30 {
-        terrain.sculpt(Brush::Raise, [-5.0, 0.5, -3.0], 4.0, 1.0);
-        terrain.sculpt(Brush::Raise, [4.0, 0.5, 2.0], 3.0, 1.0);
-        terrain.sculpt(Brush::Raise, [6.0, 1.5, -6.0], 2.2, 1.0);
-        terrain.sculpt(Brush::Lower, [-2.0, 0.0, 6.0], 3.0, 1.0);
+        terrain.sculpt(Brush::Raise, [-5.0, 0.5, -3.0], 4.0, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [4.0, 0.5, 2.0], 3.0, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [6.0, 1.5, -6.0], 2.2, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Lower, [-2.0, 0.0, 6.0], 3.0, 1.0, floptle_field::BrushProfile::default());
     }
     for _ in 0..20 {
-        terrain.paint([0.0, 0.0, 0.0], 4.0, 1.0, [0.45, 0.32, 0.2]);
-        terrain.paint([6.0, 1.5, -6.0], 2.4, 1.0, [0.6, 0.6, 0.62]);
+        terrain.paint([0.0, 0.0, 0.0], 4.0, 1.0, [0.45, 0.32, 0.2], floptle_field::BrushProfile::default());
+        terrain.paint([6.0, 1.5, -6.0], 2.4, 1.0, [0.6, 0.6, 0.62], floptle_field::BrushProfile::default());
     }
     // Paint a TEXTURE (palette slot 1) onto the big hill.
     terrain.paint_texture([-5.0, 0.5, -3.0], 5.0, 1);

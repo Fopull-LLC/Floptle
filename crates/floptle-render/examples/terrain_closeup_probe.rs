@@ -35,8 +35,8 @@ fn main() {
     // DEFAULT-DETAIL voxels (64 -> 0.5 world units), the grainy case.
     let mut terrain = Terrain::flat([64, 24, 64], [0.0, 0.0, 0.0], [16.0, 6.0, 16.0], 0.0, [0.4, 0.6, 0.32]);
     for _ in 0..50 {
-        terrain.sculpt(Brush::Raise, [0.0, 1.0, 0.0], 6.0, 1.0);
-        terrain.sculpt(Brush::Raise, [4.0, 0.5, -2.0], 3.0, 1.0);
+        terrain.sculpt(Brush::Raise, [0.0, 1.0, 0.0], 6.0, 1.0, floptle_field::BrushProfile::default());
+        terrain.sculpt(Brush::Raise, [4.0, 0.5, -2.0], 3.0, 1.0, floptle_field::BrushProfile::default());
     }
 
     let mut raymarch = Raymarch::new(&gpu);

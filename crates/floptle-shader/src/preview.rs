@@ -25,9 +25,11 @@ use crate::ir::{self, Checked, ExprId, Input, ShaderIr, Stage, Ty};
 use crate::stdlib;
 use crate::transpile::{EmitCtx, TranspileError, Writer, MAX_TEXTURE_SLOTS, MAX_UNIFORMS};
 
-/// The atlas holds at most this many tiles (an 8×8 grid) — graphs beyond it
-/// preview their first 64 nodes.
-pub const PREVIEW_MAX_TILES: usize = 64;
+/// The atlas holds at most this many tiles (a 12×11 grid). Graphs beyond it
+/// drop thumbnails for their LAST anonymous subexpressions only — the output
+/// and every named node always get a tile (see [`preview_targets`]). Sized
+/// after the sky examples: a fully-exploded sky graph runs ~100 nodes.
+pub const PREVIEW_MAX_TILES: usize = 128;
 
 /// One thing a preview tile can show.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,7 +72,11 @@ pub struct CompiledPreview {
 /// thumbnail. Uniform/Constant nodes skip (their value is already an editor
 /// widget on the node); everything else previews.
 pub fn preview_targets(ir: &ShaderIr, view: &[GNode]) -> Vec<(NodeKey, PreviewTarget)> {
-    let mut out = Vec::new();
+    // The output and named nodes claim tiles FIRST: when a graph outgrows the
+    // tile budget, the dropped thumbnails must be trailing anonymous
+    // subexpressions — never the output or a `let` someone is watching.
+    let mut named = Vec::new();
+    let mut anon = Vec::new();
     for n in view {
         if matches!(n.kind, NodeKind::Uniform(_) | NodeKind::Constant(_)) {
             continue;
@@ -89,12 +95,15 @@ pub fn preview_targets(ir: &ShaderIr, view: &[GNode]) -> Vec<(NodeKey, PreviewTa
                 None => continue,
             },
         };
-        out.push((n.key.clone(), t));
-        if out.len() == PREVIEW_MAX_TILES {
-            break;
+        match &n.key {
+            NodeKey::Out => named.insert(0, (n.key.clone(), t)),
+            NodeKey::Anon(_) => anon.push((n.key.clone(), t)),
+            _ => named.push((n.key.clone(), t)),
         }
     }
-    out
+    named.extend(anon);
+    named.truncate(PREVIEW_MAX_TILES);
+    named
 }
 
 /// Build the preview module for a checked shader. `targets` come from
@@ -115,21 +124,26 @@ pub fn transpile_preview(
     let cols = (count as f32).sqrt().ceil() as u32;
     let rows = count.div_ceil(cols as usize) as u32;
 
+    // Sky shaders preview through the Fragment tile path: the dome normal stands in for
+    // the ray direction (tile top ≈ zenith, middle ≈ horizon), and knobs ride the same
+    // `P` param block as fragment previews. The real sky still renders in the scene.
     let ctx = match stage {
         Stage::Fragment => EmitCtx::Fragment,
+        Stage::Sky => EmitCtx::SkyPreview,
         Stage::Sdf => EmitCtx::Sdf { slot: 0 },
     };
     let mut w = Writer::new(ir, ck, ctx);
     w.dyn_nums = Some(Default::default());
 
     match stage {
-        Stage::Fragment => w.raw(FRAG_PRELUDE),
+        Stage::Fragment | Stage::Sky => w.raw(FRAG_PRELUDE),
         Stage::Sdf => w.raw(SDF_PRELUDE),
     }
     w.raw(stdlib::SUPPORT_WGSL);
 
-    if stage == Stage::Fragment {
-        // The same param block as the real material path, at group(2).
+    if stage != Stage::Sdf {
+        // The same param block as the real material path, at group(2) — sky
+        // knobs read it too (a preview has no `sky_uniforms` globals array).
         w.line("struct FlslParams {".into(), None);
         if ir.uniforms.is_empty() && ir.textures.is_empty() {
             w.line("    _pad: vec4<f32>,".into(), None);
@@ -150,8 +164,15 @@ pub fn transpile_preview(
             );
             w.line(format!("@group(2) @binding({}) var flsl_samp{i}: sampler;", 2 + 2 * i), None);
         }
-        w.raw(crate::transpile::FRAGMENT_LIT_WGSL);
+        if stage == Stage::Fragment {
+            w.raw(crate::transpile::FRAGMENT_LIT_WGSL);
+        }
         w.line("fn flsl_pv(in: VsOut, tile: u32) -> vec4<f32> {".into(), None);
+        // Emitted fragment code reads `front` (the primitive's winding, which
+        // `facing_normal` needs). A preview tile is a synthetic dome always facing the
+        // viewer, so it is front-facing by construction — there is no primitive to ask.
+        // (Sky chunks never read it; naga is fine with an unused local.)
+        w.line("    let front = true;".into(), None);
     } else {
         w.line("fn flsl_pv(q: vec3<f32>, tile: u32) -> vec4<f32> {".into(), None);
     }
@@ -184,7 +205,7 @@ pub fn transpile_preview(
 
     w.raw(PV_VERTEX);
     match stage {
-        Stage::Fragment => w.raw(FRAG_MAIN),
+        Stage::Fragment | Stage::Sky => w.raw(FRAG_MAIN),
         Stage::Sdf => w.raw(SDF_MAIN),
     }
 
@@ -237,7 +258,7 @@ fn target_vis(
                 Ty::Vec4 => "",
             };
             let e = match stage {
-                Stage::Fragment => format!("P.u{u}{access}"),
+                Stage::Fragment | Stage::Sky => format!("P.u{u}{access}"),
                 Stage::Sdf => format!("G.shape_uniforms[{u}u]{access}"),
             };
             wrap(e, uni.ty)
@@ -258,6 +279,20 @@ fn target_vis(
                         span: Default::default(),
                     });
                 }
+                // Sky previews through the fragment tile (dome normal ≈ ray dir).
+                (Stage::Sky, Input::SkyDir) => "normalize(in.normal)",
+                (Stage::Sky, _) => {
+                    return Err(TranspileError {
+                        message: format!("`{}` is not available in sky shaders", i.name()),
+                        span: Default::default(),
+                    });
+                }
+                (Stage::Fragment, Input::SkyDir) => {
+                    return Err(TranspileError {
+                        message: "`skyDir` is only for sky shaders".into(),
+                        span: Default::default(),
+                    });
+                }
             };
             let ty = if *i == Input::Time { Ty::Float } else { i.ty() };
             wrap(e.to_string(), ty)
@@ -266,7 +301,7 @@ fn target_vis(
             format!("textureSample(flsl_tex{t}, flsl_samp{t}, in.uv)")
         }
         PreviewTarget::Output => match stage {
-            Stage::Fragment => match ir.outputs.get("color") {
+            Stage::Fragment | Stage::Sky => match ir.outputs.get("color") {
                 Some(&out) => match ck.ty(out) {
                     Ty::Vec4 => format!("({})", w.emit(out)?),
                     _ => format!("vec4<f32>({}, 1.0)", w.emit(out)?),
@@ -330,7 +365,7 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { re
 // (shoreline foam, contact glows) show a gradient instead of a constant.
 fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
-fn facing_normal(n: vec3<f32>, view_pos: vec3<f32>) -> vec3<f32> { return select(-n, n, dot(n, -view_pos) >= 0.0); }
+fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 "#;
 
 /// Stand-ins for the field/raymarch symbols an sdf chunk references, plus the
@@ -459,6 +494,30 @@ mod tests {
             assert!(pv.tiles > 0, "{name} has tiles");
             if let Err(d) = validate_module(&pv.wgsl) {
                 panic!("{name}: preview module rejected: {} \n---\n{}", d.message, pv.wgsl);
+            }
+        }
+    }
+
+    /// A graph can outgrow the tile budget, but the tiles it drops must be
+    /// anonymous subexpressions — the OUTPUT and every named `let` always
+    /// preview (the sky examples run ~100 nodes; Ty's first sight of them was
+    /// a graph whose output tile was silently over budget).
+    #[test]
+    fn the_output_and_named_lets_always_get_tiles() {
+        for (name, src) in crate::examples::EXAMPLES {
+            let ir = parse(src).expect("parses");
+            let ck = ir::check(&ir).expect("checks");
+            let view = build_view(&ir, Some(&ck));
+            let targets = preview_targets(&ir, &view);
+            assert!(
+                targets.iter().any(|(_, t)| *t == PreviewTarget::Output),
+                "{name}: the output lost its preview tile"
+            );
+            for (i, (lname, _)) in ir.lets.iter().enumerate() {
+                assert!(
+                    targets.iter().any(|(_, t)| *t == PreviewTarget::Let(i)),
+                    "{name}: let `{lname}` lost its preview tile"
+                );
             }
         }
     }

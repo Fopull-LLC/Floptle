@@ -68,6 +68,10 @@ pub struct Globals {
     pub point_pos: [[f32; 4]; 16],
     /// Each point light's rgb = color × intensity (w unused).
     pub point_color: [[f32; 4]; 16],
+    /// Meshed-terrain splat params: x = per-slot NEAREST bitmask (bit i = palette slot i
+    /// wants nearest filtering), y = triplanar world scale, z/w unused. Mirrors the
+    /// raymarch's `terrain_tint.w` mask so meshed terrain filters textures identically.
+    pub terrain_mask: [f32; 4],
 }
 
 impl Default for Globals {
@@ -80,6 +84,7 @@ impl Default for Globals {
             point_count: [0.0; 4],
             point_pos: [[0.0; 4]; 16],
             point_color: [[0.0; 4]; 16],
+            terrain_mask: [0.0, 0.22, 0.0, 0.0],
         }
     }
 }
@@ -90,6 +95,13 @@ impl Default for Globals {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct InstanceRaw {
     pub model: [[f32; 4]; 4],
+    /// The inverse-transpose normal matrix, as three vec4 columns whose `.w` is padding
+    /// the shader's `mat3x3` never reads — except two lanes that were free (a vec3
+    /// attribute still costs a vec4 slot) and the attribute budget is FULL at 16/16, so
+    /// these are the only places a per-instance index could go without spending a slot
+    /// that does not exist:
+    ///   - `normal_mat[0].w` = the instance's TERRAIN color base.
+    ///   - `normal_mat[1].w` = the paint-modulate flag (0/1; see `MaterialParams`).
     pub normal_mat: [[f32; 4]; 3],
     /// Base color tint (rgb) + alpha.
     pub color: [f32; 4],
@@ -131,6 +143,24 @@ pub struct MaterialParams {
     pub tile: [f32; 4],
     /// UV-mode rotation in degrees around the UV center (quantized to 0.1°).
     pub tile_rotation: f32,
+    /// Base offset of this instance's vertex-paint block in the `vpaint` store;
+    /// 0 = unpainted (paint multiplies albedo, so unpainted reads as white).
+    /// Usually [`Raster::mesh_paint_base`] — instances sharing a mesh share its block.
+    pub paint_base: u32,
+    /// Base offset of this instance's block in the TERRAIN color store; 0 = none.
+    /// Set from [`Raster::dyn_paint_base`] for terrain chunk instances and left at 0 by
+    /// everything else. Multiplies albedo exactly like `paint_base` (they are the same
+    /// `vcolor` varying downstream) — an instance never has both.
+    pub terrain_paint_base: u32,
+    /// Modulate-2× the vertex paint (mid-grey = neutral, so paint carries BOTH light and
+    /// shadow) instead of the plain darken-only multiply. True for brush paint, false for
+    /// imported glTF COLOR_0 (whose spec is a linear ×1 multiply). Ignored when
+    /// `paint_base == 0`. Rides the free `normal_mat[1].w` instance lane.
+    pub paint_modulate: bool,
+    /// Meshed-TERRAIN splat: interpret the vertex color's alpha as a 1-based palette slot
+    /// and triplanar-sample the terrain palette (× the rgb tint), instead of treating alpha
+    /// as opacity. True only for terrain chunk instances. Rides `normal_mat[2].w`.
+    pub terrain_splat: bool,
 }
 
 impl MaterialParams {
@@ -151,6 +181,10 @@ impl MaterialParams {
             tile_mode: 0,
             tile: [0.0; 4],
             tile_rotation: 0.0,
+            paint_base: 0,
+            terrain_paint_base: 0,
+            paint_modulate: false,
+            terrain_splat: false,
         }
     }
 }
@@ -183,6 +217,32 @@ struct RegisteredMesh {
     gpu_mesh: GpuMesh,
     tex_bind: wgpu::BindGroup,
     _texture: Option<wgpu::Texture>, // kept alive for the bind group (None = default)
+    /// Base offset of this mesh's vertex-paint block in `vpaint_buf`; 0 = unpainted.
+    paint_base: u32,
+    /// Set only for [`register_dynamic`](Raster::register_dynamic) slots — meshes whose
+    /// geometry is rewritten in place. `None` = an ordinary upload-once mesh.
+    dynamic: Option<DynSlot>,
+}
+
+/// A dynamic mesh slot's capacity + its paired block in the terrain color store.
+/// The color block travels with the slot for its whole life (allocated on register,
+/// re-used by every `replace_dynamic`, handed back on `free_dynamic`) — that pairing
+/// is what keeps remeshing from leaking color memory.
+struct DynSlot {
+    cap_verts: u32,
+    cap_indices: u32,
+    /// Base offset in `tpaint_buf`; 0 = this slot carries no per-vertex color.
+    tpaint_base: u32,
+    /// Always == `cap_verts` when `tpaint_base != 0` (the block is sized to the slot).
+    tpaint_cap: u32,
+}
+
+/// The capacity a dynamic slot gets for a mesh of `n` elements: 1.5× headroom, floored
+/// at 1024 and rounded to a power of two. The rounding matters as much as the headroom:
+/// the free-lists are keyed by exact capacity, so collapsing thousands of chunk sizes
+/// onto a handful of size classes is what makes slot re-use actually hit.
+fn slot_cap(n: u32) -> u32 {
+    n.saturating_mul(3).div_ceil(2).max(1024).next_power_of_two()
 }
 
 pub struct Raster {
@@ -201,6 +261,45 @@ pub struct Raster {
     prepass_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
+    /// The vertex-paint block store: every painted mesh's RGBA8 colors, packed back
+    /// to back, indexed in `vs` as `vpaint[paint_base + vertex_index]`. Index 0 is a
+    /// reserved dummy — `paint_base == 0` means "unpainted".
+    vpaint_buf: wgpu::Buffer,
+    /// CPU mirror of `vpaint_buf`, kept so blocks can be appended (and the buffer
+    /// re-created when it outgrows its capacity) without a readback.
+    vpaint_cpu: Vec<u32>,
+    /// The TERRAIN color store: chunk-mesh per-vertex colors, read in `vs` exactly like
+    /// `vpaint` but through its own base offset. Separate from `vpaint` for two reasons,
+    /// both learned rather than guessed:
+    ///   1. `vpaint` is bump-allocated and NEVER freed (its blocks are owned by meshes
+    ///      and nodes for the scene's life). Remeshing churns blocks every sculpt dab,
+    ///      so terrain in that store would leak without bound.
+    ///   2. `vpaint` bases are packed into `params.z` beside the unlit bit, a budget of
+    ///      ~8.3M vertices *shared with the user's painting*. A large LOD'd terrain would
+    ///      quietly eat it and make the brush fail. Terrain bases live in `n0.w` — a lane
+    ///      that was pure padding — with a full 2^24 range of their own.
+    ///
+    /// Index 0 is a reserved dummy, so base == 0 means "no terrain color" as with vpaint.
+    tpaint_buf: wgpu::Buffer,
+    /// High-water mark of `tpaint_buf`, in u32s. No CPU mirror: colors are regenerated
+    /// by the mesher, never read back, and growth copies buffer-to-buffer on the GPU.
+    tpaint_len: u32,
+    /// Freed terrain-color blocks by exact capacity → their bases, for re-use.
+    tpaint_free: HashMap<u32, Vec<u32>>,
+    /// Freed dynamic mesh slots (indices into `meshes`), re-used by `register_dynamic`.
+    dyn_free: Vec<u32>,
+    /// The terrain texture palette (a `TERRAIN_SLOTS`-layer array), bound to group(0) so
+    /// meshed terrain can triplanar-splat it exactly like the raymarched terrain did. Its
+    /// own copy (not shared with the raymarch's) keeps the two passes decoupled; the editor
+    /// uploads the same layers to both. `terrain_pal_view` is kept for bind-group rebuilds.
+    terrain_pal_view: wgpu::TextureView,
+    _terrain_pal: wgpu::Texture,
+    /// REPEAT samplers (linear + nearest) for the palette — triplanar tiles across the
+    /// surface, and pixel-art slots pick nearest via the `terrain_mask` bitmask.
+    terrain_samp: wgpu::Sampler,
+    terrain_samp_nearest: wgpu::Sampler,
+    /// Per-slot nearest bitmask, carried into every frame's `Globals.terrain_mask.x`.
+    terrain_nearest_mask: u32,
     tex_layout: wgpu::BindGroupLayout,
     /// Fallback group(2) for callers without a raymarch pass: zeroed field
     /// globals (no volumes/blobs, shadows + AO off) → the field branches skip.
@@ -331,19 +430,71 @@ impl Raster {
             source: wgpu::ShaderSource::Wgsl(pass_prelude().into()),
         });
 
-        // Group 0: frame globals (uniform).
+        // Group 0: frame globals (uniform) + the vertex-paint block store (storage).
+        // `vpaint` is here, not on the per-mesh group(1), because it is ONE global
+        // buffer every draw indexes with its own base offset — which is what keeps
+        // painted nodes inside their instanced batches (see docs/vertex-paint-proposal.md
+        // §2.1/§4.1). It is VERTEX-visible only: `vs` resolves paint to a varying.
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raster-globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 2: the terrain color store (see `tpaint_buf`) — same shape and
+                // same vertex-only visibility as vpaint, its own address space.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 3/4/5: the terrain palette array + its two REPEAT samplers
+                // (linear + nearest), for meshed-terrain triplanar splatting. FRAGMENT-only.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         // Group 1: the per-material base-color texture + its own sampler (so each
         // texture can choose its own filtering / wrap mode).
@@ -383,14 +534,64 @@ impl Raster {
             mapped_at_creation: false,
         });
 
-        let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buf.as_entire_binding(),
-            }],
+        // Slot 0 is a RESERVED dummy: `paint_base == 0` means "unpainted", so no real
+        // block ever starts there, and the vs's clamped index always has something
+        // in-bounds to read even before any paint exists.
+        let vpaint_cpu: Vec<u32> = vec![0xFFFF_FFFF];
+        let vpaint_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-vpaint"),
+            size: (vpaint_cpu.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        gpu.queue.write_buffer(&vpaint_buf, 0, bytemuck::cast_slice(&vpaint_cpu));
+
+        // The terrain color store starts as its lone reserved dummy slot, same rule.
+        // COPY_SRC as well as COPY_DST: growth copies the live blocks across on the GPU
+        // rather than keeping a CPU mirror (a big terrain's mirror would be tens of MB
+        // of memory this store never reads).
+        let tpaint_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-tpaint"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&tpaint_buf, 0, bytemuck::cast_slice(&[0xFFFF_FFFFu32]));
+
+        // The terrain palette starts all-white (no textures): meshed terrain then reads
+        // white × tint = flat tint, exactly the untextured look, until a palette is set.
+        let terrain_pal = crate::raymarch::make_terrain_array(gpu, &[]);
+        let terrain_pal_view = terrain_pal.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        // REPEAT so triplanar tiles; one linear, one nearest (pixel-art slots).
+        let repeat = |filter: wgpu::FilterMode| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("terrain-palette-samp"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                address_mode_w: wgpu::AddressMode::Repeat,
+                mag_filter: filter,
+                min_filter: filter,
+                ..Default::default()
+            })
+        };
+        let terrain_samp = repeat(wgpu::FilterMode::Linear);
+        let terrain_samp_nearest = repeat(wgpu::FilterMode::Nearest);
+
+        let globals_bind = Self::make_globals_bind(
+            device,
+            &globals_layout,
+            &globals_buf,
+            &vpaint_buf,
+            &tpaint_buf,
+            &terrain_pal_view,
+            &terrain_samp,
+            &terrain_samp_nearest,
+        );
 
         // 1×1 white default for meshes registered without a texture (the tint then
         // shows through unchanged).
@@ -438,6 +639,17 @@ impl Raster {
             prepass_tex: None,
             globals_bind,
             globals_buf,
+            vpaint_buf,
+            vpaint_cpu,
+            tpaint_buf,
+            tpaint_len: 1, // slot 0 is the reserved dummy
+            tpaint_free: HashMap::new(),
+            dyn_free: Vec::new(),
+            terrain_pal_view,
+            _terrain_pal: terrain_pal,
+            terrain_samp,
+            terrain_samp_nearest,
+            terrain_nearest_mask: 0,
             tex_layout,
             empty_field_bind,
             samplers: HashMap::new(),
@@ -561,7 +773,12 @@ impl Raster {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // LESS-EQUAL, not Less: texture-paint overlays are COPLANAR with the mesh
+                // they decorate (identical positions through the same vertex shader, so
+                // byte-identical depth) — under Less the opaque base's prepass depth would
+                // reject every overlay fragment. Equal-depth translucents draw over the
+                // surface they sit on, which is exactly what an overlay wants.
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -957,11 +1174,467 @@ impl Raster {
         id
     }
 
+    /// Overwrite a registered texture's pixels in place (same dimensions). For a paint
+    /// brush stamping into a per-node texture every dab — re-registering would leak a new
+    /// `TexId` per stroke. Dimensions must match what it was registered with; a mismatch or
+    /// unknown id is ignored. (No mip regen — paint textures use a plain filter.)
+    pub fn update_texture(&self, gpu: &Gpu, id: TexId, data: &TextureData) {
+        let Some(t) = self.textures.get(id.0 as usize) else { return };
+        let size = t._texture.size();
+        if size.width != data.width || size.height != data.height {
+            log::error!("update_texture size mismatch: {}×{} vs {}×{}", size.width, size.height, data.width, data.height);
+            return;
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &t._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &data.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(data.width * 4),
+                rows_per_image: Some(data.height),
+            },
+            wgpu::Extent3d { width: data.width, height: data.height, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Overwrite a rectangular sub-region of a registered texture. The paint brush touches
+    /// only the texels under a dab, so re-uploading the whole (up to 2048²) atlas every dab
+    /// is wasteful — this uploads just the dirty rect. `pixels` is tightly packed RGBA8,
+    /// `w * h * 4` bytes, row-major. `write_texture` (unlike a buffer copy) imposes no
+    /// 256-byte row alignment, so `bytes_per_row = w * 4` is fine.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_texture_region(&self, gpu: &Gpu, id: TexId, x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) {
+        let Some(t) = self.textures.get(id.0 as usize) else { return };
+        let size = t._texture.size();
+        if x + w > size.width || y + h > size.height {
+            log::error!("update_texture_region out of bounds: {x},{y} {w}×{h} in {}×{}", size.width, size.height);
+            return;
+        }
+        if pixels.len() < (w * h * 4) as usize {
+            return;
+        }
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &t._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Build the group(0) bind group over the frame globals + the paint store. Called
+    /// at startup and again whenever `vpaint_buf` is RE-CREATED (a bind group holds the
+    /// buffer it was built from, so growing the store invalidates it).
+    #[allow(clippy::too_many_arguments)]
+    fn make_globals_bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        globals_buf: &wgpu::Buffer,
+        vpaint_buf: &wgpu::Buffer,
+        tpaint_buf: &wgpu::Buffer,
+        pal_view: &wgpu::TextureView,
+        pal_samp: &wgpu::Sampler,
+        pal_samp_nearest: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-globals"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: vpaint_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: tpaint_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(pal_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(pal_samp) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(pal_samp_nearest) },
+            ],
+        })
+    }
+
+    /// Upload the terrain texture palette (already resized to 256² per layer, same order
+    /// as the raymarch's `set_terrain_textures`) and the per-slot nearest bitmask, so meshed
+    /// terrain splats textures identically to the old raymarched path. Rebuilds the globals
+    /// bind group (the palette texture is recreated).
+    pub fn set_terrain_palette(&mut self, gpu: &Gpu, layers: &[TextureData], nearest_mask: u32) {
+        let tex = crate::raymarch::make_terrain_array(gpu, layers);
+        self._terrain_pal = tex;
+        self.terrain_pal_view = self._terrain_pal.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        self.globals_bind = Self::make_globals_bind(
+            &gpu.device,
+            &self.globals_layout,
+            &self.globals_buf,
+            &self.vpaint_buf,
+            &self.tpaint_buf,
+            &self.terrain_pal_view,
+            &self.terrain_samp,
+            &self.terrain_samp_nearest,
+        );
+        self.terrain_nearest_mask = nearest_mask;
+    }
+
+    /// The stored per-slot nearest bitmask, folded into `Globals.terrain_mask.x` at draw
+    /// time (the editor sets the palette once, then every frame's globals carry the mask).
+    pub fn terrain_nearest_mask(&self) -> u32 {
+        self.terrain_nearest_mask
+    }
+
+    /// Append a paint block to the store and return its `paint_base` (0 = unpainted).
+    /// Blocks are bump-allocated and shared freely: any number of instances may point
+    /// at the same base (proposal §9.0 — sharing is just a repeated offset).
+    fn alloc_paint(&mut self, gpu: &Gpu, colors: &[[u8; 4]]) -> u32 {
+        if colors.is_empty() {
+            return 0;
+        }
+        let base = self.vpaint_cpu.len() as u32;
+        // `params.z` packs the base as `base << 1` beside the unlit bit, and f32 only
+        // holds integers exactly to 2^24 — past that the offset would silently decode
+        // wrong and read another block's colors. Refuse instead of corrupting.
+        if (base as u64 + colors.len() as u64) > (1 << 23) {
+            log::error!(
+                "vertex paint store full ({} verts): this mesh renders unpainted. \
+                 The params.z packing holds ~8.3M painted vertices per scene.",
+                base
+            );
+            return 0;
+        }
+        self.vpaint_cpu.extend(colors.iter().map(|c| u32::from_le_bytes(*c)));
+
+        let needed = (self.vpaint_cpu.len() * 4) as u64;
+        if needed > self.vpaint_buf.size() {
+            // Grow by powers of two so a scene of many painted meshes doesn't
+            // re-create the buffer once per mesh.
+            let cap = needed.next_power_of_two();
+            self.vpaint_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-vpaint"),
+                size: cap,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.globals_bind = Self::make_globals_bind(
+                &gpu.device,
+                &self.globals_layout,
+                &self.globals_buf,
+                &self.vpaint_buf,
+                &self.tpaint_buf,
+                &self.terrain_pal_view,
+                &self.terrain_samp,
+                &self.terrain_samp_nearest,
+            );
+            gpu.queue.write_buffer(&self.vpaint_buf, 0, bytemuck::cast_slice(&self.vpaint_cpu));
+        } else {
+            // Buffer still fits: push only the new block.
+            gpu.queue.write_buffer(
+                &self.vpaint_buf,
+                (base * 4) as u64,
+                bytemuck::cast_slice(&self.vpaint_cpu[base as usize..]),
+            );
+        }
+        base
+    }
+
+    /// Allocate a paint block of `count` vertices filled with `fill`, returning its
+    /// base (0 on failure). This is how the brush gives a node its OWN paint, separate
+    /// from whatever its mesh imported with.
+    pub fn paint_alloc(&mut self, gpu: &Gpu, count: u32, fill: [u8; 4]) -> u32 {
+        self.alloc_paint(gpu, &vec![fill; count as usize])
+    }
+
+    /// Allocate a paint block seeded from existing colors — the copy half of
+    /// copy-on-write (proposal §9.0): forking a shared block, or duplicating a node.
+    pub fn paint_alloc_from(&mut self, gpu: &Gpu, colors: &[[u8; 4]]) -> u32 {
+        self.alloc_paint(gpu, colors)
+    }
+
+    /// Read one vertex's painted color out of the CPU mirror.
+    pub fn paint_get(&self, base: u32, i: u32) -> [u8; 4] {
+        self.vpaint_cpu
+            .get((base + i) as usize)
+            .map_or([255; 4], |c| c.to_le_bytes())
+    }
+
+    /// Write one vertex's color to the CPU mirror. The GPU does NOT see this until
+    /// [`Raster::paint_flush`] — a brush dab touches many vertices, and one upload per
+    /// dab beats one per vertex.
+    pub fn paint_set(&mut self, base: u32, i: u32, c: [u8; 4]) {
+        if let Some(slot) = self.vpaint_cpu.get_mut((base + i) as usize) {
+            *slot = u32::from_le_bytes(c);
+        }
+    }
+
+    /// Upload the vertex range `lo..=hi` of a block. Partial by design: re-uploading a
+    /// whole 100k-vertex block per dab would be pure waste (the same reason terrain
+    /// tracks a dirty sub-box).
+    pub fn paint_flush(&self, gpu: &Gpu, base: u32, lo: u32, hi: u32) {
+        let (s, e) = ((base + lo) as usize, (base + hi) as usize + 1);
+        if s >= e || e > self.vpaint_cpu.len() {
+            return;
+        }
+        gpu.queue.write_buffer(
+            &self.vpaint_buf,
+            (s * 4) as u64,
+            bytemuck::cast_slice(&self.vpaint_cpu[s..e]),
+        );
+    }
+
+    /// Copy a block out of the CPU mirror — the undo snapshot, and the source for a
+    /// copy-on-write fork.
+    pub fn paint_block(&self, base: u32, count: u32) -> Vec<[u8; 4]> {
+        (0..count).map(|i| self.paint_get(base, i)).collect()
+    }
+
+    /// Overwrite a whole block and upload it — how undo/redo restores a stroke.
+    pub fn paint_restore(&mut self, gpu: &Gpu, base: u32, colors: &[[u8; 4]]) {
+        for (i, c) in colors.iter().enumerate() {
+            self.paint_set(base, i as u32, *c);
+        }
+        if !colors.is_empty() {
+            self.paint_flush(gpu, base, 0, colors.len() as u32 - 1);
+        }
+    }
+
+    /// The paint block a registered mesh owns, or 0 if it imported unpainted.
+    /// Instances of the same mesh SHARE this base — one block, N instances, still
+    /// one draw call.
+    pub fn mesh_paint_base(&self, id: MeshId) -> u32 {
+        self.meshes.get(id.0 as usize).map_or(0, |m| m.paint_base)
+    }
+
+    // ---- Dynamic meshes ------------------------------------------------------------
+    //
+    // Terrain chunks are the first citizen: geometry that is re-extracted (surface nets
+    // over the sparse SDF) whenever a brush dirties a chunk, then again at a coarser
+    // stride when it crosses an LOD ring. They are ordinary `MeshId`s on purpose — that
+    // way chunks flow through the depth prepass, the instance bucketing, `.flsl`
+    // materials, the selection mask and field shadows with no parallel plumbing at all.
+    // The only differences live behind `RegisteredMesh::dynamic`: buffers with headroom,
+    // a rewritable index count, and a paired terrain-color block.
+
+    /// Allocate (or re-use) a terrain-color block of exactly `cap` vertices, returning
+    /// its base. Growth copies the live prefix on the GPU, so nothing is mirrored on
+    /// the CPU. Returns 0 if `cap` is 0 or the store's f32-exact range is exhausted.
+    fn tpaint_alloc(&mut self, gpu: &Gpu, cap: u32) -> u32 {
+        if cap == 0 {
+            return 0;
+        }
+        // Exact-capacity re-use: freed blocks come back at the capacity they left with,
+        // so this never fragments (and `slot_cap`'s size classes keep the hit rate high).
+        if let Some(v) = self.tpaint_free.get_mut(&cap)
+            && let Some(base) = v.pop()
+        {
+            return base;
+        }
+        let base = self.tpaint_len;
+        // The base rides `n0.w` as a plain f32 — exact only to 2^24. Refuse rather than
+        // silently decode to a neighbouring block's colors (the vpaint rule, same reason).
+        if base as u64 + cap as u64 > (1 << 24) {
+            log::error!(
+                "terrain color store full ({base} verts): these chunks render untinted. \
+                 The n0.w lane holds ~16.7M terrain vertices per scene."
+            );
+            return 0;
+        }
+        self.tpaint_len += cap;
+
+        let needed = (self.tpaint_len as u64) * 4;
+        if needed > self.tpaint_buf.size() {
+            let new_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-tpaint"),
+                size: needed.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tpaint-grow") });
+            enc.copy_buffer_to_buffer(&self.tpaint_buf, 0, &new_buf, 0, self.tpaint_buf.size());
+            gpu.queue.submit([enc.finish()]);
+            self.tpaint_buf = new_buf;
+            self.globals_bind = Self::make_globals_bind(
+                &gpu.device,
+                &self.globals_layout,
+                &self.globals_buf,
+                &self.vpaint_buf,
+                &self.tpaint_buf,
+                &self.terrain_pal_view,
+                &self.terrain_samp,
+                &self.terrain_samp_nearest,
+            );
+        }
+        base
+    }
+
+    /// Create a dynamic mesh slot sized for `verts`/`indices` (with headroom) and, when
+    /// `colored`, its paired terrain-color block. The slot draws nothing until
+    /// [`replace_dynamic`](Self::replace_dynamic) fills it.
+    pub fn register_dynamic(
+        &mut self,
+        gpu: &Gpu,
+        verts: u32,
+        indices: u32,
+        colored: bool,
+    ) -> MeshId {
+        let cap_verts = slot_cap(verts);
+        let cap_indices = slot_cap(indices);
+        let tpaint_cap = if colored { cap_verts } else { 0 };
+        let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
+        let gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
+        let slot = DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap };
+
+        let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.sampler_for(gpu, TexSampling::default());
+        let tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-dyn-tex"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        let mesh = RegisteredMesh {
+            gpu_mesh,
+            tex_bind,
+            _texture: None,
+            paint_base: 0,
+            dynamic: Some(slot),
+        };
+        match self.dyn_free.pop() {
+            Some(i) => {
+                self.meshes[i as usize] = mesh;
+                MeshId(i)
+            }
+            None => {
+                self.meshes.push(mesh);
+                MeshId(self.meshes.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Rewrite a dynamic slot's geometry (and, if it has one, its terrain-color block).
+    /// Returns `false` — leaving the slot untouched — when `id` is not a dynamic slot;
+    /// data that outgrows the slot's capacity re-creates its buffers in place (logged,
+    /// because steady-state sculpting is meant never to hit it).
+    pub fn replace_dynamic(&mut self, gpu: &Gpu, id: MeshId, data: &MeshData) -> bool {
+        let Some(m) = self.meshes.get(id.0 as usize) else { return false };
+        let Some(slot) = m.dynamic.as_ref() else { return false };
+        let (nv, ni) = (data.vertices.len() as u32, data.indices.len() as u32);
+
+        if nv > slot.cap_verts || ni > slot.cap_indices {
+            let (cap_verts, cap_indices) = (slot_cap(nv), slot_cap(ni));
+            log::debug!(
+                "terrain chunk outgrew its slot ({} > {} verts / {} > {} indices) — regrowing",
+                nv,
+                slot.cap_verts,
+                ni,
+                slot.cap_indices
+            );
+            // The color block is sized to the slot, so it regrows with it: hand the old
+            // one back to the free-list (it is re-usable at its own capacity) and take a
+            // new one. Skipping this is exactly the leak the separate store exists to stop.
+            let (old_base, old_cap, colored) =
+                (slot.tpaint_base, slot.tpaint_cap, slot.tpaint_base != 0);
+            if old_base != 0 {
+                self.tpaint_free.entry(old_cap).or_default().push(old_base);
+            }
+            let tpaint_cap = if colored { cap_verts } else { 0 };
+            let tpaint_base = self.tpaint_alloc(gpu, tpaint_cap);
+            let m = &mut self.meshes[id.0 as usize];
+            m.gpu_mesh = GpuMesh::with_capacity(gpu, cap_verts, cap_indices);
+            m.dynamic = Some(DynSlot { cap_verts, cap_indices, tpaint_base, tpaint_cap });
+        }
+
+        let m = &mut self.meshes[id.0 as usize];
+        if !m.gpu_mesh.write(gpu, data) {
+            return false;
+        }
+        let slot = m.dynamic.as_ref().expect("dynamic slot");
+        if slot.tpaint_base != 0
+            && let Some(colors) = data.colors.as_ref()
+        {
+            // A short/long stream would tint the wrong vertices — the `register` rule.
+            if colors.len() != data.vertices.len() {
+                log::error!(
+                    "chunk color stream is {} long but has {} vertices — ignoring the color",
+                    colors.len(),
+                    data.vertices.len()
+                );
+            } else if !colors.is_empty() {
+                let packed: Vec<u32> = colors.iter().map(|c| u32::from_le_bytes(*c)).collect();
+                gpu.queue.write_buffer(
+                    &self.tpaint_buf,
+                    (slot.tpaint_base as u64) * 4,
+                    bytemuck::cast_slice(&packed),
+                );
+            }
+        }
+        true
+    }
+
+    /// Return a dynamic slot (and its color block) to the free-lists. The `MeshId` is
+    /// recycled by a later `register_dynamic`, so callers must drop it here: terrain
+    /// owns its chunk ids exclusively, which is what makes that safe.
+    pub fn free_dynamic(&mut self, id: MeshId) {
+        let Some(m) = self.meshes.get_mut(id.0 as usize) else { return };
+        let Some(slot) = m.dynamic.take() else { return };
+        if slot.tpaint_base != 0 {
+            self.tpaint_free.entry(slot.tpaint_cap).or_default().push(slot.tpaint_base);
+        }
+        m.gpu_mesh.index_count = 0; // stop drawing immediately, even before re-use
+        if !self.dyn_free.contains(&id.0) {
+            self.dyn_free.push(id.0);
+        }
+    }
+
+    /// The terrain-color base a dynamic slot owns (0 = none) — goes in
+    /// [`MaterialParams::terrain_paint_base`] for that chunk's instance.
+    pub fn dyn_paint_base(&self, id: MeshId) -> u32 {
+        self.meshes
+            .get(id.0 as usize)
+            .and_then(|m| m.dynamic.as_ref())
+            .map_or(0, |s| s.tpaint_base)
+    }
+
+    /// Bytes the terrain color store currently holds on the GPU (for budget probes).
+    pub fn tpaint_bytes(&self) -> u64 {
+        self.tpaint_buf.size()
+    }
+
     /// Upload a mesh and its base-color texture (or `None` for a white default),
     /// returning its handle. The mesh's own texture uses the default (crisp) sampling.
+    /// `data.colors`, if present, becomes the mesh's shared vertex-paint block.
     pub fn register(&mut self, gpu: &Gpu, data: &MeshData, texture: Option<&TextureData>) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
         let gpu_mesh = GpuMesh::upload(gpu, data);
+        // A short/long color stream would silently misalign paint against geometry —
+        // drop it rather than paint the wrong vertices.
+        let paint_base = match data.colors.as_ref() {
+            Some(c) if c.len() == data.vertices.len() => self.alloc_paint(gpu, c),
+            Some(c) => {
+                log::error!(
+                    "mesh color stream is {} long but has {} vertices — ignoring the paint",
+                    c.len(),
+                    data.vertices.len()
+                );
+                0
+            }
+            None => 0,
+        };
 
         let owned = texture.map(|t| upload_texture(gpu, t));
         let view = owned
@@ -978,7 +1651,13 @@ impl Raster {
             ],
         });
 
-        self.meshes.push(RegisteredMesh { gpu_mesh, tex_bind, _texture: owned });
+        self.meshes.push(RegisteredMesh {
+            gpu_mesh,
+            tex_bind,
+            _texture: owned,
+            paint_base,
+            dynamic: None,
+        });
         id
     }
 
@@ -1522,15 +2201,30 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     let nm = if m3.determinant().abs() > 1e-12 { m3.inverse().transpose() } else { m3 };
     InstanceRaw {
         model: model.to_cols_array_2d(),
+        // n0.w = the terrain color base (0 = none): a plain index, NOT bit-packed, so
+        // unlike params.z it needs no decode ceremony — but it is still read only in
+        // `vs`, where it is exact off the attribute rather than interpolated.
         normal_mat: [
-            [nm.x_axis.x, nm.x_axis.y, nm.x_axis.z, 0.0],
-            [nm.y_axis.x, nm.y_axis.y, nm.y_axis.z, 0.0],
-            [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, 0.0],
+            [nm.x_axis.x, nm.x_axis.y, nm.x_axis.z, m.terrain_paint_base as f32],
+            [nm.y_axis.x, nm.y_axis.y, nm.y_axis.z, f32::from(m.paint_modulate)],
+            [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, f32::from(m.terrain_splat)],
         ],
         color: [m.color[0], m.color[1], m.color[2], m.alpha],
         emissive: [m.emissive[0], m.emissive[1], m.emissive[2], m.emissive_strength],
         specular: [m.specular[0], m.specular[1], m.specular[2], m.specular_strength],
-        params: [m.shininess, m.rim_strength, if m.unlit { 1.0 } else { 0.0 }, m.ambient],
+        // params.z packs TWO things: bit 0 = unlit, bits 1.. = the vertex-paint base
+        // (0 = unpainted). Exact in f32 up to 2^24; `alloc_paint` refuses past that.
+        //
+        // The fragment shader NEVER sees this packing — `vs` decodes it and re-emits a
+        // clean 0/1 into `VsOut.params.z`, because fs reads it as `> 0.5` (a THRESHOLD,
+        // not a bit test): a raw packed value there would make every painted node
+        // silently render unlit. Keep the decode in `vs`. See raster.wgsl's `vs`.
+        params: [
+            m.shininess,
+            m.rim_strength,
+            (u32::from(m.unlit) | (m.paint_base << 1)) as f32,
+            m.ambient,
+        ],
         // rim.w = packed tiling flags: mode + rotation deci-degrees (exact small
         // int in f32 — well under 2^24). Rotation only means anything in mode 1.
         rim: [

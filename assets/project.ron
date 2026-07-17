@@ -1,5 +1,97 @@
 (
     retro: true,
-    retro_height: 415,
+    retro_height: 300,
     matter: true,
+    title: Some("Testing"),
+    layers: [
+        "",
+        "entity",
+        "level",
+    ],
+    mixer: (
+        master: (
+            name: "Master",
+            gain_db: 0.0,
+            pan: 0.0,
+            muted: false,
+            soloed: false,
+            effects: [],
+            output: None,
+        ),
+        tracks: [
+            (
+                name: "Music",
+                gain_db: 0.0,
+                pan: 0.0,
+                muted: false,
+                soloed: false,
+                effects: [
+                    (
+                        effect: ParametricEq(
+                            bands: [
+                                (
+                                    kind: LowShelf,
+                                    freq_hz: 120.0,
+                                    gain_db: 0.0,
+                                    q: 0.71,
+                                    enabled: true,
+                                ),
+                                (
+                                    kind: Peak,
+                                    freq_hz: 500.0,
+                                    gain_db: 0.0,
+                                    q: 1.0,
+                                    enabled: true,
+                                ),
+                                (
+                                    kind: Peak,
+                                    freq_hz: 2500.0,
+                                    gain_db: 0.0,
+                                    q: 1.0,
+                                    enabled: true,
+                                ),
+                                (
+                                    kind: HighShelf,
+                                    freq_hz: 8000.0,
+                                    gain_db: 0.0,
+                                    q: 0.71,
+                                    enabled: true,
+                                ),
+                            ],
+                        ),
+                        bypass: false,
+                    ),
+                    (
+                        effect: Phaser(
+                            rate_hz: 0.4,
+                            stages: 6,
+                            center_hz: 900.0,
+                            depth: 0.7,
+                            feedback: 0.4,
+                            mix: 0.5,
+                        ),
+                        bypass: false,
+                    ),
+                    (
+                        effect: Limiter(
+                            ceiling_db: -0.3,
+                            release_ms: 80.0,
+                        ),
+                        bypass: false,
+                    ),
+                    (
+                        effect: Compressor(
+                            threshold_db: -18.0,
+                            ratio: 3.0,
+                            attack_ms: 10.0,
+                            release_ms: 120.0,
+                            makeup_db: 0.0,
+                        ),
+                        bypass: false,
+                    ),
+                ],
+                output: None,
+            ),
+        ],
+    ),
 )

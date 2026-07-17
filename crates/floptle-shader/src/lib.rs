@@ -26,8 +26,8 @@ pub mod transpile;
 pub use ir::{Blend, IrError, ShaderIr, Stage, Ty, Uniform};
 pub use text::{parse, print, ParseError};
 pub use transpile::{
-    transpile_fragment, transpile_sdf, validate, validate_module, CompiledFragment, CompiledSdf,
-    TilingPack, TranspileError, WgslDiag,
+    transpile_fragment, transpile_sdf, transpile_sky, validate, validate_module, CompiledFragment,
+    CompiledSdf, CompiledSky, TilingPack, TranspileError, WgslDiag,
 };
 
 /// File extension for the textual shader format ("FLoptle Shading Language").
@@ -53,7 +53,35 @@ pub fn compile_fragment(src: &str) -> Result<CompiledFragment, String> {
     if ir.stage == Some(Stage::Sdf) {
         return Err("this is an sdf shader — assign it to a Field Shape, not a mesh material".into());
     }
+    if ir.stage == Some(Stage::Sky) {
+        return Err("this is a sky shader — assign it to the Skybox, not a mesh material".into());
+    }
     transpile::transpile_fragment(&ir, &ck).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })
+}
+
+/// Parse + type-check + transpile a Sky-stage `.flsl`, for the Skybox node. Human-readable
+/// `line:col`-prefixed errors. A non-sky shader is rejected with a hint.
+pub fn compile_sky(src: &str) -> Result<transpile::CompiledSky, String> {
+    let ir = text::parse(src).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })?;
+    let ck = ir::check(&ir).map_err(|errs| {
+        errs.iter()
+            .map(|e| {
+                let (l, c) = text::line_col(src, e.span.start);
+                format!("{l}:{c}: {}", e.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    if ir.stage != Some(Stage::Sky) {
+        return Err("not a sky shader — add `stage sky` and `output color = …`".into());
+    }
+    transpile::transpile_sky(&ir, &ck).map_err(|e| {
         let (l, c) = text::line_col(src, e.span.start);
         format!("{l}:{c}: {}", e.message)
     })
