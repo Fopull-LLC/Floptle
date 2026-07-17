@@ -19,7 +19,7 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material, Matter, World};
 use floptle_script::ScriptHost;
 use floptle_render::{
-    capsule, cube, plane, uv_sphere, FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
+    FlyCamera, Gpu, Grid, Input, MeshId, Outline, Raster, Raymarch, Retro, TexId,
 };
 use floptle_scene::{
     MaterialDoc, MatterDoc, ProjectConfigDoc, SceneDoc,
@@ -50,6 +50,11 @@ mod inspector;
 mod lua_support;
 mod matter_catalog;
 mod net;
+mod paint_io;
+mod paint_mesh;
+mod paint_tex;
+mod paint_tex_io;
+mod paint_ui;
 mod play;
 mod prefab;
 mod shader_graph;
@@ -68,6 +73,7 @@ mod theme;
 mod ui_game;
 mod ui_widgets;
 mod timeline;
+mod vertex_paint;
 mod vfx;
 mod vfx_inspector;
 mod vfx_ui;
@@ -83,7 +89,10 @@ use ide::*;
 use inspector::*;
 use prefs::*;
 use shading::*;
+use paint_mesh::PaintMeshCache;
+use paint_ui::VertexBrush;
 use terrain_ui::*;
+use vertex_paint::{PaintBlocks, PaintViz};
 use theme::*;
 use viz::*;
 
@@ -215,6 +224,10 @@ struct EditorCmd {
     add_parented: Option<(MatterDoc, Entity)>,
     /// Open the "new terrain" size/thickness/color/texture dialog.
     open_new_terrain: bool,
+    /// Flood the selected node with the brush color (🖌 Paint tab).
+    paint_fill: bool,
+    /// Strip all paint from the selected node (🖌 Paint tab).
+    paint_clear: bool,
     /// Create a fresh flat terrain with this config (from the "New terrain" dialog).
     create_terrain: Option<NewTerrainCfg>,
     /// Remove the terrain.
@@ -433,6 +446,9 @@ struct EditorTabViewer<'a> {
     /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
     /// back to this schema when the picked shader is `stage sdf`.
     sdf_cache: &'a shaders::SdfCache,
+    /// The active Sky shader's uniform schema (empty when no sky shader) — the
+    /// Inspector's Skybox section renders knob rows from it into `shader_params`.
+    sky_uniforms: &'a [floptle_shader::Uniform],
     /// The component clipboard (read-only here; copy/paste route through `cmd`).
     component_clip: &'a Option<ComponentClip>,
     /// Search text for the Inspector's "➕ Add Component" menu.
@@ -452,12 +468,17 @@ struct EditorTabViewer<'a> {
     cam_preview: Option<egui::TextureId>,
     /// Whether any camera holds play-mode authority (for the Game tab's warning).
     has_active_camera: bool,
+    /// Vertex-paint dock-tab state.
+    vertex_brush: &'a mut VertexBrush,
     /// Terrain dock-tab state.
     terrain_brush: &'a mut TerrainBrush,
     terrain_detail: &'a mut u32,
     terrain_textures: &'a mut Vec<String>,
     terrain_present: bool,
     terrain_voxels: Option<(usize, u64)>,
+    /// The scene's coarsest terrain voxel: `(edge per axis, anisotropy)`. Shown in the
+    /// Terrain tab — coarse/stretched cells are what read as a dark lattice.
+    terrain_worst_voxel: Option<([f32; 3], f32)>,
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,
@@ -473,6 +494,8 @@ struct EditorTabViewer<'a> {
     gizmo: Option<&'a GizmoFrame>,
     /// The terrain brush telegraph to draw over the viewport, if sculpting.
     terrain_viz: Option<&'a TerrainViz>,
+    /// The vertex-paint brush telegraph, if the Paint tool is hovering a mesh.
+    paint_viz: Option<&'a PaintViz>,
     camera_gizmos: &'a [CameraGizmo],
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
@@ -578,7 +601,9 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     // truncates instead of pushing controls out of view.
     fn scroll_bars(&self, tab: &EditorTab) -> [bool; 2] {
         match tab {
-            EditorTab::Hierarchy | EditorTab::Inspector | EditorTab::Terrain => [false, true],
+            EditorTab::Hierarchy | EditorTab::Inspector | EditorTab::Terrain | EditorTab::Paint => {
+                [false, true]
+            }
             _ => [true, true],
         }
     }
@@ -588,6 +613,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Hierarchy => self.hierarchy_ui(ui),
             EditorTab::Inspector => self.inspector_ui(ui),
             EditorTab::Terrain => self.terrain_ui(ui),
+            EditorTab::Paint => self.paint_ui(ui),
             EditorTab::Assets => self.assets_ui(ui),
             EditorTab::Console => self.console_ui(ui),
             // Scene = editor free-fly view (tools/gizmos); Game = active-camera view.
@@ -1363,6 +1389,13 @@ struct Editor {
     terrain_slots: Vec<Entity>,
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
+    /// Terrain 2.0 (ADR terrain-mesh): each terrain's PRIMARY-ray rendering is a set of
+    /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing the
+    /// dense voxel field. The dense field (`terrains`) stays the authority — it still feeds
+    /// the atlas for sun shadows + SDF AO (the volume flips to `w = 3` = in-field-but-not-
+    /// drawn), physics, sculpting and save. This map is the DERIVED render mesh, rebuilt
+    /// from the dense field whenever the terrain changes. Keyed per terrain entity.
+    terrain_render: HashMap<Entity, crate::terrain_edit::TerrainRender>,
     /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
     /// no RigidBody): each level mesh is baked once into an unsigned distance
     /// volume (`bake_occluder`) and uploaded into the SAME 3D atlas as the
@@ -1396,6 +1429,32 @@ struct Editor {
     stroke_snapshot: Option<(u32, Vec<u8>)>,
     /// At least one dab landed during the current stroke (so it's worth undoing).
     stroke_dabbed: bool,
+    /// LMB held with the Paint tool — keep dabbing on mouse motion.
+    painting: bool,
+    /// Pre-stroke colors captured on the first dab, banked to the undo timeline on
+    /// mouse-up. `(paint id, colors per part)`; the whole stroke = one undo step.
+    paint_stroke_snapshot: Option<(u32, Vec<Vec<[u8; 4]>>)>,
+    /// At least one dab landed during the current paint stroke.
+    paint_stroke_dabbed: bool,
+    /// TEXTURE-paint stroke undo: id → pre-stroke images, captured the first time the
+    /// stroke touches each node (the sphere brush can cross several). `None` = that node
+    /// had no paint before, so undo removes it. Banked as ONE history step on mouse-up.
+    tex_stroke_snapshot: std::collections::HashMap<u32, Option<Vec<Vec<u8>>>>,
+    /// Vertex-paint brush settings.
+    vertex_brush: VertexBrush,
+    /// Retained CPU geometry + triangle grids for painted meshes (built lazily).
+    paint_meshes: PaintMeshCache,
+    /// paint id → its per-part blocks in the renderer's `vpaint` store.
+    paint_data: std::collections::HashMap<u32, PaintBlocks>,
+    /// TEXTURE painting (the ▦ Texture brush target): per-node paint images + atlas meshes,
+    /// keyed by the stable `TexturePaint` id so undo survives a World rebuild (see `paint_tex`).
+    paint_tex: std::collections::HashMap<u32, crate::paint_tex::PaintTex>,
+    /// Bumped on EVERY vertex-paint mutation (dab, fill, clear, undo, reload). Texture-painted
+    /// nodes mirror their vertex paint into atlas-ordered blocks; `sync_tex_paint_mirrors`
+    /// compares this against each mirror's epoch to rebuild only when something changed.
+    vpaint_epoch: u64,
+    /// The paint brush telegraph for this frame (projected ring).
+    paint_viz: Option<PaintViz>,
     /// Terrain brush settings.
     terrain_brush: TerrainBrush,
     /// New-terrain resolution along the long axis (user-controllable detail).
@@ -1407,6 +1466,13 @@ struct Editor {
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so
     /// we only re-upload when the skybox node's texture actually changes.
     sky_texture_loaded: Option<String>,
+    /// The active Sky shader: `(project-relative path, file mtime, uniform SCHEMA)`.
+    /// Recompiled + re-spliced only when the path or mtime changes. `None` = built-in sky.
+    /// The schema (name/type/range/default per uniform) both drives the Skybox
+    /// Inspector's knob rows and, resolved against the node's `shader_params` each
+    /// frame (`sky_uniform_values`), fills `RaymarchGlobals.sky_uniforms` — so a knob
+    /// drag takes effect immediately, no recompile.
+    sky_shader: Option<(String, u64, Vec<floptle_shader::Uniform>)>,
     /// The brush telegraph for this frame (projected ring + normal).
     terrain_viz: Option<TerrainViz>,
     /// Camera frustums to draw in the viewport this frame (so cameras are visible).
@@ -1785,8 +1851,14 @@ struct Editor {
     pending_open_scene: Option<String>,
     /// Quit was requested with unsaved changes — the confirm modal is up.
     show_quit_confirm: bool,
-    /// The quit modal confirmed — the next CloseRequested exits for real.
-    quit_confirmed: bool,
+    /// A close was decided (Save & Quit / Quit without saving): the winit loop exits on
+    /// the next `about_to_wait`. A plain flag — NOT `ViewportCommand::Close`, which is an
+    /// eframe/multi-viewport command this raw winit + egui-winit app never acts on (that
+    /// was the "click Save & Exit, nothing closes" bug).
+    pending_exit: bool,
+    /// A short-lived on-screen confirmation (message, seconds remaining) — so a save is
+    /// visibly acknowledged instead of only whispering to the Console.
+    toast: Option<(String, f32)>,
     /// An asset delete awaiting confirmation (absolute path).
     delete_confirm: Option<Vec<String>>,
     last: Option<Instant>,
@@ -1802,6 +1874,16 @@ enum Snapshot {
     /// A terrain field snapshot: `(terrain id, serialized field)` — keyed by the
     /// stable id (not Entity) so it survives scene restores.
     Terrain(u32, Vec<u8>),
+    /// A vertex-paint snapshot: `(paint id, colors per part)`. Keyed by the stable
+    /// paint id for the same reason terrain is — `restore()` respawns the World, so an
+    /// Entity here would dangle. Undo/redo is a colors swap that never touches the ECS.
+    VertexPaint(u32, Vec<Vec<[u8; 4]>>),
+    /// A texture-paint stroke: per touched node, `(tex-paint id, pre-stroke images per
+    /// part)`. `None` images = that node had no paint before this stroke, so undo REMOVES
+    /// its paint. A Vec because the world-space brush sphere paints EVERY surface it
+    /// touches (that's how you shade a wall-floor corner in one stroke) — and one stroke
+    /// must be one undo step, however many nodes it crossed. Keyed by the stable id.
+    TexPaint(Vec<(u32, Option<Vec<Vec<u8>>>)>),
 }
 
 /// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
@@ -1920,10 +2002,15 @@ impl ApplicationHandler for Editor {
         let mut raster = Raster::new(&gpu);
         // Registration order defines the Shape→MeshId mapping (Shape as usize):
         // Cube=0, Sphere=1, Capsule=2, Plane=3.
-        let cube_id = raster.register(&gpu, &cube(0.7), None);
-        let sphere_id = raster.register(&gpu, &uv_sphere(0.85, 24, 36), None);
-        let capsule_id = raster.register(&gpu, &capsule(0.5, 0.5, 16, 24), None);
-        let plane_id = raster.register(&gpu, &plane(0.7), None);
+        // Geometry comes from matter_catalog::primitive_mesh so the paint brush's CPU
+        // cache raycasts the EXACT mesh drawn here — paint is indexed by vertex_index,
+        // so a divergence would paint the wrong vertices.
+        use crate::matter_catalog::primitive_mesh;
+        use floptle_core::Shape;
+        let cube_id = raster.register(&gpu, &primitive_mesh(Shape::Cube), None);
+        let sphere_id = raster.register(&gpu, &primitive_mesh(Shape::Sphere), None);
+        let capsule_id = raster.register(&gpu, &primitive_mesh(Shape::Capsule), None);
+        let plane_id = raster.register(&gpu, &primitive_mesh(Shape::Plane), None);
         self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
         self.raymarch = Some(Raymarch::new(&gpu));
 
@@ -1945,6 +2032,9 @@ impl ApplicationHandler for Editor {
         self.set_scene_file(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        // NOTE: adopt_paint/adopt_tex_paint happen AFTER `self.gpu = Some(..)` below —
+        // both allocate GPU blocks/textures, and at this point gpu/raster are still
+        // locals. Calling them here silently no-ops and boot loses all saved paint.
         if !self.player_mode {
             self.check_autosave(); // offer crash recovery if an autosave is newer
         }
@@ -2007,6 +2097,10 @@ impl ApplicationHandler for Editor {
         for p in mesh_paths {
             self.import_model(&p);
         }
+        // Saved paint comes back only now that gpu/raster live in `self` (vertex blocks +
+        // texture-paint atlases are GPU allocations — see the NOTE at the scene load above).
+        self.adopt_paint();
+        self.adopt_tex_paint();
         let now = Instant::now();
         self.last = Some(now);
         self.started = Some(now);
@@ -2038,7 +2132,7 @@ impl ApplicationHandler for Editor {
 
         match event {
             WindowEvent::CloseRequested => {
-                if self.scene_dirty && !self.quit_confirmed && !self.player_mode {
+                if self.scene_dirty && !self.player_mode {
                     self.show_quit_confirm = true;
                 } else {
                     event_loop.exit();
@@ -2241,7 +2335,17 @@ impl ApplicationHandler for Editor {
                     // over the scene for editor purposes.
                     let over_scene = self.cursor_over_scene() && !self.game_view();
                     let hovered = self.gizmo.as_ref().and_then(|g| g.hovered);
-                    if over_scene && self.tool == Tool::Sculpt {
+                    if over_scene && self.tool == Tool::Paint && !self.playing {
+                        // Paint tool takes the WHOLE click — no pick, no gizmo grab.
+                        // The dab lands next frame in vertex_paint_frame_update, once
+                        // the cursor ray has told us which node is under it.
+                        self.context_menu = None;
+                        self.painting = true;
+                        self.last_dab_pos = None; // first dab fires immediately
+                        self.last_dab_time = None;
+                        self.paint_stroke_snapshot = None;
+                        self.paint_stroke_dabbed = false;
+                    } else if over_scene && self.tool == Tool::Sculpt {
                         // Sculpt tool: start a brush stroke on the terrain (applied
                         // next frame in terrain_frame_update).
                         self.context_menu = None;
@@ -2293,6 +2397,11 @@ impl ApplicationHandler for Editor {
                     self.drag = None;
                     self.editing = false;
                     self.sculpting = false;
+                    // End of a paint stroke: bank the whole stroke as ONE undo step.
+                    if self.painting {
+                        self.painting = false;
+                        self.end_paint_stroke();
+                    }
                     // End of a sculpt stroke: bank one undo step if it changed anything.
                     if let Some((id, snap)) = self.stroke_snapshot.take()
                         && self.stroke_dabbed {
@@ -2410,7 +2519,15 @@ impl ApplicationHandler for Editor {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A quit-modal decision (Save & Quit / Quit without saving) sets `pending_exit`;
+        // the save already ran during the frame, so now actually leave. Doing it here (not
+        // inside the egui closure, which has no `event_loop`) is what makes the button close
+        // the app for real.
+        if self.pending_exit {
+            event_loop.exit();
+            return;
+        }
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }

@@ -46,11 +46,17 @@
 > multi-select: ctrl/shift-click, group move, group delete, Ctrl+D duplicate
 > (intra-selection wires follow the copies). Positions are STABLE — layout
 > entries plus a session cache keyed by two reparse-stable identities mean a
-> node only ever moves when dragged. Ten commented example shaders
+> node only ever moves when dragged. Eighteen commented example shaders
 > (`floptle-shader::examples`, incl. `water.flsl` with fieldDistance shoreline
 > foam) seed into `shaders/examples/` per project (missing ones fill in on
 > open; deleting the folder opts out) and are compile-tested against the REAL
-> pass sources.
+> pass sources. Eight of them are `stage sky` skyboxes — dayBreeze /
+> sunsetStreaks / stormNight (per-cycle randomized lightning) / starryNight
+> (wheeling worley star field + milky way) / moonlitClouds / auroraVeil /
+> retroSun (synthwave grid floor) / nebulaDream — all animated (scrolling
+> decks, twinkle, sway, hue drift), all verified by
+> `sky_examples_probe` (a contact sheet at three times that also asserts each
+> one moves).
 >
 > **LIVE PER-NODE PREVIEWS** (§6's "live preview", realized Unity-style):
 > every node draws a thumbnail of its own value, updating in real time as the

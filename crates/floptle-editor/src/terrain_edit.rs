@@ -14,6 +14,7 @@ use floptle_core::math::Vec3;
 use floptle_core::math::Vec4;
 use floptle_core::transform::Transform;
 use floptle_render::MaterialParams;
+use floptle_render::MeshId;
 use floptle_render::RaymarchGlobals;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,6 +25,245 @@ use crate::shading::{OccKey, material_params};
 use crate::terrain_ui::{NewTerrainCfg};
 use crate::viz::{TerrainViz, project};
 use crate::{Editor};
+
+/// The DERIVED render mesh for one terrain (ADR terrain-mesh / P2). The dense field stays
+/// the authority (physics, sculpt, save, and the atlas that feeds shadows + AO); this is
+/// only what the raster pass DRAWS. Chunk vertices are FIELD-space, so every chunk shares
+/// one camera-relative instance matrix and the triplanar material stays continuous.
+#[derive(Default)]
+pub(crate) struct TerrainRender {
+    /// The sparse SDF the mesher extracts from. Re-derived from the dense field on change.
+    pub field: floptle_field::ChunkField,
+    /// One dynamic raster slot per non-empty chunk, keyed by chunk coord so a sculpt can
+    /// re-mesh just the chunks it touched and free the ones that emptied.
+    pub slots: HashMap<[i32; 3], MeshId>,
+}
+
+impl Editor {
+    /// Rebuild every terrain's render mesh whose dense field changed. Cheap when nothing
+    /// changed (the guard is the same `terrain_gpu_dirty` / region-dirty the atlas upload
+    /// already tracks). Full rebuild on structural change; the sculpt fast-path re-meshes
+    /// only the dabbed chunks. Called right after `sync_terrain_gpu` keeps the atlas fed.
+    pub(crate) fn sync_terrain_meshes(
+        &mut self,
+        full_rebuild: bool,
+        region: Option<(Entity, [u32; 3], [u32; 3])>,
+    ) {
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+            return;
+        };
+        // Drop render meshes for terrains that no longer exist (deleted nodes).
+        let live: Vec<Entity> = self.terrains.keys().copied().collect();
+        self.terrain_render.retain(|e, r| {
+            if live.contains(e) {
+                return true;
+            }
+            for (_, mid) in r.slots.drain() {
+                raster.free_dynamic(mid);
+            }
+            false
+        });
+
+        for (&e, terrain) in &self.terrains {
+            let structural = full_rebuild || !self.terrain_render.contains_key(&e);
+            let region_box = region.filter(|(re, ..)| *re == e);
+            if !structural && region_box.is_none() {
+                continue;
+            }
+            let render = self.terrain_render.entry(e).or_default();
+
+            // Which chunks to (re)mesh, and whether to prune slots the field no longer fills.
+            let (coords, prune) = if structural {
+                // Full re-derive: a cubic-voxel ChunkField resampled off the dense grid.
+                // Resampling to cubic voxels is also what quietly retires the voxel-stretch
+                // artifact on old (18:1-stretched) fields — they mesh at true cubic detail.
+                let voxel = terrain_voxel_size(&terrain.baked);
+                render.field = floptle_field::ChunkField::from_dense(&terrain.baked, voxel);
+                (render.field.chunk_coords(), true)
+            } else {
+                // Regional: re-derive ONLY the dabbed box from the dense authority and
+                // re-mesh just its chunks — what keeps sculpting a big terrain smooth
+                // (a full resample per dab would be O(whole field)).
+                let (_, mn, mx) = region_box.expect("region present");
+                let (wmin, wmax) = voxel_index_world_box(&terrain.baked, mn, mx);
+                let touched = render.field.refresh_from_dense_region(&terrain.baked, wmin, wmax);
+                (touched, false)
+            };
+
+            for coord in coords {
+                let cm = floptle_field::mesh_chunk(&render.field, coord, 1, false);
+                if cm.is_empty() {
+                    // Chunk emptied (e.g. dug fully away): free + forget its slot.
+                    if let Some(mid) = render.slots.remove(&coord) {
+                        raster.free_dynamic(mid);
+                    }
+                } else {
+                    upload_chunk(gpu, raster, render, coord, &cm);
+                }
+            }
+
+            if prune {
+                // A full rebuild may have shed chunks entirely; free any slot whose chunk
+                // no longer holds data.
+                let has: std::collections::HashSet<[i32; 3]> =
+                    render.field.chunk_coords().into_iter().collect();
+                render.slots.retain(|c, mid| {
+                    if has.contains(c) {
+                        true
+                    } else {
+                        raster.free_dynamic(*mid);
+                        false
+                    }
+                });
+            }
+        }
+    }
+
+}
+
+/// Append every terrain's chunk-mesh instances to the raster draw list. The model matrix
+/// places the field-space chunk vertices via the node's f64 anchor, exactly as
+/// `fill_terrain_volumes` places the shadow/AO volume — so the drawn mesh and the marched
+/// field coincide (ADR-0015 camera-relative).
+///
+/// A FREE function taking explicit fields, like `fill_terrain_volumes` /
+/// `push_mesh_instances`: the render loop has already borrowed `self.raster` mutably out
+/// of `self`, so no `&self` method may run there. `base_mat` is computed before that borrow
+/// (`terrain_material`), and `raster` is passed for `dyn_paint_base` (the per-chunk color).
+pub(crate) fn push_terrain_instances(
+    terrain_render: &HashMap<Entity, TerrainRender>,
+    world: &floptle_core::World,
+    raster: &floptle_render::Raster,
+    base_mat: &MaterialParams,
+    cam_world: DVec3,
+    instances: &mut Vec<(MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw)>,
+) {
+    for (&e, render) in terrain_render {
+        if render.slots.is_empty() {
+            continue;
+        }
+        let anchor = floptle_core::world_transform(world, e).translation;
+        let model = Mat4::from_translation((anchor - cam_world).as_vec3());
+        for &mid in render.slots.values() {
+            let mut mp = *base_mat;
+            mp.terrain_paint_base = raster.dyn_paint_base(mid);
+            // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
+            // the terrain palette (bound to the raster in `set_terrain_palette`).
+            mp.terrain_splat = true;
+            instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
+        }
+    }
+}
+
+/// Register (or overwrite) one chunk's dynamic slot in a terrain's render set.
+fn upload_chunk(
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    render: &mut TerrainRender,
+    coord: [i32; 3],
+    cm: &floptle_field::ChunkMesh,
+) {
+    let data = floptle_render::chunk_mesh_data(cm);
+    match render.slots.get(&coord).copied() {
+        Some(mid) if raster.replace_dynamic(gpu, mid, &data) => {}
+        Some(mid) => {
+            // Outgrew its slot (rare): drop and re-register at the new size.
+            raster.free_dynamic(mid);
+            let id = raster.register_dynamic(
+                gpu,
+                data.vertices.len() as u32,
+                data.indices.len() as u32,
+                true,
+            );
+            raster.replace_dynamic(gpu, id, &data);
+            render.slots.insert(coord, id);
+        }
+        None => {
+            let id = raster.register_dynamic(
+                gpu,
+                data.vertices.len() as u32,
+                data.indices.len() as u32,
+                true,
+            );
+            raster.replace_dynamic(gpu, id, &data);
+            render.slots.insert(coord, id);
+        }
+    }
+}
+
+/// World-space AABB (in the dense field's frame) of a box given as DENSE voxel indices —
+/// the conversion the sculpt fast-path needs to hand `refresh_from_dense_region` a region.
+/// Mirrors `Terrain::voxel_world`: voxel `i` centers at `center - half + (i+0.5)/dims·2half`.
+fn voxel_index_world_box(
+    baked: &floptle_field::BakedSdf,
+    mn: [u32; 3],
+    mx: [u32; 3],
+) -> (Vec3, Vec3) {
+    let c = baked.center;
+    let hf = baked.half_extent;
+    let [w, h, d] = baked.dims;
+    let f = |i: u32, n: u32, ci: f32, hi: f32| ci - hi + (i as f32 + 0.5) / n.max(1) as f32 * 2.0 * hi;
+    let lo = Vec3::new(f(mn[0], w, c[0], hf[0]), f(mn[1], h, c[1], hf[1]), f(mn[2], d, c[2], hf[2]));
+    let hi = Vec3::new(f(mx[0], w, c[0], hf[0]), f(mx[1], h, c[1], hf[1]), f(mx[2], d, c[2], hf[2]));
+    (lo.min(hi), lo.max(hi))
+}
+
+/// The cubic voxel edge to mesh a dense terrain at.
+///
+/// TWO constraints, and the tighter (coarser) wins:
+///   1. Source detail — the MEDIAN of the three axis resolutions. Using the *min* (my
+///      first cut) is catastrophic for a STRETCHED legacy field: the 18:1 Y-stretch makes
+///      one axis ~0.36 units, and meshing the 578×578 footprint at 0.36 is hundreds of
+///      millions of voxels — it floods the terrain color store (2^24 verts) and takes
+///      forever. The median tracks the real content scale, not the thinnest artifact axis.
+///   2. A FOOTPRINT BUDGET — surface-nets vertex count scales with the two LARGEST extents'
+///      area over voxel², so bound that area to a safe cell count. This is the hard backstop
+///      that guarantees no field, however pathological, can blow the store.
+///
+/// A small terrain is detail-limited (median wins); a big one is budget-limited (area wins).
+fn terrain_voxel_size(baked: &floptle_field::BakedSdf) -> f32 {
+    let [w, h, d] = baked.dims;
+    let mut axis = [
+        2.0 * baked.half_extent[0] / (w.max(2) - 1) as f32,
+        2.0 * baked.half_extent[1] / (h.max(2) - 1) as f32,
+        2.0 * baked.half_extent[2] / (d.max(2) - 1) as f32,
+    ];
+    axis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = axis[1];
+
+    // Footprint = the two LARGEST world extents (a terrain is a wide, shallow slab; its
+    // surface — and thus its vertex count — scales with this area / voxel²). Cap the cell
+    // count so the mesh stays well under the store and the remesh budget.
+    let mut ext = [2.0 * baked.half_extent[0], 2.0 * baked.half_extent[1], 2.0 * baked.half_extent[2]];
+    ext.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    const MAX_SURFACE_CELLS: f32 = 1_000_000.0; // ~1 M verts worst case, far under 2^24
+    let by_area = (ext[1] * ext[2] / MAX_SURFACE_CELLS).sqrt();
+
+    median.max(by_area).clamp(0.25, 16.0)
+}
+
+/// Bitmask of terrain palette slots whose texture asked for Pixelated filtering
+/// (bit i = slot i). Packed into `terrain_tint.w` — an exact small int in f32, the same
+/// idiom `rim.w` uses for tiling flags. `TERRAIN_SLOTS` is 16, so it fits easily.
+///
+/// A free function, not a method: the render loop holds `self.gpu.as_mut()` and friends,
+/// so `&self` is unavailable there — but borrowing these two fields is fine.
+pub(crate) fn terrain_nearest_mask(
+    textures: &[String],
+    settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
+) -> f32 {
+    let mut mask = 0u32;
+    for (i, path) in textures.iter().enumerate().take(32) {
+        if path.is_empty() {
+            continue;
+        }
+        let s = settings.get(path).copied().unwrap_or_default();
+        if s.filter == crate::assets::FilterMode::Pixelated {
+            mask |= 1 << i;
+        }
+    }
+    mask as f32
+}
 
 impl Editor {
     /// Focus (re-adding if closed) the Terrain dock tab.
@@ -229,7 +469,7 @@ impl Editor {
             let now = Instant::now();
             let moved = self
                 .last_dab_pos
-                .is_none_or(|p| (hitw - p).length() as f32 >= radius * 0.34);
+                .is_none_or(|p| (hitw - p).length() as f32 >= radius * self.terrain_brush.spacing.max(0.02));
             let timed = self
                 .last_dab_time
                 .is_none_or(|t| (now - t).as_secs_f32() >= 0.10);
@@ -272,10 +512,10 @@ impl Editor {
                     Some(terrain.brush_range(hit, brush.radius))
                 }
                 floptle_field::Brush::Paint => {
-                    terrain.paint(hit, brush.radius, brush.strength, brush.color);
+                    terrain.paint(hit, brush.radius, brush.strength, brush.color, brush.profile);
                     Some(terrain.brush_range(hit, brush.radius))
                 }
-                m => terrain.sculpt(m, hit, brush.radius, brush.strength),
+                m => terrain.sculpt(m, hit, brush.radius, brush.strength, brush.profile),
             };
             self.stroke_dabbed = true; // mark this stroke as worth an undo step
             // Fast path: a single terrain that didn't resize uploads only the dabbed box
@@ -302,8 +542,42 @@ impl Editor {
 
     /// Voxel dims for the current detail setting over the terrain box (≈2:1:2).
     pub(crate) fn terrain_dims(&self) -> [u32; 3] {
-        let d = self.terrain_detail.clamp(24, 192);
-        [d, (d * 3 / 8).max(8), d]
+        // The legacy default slab (16 × 6 × 16 half-extents) — kept for adopt_terrain's
+        // "terrain node with no field" fallback.
+        self.terrain_dims_for([16.0, 6.0, 16.0])
+    }
+
+    /// Voxel grid for a slab of `half` half-extents: `detail` cells along the LONGEST
+    /// axis, and every other axis sized to the SAME voxel edge — i.e. cubic cells.
+    ///
+    /// The old policy was `[d, d*3/8, d]`: a fixed COUNT with a hardcoded 8:3 aspect,
+    /// which never consulted the terrain's actual size. Two consequences, both of which
+    /// shipped:
+    ///
+    /// * **Stretched cells.** A slab whose real aspect isn't 8:3 got anisotropic voxels
+    ///   — a 578 × 12 terrain came out 9.17 × 0.50 × 9.17, i.e. **18:1**. Trilinear
+    ///   interpolation across cells that stretched is visibly faceted: you see the
+    ///   lattice as dark quad lines, and terraced steps edge-on.
+    /// * **Detail meant nothing at scale.** 64 cells whether the terrain is 16 units or
+    ///   578. The slider looked like it controlled quality; past a few dozen units it
+    ///   couldn't.
+    ///
+    /// Cubic cells fix the facets. They do NOT make a huge slab fine — 578 units at
+    /// `detail` 192 is still ~3 units/voxel — which is exactly why
+    /// [`Self::terrain_voxel_size`] is surfaced in the UI: a terrain this big wants
+    /// several blended volumes, not one coarse one, and the number has to say so.
+    pub(crate) fn terrain_dims_for(&self, half: [f32; 3]) -> [u32; 3] {
+        crate::terrain_ui::terrain_dims_for_size(
+            [2.0 * half[0], 2.0 * half[1], 2.0 * half[2]],
+            self.terrain_detail,
+        )
+    }
+
+    /// The world-space voxel edge of a terrain field, per axis. Anisotropy here is
+    /// what shows up as a visible lattice, so the UI reports it.
+    pub(crate) fn terrain_voxel_size(field: &floptle_field::Terrain) -> [f32; 3] {
+        let b = &field.baked;
+        [0, 1, 2].map(|i| 2.0 * b.half_extent[i] / (b.dims[i].max(2) - 1) as f32)
     }
 
     /// Create a fresh flat terrain as a NEW scene node (you can have any number). It
@@ -321,7 +595,7 @@ impl Editor {
         let half_xz = cfg.size_xz.max(0.1) * 0.5;
         let half_y = cfg.thickness.max(0.1) * 0.5;
         let mut field = floptle_field::Terrain::flat(
-            self.terrain_dims(),
+            self.terrain_dims_for([half_xz, half_y, half_xz]),
             [0.0, 0.0, 0.0],
             [half_xz, half_y, half_xz],
             0.0,
@@ -470,7 +744,12 @@ impl Editor {
             let bc = t.baked.center;
             let hf = t.baked.half_extent;
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
-            g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 1.0];
+            // w = 3: shadow + AO, NOT drawn. Terrain 2.0 draws the extracted chunk meshes
+            // through the raster pass (`push_terrain_instances`); the raymarch stops
+            // sphere-tracing terrain but its field keeps casting sun shadows and darkening
+            // props that stand on it (that is what `w = 3` means, vs `w = 2` which would
+            // drop terrain out of the AO field — trap T2).
+            g.vol_center[i] = [cr.x as f32, cr.y as f32, cr.z as f32, 3.0];
             g.vol_half[i] = [hf[0], hf[1], hf[2], 0.6];
         }
         // Mesh shadow occluders ride the slots AFTER the terrains, flagged
@@ -518,5 +797,53 @@ impl Editor {
         pick.and_then(|e| self.world.get::<Material>(e))
             .map(material_params)
             .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terrain_voxel_size;
+    use floptle_field::BakedSdf;
+
+    /// A dense field with the given world size and voxel dims — only the fields
+    /// `terrain_voxel_size` reads need to be real.
+    fn baked(size: [f32; 3], dims: [u32; 3]) -> BakedSdf {
+        BakedSdf {
+            dims,
+            center: [0.0; 3],
+            half_extent: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5],
+            distance: vec![0.0; 1],
+            color: vec![[0; 4]; 1],
+        }
+    }
+
+    /// The shipped bug: `terrain_voxel_size` took the MIN axis resolution, so a STRETCHED
+    /// field (the 18:1 Y-stretch) meshed the wide footprint at its thin-axis voxel —
+    /// millions of surface cells that flooded the terrain color store (2^24). The chosen
+    /// voxel must keep the surface-cell count bounded for ANY slab shape.
+    #[test]
+    fn voxel_size_bounds_the_vertex_count() {
+        let cases = [
+            // (world size, dense dims) — the real cases + extremes.
+            ([578.0, 97.5, 578.0], [289, 271, 307]), // Ty's stretched field (was 2.6 M cells)
+            ([578.0, 12.0, 578.0], [64, 24, 64]),    // the 18:1 slab that shipped
+            ([16.0, 6.0, 16.0], [64, 24, 64]),       // a small terrain
+            ([4000.0, 100.0, 4000.0], [256, 64, 256]), // a huge map
+            ([2.0, 200.0, 2.0], [24, 384, 24]),      // a tall column
+        ];
+        for (size, dims) in cases {
+            let v = terrain_voxel_size(&baked(size, dims));
+            // Surface cells ≈ (two largest extents) / voxel². This is what becomes the
+            // vertex count; it MUST stay well under 2^24 (~16.7 M) — the store's ceiling.
+            let mut ext = size;
+            ext.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let cells = ext[1] * ext[2] / (v * v);
+            assert!(
+                cells < 4_000_000.0,
+                "{size:?} @ voxel {v:.3} => {cells:.0} surface cells — near/over the color \
+                 store ceiling (the min-axis bug shipped ~2.6 M here and overflowed)"
+            );
+            assert!(v.is_finite() && v >= 0.25, "voxel {v} out of range for {size:?}");
+        }
     }
 }

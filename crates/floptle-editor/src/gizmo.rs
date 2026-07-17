@@ -25,7 +25,7 @@ pub(crate) const CENTER_RING_PX: f32 = 52.0;
 /// Trackball free-rotate sensitivity (radians per pixel).
 pub(crate) const TRACKBALL_SENS: f32 = 0.01;
 
-/// The active editing tool. Bound to number keys 1-4 (5-9 reserved).
+/// The active editing tool. Bound to number keys 1-7 (8-9 reserved).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Tool {
     #[default]
@@ -40,19 +40,33 @@ pub(crate) enum Tool {
     /// arranging tool for UI elements; works on 3D shapes too (pull a cube
     /// into a floor).
     Rect,
+    /// Vertex paint brush (LMB-drag paints per-vertex color onto a mesh).
+    Paint,
 }
 
 impl Tool {
+    /// Every tool, in KEYBIND order. This is the single source of truth: `from_digit`,
+    /// `digit`, and the viewport toolbar all read it, so the toolbar can never again
+    /// disagree with the number keys (it used to list Rect before Sculpt while the keys
+    /// said otherwise). Add a tool here and it appears, in order, everywhere.
+    pub(crate) const ALL: [Tool; 7] = [
+        Tool::Select,
+        Tool::Move,
+        Tool::Rotate,
+        Tool::Scale,
+        Tool::Sculpt,
+        Tool::Rect,
+        Tool::Paint,
+    ];
+
     pub(crate) fn from_digit(n: u32) -> Option<Tool> {
-        match n {
-            1 => Some(Tool::Select),
-            2 => Some(Tool::Move),
-            3 => Some(Tool::Rotate),
-            4 => Some(Tool::Scale),
-            5 => Some(Tool::Sculpt),
-            6 => Some(Tool::Rect),
-            _ => None, // 7-9 reserved for future tools
-        }
+        // 8-9 reserved for future tools.
+        Self::ALL.get((n as usize).checked_sub(1)?).copied()
+    }
+
+    /// The number key that selects this tool (1-based).
+    pub(crate) fn digit(self) -> usize {
+        Self::ALL.iter().position(|t| *t == self).map_or(0, |i| i + 1)
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -63,6 +77,7 @@ impl Tool {
             Tool::Scale => "scale",
             Tool::Sculpt => "sculpt",
             Tool::Rect => "rect",
+            Tool::Paint => "paint",
         }
     }
 }
@@ -200,7 +215,7 @@ pub(crate) fn build_gizmo(
     h: f32,
     rect_half: Option<Vec3>,
 ) -> Option<GizmoFrame> {
-    if tool == Tool::Select || tool == Tool::Sculpt {
+    if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint {
         return None;
     }
     let e = selection?;
@@ -364,7 +379,7 @@ pub(crate) fn hit_test(
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
         }
-        Tool::Select | Tool::Sculpt | Tool::Rect => {} // Rect hit-tests in build_gizmo
+        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Rect => {} // Rect hit-tests in build_gizmo
     }
     cands
         .into_iter()
@@ -489,6 +504,6 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                 }
             }
         }
-        Tool::Select | Tool::Sculpt => {}
+        Tool::Select | Tool::Sculpt | Tool::Paint => {}
     }
 }

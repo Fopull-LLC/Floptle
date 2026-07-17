@@ -24,7 +24,7 @@ struct Globals {
     params: vec4<f32>,      // x = time, y = blob count, z = blob↔volume blend k, w = volume count
     // Up to 16 baked volumes, EACH at its native voxel resolution inside one shared
     // 3D atlas (no combined-grid resolution spread — ADR-0015 / multi-volume terrain).
-    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w: 0 absent, 1 render, 2 shadow-only
+    vol_center: array<vec4<f32>, 16>, // xyz camera-relative box center, w = KIND (see `vol_drawn` & co.)
     vol_half: array<vec4<f32>, 16>,   // xyz half-extent, w = volume↔volume fuse k
     vol_atlas: array<vec4<f32>, 16>,  // xyz voxel offset in the atlas (renderer-patched)
     vol_dims: array<vec4<f32>, 16>,   // xyz voxel dims of this volume (renderer-patched)
@@ -86,6 +86,10 @@ struct Globals {
     shape_specular: array<vec4<f32>, 4>,
     shape_params: array<vec4<f32>, 4>,
     shape_rim: array<vec4<f32>, 4>,
+    // Sky shader (ADR-0007 Sky stage): x = active (0/1). The shader's exposed uniforms ride
+    // `sky_uniforms`. Appended at the END so the Rust `RaymarchGlobals` stays byte-identical.
+    sky_meta: vec4<f32>,
+    sky_uniforms: array<vec4<f32>, 16>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -160,6 +164,34 @@ fn blob_bound(i: u32) -> f32 {
     return s + max(0.3 * s, G.params.z);
 }
 
+// ---- Volume kinds (`vol_center.w`) ---------------------------------------------
+//
+//   0 = absent
+//   1 = render        — drawn by the raymarch, in the AO field, casts shadows
+//   2 = occluder bake — casts shadows ONLY: a baked static level mesh whose real
+//                       triangles the raster pass draws. Deliberately outside the AO
+//                       field (it would double-occlude its own triangles).
+//   3 = shadow + AO, NOT drawn — MESHED TERRAIN (ADR terrain 2.0 / P2). The raster
+//                       pass draws its extracted chunk meshes, while the field keeps
+//                       casting its sun shadows AND darkening props that stand on it.
+//
+// Kind 3 exists rather than re-using kind 2 for one reason: `map_d` skips kind 2, so
+// terrain-as-2 would silently strip the SDF contact AO out from under every prop in
+// the scene. Kind 3 is therefore identical to kind 1 in every FIELD-MATH site
+// (`volumes_d`, `union_edge_m`, `field_eps`) and differs only in the DRAW sites
+// (`field_span`, `volumes`, `real_surface`, `containing_volume`) — which is what makes
+// the render swap a change to visibility alone, with shadows and AO untouched.
+fn vol_absent(i: u32) -> bool { return G.vol_center[i].w < 0.5; }
+// Kind 1 only: the raymarch draws this volume.
+fn vol_drawn(i: u32) -> bool { return abs(G.vol_center[i].w - 1.0) < 0.5; }
+// Kinds 1 and 3: this volume is matter as far as normals / AO / the fused smin go.
+fn vol_in_field(i: u32) -> bool {
+    let w = G.vol_center[i].w;
+    return w > 0.5 && (w < 1.5 || w > 2.5);
+}
+// Kind 2 only: a cast-only occluder bake, folded into the shadow march with a plain min.
+fn vol_occluder(i: u32) -> bool { return abs(G.vol_center[i].w - 2.0) < 0.5; }
+
 // The span of the whole DRAWN field (render volumes + blobs) along a ray — the
 // primary march runs only inside it. Returns (t0, t1); t0 > t1 = provably sky.
 fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
@@ -168,7 +200,7 @@ fn field_span(ro: vec3<f32>, rd: vec3<f32>, max_t: f32) -> vec2<f32> {
     let inv = safe_inv(rd);
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_drawn(i)) { continue; }        // DRAW: kind 3 terrain is meshed, not marched
         // The TIGHT content box, not the brick: rays over the hills toward the
         // sky must exit at the terrain's true top, not the brick's.
         let s = slab_span(ro, inv, G.vol_tight_c[i].xyz, G.vol_tight_h[i].xyz + vec3<f32>(vol_pad(i)));
@@ -284,7 +316,7 @@ fn union_edge_m(p: vec3<f32>, mask: u32) -> f32 {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if ((mask & (1u << i)) == 0u) { continue; }
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_in_field(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < 0.0) {
             e = max(e, box_edge(i, p));
@@ -303,7 +335,7 @@ fn union_edge(p: vec3<f32>) -> f32 {
 fn inside_volume_box_eps(p: vec3<f32>, e: f32) -> bool {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_drawn(i)) { continue; }        // DRAW: only a drawn box can produce a false hit
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < e) { return true; }
     }
@@ -317,7 +349,7 @@ fn containing_volume(p: vec3<f32>, e: f32) -> i32 {
     var bd = 1e9;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_drawn(i)) { continue; }        // DRAW: picks the texture slot the march shades with
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < e) {
             let d = volume_d(i, p);
@@ -335,7 +367,7 @@ fn volumes_d(p: vec3<f32>) -> VolFoldD {
     var any = false;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_in_field(i)) { continue; }
         let v = volume_d(i, p);
         if (!any) {
             d = v;
@@ -378,7 +410,7 @@ fn field_eps(p: vec3<f32>) -> f32 {
     var h = 0.012;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5 || G.vol_center[i].w > 1.5) { continue; }
+        if (!vol_in_field(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < 0.08) {
             // Where boxes overlap the LARGEST voxel wins — pure box tests, no
@@ -440,7 +472,7 @@ fn shadow_volumes_d(p: vec3<f32>) -> f32 {
     var d = 1e9;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 1.5) { continue; }
+        if (!vol_occluder(i)) { continue; }
         d = min(d, volume_d(i, p));
     }
     return d;
@@ -453,7 +485,7 @@ fn shadow_vol_eps(p: vec3<f32>) -> f32 {
     var h = 0.0;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 1.5) { continue; }
+        if (!vol_occluder(i)) { continue; }
         let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
         if (max(q.x, max(q.y, q.z)) < 0.08) {
             let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
@@ -519,7 +551,7 @@ fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
         if ((vmask & (1u << i)) == 0u) { continue; }
-        if (G.vol_center[i].w > 1.5) {
+        if (vol_occluder(i)) {
             sd = min(sd, volume_d(i, p));
         } else {
             let v = volume_d(i, p);
@@ -588,7 +620,7 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     var t_end = 0.0;
     let vols = min(u32(G.params.w), 16u);
     for (var i = 0u; i < vols; i = i + 1u) {
-        if (G.vol_center[i].w < 0.5) { continue; } // absent (shadow-only bakes stay in)
+        if (vol_absent(i)) { continue; } // every present kind casts (1, 2 and 3 alike)
         // Tight content box, not the brick: a sun ray from open ground exits the
         // terrain at its true top, so t_end stops just past the hills instead of
         // marching to the brick's roof.

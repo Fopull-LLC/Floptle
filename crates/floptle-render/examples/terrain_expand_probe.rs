@@ -41,7 +41,7 @@ fn main() {
     for _ in 0..40 {
         let c = [x, 0.6, z];
         terrain.ensure_contains(c, 3.0 * 1.5);
-        terrain.sculpt(Brush::Raise, c, 3.0, 1.0);
+        terrain.sculpt(Brush::Raise, c, 3.0, 1.0, floptle_field::BrushProfile::default());
         x += 0.7;
         z -= 0.7;
     }

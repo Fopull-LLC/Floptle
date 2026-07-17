@@ -172,6 +172,33 @@ pub struct Collidable;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Trigger;
 
+/// Marks a node as carrying **vertex paint** — per-vertex color the brush authored,
+/// stored outside the scene (`<project>/paint/<scene>.vpaint`) because per-vertex
+/// arrays have no business in a `.ron`.
+///
+/// `id` is a STABLE per-node key, not an `Entity`: undo respawns the whole `World`, so
+/// entity handles don't survive it — the same reason `Matter::Terrain { id }` exists.
+/// The paint file keys off this id, and the renderer resolves it to a base offset in
+/// the `vpaint` store.
+///
+/// This is an ADDITIVE component rather than a `Matter` field on purpose. Paint is
+/// orthogonal to what a node *is* (a Mesh and a Primitive are both paintable), and
+/// every primitive of a shape shares ONE `MeshId` — so paint cannot live on the
+/// geometry. See `docs/vertex-paint-proposal.md` §3.1/§9.1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VertexPaint {
+    pub id: u32,
+}
+
+/// TEXTURE painting: this node carries a hand-painted texture (per-part paint images on a
+/// unique per-triangle atlas — see the editor's `paint_tex`). A stable id (not `Entity`,
+/// which `restore()` invalidates) keys the editor's image store, exactly like
+/// [`VertexPaint`] — so undo survives a World rebuild.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TexturePaint {
+    pub id: u32,
+}
+
 /// Attaches a layered animation controller asset (`*.actl.ron`) to a node. The
 /// runtime it drives lives editor/runtime-side; this is just the reference —
 /// the same discipline as `Matter::Mesh { asset_path }`. On a rigged Mesh node
@@ -335,7 +362,20 @@ pub enum Matter {
     /// drawn behind everything. `color` is the solid sky color (grey by default); when
     /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by
     /// `tint`. The node's transform rotation orients the sky (a script can spin it).
-    Skybox { color: [f32; 3], size: f32, texture: Option<String>, tint: [f32; 3] },
+    /// `shader` (a project-relative `.flsl` Sky-stage path) overrides the solid/texture
+    /// look entirely: it computes the environment color per ray direction (a procedural
+    /// sky). `shader_params` overrides that shader's exposed uniforms by name (the
+    /// Inspector's sky knobs — absent names use the `.flsl` defaults), exactly like a
+    /// Material's `shader_params`. Serialized via `MatterDoc::Skybox` (which
+    /// `#[serde(default)]`s it so old scenes still load).
+    Skybox {
+        color: [f32; 3],
+        size: f32,
+        texture: Option<String>,
+        tint: [f32; 3],
+        shader: Option<String>,
+        shader_params: std::collections::BTreeMap<String, [f32; 4]>,
+    },
     /// The scene's post-processing chain — a mandatory scene node (self-healed on
     /// load, like the Skybox), so every scene tunes its own look. `enabled` gates
     /// the whole chain; each effect then has its own switch and knobs. `ao` picks
@@ -366,7 +406,14 @@ pub enum Matter {
 impl Matter {
     /// The default skybox: solid mid-grey, a large radius, no texture.
     pub fn default_skybox() -> Self {
-        Matter::Skybox { color: [0.5, 0.5, 0.52], size: 500.0, texture: None, tint: [1.0, 1.0, 1.0] }
+        Matter::Skybox {
+            color: [0.5, 0.5, 0.52],
+            size: 500.0,
+            texture: None,
+            tint: [1.0, 1.0, 1.0],
+            shader: None,
+            shader_params: std::collections::BTreeMap::new(),
+        }
     }
 
     /// The default post-processing node: chain on, screen-space ambient occlusion

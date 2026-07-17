@@ -110,6 +110,12 @@ impl Editor {
         let rigidbody =
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
+        // Carry the paint KEY, not a copy of the colors: the pasted node points at the
+        // same block and forks it only if painted (copy-on-write, proposal §9.0). So
+        // duplicating a painted prop is free, and painting the copy doesn't touch the
+        // original.
+        let paint = self.world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
+        let tex_paint = self.world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let trigger = self.world.get::<floptle_core::Trigger>(e).is_some();
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
@@ -138,6 +144,8 @@ impl Editor {
             material,
             rigidbody,
             mesh_collider,
+            paint,
+            tex_paint,
             collidable,
             trigger,
             visible,
@@ -238,6 +246,8 @@ impl Editor {
             material: None,
             rigidbody: None,
             mesh_collider: false,
+            paint: None,
+            tex_paint: None,
             collidable: false,
             trigger: false,
             visible: true,
@@ -284,6 +294,8 @@ impl Editor {
                 material: None,
                 rigidbody: None,
                 mesh_collider: false,
+                paint: None,
+                tex_paint: None,
                 collidable: false,
                 trigger: false,
                 visible: true,

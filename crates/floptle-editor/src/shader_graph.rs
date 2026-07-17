@@ -645,6 +645,10 @@ impl EditorTabViewer<'_> {
                     ui.label(egui::RichText::new("sdf — this shader IS geometry").small())
                         .on_hover_text("assign it to a ◈ Field Shape node (Add → Field Shape)");
                 }
+                Some(Stage::Sky) => {
+                    ui.label(egui::RichText::new("sky — the scene's environment").small())
+                        .on_hover_text("assign it on the Skybox node (Inspector → skybox → shader)");
+                }
                 _ => {
                     ui.label(egui::RichText::new("fragment").small())
                         .on_hover_text("a surface look — assign it on a Material's Shader row");
@@ -738,13 +742,23 @@ impl EditorTabViewer<'_> {
                 // Preview-only trouble never blocks editing — mention quietly.
                 ui.weak(format!("previews paused: {pe}"));
             } else {
-                // A gentle nudge when the shader isn't visible anywhere.
-                let used = self
-                    .world
-                    .query::<floptle_core::Material>()
-                    .any(|(_, m)| m.shader.as_deref() == Some(path.as_str()));
-                if !used {
-                    ui.weak("not in the scene yet — assign it on a Material to watch edits live");
+                // A gentle nudge when the shader isn't visible anywhere. Sky
+                // shaders live on the Skybox node, everything else on Materials.
+                if stage == Stage::Sky {
+                    let used = self.world.query::<floptle_core::Matter>().any(|(_, m)| {
+                        matches!(m, floptle_core::Matter::Skybox { shader: Some(s), .. } if s == &path)
+                    });
+                    if !used {
+                        ui.weak("not on the Skybox yet — pick it there (Inspector → skybox → shader) to see it in the scene");
+                    }
+                } else {
+                    let used = self
+                        .world
+                        .query::<floptle_core::Material>()
+                        .any(|(_, m)| m.shader.as_deref() == Some(path.as_str()));
+                    if !used {
+                        ui.weak("not in the scene yet — assign it on a Material to watch edits live");
+                    }
                 }
             }
         });

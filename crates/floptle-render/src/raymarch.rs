@@ -134,6 +134,10 @@ pub struct RaymarchGlobals {
     pub shape_specular: [[f32; 4]; 4],
     pub shape_params: [[f32; 4]; 4],
     pub shape_rim: [[f32; 4]; 4],
+    /// Sky shader: `[0]` = active (0/1); rest padding.
+    pub sky_meta: [f32; 4],
+    /// The Sky shader's exposed uniforms (`G.sky_uniforms[i]`), packed by the editor.
+    pub sky_uniforms: [[f32; 4]; 16],
 }
 
 impl Default for RaymarchGlobals {
@@ -194,6 +198,8 @@ impl Default for RaymarchGlobals {
             shape_specular: [[1.0, 1.0, 1.0, 0.0]; 4],
             shape_params: [[16.0, 0.0, 0.0, 1.0]; 4],
             shape_rim: [[0.0; 4]; 4],
+            sky_meta: [0.0; 4],
+            sky_uniforms: [[0.0; 4]; 16],
         }
     }
 }
@@ -291,6 +297,7 @@ pub struct Raymarch {
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     tile_sampler: wgpu::Sampler,
+    tile_sampler_nearest: wgpu::Sampler,
     _dist_tex: wgpu::Texture,
     _color_tex: wgpu::Texture,
     /// Atlas layout: each uploaded volume's (voxel offset, voxel dims) inside the
@@ -316,6 +323,14 @@ pub struct Raymarch {
     /// `bind` with the real prepass depth at binding 7 — what
     /// [`draw_into_primed`](Self::draw_into_primed) uses.
     bind_primed: Option<wgpu::BindGroup>,
+    /// The scene's spliced custom code, KEPT so either half can change independently and
+    /// the pipeline rebuild still carries both. `field_code` = Field Shapes `(field, color)`;
+    /// `sky_fn` = a Sky shader's `flsl_sky`. Both splice into the ONE raymarch module, so a
+    /// change to either re-assembles from both. `custom_support` is the shared stdlib the
+    /// editor supplies (same string for both — appended once).
+    field_code: Option<(String, String)>,
+    sky_fn: Option<String>,
+    custom_support: String,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at.
@@ -330,7 +345,7 @@ impl Raymarch {
         // concatenated on — module-scope WGSL declarations are order-independent.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raymarch"),
-            source: wgpu::ShaderSource::Wgsl(Self::assembled_source(None).into()),
+            source: wgpu::ShaderSource::Wgsl(Self::assembled_source(None, None, "").into()),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -370,6 +385,15 @@ impl Raymarch {
                 // texture reuses it so an equirect sky wraps seamlessly.
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The same palette sampled NEAREST — `triplanar` selects per slot from
+                // the mask in terrain_tint.w, so a texture marked Pixelated in the
+                // Assets panel looks pixelated on terrain, exactly as it does on a mesh.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -435,6 +459,17 @@ impl Raymarch {
             ..Default::default()
         });
 
+        // Same wrap as `tile_sampler`, nearest filtering — the per-slot alternative.
+        let tile_sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raymarch-terrain-tile-nearest"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // A 1³ "empty" atlas so the bindings are valid before any volume is baked.
         let empty = BakedSdf {
             dims: [1, 1, 1],
@@ -450,7 +485,7 @@ impl Raymarch {
         let prime_fallback = make_prime_fallback(gpu);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler, &sky_tex, &prime_fallback,
+            &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback,
         );
         let field_layout = field_bind_layout(device);
         let field_bind = make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &sampler);
@@ -463,6 +498,7 @@ impl Raymarch {
             bind_layout,
             sampler,
             tile_sampler,
+            tile_sampler_nearest,
             _dist_tex: dist_tex,
             _color_tex: color_tex,
             slots: Vec::new(),
@@ -474,32 +510,63 @@ impl Raymarch {
             prime_fallback,
             prime_view: None,
             bind_primed: None,
+            field_code: None,
+            sky_fn: None,
+            custom_support: String::new(),
         }
     }
 
     /// The pass module's WGSL: `raymarch.wgsl + field.wgsl`, with the Field
     /// Shape stub blocks spliced when code is given — `(field_code, color_code,
     /// support)`. `None` returns the byte-identical baseline concatenation.
-    fn assembled_source(code: Option<(&str, &str, &str)>) -> String {
+    fn assembled_source(
+        field_code: Option<(&str, &str)>,
+        sky_fn: Option<&str>,
+        support: &str,
+    ) -> String {
         let base = concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"));
-        match code {
-            None => base.to_string(),
-            Some((field, color, support)) => {
-                let s = crate::raster::splice_block(
-                    base,
-                    "//[flsl-color-custom-begin]",
-                    "//[flsl-color-custom-end]",
-                    color,
-                );
-                let s = crate::raster::splice_block(
-                    &s,
-                    "//[flsl-field-custom-begin]",
-                    "//[flsl-field-custom-end]",
-                    field,
-                );
-                format!("{s}\n{support}")
-            }
+        let mut s = base.to_string();
+        if let Some((field, color)) = field_code {
+            s = crate::raster::splice_block(
+                &s,
+                "//[flsl-color-custom-begin]",
+                "//[flsl-color-custom-end]",
+                color,
+            );
+            s = crate::raster::splice_block(
+                &s,
+                "//[flsl-field-custom-begin]",
+                "//[flsl-field-custom-end]",
+                field,
+            );
         }
+        if let Some(sky) = sky_fn {
+            s = crate::raster::splice_block(
+                &s,
+                "//[flsl-sky-custom-begin]",
+                "//[flsl-sky-custom-end]",
+                sky,
+            );
+        }
+        if field_code.is_some() || sky_fn.is_some() {
+            format!("{s}\n{support}")
+        } else {
+            s
+        }
+    }
+
+    /// Rebuild the raymarch pipelines from the CURRENTLY stored field + sky code. Both
+    /// splice into one module, so a change to either re-assembles from both.
+    fn rebuild_custom(&mut self, gpu: &Gpu) {
+        let field = self.field_code.as_ref().map(|(f, c)| (f.as_str(), c.as_str()));
+        let src = Self::assembled_source(field, self.sky_fn.as_deref(), &self.custom_support);
+        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raymarch"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
+        self.pipeline = pipeline;
+        self.mask_pipeline = mask_pipeline;
     }
 
     fn build_pipelines(
@@ -582,19 +649,41 @@ impl Raymarch {
     /// [`assembled_source`]) first; per-shape transforms/uniforms then ride
     /// the globals — no further rebuilds on edits.
     pub fn set_custom_field(&mut self, gpu: &Gpu, code: Option<(&str, &str, &str)>) {
-        let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raymarch"),
-            source: wgpu::ShaderSource::Wgsl(Self::assembled_source(code).into()),
-        });
-        let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
-        self.pipeline = pipeline;
-        self.mask_pipeline = mask_pipeline;
+        match code {
+            Some((field, color, support)) => {
+                self.field_code = Some((field.to_string(), color.to_string()));
+                self.custom_support = support.to_string();
+            }
+            None => self.field_code = None,
+        }
+        self.rebuild_custom(gpu);
+    }
+
+    /// Splice (or clear, with `None`) a Sky shader's `flsl_sky` into the raymarch's
+    /// `sky_color` — the procedural skybox. `support` is the same stdlib as `set_custom_field`.
+    /// Composes with Field Shapes: both live in the one module and re-assemble together.
+    pub fn set_sky_shader(&mut self, gpu: &Gpu, code: Option<(&str, &str)>) {
+        match code {
+            Some((sky, support)) => {
+                self.sky_fn = Some(sky.to_string());
+                if !support.is_empty() {
+                    self.custom_support = support.to_string();
+                }
+            }
+            None => self.sky_fn = None,
+        }
+        self.rebuild_custom(gpu);
     }
 
     /// The exact source [`set_custom_field`](Self::set_custom_field) would
     /// build — for the editor to naga-validate BEFORE swapping pipelines.
     pub fn preview_custom_source(code: Option<(&str, &str, &str)>) -> String {
-        Self::assembled_source(code)
+        Self::assembled_source(code.map(|(f, c, _)| (f, c)), None, code.map_or("", |(_, _, s)| s))
+    }
+
+    /// The source a Sky shader would build — for naga-validation before swapping pipelines.
+    pub fn preview_sky_source(sky_fn: &str, support: &str) -> String {
+        Self::assembled_source(None, Some(sky_fn), support)
     }
 
     /// Rebuild `bind` (fallback prime) and, when primed, `bind_primed` — after
@@ -609,6 +698,7 @@ impl Raymarch {
             &self.sampler,
             &self.terrain_tex,
             &self.tile_sampler,
+            &self.tile_sampler_nearest,
             &self.sky_tex,
             &self.prime_fallback,
         );
@@ -622,6 +712,7 @@ impl Raymarch {
                 &self.sampler,
                 &self.terrain_tex,
                 &self.tile_sampler,
+                &self.tile_sampler_nearest,
                 &self.sky_tex,
                 v,
             )
@@ -1016,6 +1107,7 @@ fn make_bind(
     sampler: &wgpu::Sampler,
     terrain: &wgpu::Texture,
     tile_sampler: &wgpu::Sampler,
+    tile_sampler_nearest: &wgpu::Sampler,
     sky: &wgpu::Texture,
     prime: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
@@ -1036,6 +1128,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(tile_sampler) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(tile_sampler_nearest) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(prime) },
         ],
@@ -1109,7 +1202,7 @@ fn make_sky_texture(gpu: &Gpu, tex: Option<&TextureData>) -> wgpu::Texture {
 
 /// Create the terrain palette as a `TERRAIN_SLOTS`-layer 256² sRGB array. Provided
 /// layers are uploaded (caller pre-resizes to 256²); the rest default to white.
-fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
+pub(crate) fn make_terrain_array(gpu: &Gpu, layers: &[TextureData]) -> wgpu::Texture {
     let size = wgpu::Extent3d {
         width: TERRAIN_TEX_SIZE,
         height: TERRAIN_TEX_SIZE,

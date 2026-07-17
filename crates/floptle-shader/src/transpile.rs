@@ -145,7 +145,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     // globals `g`, which only exist in the raster module).
     w.raw(FRAGMENT_LIT_WGSL);
 
-    w.line("fn flsl_surface(in: VsOut) -> vec4<f32> {".into(), None);
+    w.line("fn flsl_surface(in: VsOut, front: bool) -> vec4<f32> {".into(), None);
     for (i, (name, root)) in ir.lets.iter().enumerate() {
         let expr = w.emit(*root)?;
         let ty = ck.ty(*root).wgsl();
@@ -165,8 +165,8 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
     // The entry point: scene fog + the node's own alpha compose OUTSIDE the
     // authored surface, so every custom material stays scene-coherent.
     w.line("@fragment".into(), None);
-    w.line("fn fs_flsl(in: VsOut) -> @location(0) vec4<f32> {".into(), None);
-    w.line("    let c = flsl_surface(in);".into(), None);
+    w.line("fn fs_flsl(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {".into(), None);
+    w.line("    let c = flsl_surface(in, front);".into(), None);
     w.line("    let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));".into(), None);
     w.line("    return vec4<f32>(apply_fog(c.rgb, in.view_pos, pix), c.a * in.color.a);".into(), None);
     w.line("}".into(), None);
@@ -185,8 +185,8 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// surface path (raster.wgsl `fs`) refactored over an authored albedo — sun +
 /// marched shadows + AO + point lights + the node Material's specular/rim.
 /// MUST stay in sync with `fs` in raster.wgsl.
-pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, albedo: vec3<f32>) -> vec3<f32> {
-    let n = facing_normal(normalize(in.normal), in.view_pos);
+pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, front: bool, albedo: vec3<f32>) -> vec3<f32> {
+    let n = facing_normal(normalize(in.normal), front);
     let l = normalize(g.light_dir.xyz);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
@@ -220,6 +220,13 @@ pub(crate) enum EmitCtx {
     /// Field shapes: `q` = shape-local position, uniforms ride the globals'
     /// `shape_uniforms` array at this scene slot.
     Sdf { slot: usize },
+    /// Sky shaders: `dir` = the ray direction, uniforms ride the globals'
+    /// `sky_uniforms` array (there is at most one sky shader in a scene).
+    Sky,
+    /// A sky shader inside a PREVIEW module: the tile's dome normal stands in
+    /// for the ray direction, and uniforms read the preview's `P` param block
+    /// (`sky_uniforms` doesn't exist there).
+    SkyPreview,
 }
 
 /// The preview transpiler's live-scalar registry: every literal number (and
@@ -321,12 +328,22 @@ impl<'a> Writer<'a> {
             ExprKind::Input(i) => match (self.ctx, i) {
                 (EmitCtx::Fragment, Input::Uv) => "in.uv".into(),
                 (EmitCtx::Fragment, Input::Normal) => {
-                    "facing_normal(normalize(in.normal), in.view_pos)".into()
+                    "facing_normal(normalize(in.normal), front)".into()
                 }
                 (EmitCtx::Fragment, Input::WorldPos) => "in.view_pos".into(),
                 (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
                 (_, Input::Time) => "G.params.x".into(),
                 (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
+                // Sky shaders read the ray DIRECTION (`dir`, the fn's parameter).
+                (EmitCtx::Sky, Input::SkyDir) => "dir".into(),
+                // In a preview tile the dome normal is the stand-in ray.
+                (EmitCtx::SkyPreview, Input::SkyDir) => "normalize(in.normal)".into(),
+                (EmitCtx::Sky | EmitCtx::SkyPreview, _) => {
+                    return Err(TranspileError::new(
+                        format!("`{}` is not available in sky shaders (use `skyDir`, `time`)", i.name()),
+                        e.span,
+                    ));
+                }
                 // Sdf shaders author in shape-LOCAL space (the node's transform
                 // is applied by shape_local; distances scale back after).
                 (EmitCtx::Sdf { .. }, Input::WorldPos) => "q".into(),
@@ -335,6 +352,9 @@ impl<'a> Writer<'a> {
                         format!("`{}` is not available in sdf shaders", i.name()),
                         e.span,
                     ));
+                }
+                (EmitCtx::Fragment, Input::SkyDir) => {
+                    return Err(TranspileError::new("`skyDir` is only for sky shaders", e.span));
                 }
             },
             ExprKind::Uniform(u) => {
@@ -345,10 +365,13 @@ impl<'a> Writer<'a> {
                     Ty::Vec4 => "",
                 };
                 match self.ctx {
-                    EmitCtx::Fragment => format!("P.u{u}{access}"),
+                    // Previews bind knobs at `P` for sky too (no globals array there).
+                    EmitCtx::Fragment | EmitCtx::SkyPreview => format!("P.u{u}{access}"),
                     EmitCtx::Sdf { slot } => {
                         format!("G.shape_uniforms[{}u]{access}", slot * 16 + u)
                     }
+                    // Sky uniforms ride the raymarch globals' dedicated `sky_uniforms` array.
+                    EmitCtx::Sky => format!("G.sky_uniforms[{u}u]{access}"),
                 }
             }
             ExprKind::Let(l) => format!("l{l}_{}", self.ir.lets[*l].0),
@@ -415,7 +438,7 @@ impl<'a> Writer<'a> {
                 }
                 "litSurface" => {
                     let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
-                    Ok(format!("flsl_lit(in, {albedo})"))
+                    Ok(format!("flsl_lit(in, front, {albedo})"))
                 }
                 "sunShadow" => {
                     let p = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
@@ -633,6 +656,51 @@ pub fn transpile_sdf(ir: &ShaderIr, ck: &Checked, slot: usize) -> Result<Compile
     Ok(CompiledSdf { name: ir.name.clone(), uniforms: ir.uniforms.clone(), dist_fn, col_fn })
 }
 
+/// A compiled Sky-stage shader: `fn flsl_sky(dir, t) -> vec3` spliced into the raymarch's
+/// `sky_color`. Its uniforms ride the raymarch globals' `sky_uniforms` array.
+#[derive(Clone, Debug)]
+pub struct CompiledSky {
+    pub name: String,
+    pub uniforms: Vec<ir::Uniform>,
+    /// `fn flsl_sky(dir: vec3<f32>, t: f32) -> vec3<f32>` — the environment color.
+    pub sky_fn: String,
+}
+
+/// Transpile a checked Sky-stage shader.
+pub fn transpile_sky(ir: &ShaderIr, ck: &Checked) -> Result<CompiledSky, TranspileError> {
+    if ir.stage != Some(Stage::Sky) {
+        return Err(TranspileError::new("not a sky shader", Span::default()));
+    }
+    if !ir.textures.is_empty() {
+        return Err(TranspileError::new(
+            "sky shaders can't declare texture slots yet (procedural only)",
+            Span::default(),
+        ));
+    }
+    if ir.uniforms.len() > MAX_UNIFORMS {
+        return Err(TranspileError::new(
+            format!("a shader can expose at most {MAX_UNIFORMS} uniforms"),
+            Span::default(),
+        ));
+    }
+    let mut w = Writer::new(ir, ck, EmitCtx::Sky);
+    w.line("fn flsl_sky(dir: vec3<f32>, t: f32) -> vec3<f32> {".into(), None);
+    for (i, (name, root)) in ir.lets.iter().enumerate() {
+        let expr = w.emit(*root)?;
+        let ty = ck.ty(*root).wgsl();
+        w.line(format!("    let l{i}_{name}: {ty} = {expr};"), Some(ir.expr(*root).span));
+    }
+    let out = ir.outputs["color"];
+    let expr = w.emit(out)?;
+    let span = ir.expr(out).span;
+    match ck.ty(out) {
+        Ty::Vec4 => w.line(format!("    return ({expr}).rgb;"), Some(span)),
+        _ => w.line(format!("    return {expr};"), Some(span)),
+    }
+    w.line("}".into(), None);
+    Ok(CompiledSky { name: ir.name.clone(), uniforms: ir.uniforms.clone(), sky_fn: w.out })
+}
+
 /// A naga diagnostic mapped back toward the `.flsl` source.
 #[derive(Clone, Debug)]
 pub struct WgslDiag {
@@ -718,6 +786,7 @@ struct RasterGlobals {
     point_count: vec4<f32>,
     point_pos: array<vec4<f32>, 16>,
     point_color: array<vec4<f32>, 16>,
+    terrain_mask: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -740,6 +809,8 @@ struct VsOut {
     @location(8) tile: vec4<f32>,
     @location(9) lpos: vec3<f32>,
     @location(10) lnorm: vec3<f32>,
+    @location(11) vcolor: vec4<f32>,
+    @location(12) @interpolate(flat) tsplat: f32,
 };
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
@@ -747,5 +818,5 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
-fn facing_normal(n: vec3<f32>, view_pos: vec3<f32>) -> vec3<f32> { return select(-n, n, dot(n, -view_pos) >= 0.0); }
+fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 "#;

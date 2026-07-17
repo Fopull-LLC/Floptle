@@ -64,6 +64,10 @@ const fn opt(name: &'static str, ty: SigTy, default: f64) -> SigInput {
 
 const BOTH: &[Stage] = &[Stage::Fragment, Stage::Sdf];
 const FRAG: &[Stage] = &[Stage::Fragment];
+// Pure math/noise/color: valid in ANY stage, including a Sky shader.
+const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky];
+// Fragment + Sky (surface-or-sky color helpers; no field position needed).
+const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky];
 
 const F: SigTy = SigTy::Exact(Ty::Float);
 const V2: SigTy = SigTy::Exact(Ty::Vec2);
@@ -75,49 +79,49 @@ const GV: SigTy = SigTy::GenericVec;
 /// The registry. Order = palette/docs order within categories.
 pub static OPS: &[OpSpec] = &[
     // ---- math (WGSL builtins, generic) ------------------------------------
-    OpSpec { name: "abs", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("abs"), doc: "Absolute value.", category: "math" },
-    OpSpec { name: "sign", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("sign"), doc: "-1, 0 or 1 per component.", category: "math" },
-    OpSpec { name: "floor", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("floor"), doc: "Round down.", category: "math" },
-    OpSpec { name: "ceil", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("ceil"), doc: "Round up.", category: "math" },
-    OpSpec { name: "round", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("round"), doc: "Round to nearest.", category: "math" },
-    OpSpec { name: "fract", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("fract"), doc: "Fractional part (x - floor(x)).", category: "math" },
-    OpSpec { name: "sqrt", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("sqrt"), doc: "Square root.", category: "math" },
-    OpSpec { name: "sin", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("sin"), doc: "Sine (radians).", category: "math" },
-    OpSpec { name: "cos", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("cos"), doc: "Cosine (radians).", category: "math" },
-    OpSpec { name: "tan", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("tan"), doc: "Tangent (radians).", category: "math" },
-    OpSpec { name: "exp", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("exp"), doc: "e^x.", category: "math" },
-    OpSpec { name: "log", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("log"), doc: "Natural log.", category: "math" },
-    OpSpec { name: "pow", inputs: &[req("x", G), req("y", G)], output: G, stages: BOTH, emit: Emit::Fn("pow"), doc: "x^y.", category: "math" },
-    OpSpec { name: "min", inputs: &[req("a", G), req("b", G)], output: G, stages: BOTH, emit: Emit::Fn("min"), doc: "Per-component minimum.", category: "math" },
-    OpSpec { name: "max", inputs: &[req("a", G), req("b", G)], output: G, stages: BOTH, emit: Emit::Fn("max"), doc: "Per-component maximum.", category: "math" },
-    OpSpec { name: "clamp", inputs: &[req("x", G), req("lo", G), req("hi", G)], output: G, stages: BOTH, emit: Emit::Fn("clamp"), doc: "Constrain x to [lo, hi].", category: "math" },
-    OpSpec { name: "saturate", inputs: &[req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("saturate"), doc: "Clamp to [0, 1].", category: "math" },
-    OpSpec { name: "mix", inputs: &[req("a", G), req("b", G), req("t", G)], output: G, stages: BOTH, emit: Emit::Fn("mix"), doc: "Linear blend: a + (b-a)·t.", category: "math" },
-    OpSpec { name: "step", inputs: &[req("edge", G), req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("step"), doc: "0 below edge, 1 at/above.", category: "math" },
-    OpSpec { name: "smoothstep", inputs: &[req("lo", G), req("hi", G), req("x", G)], output: G, stages: BOTH, emit: Emit::Fn("smoothstep"), doc: "Smooth 0→1 ramp between lo and hi.", category: "math" },
-    OpSpec { name: "dot", inputs: &[req("a", G), req("b", G)], output: F, stages: BOTH, emit: Emit::Fn("dot"), doc: "Dot product.", category: "math" },
-    OpSpec { name: "cross", inputs: &[req("a", V3), req("b", V3)], output: V3, stages: BOTH, emit: Emit::Fn("cross"), doc: "Cross product.", category: "math" },
-    OpSpec { name: "normalize", inputs: &[req("v", G)], output: G, stages: BOTH, emit: Emit::Fn("normalize"), doc: "Unit-length vector.", category: "math" },
-    OpSpec { name: "length", inputs: &[req("v", G)], output: F, stages: BOTH, emit: Emit::Fn("length"), doc: "Vector length.", category: "math" },
-    OpSpec { name: "distance", inputs: &[req("a", G), req("b", G)], output: F, stages: BOTH, emit: Emit::Fn("distance"), doc: "Distance between points.", category: "math" },
-    OpSpec { name: "reflect", inputs: &[req("i", G), req("n", G)], output: G, stages: BOTH, emit: Emit::Fn("reflect"), doc: "Reflect i around normal n.", category: "math" },
+    OpSpec { name: "abs", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("abs"), doc: "Absolute value.", category: "math" },
+    OpSpec { name: "sign", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sign"), doc: "-1, 0 or 1 per component.", category: "math" },
+    OpSpec { name: "floor", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("floor"), doc: "Round down.", category: "math" },
+    OpSpec { name: "ceil", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("ceil"), doc: "Round up.", category: "math" },
+    OpSpec { name: "round", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("round"), doc: "Round to nearest.", category: "math" },
+    OpSpec { name: "fract", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("fract"), doc: "Fractional part (x - floor(x)).", category: "math" },
+    OpSpec { name: "sqrt", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sqrt"), doc: "Square root.", category: "math" },
+    OpSpec { name: "sin", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sin"), doc: "Sine (radians).", category: "math" },
+    OpSpec { name: "cos", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("cos"), doc: "Cosine (radians).", category: "math" },
+    OpSpec { name: "tan", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("tan"), doc: "Tangent (radians).", category: "math" },
+    OpSpec { name: "exp", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("exp"), doc: "e^x.", category: "math" },
+    OpSpec { name: "log", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("log"), doc: "Natural log.", category: "math" },
+    OpSpec { name: "pow", inputs: &[req("x", G), req("y", G)], output: G, stages: ANY, emit: Emit::Fn("pow"), doc: "x^y.", category: "math" },
+    OpSpec { name: "min", inputs: &[req("a", G), req("b", G)], output: G, stages: ANY, emit: Emit::Fn("min"), doc: "Per-component minimum.", category: "math" },
+    OpSpec { name: "max", inputs: &[req("a", G), req("b", G)], output: G, stages: ANY, emit: Emit::Fn("max"), doc: "Per-component maximum.", category: "math" },
+    OpSpec { name: "clamp", inputs: &[req("x", G), req("lo", G), req("hi", G)], output: G, stages: ANY, emit: Emit::Fn("clamp"), doc: "Constrain x to [lo, hi].", category: "math" },
+    OpSpec { name: "saturate", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("saturate"), doc: "Clamp to [0, 1].", category: "math" },
+    OpSpec { name: "mix", inputs: &[req("a", G), req("b", G), req("t", G)], output: G, stages: ANY, emit: Emit::Fn("mix"), doc: "Linear blend: a + (b-a)·t.", category: "math" },
+    OpSpec { name: "step", inputs: &[req("edge", G), req("x", G)], output: G, stages: ANY, emit: Emit::Fn("step"), doc: "0 below edge, 1 at/above.", category: "math" },
+    OpSpec { name: "smoothstep", inputs: &[req("lo", G), req("hi", G), req("x", G)], output: G, stages: ANY, emit: Emit::Fn("smoothstep"), doc: "Smooth 0→1 ramp between lo and hi.", category: "math" },
+    OpSpec { name: "dot", inputs: &[req("a", G), req("b", G)], output: F, stages: ANY, emit: Emit::Fn("dot"), doc: "Dot product.", category: "math" },
+    OpSpec { name: "cross", inputs: &[req("a", V3), req("b", V3)], output: V3, stages: ANY, emit: Emit::Fn("cross"), doc: "Cross product.", category: "math" },
+    OpSpec { name: "normalize", inputs: &[req("v", G)], output: G, stages: ANY, emit: Emit::Fn("normalize"), doc: "Unit-length vector.", category: "math" },
+    OpSpec { name: "length", inputs: &[req("v", G)], output: F, stages: ANY, emit: Emit::Fn("length"), doc: "Vector length.", category: "math" },
+    OpSpec { name: "distance", inputs: &[req("a", G), req("b", G)], output: F, stages: ANY, emit: Emit::Fn("distance"), doc: "Distance between points.", category: "math" },
+    OpSpec { name: "reflect", inputs: &[req("i", G), req("n", G)], output: G, stages: ANY, emit: Emit::Fn("reflect"), doc: "Reflect i around normal n.", category: "math" },
 
     // ---- noise -------------------------------------------------------------
-    OpSpec { name: "valueNoise", inputs: &[req("p", GV)], output: F, stages: BOTH, emit: Emit::FnByLanes("flsl_vnoise"), doc: "Smooth value noise in [0, 1].", category: "noise" },
-    OpSpec { name: "noise", inputs: &[req("p", GV)], output: F, stages: BOTH, emit: Emit::FnByLanes("flsl_gnoise"), doc: "Gradient noise in [-1, 1] (simplex-style look).", category: "noise" },
-    OpSpec { name: "worley", inputs: &[req("p", GV)], output: F, stages: BOTH, emit: Emit::FnByLanes("flsl_worley"), doc: "Cellular noise: distance to the nearest feature point.", category: "noise" },
-    OpSpec { name: "fbm", inputs: &[req("p", GV), opt("octaves", F, 4.0), opt("lacunarity", F, 2.0), opt("gain", F, 0.5)], output: F, stages: BOTH, emit: Emit::FnByLanes("flsl_fbm"), doc: "Fractal noise: layered octaves of gradient noise, in ≈[-1, 1].", category: "noise" },
-    OpSpec { name: "domainWarp", inputs: &[req("p", GV), opt("scale", F, 1.0), opt("time", F, 0.0), opt("strength", F, 1.0)], output: GV, stages: BOTH, emit: Emit::FnByLanes("flsl_warp"), doc: "Melt space: offset p by drifting noise (feed the result to other nodes).", category: "noise" },
+    OpSpec { name: "valueNoise", inputs: &[req("p", GV)], output: F, stages: ANY, emit: Emit::FnByLanes("flsl_vnoise"), doc: "Smooth value noise in [0, 1].", category: "noise" },
+    OpSpec { name: "noise", inputs: &[req("p", GV)], output: F, stages: ANY, emit: Emit::FnByLanes("flsl_gnoise"), doc: "Gradient noise in [-1, 1] (simplex-style look).", category: "noise" },
+    OpSpec { name: "worley", inputs: &[req("p", GV)], output: F, stages: ANY, emit: Emit::FnByLanes("flsl_worley"), doc: "Cellular noise: distance to the nearest feature point.", category: "noise" },
+    OpSpec { name: "fbm", inputs: &[req("p", GV), opt("octaves", F, 4.0), opt("lacunarity", F, 2.0), opt("gain", F, 0.5)], output: F, stages: ANY, emit: Emit::FnByLanes("flsl_fbm"), doc: "Fractal noise: layered octaves of gradient noise, in ≈[-1, 1].", category: "noise" },
+    OpSpec { name: "domainWarp", inputs: &[req("p", GV), opt("scale", F, 1.0), opt("time", F, 0.0), opt("strength", F, 1.0)], output: GV, stages: ANY, emit: Emit::FnByLanes("flsl_warp"), doc: "Melt space: offset p by drifting noise (feed the result to other nodes).", category: "noise" },
 
     // ---- color -------------------------------------------------------------
-    OpSpec { name: "luminance", inputs: &[req("c", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_luma"), doc: "Perceptual brightness of a color.", category: "color" },
-    OpSpec { name: "toHsv", inputs: &[req("c", V3)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_to_hsv"), doc: "RGB → hue/saturation/value.", category: "color" },
-    OpSpec { name: "fromHsv", inputs: &[req("c", V3)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_from_hsv"), doc: "Hue/saturation/value → RGB.", category: "color" },
-    OpSpec { name: "hueShift", inputs: &[req("c", V3), req("shift", F)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_hue_shift"), doc: "Rotate a color's hue (1.0 = a full cycle).", category: "color" },
-    OpSpec { name: "posterize", inputs: &[req("c", V3), opt("steps", F, 6.0)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_posterize"), doc: "Quantize to N bands — the retro look.", category: "color" },
-    OpSpec { name: "gamma", inputs: &[req("c", V3), req("g", F)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_gamma"), doc: "Gamma curve (g > 1 darkens mids).", category: "color" },
-    OpSpec { name: "contrast", inputs: &[req("c", V3), req("amount", F)], output: V3, stages: FRAG, emit: Emit::Fn("flsl_contrast"), doc: "Push colors away from mid grey (1 = unchanged).", category: "color" },
-    OpSpec { name: "palette", inputs: &[req("t", F), req("name", SigTy::Str)], output: V3, stages: FRAG, emit: Emit::Special, doc: "A looping color ramp: \"sunset\", \"bruise\", \"neon\", \"ocean\", \"ember\", \"mono\".", category: "color" },
+    OpSpec { name: "luminance", inputs: &[req("c", V3)], output: F, stages: FSKY, emit: Emit::Fn("flsl_luma"), doc: "Perceptual brightness of a color.", category: "color" },
+    OpSpec { name: "toHsv", inputs: &[req("c", V3)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_to_hsv"), doc: "RGB → hue/saturation/value.", category: "color" },
+    OpSpec { name: "fromHsv", inputs: &[req("c", V3)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_from_hsv"), doc: "Hue/saturation/value → RGB.", category: "color" },
+    OpSpec { name: "hueShift", inputs: &[req("c", V3), req("shift", F)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_hue_shift"), doc: "Rotate a color's hue (1.0 = a full cycle).", category: "color" },
+    OpSpec { name: "posterize", inputs: &[req("c", V3), opt("steps", F, 6.0)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_posterize"), doc: "Quantize to N bands — the retro look.", category: "color" },
+    OpSpec { name: "gamma", inputs: &[req("c", V3), req("g", F)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_gamma"), doc: "Gamma curve (g > 1 darkens mids).", category: "color" },
+    OpSpec { name: "contrast", inputs: &[req("c", V3), req("amount", F)], output: V3, stages: FSKY, emit: Emit::Fn("flsl_contrast"), doc: "Push colors away from mid grey (1 = unchanged).", category: "color" },
+    OpSpec { name: "palette", inputs: &[req("t", F), req("name", SigTy::Str)], output: V3, stages: FSKY, emit: Emit::Special, doc: "A looping color ramp: \"sunset\", \"bruise\", \"neon\", \"ocean\", \"ember\", \"mono\".", category: "color" },
 
     // ---- texture -----------------------------------------------------------
     OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Sample a declared texture slot (honors the slot's tiling block from the material).", category: "texture" },
@@ -152,9 +156,9 @@ pub fn op(name: &str) -> Option<&'static OpSpec> {
 /// The pseudo-specs behind `vec2/3/4(…)` constructors (shape-checked
 /// structurally in ir.rs; these exist so `ResolvedCall.op` is uniform).
 pub fn constructor_spec(name: &str) -> &'static OpSpec {
-    static V2C: OpSpec = OpSpec { name: "vec2", inputs: &[], output: V2, stages: BOTH, emit: Emit::Special, doc: "Build a vec2 from components.", category: "math" };
-    static V3C: OpSpec = OpSpec { name: "vec3", inputs: &[], output: V3, stages: BOTH, emit: Emit::Special, doc: "Build a vec3 from components.", category: "math" };
-    static V4C: OpSpec = OpSpec { name: "vec4", inputs: &[], output: V4, stages: BOTH, emit: Emit::Special, doc: "Build a vec4 from components.", category: "math" };
+    static V2C: OpSpec = OpSpec { name: "vec2", inputs: &[], output: V2, stages: ANY, emit: Emit::Special, doc: "Build a vec2 from components.", category: "math" };
+    static V3C: OpSpec = OpSpec { name: "vec3", inputs: &[], output: V3, stages: ANY, emit: Emit::Special, doc: "Build a vec3 from components.", category: "math" };
+    static V4C: OpSpec = OpSpec { name: "vec4", inputs: &[], output: V4, stages: ANY, emit: Emit::Special, doc: "Build a vec4 from components.", category: "math" };
     match name {
         "vec2" => &V2C,
         "vec3" => &V3C,
@@ -185,16 +189,30 @@ pub const PALETTE_NAMES: &[&str] = &["sunset", "bruise", "neon", "ocean", "ember
 pub const SUPPORT_WGSL: &str = r#"
 // ---- floptle-shader stdlib support (generated modules only) ----------------
 
+// Integer-lattice hashes (PCG-style bit mixing). The old float hashes
+// (`fract(p * 456.21)`…) silently quantized once the product outgrew f32
+// fract precision — beyond ~50 lattice cells the noise degraded into
+// straight-edged constant sheets (sky shaders hit this instantly: a cloud
+// plane projected toward the horizon runs through hundreds of cells). The
+// lattice ids these receive are integers (± constant offsets), so hashing
+// their BITS is exact at any distance from the origin.
 fn flsl_hash2(p: vec2<f32>) -> f32 {
-    var q = fract(p * vec2<f32>(123.34, 456.21));
-    q += dot(q, q + 45.32);
-    return fract(q.x * q.y);
+    let xi = bitcast<u32>(i32(round(p.x * 8.0)));
+    let yi = bitcast<u32>(i32(round(p.y * 8.0)));
+    var h = xi * 0x85EBCA6Bu ^ yi * 0xC2B2AE35u;
+    h = (h ^ (h >> 16u)) * 0x045D9F3Bu;
+    h = h ^ (h >> 16u);
+    return f32(h >> 8u) * (1.0 / 16777216.0);
 }
 
 fn flsl_hash3(p: vec3<f32>) -> f32 {
-    var q = fract(p * vec3<f32>(123.34, 456.21, 789.92));
-    q += dot(q, q.yzx + 33.33);
-    return fract((q.x + q.y) * q.z);
+    let xi = bitcast<u32>(i32(round(p.x * 8.0)));
+    let yi = bitcast<u32>(i32(round(p.y * 8.0)));
+    let zi = bitcast<u32>(i32(round(p.z * 8.0)));
+    var h = xi * 0x85EBCA6Bu ^ yi * 0xC2B2AE35u ^ zi * 0x27D4EB2Fu;
+    h = (h ^ (h >> 16u)) * 0x045D9F3Bu;
+    h = h ^ (h >> 16u);
+    return f32(h >> 8u) * (1.0 / 16777216.0);
 }
 
 fn flsl_hash22(p: vec2<f32>) -> vec2<f32> {

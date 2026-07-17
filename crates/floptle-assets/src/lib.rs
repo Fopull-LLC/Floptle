@@ -18,4 +18,7 @@ pub mod texture;
 
 pub use gltf_import::{import, ImportError, ImportedModel};
 pub use gltf_rig::{import_rigged, probe_animations, RiggedModel, RiggedPart};
-pub use texture::{load_texture, load_texture_sized, save_texture_png};
+pub use texture::{
+    decode_png, encode_png, load_texture, load_texture_sized, load_texture_sized_filtered,
+    save_texture_png,
+};

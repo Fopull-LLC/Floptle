@@ -47,6 +47,81 @@ pub enum Brush {
     Paint,
 }
 
+/// The SHAPE of a brush's weight from its center to its rim — the thing that decides
+/// whether a stroke reads as a soft airbrush or a hard stamp.
+///
+/// Every brush in the editor (terrain sculpt/paint AND vertex paint) runs through this,
+/// because both used to hardcode `w = strength * (1 - d/radius)` — a fixed linear ramp.
+/// That is *why* everything looked blurry: there was no profile to configure, only one
+/// soft gradient. Two knobs, deliberately, in the shape artists already know:
+///
+/// * `hardness` — the fraction of the radius that gets FULL weight before any falloff
+///   starts. `1.0` = a hard-edged stamp with no gradient at all (the N64/PS1 look);
+///   `0.0` = falloff across the entire radius (an airbrush).
+/// * `falloff` — the shape of the ramp over the remaining rim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrushProfile {
+    pub hardness: f32,
+    pub falloff: Falloff,
+}
+
+/// The ramp shape from the hard core out to the rim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Falloff {
+    /// Smoothstep — the soft, blendy default.
+    Smooth,
+    /// Straight line. Predictable; what the old hardcoded brushes always did.
+    Linear,
+    /// Squared — clings to full strength then drops away late. Good for crisp-ish
+    /// edges that still feather slightly.
+    Sharp,
+    /// Inverse of Sharp — drops immediately, trails off. A wide, faint halo.
+    Soft,
+}
+
+impl Default for BrushProfile {
+    fn default() -> Self {
+        // Slightly hard by default: the old fully-linear ramp is what read as "blurry".
+        Self { hardness: 0.35, falloff: Falloff::Smooth }
+    }
+}
+
+impl BrushProfile {
+    /// A hard-edged stamp — no gradient anywhere inside the radius.
+    pub fn hard() -> Self {
+        Self { hardness: 1.0, falloff: Falloff::Linear }
+    }
+
+    /// Weight at distance `d` from the brush center, for a brush of `radius`.
+    /// Returns 0 outside the radius, 1 inside the hard core.
+    pub fn weight(&self, d: f32, radius: f32) -> f32 {
+        if radius <= 0.0 {
+            return 0.0;
+        }
+        let t = d / radius;
+        // Outside the radius FIRST. Clamping t to 1 before this test made `t <= hardness`
+        // true at ANY distance when hardness == 1 — i.e. a hard brush painted the whole
+        // mesh, ignoring its radius entirely. (Caught by
+        // `every_profile_is_bounded_and_dies_at_the_rim`; keep that test.)
+        if t >= 1.0 {
+            return 0.0;
+        }
+        let h = self.hardness.clamp(0.0, 1.0);
+        if t <= h {
+            return 1.0; // inside the hard core (hardness 1 ⇒ the whole disc)
+        }
+        // u: 0 at the core edge → 1 at the rim. s: the remaining strength.
+        let u = ((t - h) / (1.0 - h)).clamp(0.0, 1.0);
+        let s = 1.0 - u;
+        match self.falloff {
+            Falloff::Linear => s,
+            Falloff::Smooth => s * s * (3.0 - 2.0 * s),
+            Falloff::Sharp => 1.0 - u * u,
+            Falloff::Soft => s * s,
+        }
+    }
+}
+
 impl Terrain {
     /// A flat ground at world height `ground_y`, filling a box of `dims` voxels
     /// centered at `center` with `half_extent`, tinted `color` (sRGB 0..1).
@@ -171,32 +246,81 @@ impl Terrain {
                     // Color always edge-clamps so cliff faces keep the terrain's tint.
                     let oi = ((clamp(iz, od) * oh + clamp(iy, oh)) * ow + clamp(ix, ow)) as usize;
                     color[ni] = old.color[oi];
-                    let in_old = ix >= 0
-                        && ix < ow as i64
-                        && iy >= 0
-                        && iy < oh as i64
-                        && iz >= 0
-                        && iz < od as i64;
-                    distance[ni] = if in_old {
-                        old.distance[oi]
-                    } else {
-                        // Continue the field outward so the terrain ends cleanly. The
-                        // box distance gives a vertical cliff where the old edge was
-                        // SOLID; adding the old edge's air gap (`.max(0.0)`) keeps AIR
-                        // as air — without it, the field dips to ~0 at the old boundary
-                        // even up in the sky, and that thin near-zero "shell" is what
-                        // the raymarch speckled and the sculpt brush kept colliding with.
-                        let wp = [
-                            new_lo[0] + (nx as f32 + 0.5) * vs[0],
-                            new_lo[1] + (ny as f32 + 0.5) * vs[1],
-                            new_lo[2] + (nz as f32 + 0.5) * vs[2],
-                        ];
-                        box_distance(wp, old.center, old.half_extent) + old.distance[oi].max(0.0)
-                    };
+                    // Continue the field outward so the terrain ends cleanly, using
+                    // ONE expression for old and new cells alike. Two bugs lived here:
+                    //
+                    // 1. It was `box_distance(..) + edge_air`. Summing two
+                    //    distance-like terms sums their GRADIENTS, and sphere tracing
+                    //    (plus every march built on it — shading normals, SDF AO, sun
+                    //    shadows) needs |∇d| ≤ 1. Two aligned unit gradients give 2.0,
+                    //    so the field climbed twice as fast as distance can and the
+                    //    march stepped straight past the surface: blotchy AO, speckle.
+                    //    Measured on a real grown field: 14.4% of near-surface voxels
+                    //    violated the bound, p95 |∇d| = 2.25 — that ~2.0 IS the sum.
+                    //
+                    // 2. New cells were filled from a formula that DISAGREED with the
+                    //    old field at the boundary: an old edge cell holding d = -5 sat
+                    //    beside a new cell holding ~0 — a 5-unit jump across one voxel
+                    //    (|∇d| ≈ 12). A cliff in the GEOMETRY is fine and wanted; a
+                    //    cliff in the FIELD is not, because the field must stay
+                    //    continuous for anything to march it.
+                    //
+                    // Both go away by clamping BOTH sides against the same SIGNED box
+                    // SDF (`box_distance` is negative inside, positive outside):
+                    //   deep inside      → box_d very negative → the old value survives
+                    //   inside at a face, SOLID → box_d ≈ 0⁻ → lifted: the face IS now
+                    //                            the surface, which is the wanted cliff
+                    //   inside at a face, AIR   → old air is larger → stays air (no
+                    //                            near-zero "shell" for the march to
+                    //                            speckle on, which is what the old `+`
+                    //                            was reaching for)
+                    //   outside          → box_d > 0 → grows outward at unit rate
+                    // `max` of two 1-Lipschitz fields is 1-Lipschitz, and both sides
+                    // agree at the face, so the seam is continuous.
+                    // See `grow_keeps_the_field_1_lipschitz`.
+                    let wp = [
+                        new_lo[0] + (nx as f32 + 0.5) * vs[0],
+                        new_lo[1] + (ny as f32 + 0.5) * vs[1],
+                        new_lo[2] + (nz as f32 + 0.5) * vs[2],
+                    ];
+                    distance[ni] = old.distance[oi].max(box_distance(wp, old.center, old.half_extent));
                 }
             }
         }
         self.baked = BakedSdf { dims: new_dims, center: new_center, half_extent: new_half, distance, color };
+    }
+
+    /// Trilinearly-sampled distance at a world point — the dense counterpart of
+    /// `ChunkField::d`. Used to check that a migrated field still describes the same
+    /// surface as the `.tfield` it came from.
+    pub fn baked_distance_at(&self, p: [f32; 3]) -> f32 {
+        let b = &self.baked;
+        let [w, h, d] = b.dims;
+        let vs = [
+            2.0 * b.half_extent[0] / (w.max(2) - 1) as f32,
+            2.0 * b.half_extent[1] / (h.max(2) - 1) as f32,
+            2.0 * b.half_extent[2] / (d.max(2) - 1) as f32,
+        ];
+        let lo = [
+            b.center[0] - b.half_extent[0],
+            b.center[1] - b.half_extent[1],
+            b.center[2] - b.half_extent[2],
+        ];
+        let g = [(p[0] - lo[0]) / vs[0], (p[1] - lo[1]) / vs[1], (p[2] - lo[2]) / vs[2]];
+        let i = [g[0].floor() as i32, g[1].floor() as i32, g[2].floor() as i32];
+        let f = [g[0] - i[0] as f32, g[1] - i[1] as f32, g[2] - i[2] as f32];
+        let at = |dx: i32, dy: i32, dz: i32| {
+            let x = (i[0] + dx).clamp(0, w as i32 - 1) as u32;
+            let y = (i[1] + dy).clamp(0, h as i32 - 1) as u32;
+            let z = (i[2] + dz).clamp(0, d as i32 - 1) as u32;
+            b.distance[((z * h + y) * w + x) as usize]
+        };
+        let l = |a: f32, bb: f32, t: f32| a + (bb - a) * t;
+        let x00 = l(at(0, 0, 0), at(1, 0, 0), f[0]);
+        let x10 = l(at(0, 1, 0), at(1, 1, 0), f[0]);
+        let x01 = l(at(0, 0, 1), at(1, 0, 1), f[0]);
+        let x11 = l(at(0, 1, 1), at(1, 1, 1), f[0]);
+        l(l(x00, x10, f[1]), l(x01, x11, f[1]), f[2])
     }
 
     /// Lay a flat slab of solid ground across the bounds, unioned with what's already
@@ -555,10 +679,11 @@ impl Terrain {
         center: [f32; 3],
         radius: f32,
         strength: f32,
+        profile: BrushProfile,
     ) -> Option<[[u32; 3]; 2]> {
         match brush {
             Brush::Smooth => return self.smooth(center, radius, strength),
-            Brush::Flatten => return self.flatten(center, radius, strength),
+            Brush::Flatten => return self.flatten(center, radius, strength, profile),
             Brush::Paint => return None,
             _ => {}
         }
@@ -594,7 +719,13 @@ impl Terrain {
     }
 
     /// Level the brushed region toward the height the stroke landed on (`center.y`).
-    fn flatten(&mut self, center: [f32; 3], radius: f32, strength: f32) -> Option<[[u32; 3]; 2]> {
+    fn flatten(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        strength: f32,
+        profile: BrushProfile,
+    ) -> Option<[[u32; 3]; 2]> {
         let [lo, hi] = self.brush_range(center, radius);
         let s = strength.clamp(0.02, 1.0);
         for iz in lo[2]..=hi[2] {
@@ -608,7 +739,7 @@ impl Terrain {
                     let i = self.idx(ix, iy, iz);
                     let cur = self.baked.distance[i];
                     let target = p[1] - center[1]; // plane SDF at the hit height
-                    let wgt = s * (1.0 - dxz / radius).clamp(0.0, 1.0);
+                    let wgt = s * profile.weight(dxz, radius);
                     self.baked.distance[i] = cur + (target - cur) * wgt;
                 }
             }
@@ -672,7 +803,14 @@ impl Terrain {
 
     /// Paint the surface color within a spherical brush (only near the surface, so
     /// you tint what you'd actually see).
-    pub fn paint(&mut self, center: [f32; 3], radius: f32, strength: f32, color: [f32; 3]) {
+    pub fn paint(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        strength: f32,
+        color: [f32; 3],
+        profile: BrushProfile,
+    ) {
         let [lo, hi] = self.brush_range(center, radius);
         let rgb = [color[0] * 255.0, color[1] * 255.0, color[2] * 255.0];
         let strength = strength.clamp(0.0, 1.0);
@@ -692,7 +830,7 @@ impl Terrain {
                     if self.baked.distance[i].abs() > radius {
                         continue;
                     }
-                    let w = strength * (1.0 - dc / radius).clamp(0.0, 1.0);
+                    let w = strength * profile.weight(dc, radius);
                     let c = &mut self.baked.color[i];
                     for k in 0..3 {
                         c[k] = (c[k] as f32 + (rgb[k] - c[k] as f32) * w) as u8;
@@ -734,6 +872,117 @@ impl Terrain {
 mod tests {
     use super::*;
 
+    /// Sphere tracing (and everything that marches the field — shading normals, SDF
+    /// AO, sun shadows) assumes the field is 1-Lipschitz: |∇d| ≤ 1, i.e. `d` never
+    /// grows faster than distance itself can. Break that and the march STEPS PAST the
+    /// surface; the symptom is blotchy AO and speckle, not an obvious crash.
+    ///
+    /// `grow` used to fill new cells with `box_distance(..) + edge_air`. Summing two
+    /// distance-like terms sums their gradients — two aligned unit gradients give 2.0.
+    /// Measured on Ty's real 289×271×307 field: 14.4% of near-surface voxels violated
+    /// the bound, p95 |∇d| = 2.25. That ~2.0 IS the sum. `max` unions the same two
+    /// bounds while staying 1-Lipschitz.
+    #[test]
+    fn grow_keeps_the_field_1_lipschitz() {
+        let mut t = Terrain::flat([48, 48, 48], [0.0; 3], [12.0, 12.0, 12.0], 0.0, [0.4, 0.6, 0.3]);
+        // Sculpt something with real relief, then force several growths outward — the
+        // repeated extrapolation is what compounds in a long authoring session.
+        for i in 0..6 {
+            let a = i as f32 * 1.7;
+            t.sculpt(
+                Brush::Raise,
+                [a.cos() * 6.0, 1.0, a.sin() * 6.0],
+                3.5,
+                0.8,
+                BrushProfile::default(),
+            );
+        }
+        for i in 0..4 {
+            let s = 13.0 + i as f32 * 6.0;
+            t.ensure_contains([s, 2.0, s], 2.0);
+            t.ensure_contains([-s, -2.0, -s], 2.0);
+        }
+        assert!(t.baked.dims[0] > 48, "the field must actually have grown");
+
+        let b = &t.baked;
+        let [w, h, d] = b.dims;
+        let vs = 2.0 * b.half_extent[0] / w as f32;
+        let at = |x: u32, y: u32, z: u32| b.distance[((z * h + y) * w + x) as usize];
+
+        let (mut checked, mut bad, mut worst) = (0u32, 0u32, 0.0f32);
+        for z in 1..d - 1 {
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    // Only the near-surface band matters: that's what gets marched.
+                    if at(x, y, z).abs() > 3.0 {
+                        continue;
+                    }
+                    let gx = (at(x + 1, y, z) - at(x - 1, y, z)) / (2.0 * vs);
+                    let gy = (at(x, y + 1, z) - at(x, y - 1, z)) / (2.0 * vs);
+                    let gz = (at(x, y, z + 1) - at(x, y, z - 1)) / (2.0 * vs);
+                    let g = (gx * gx + gy * gy + gz * gz).sqrt();
+                    checked += 1;
+                    worst = worst.max(g);
+                    // 1.35 leaves room for central differences across curvature; the
+                    // `+` bug produced 2.0-2.5, nowhere near this.
+                    if g > 1.35 {
+                        bad += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 500, "not enough near-surface voxels sampled ({checked})");
+        let pct = 100.0 * bad as f32 / checked as f32;
+        assert!(
+            pct < 1.0 && worst < 1.35,
+            "{pct:.1}% of {checked} near-surface voxels have |∇d| > 1.35 (worst {worst:.2}) — \
+             the field is no longer a distance field, so every march overshoots. \
+             For reference the shipped `+` fill measured 11.1% / worst 12.00."
+        );
+    }
+
+    #[test]
+    fn a_hard_brush_has_no_gradient_and_a_soft_one_is_all_gradient() {
+        let hard = BrushProfile::hard();
+        // Full weight everywhere inside the radius — this is the flat, stamped retro
+        // edge that the old hardcoded linear ramp made impossible.
+        for d in [0.0, 0.5, 0.9, 0.999] {
+            assert_eq!(hard.weight(d, 1.0), 1.0, "hard brush must be flat at d={d}");
+        }
+        assert_eq!(hard.weight(1.0, 1.0), 0.0, "…and stop dead at the rim");
+
+        let soft = BrushProfile { hardness: 0.0, falloff: Falloff::Smooth };
+        assert_eq!(soft.weight(0.0, 1.0), 1.0);
+        assert!(soft.weight(0.5, 1.0) < 0.9, "a soft brush must actually fall off");
+        assert_eq!(soft.weight(1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn hardness_sets_the_size_of_the_full_strength_core() {
+        let p = BrushProfile { hardness: 0.5, falloff: Falloff::Linear };
+        assert_eq!(p.weight(0.0, 1.0), 1.0);
+        assert_eq!(p.weight(0.5, 1.0), 1.0, "the core edge is still full strength");
+        // Half way across the remaining rim → half weight (linear).
+        assert!((p.weight(0.75, 1.0) - 0.5).abs() < 1e-5, "got {}", p.weight(0.75, 1.0));
+        assert_eq!(p.weight(1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn every_profile_is_bounded_and_dies_at_the_rim() {
+        for falloff in [Falloff::Smooth, Falloff::Linear, Falloff::Sharp, Falloff::Soft] {
+            for h in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let p = BrushProfile { hardness: h, falloff };
+                for i in 0..=20 {
+                    let w = p.weight(i as f32 / 20.0, 1.0);
+                    assert!((0.0..=1.0).contains(&w), "{falloff:?}/{h}: weight {w} out of range");
+                }
+                assert_eq!(p.weight(1.5, 1.0), 0.0, "{falloff:?}/{h}: outside the radius must be 0");
+            }
+        }
+        // A degenerate radius must not divide by zero.
+        assert_eq!(BrushProfile::default().weight(1.0, 0.0), 0.0);
+    }
+
     #[test]
     fn flat_ground_surface_at_zero() {
         let t = Terrain::flat([32, 24, 32], [0.0, 0.0, 0.0], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
@@ -748,7 +997,7 @@ mod tests {
     #[test]
     fn bytes_round_trip() {
         let mut t = Terrain::flat([20, 16, 20], [1.0, 0.0, -2.0], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
-        t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 2.0, 1.0);
+        t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 2.0, 1.0, BrushProfile::default());
         t.paint_texture([0.0, 0.5, 0.0], 2.0, 2);
         let bytes = t.to_bytes();
         let back = Terrain::from_bytes(&bytes).expect("parses");
@@ -790,7 +1039,7 @@ mod tests {
     fn sculpt_returns_changed_aabb() {
         let mut t = Terrain::flat([32, 24, 32], [0.0; 3], [16.0, 6.0, 16.0], 0.0, [0.4, 0.7, 0.3]);
         // Raise a bump at the center — the returned box must cover the brush center voxel.
-        let bb = t.sculpt(Brush::Raise, [0.0, 0.0, 0.0], 3.0, 1.0).expect("raise changed cells");
+        let bb = t.sculpt(Brush::Raise, [0.0, 0.0, 0.0], 3.0, 1.0, BrushProfile::default()).expect("raise changed cells");
         let [lo, hi] = bb;
         for a in 0..3 {
             assert!(lo[a] <= hi[a], "axis {a}: lo {} hi {}", lo[a], hi[a]);
@@ -802,7 +1051,7 @@ mod tests {
             assert!(lo[a] <= mid[a] && mid[a] <= hi[a], "center axis {a} outside box");
         }
         // Painting reports no geometry change (returns None from sculpt's Paint arm).
-        assert!(t.sculpt(Brush::Paint, [0.0; 3], 3.0, 1.0).is_none());
+        assert!(t.sculpt(Brush::Paint, [0.0; 3], 3.0, 1.0, BrushProfile::default()).is_none());
     }
 
     #[test]
@@ -883,7 +1132,7 @@ mod tests {
         let mut t = Terrain::flat([48, 32, 48], [0.0, 0.0, 0.0], [8.0, 6.0, 8.0], 0.0, [0.4, 0.7, 0.3]);
         // Repeatedly raise at the origin -> the surface should rise above 0.
         for _ in 0..40 {
-            t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 2.0, 1.0);
+            t.sculpt(Brush::Raise, [0.0, 0.5, 0.0], 2.0, 1.0, BrushProfile::default());
         }
         let hit = t.raycast([0.0, 5.0, 0.0], [0.0, -1.0, 0.0]).expect("hits raised ground");
         assert!(hit[1] > 0.3, "expected a bump, hit y={}", hit[1]);

@@ -25,11 +25,15 @@
 //!   density `ρ(p)`, gravity potential `Φ(p)`, acceleration `g(p)`
 //!   (ADR-0014).
 
+pub mod chunks;
 pub mod mesh2sdf;
+pub mod mesher;
 pub mod terrain;
 
 pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
-pub use terrain::{Brush, Terrain};
+pub use chunks::{ChunkField, BAND_VOXELS, CHUNK};
+pub use mesher::{mesh_chunk, mesh_field, ChunkMesh};
+pub use terrain::{Brush, BrushProfile, Falloff, Terrain};
 
 /// Polynomial smooth-minimum: blends two distances over radius `k` (k→0 = hard
 /// union). The core "geometry blends together cleanly" operator.

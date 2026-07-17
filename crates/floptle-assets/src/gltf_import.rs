@@ -151,6 +151,9 @@ fn add_primitives(m: &gltf::Mesh, world: Mat4, buffers: &[gltf::buffer::Data], p
             None => compute_normals(&positions, &indices),
         };
         let uvs: Option<Vec<[f32; 2]>> = reader.read_tex_coords(0).map(|tc| tc.into_f32().collect());
+        // COLOR_0 — vertex paint authored in Blender. glTF allows RGB or RGBA, u8/u16/f32;
+        // `into_rgba_u8` normalizes all six spellings to the RGBA8 the `vpaint` store wants.
+        let colors: Option<Vec<[u8; 4]>> = reader.read_colors(0).map(|c| c.into_rgba_u8().collect());
 
         let part_idx = parts.part_for(&prim.material());
         let part = &mut parts.list[part_idx];
@@ -163,6 +166,24 @@ fn add_primitives(m: &gltf::Mesh, world: Mat4, buffers: &[gltf::buffer::Data], p
         }
         for idx in indices {
             part.mesh.indices.push(base + idx);
+        }
+
+        // Parts accumulate MANY primitives, and COLOR_0 is per-primitive — so a part can
+        // mix painted and unpainted prims. The colors stream must stay exactly parallel to
+        // `vertices` (the renderer drops a mismatched one), so back-fill earlier unpainted
+        // prims with white and pad this one if it came up short. White is the identity for
+        // the albedo multiply, so back-filled vertices render exactly as before.
+        const WHITE: [u8; 4] = [255; 4];
+        if colors.is_some() || part.mesh.colors.is_some() {
+            let c = part.mesh.colors.get_or_insert_with(Vec::new);
+            c.resize(base as usize, WHITE);
+            match &colors {
+                Some(src) => {
+                    c.extend(src.iter().take(positions.len()).copied());
+                    c.resize(base as usize + positions.len(), WHITE);
+                }
+                None => c.resize(base as usize + positions.len(), WHITE),
+            }
         }
     }
 }

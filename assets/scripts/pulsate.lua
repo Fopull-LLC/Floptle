@@ -3,7 +3,7 @@
 -- `time` is seconds since play started. `node.scale` sets a uniform scale (there
 -- are also node.scale_x / scale_y / scale_z for per-axis control).
 
-defaults = { amplitude = 0.3, speed = 2.0, base = 1.0 }
+defaults = { amplitude = 0.3, speed = 2.0, base = 1.0, ref = noderef() }
 
 function update(node, dt)
   local f = params.base * (1.0 + params.amplitude * math.sin(params.speed * time))

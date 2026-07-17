@@ -23,6 +23,8 @@ pub(crate) enum EditorTab {
     Mixer,
     /// The shader node-graph canvas (a `.flsl`'s box-and-wire view).
     ShaderGraph,
+    /// The vertex-paint brush settings (color, radius, strength, falloff, channels).
+    Paint,
 }
 
 impl EditorTab {
@@ -41,6 +43,7 @@ impl EditorTab {
             EditorTab::Particles => "✨ Particles",
             EditorTab::Mixer => "🎧 Mixer",
             EditorTab::ShaderGraph => "◈ Shaders",
+            EditorTab::Paint => "🖌 Paint",
         }
     }
 }
@@ -77,9 +80,12 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
         DockState::new(vec![EditorTab::Scene, EditorTab::Game, EditorTab::Scripting, EditorTab::ShaderGraph]);
     let surface = dock.main_surface_mut();
     let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
-    // Inspector + Terrain tabs share the right dock (Inspector shown first).
-    let [central, _] =
-        surface.split_right(central, 0.78, vec![EditorTab::Inspector, EditorTab::Terrain]);
+    // Inspector + Terrain + Paint tabs share the right dock (Inspector shown first).
+    let [central, _] = surface.split_right(
+        central,
+        0.78,
+        vec![EditorTab::Inspector, EditorTab::Terrain, EditorTab::Paint],
+    );
     // Console + the animation tabs sit beside Assets in the bottom dock.
     let [_, _] = surface.split_below(
         central,
@@ -121,6 +127,16 @@ pub(crate) fn focus_terrain_tab(dock: &mut egui_dock::DockState<EditorTab>) {
         let _ = dock.set_active_tab(path);
     } else {
         dock.push_to_focused_leaf(EditorTab::Terrain);
+    }
+}
+
+/// Focus the Paint dock tab — re-adding it if the user closed it. Used when the
+/// Paint tool is selected, so the brush settings are never a tab-hunt away.
+pub(crate) fn focus_paint_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Paint) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Paint);
     }
 }
 

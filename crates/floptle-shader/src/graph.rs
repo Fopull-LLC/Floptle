@@ -314,7 +314,7 @@ pub fn build_view_padded(
     // The sink first (so it exists even with no outputs wired).
     let stage = ir.stage.unwrap_or(Stage::Fragment);
     let out_names: &[OutName] = match stage {
-        Stage::Fragment => &[OutName::Color],
+        Stage::Fragment | Stage::Sky => &[OutName::Color],
         Stage::Sdf => &[OutName::Sdf, OutName::Color],
     };
     let mut sink_ports = Vec::new();
@@ -1500,6 +1500,7 @@ fn spatial_default(ir: &mut ShaderIr, stage: Stage) -> ExprId {
     match stage {
         Stage::Fragment => push(ir, ExprKind::Input(Input::Uv)),
         Stage::Sdf => push(ir, ExprKind::Input(Input::WorldPos)),
+        Stage::Sky => push(ir, ExprKind::Input(Input::SkyDir)),
     }
 }
 

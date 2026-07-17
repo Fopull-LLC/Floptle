@@ -23,6 +23,12 @@
 @group(0) @binding(5) var terrain_samp: sampler;
 // The equirectangular skybox texture (sampled for background pixels, reusing the
 // REPEAT terrain sampler so it wraps seamlessly).
+// The SAME terrain palette, sampled nearest. A texture_2d_array has one sampler for
+// all 16 slots, so per-texture filtering can't come from the sampler alone — both are
+// bound and `triplanar` picks per slot from the mask in G.terrain_tint.w. Without this
+// every terrain texture was hardcoded Linear (blurry) while the identical image on a
+// mesh honoured its Pixelated setting.
+@group(0) @binding(8) var terrain_samp_nearest: sampler;
 @group(0) @binding(6) var sky_tex: texture_2d<f32>;
 // The opaque-mesh depth prepass (screen-sized when primed, a 1×1 "off" fallback
 // otherwise): caps the march per pixel so rays stop at the nearest mesh instead
@@ -33,7 +39,19 @@ const PI: f32 = 3.14159265359;
 
 // The environment color along world ray direction `dir`: a flat color, or the equirect
 // sky texture (rotated by the skybox node so a script can spin it) times its tint.
+//[flsl-sky-custom-begin] — the renderer splices a generated Sky shader over this block;
+// the stub returns a sentinel so `sky_color` falls through to the built-in path.
+fn flsl_sky(dir: vec3<f32>, t: f32) -> vec3<f32> {
+    return vec3<f32>(-1.0);
+}
+//[flsl-sky-custom-end]
+
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    // A Sky shader (sky_meta.x = 1) overrides everything: it computes the environment color
+    // per ray direction. `flsl_sky` is the spliced procedural sky (a stub otherwise).
+    if (G.sky_meta.x > 0.5) {
+        return flsl_sky(normalize(dir), G.params.x);
+    }
     if (G.sky_params.x < 0.5) {
         return G.bg.rgb;
     }
@@ -287,9 +305,19 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let scale = 0.22; // ~4.5 world units per tile
     let an = abs(n) + vec3<f32>(0.0001);
     let w = an / (an.x + an.y + an.z);
-    let cx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
-    let cy = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
-    let cz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
+    // Bit `slot` of the mask = this slot's texture asked for Pixelated/Nearest filtering
+    // (the Assets panel setting). Both samplers are read and one result is selected:
+    // WGSL has no sampler arrays, and `select` keeps this uniform-safe.
+    let nearest = (u32(G.terrain_tint.w) & (1u << u32(slot))) != 0u;
+    let lx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
+    let ly = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
+    let lz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
+    let nx = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.zy * scale, slot, 0.0).rgb;
+    let ny = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.xz * scale, slot, 0.0).rgb;
+    let nz = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.xy * scale, slot, 0.0).rgb;
+    let cx = select(lx, nx, nearest);
+    let cy = select(ly, ny, nearest);
+    let cz = select(lz, nz, nearest);
     return cx * w.x + cy * w.y + cz * w.z;
 }
 

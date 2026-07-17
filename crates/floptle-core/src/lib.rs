@@ -41,7 +41,7 @@ pub use material::{Material, Tiling};
 pub use matter::{
     world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
     Collidable, GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent, ParticleSystem,
-    RigidBody, Shape, Spin, Tags, Trigger, Visible,
+    RigidBody, Shape, Spin, Tags, TexturePaint, Trigger, VertexPaint, Visible,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use script::{ScriptInst, Scripts};

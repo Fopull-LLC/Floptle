@@ -33,9 +33,43 @@ pub fn load_texture(path: &Path) -> Option<TextureData> {
 /// Decode + resize an image to exactly `w`×`h` RGBA8 (for the terrain palette,
 /// whose layers must all share one size).
 pub fn load_texture_sized(path: &Path, w: u32, h: u32) -> Option<TextureData> {
+    load_texture_sized_filtered(path, w, h, false)
+}
+
+/// Like [`load_texture_sized`], but `nearest` picks point resampling.
+///
+/// This matters more than the GPU sampler does. Resizing a 32² pixel-art tile up to
+/// the terrain palette's 256² with a bilinear (`Triangle`) filter smears it into mush
+/// **at load**, and no sampler setting downstream can recover it — which is why a
+/// texture marked Pixelated still looked blurry on terrain while the identical image
+/// looked crisp on a mesh (meshes upload at native size and only choose a sampler).
+/// Callers that honour a texture's Pixelated setting must pass `nearest: true`.
+pub fn load_texture_sized_filtered(path: &Path, w: u32, h: u32, nearest: bool) -> Option<TextureData> {
     let img = decode(path)?;
-    let out = img.resize_exact(w, h, image::imageops::FilterType::Triangle).to_rgba8();
+    let filter = if nearest {
+        image::imageops::FilterType::Nearest
+    } else {
+        image::imageops::FilterType::Triangle
+    };
+    let out = img.resize_exact(w, h, filter).to_rgba8();
     Some(TextureData { pixels: out.into_raw(), width: w, height: h })
+}
+
+/// Encode an RGBA8 [`TextureData`] to PNG bytes in memory. Used to pack paint
+/// textures into a scene's paint container (they compress well — paint is mostly flat).
+pub fn encode_png(tex: &TextureData) -> Option<Vec<u8>> {
+    let img = image::RgbaImage::from_raw(tex.width, tex.height, tex.pixels.clone())?;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+    Some(buf.into_inner())
+}
+
+/// Decode PNG (or any guessed format) bytes to tightly-packed RGBA8. The inverse of
+/// [`encode_png`].
+pub fn decode_png(bytes: &[u8]) -> Option<TextureData> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (width, height) = img.dimensions();
+    Some(TextureData { pixels: img.into_raw(), width, height })
 }
 
 /// Write an RGBA8 [`TextureData`] to `path` as a PNG.

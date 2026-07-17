@@ -191,17 +191,18 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
     changed
 }
 
-/// Widget rows for a shader's exposed uniforms (shared by fragment materials
-/// and Field Shape sdf shaders): edits write into `m.shader_params`.
+/// Widget rows for a shader's exposed uniforms (shared by fragment materials,
+/// Field Shape sdf shaders and the Skybox's sky shader): edits write into the
+/// given `params` map by uniform name (absent names use the shader default).
 fn shader_uniform_rows(
     ui: &mut egui::Ui,
     uniforms: &[floptle_shader::Uniform],
-    m: &mut Material,
+    params: &mut std::collections::BTreeMap<String, [f32; 4]>,
 ) -> bool {
     let mut changed = false;
     for u in uniforms {
         ui.label(&u.name);
-        let mut v = m.shader_params.get(&u.name).copied().unwrap_or(u.default);
+        let mut v = params.get(&u.name).copied().unwrap_or(u.default);
         let mut ch = false;
         if u.is_color {
             ch |= ui.color_edit_button_rgba_unmultiplied(&mut v).changed();
@@ -226,7 +227,7 @@ fn shader_uniform_rows(
             }
         }
         if ch {
-            m.shader_params.insert(u.name.clone(), v);
+            params.insert(u.name.clone(), v);
             changed = true;
         }
         ui.end_row();
@@ -345,7 +346,7 @@ pub(crate) fn material_props_ui(
                 egui::Grid::new("mat_shader_rows").num_columns(2).spacing([8.0, 5.0]).show(
                     ui,
                     |ui| {
-                        r.changed |= shader_uniform_rows(ui, &compiled.uniforms, m);
+                        r.changed |= shader_uniform_rows(ui, &compiled.uniforms, &mut m.shader_params);
                         for (i, slot) in compiled.textures.iter().enumerate() {
                             ui.label(slot);
                             let cur = m
@@ -412,7 +413,7 @@ pub(crate) fn material_props_ui(
             }
             if let Some((ir, _)) = &entry.parsed {
                 egui::Grid::new("mat_sdf_rows").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
-                    r.changed |= shader_uniform_rows(ui, &ir.uniforms, m);
+                    r.changed |= shader_uniform_rows(ui, &ir.uniforms, &mut m.shader_params);
                 });
             }
         } else {
@@ -1008,9 +1009,70 @@ impl EditorTabViewer<'_> {
                                         .changed();
                                 }
                             }
-                            Matter::Skybox { color, size, texture, tint } => {
+                            Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
                                 ui.label("skybox");
                                 ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");
+                                // A Sky-stage .flsl overrides the solid/texture look with a
+                                // procedural sky (per-ray-direction color). Clear it to fall
+                                // back to the solid/texture controls below.
+                                ui.horizontal(|ui| {
+                                    ui.label("shader");
+                                    let cur = shader.clone().unwrap_or_default();
+                                    let slabel = if cur.is_empty() {
+                                        "(none — built-in sky)".to_string()
+                                    } else {
+                                        Path::new(&cur).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(cur.clone())
+                                    };
+                                    if let Some(pick) = crate::ui_widgets::asset_picker(
+                                        ui,
+                                        egui::Id::new("sky-shader"),
+                                        &slabel,
+                                        None,
+                                        self.asset_tree,
+                                        crate::assets::is_shader,
+                                        180.0,
+                                    ) {
+                                        // A different sky shader has different knobs — the old
+                                        // overrides would misfill by name, so drop them (same
+                                        // as the Material path clears params on shader change).
+                                        if *shader != pick {
+                                            shader_params.clear();
+                                        }
+                                        *shader = pick;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
+                                        *shader = None;
+                                        shader_params.clear();
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                if shader.is_some() {
+                                    ui.small("a `stage sky` .flsl computes the sky from `skyDir`.");
+                                    // Knob rows from the compiled sky shader's uniform schema —
+                                    // same widgets as a Material's shader params. Edits write
+                                    // into `shader_params`; the raymarch reads them next frame.
+                                    if self.sky_uniforms.is_empty() {
+                                        ui.small("(its knobs appear here once it compiles — check the Console if not)");
+                                    } else {
+                                        egui::Grid::new("sky_shader_rows")
+                                            .num_columns(2)
+                                            .spacing([8.0, 5.0])
+                                            .show(ui, |ui| {
+                                                if shader_uniform_rows(ui, self.sky_uniforms, shader_params) {
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            });
+                                        if ui
+                                            .button("Reset knobs")
+                                            .on_hover_text("back to the shader's own defaults")
+                                            .clicked()
+                                        {
+                                            shader_params.clear();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                }
                                 let mut textured = texture.is_some();
                                 ui.horizontal(|ui| {
                                     if ui.selectable_label(!textured, "■ Solid color").clicked() && textured {
