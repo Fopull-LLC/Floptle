@@ -70,7 +70,20 @@ impl Editor {
         // dab re-meshes only the chunks it touched (`terrain_chunks_dirty`).
         let terrain_full_rebuild = self.terrain_gpu_dirty;
         self.sync_terrain_gpu();
-        self.sync_terrain_meshes(terrain_full_rebuild);
+        // LOD rings center on what the player actually sees: the active game camera
+        // during Play, the editor fly-camera otherwise.
+        let lod_cam = if self.playing {
+            self.world
+                .query::<Matter>()
+                .find_map(|(e, m)| {
+                    matches!(m, Matter::Camera { active: true, .. })
+                        .then(|| floptle_core::world_transform(&self.world, e).translation)
+                })
+                .unwrap_or(self.camera.position)
+        } else {
+            self.camera.position
+        };
+        self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
         self.sync_sky_texture();
         self.sync_sky_shader();
         // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;

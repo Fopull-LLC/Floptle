@@ -1400,6 +1400,11 @@ struct Editor {
     /// remesh queue a brush dab (or undo swap) feeds. Drained every frame by
     /// `sync_terrain_meshes`.
     terrain_chunks_dirty: HashMap<Entity, Vec<[i32; 3]>>,
+    /// The background remesh worker (P4) — spawned lazily on first terrain use.
+    terrain_worker: Option<crate::terrain_edit::TerrainWorker>,
+    /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a
+    /// stale result from a previous world can never land on a reused entity id.
+    terrain_epoch: u64,
     /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
     /// no RigidBody): each level mesh is baked once into an unsigned distance
     /// volume (`bake_occluder`) and uploaded into the SAME 3D atlas as the
