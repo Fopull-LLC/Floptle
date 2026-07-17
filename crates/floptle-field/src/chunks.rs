@@ -459,8 +459,13 @@ impl ChunkField {
                     let cur = self.voxel_at([ix, iy, iz]);
                     let next = match brush {
                         Brush::Raise => crate::smin(cur, ball, k),
-                        // Subtract: intersect with the ball's complement.
-                        Brush::Lower => -crate::smin(-cur, -ball, k),
+                        // Subtract: intersect with the ball's COMPLEMENT (whose SDF is
+                        // -ball): max(cur, -ball) = -min(-cur, ball). Getting the ball's
+                        // sign wrong here computes max(cur, ball) instead — which keeps
+                        // the ball and carves away everything else in the write box, a
+                        // giant square crater per dab (the shipped bug the regression
+                        // test below pins down).
+                        Brush::Lower => -crate::smin(-cur, ball, k),
                         _ => cur,
                     };
                     if (next - cur).abs() < 1e-6 {
@@ -1649,6 +1654,45 @@ mod tests {
              The dense grow() shipped 11.1% / 12.00.",
             bad * 100.0
         );
+    }
+
+    /// Lower must carve THE BALL and nothing else. The shipped bug computed
+    /// `max(cur, ball)` instead of `max(cur, -ball)` — keep-the-ball-carve-the-box —
+    /// so every dig blasted a write-box-sized square crater ("massive squares",
+    /// Ty's solar playtest). The dab: radius 1.3, strength 0.6 — the dig_tool defaults.
+    #[test]
+    fn lower_carves_a_ball_not_the_write_box() {
+        let mut f = ChunkField::new(0.75);
+        f.fill_slab(Vec3::new(-30.0, -12.0, -30.0), Vec3::new(30.0, 0.0, 30.0), 0.0, [0.5; 3]);
+        let (radius, strength) = (1.3f32, 0.6f32);
+        let r_eff = radius * strength;
+        let center = Vec3::new(0.0, 0.0, 0.0); // on the surface
+        f.sculpt(Brush::Lower, center, radius, strength, BrushProfile::default());
+
+        // Inside the ball: air now (was surface).
+        assert!(f.d(center) > 0.0, "dig center still solid: {}", f.d(center));
+        assert!(
+            f.d(center - Vec3::Y * (r_eff * 0.5)) > 0.0,
+            "just below the dig center should be carved"
+        );
+        // WELL outside the ball but inside the brush's write box (radius + band + 1
+        // voxel ≈ 5 units): the surface must be untouched. This is the assertion the
+        // inverted CSG fails — it read +band (open air) everywhere here.
+        for x in [-4.0f32, 4.0] {
+            for z in [-4.0f32, 4.0] {
+                let p = Vec3::new(x, -1.0, z); // a unit under the old surface
+                assert!(
+                    f.d(p) < 0.0,
+                    "ground at {p:?} was carved away — Lower ate the write box, \
+                     not the ball (d = {})",
+                    f.d(p)
+                );
+            }
+        }
+        // And the crater must not out-reach the smoothed ball by more than the blend.
+        let k = (1.0 - BrushProfile::default().hardness) * radius * 0.5;
+        let deep = center - Vec3::Y * (r_eff + k + 0.8);
+        assert!(f.d(deep) < 0.0, "crater reaches deeper than ball + blend: d = {}", f.d(deep));
     }
 
     /// Sparsity is the whole point: memory must track the SURFACE, not the volume.
