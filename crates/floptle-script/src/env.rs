@@ -14,9 +14,9 @@ use crate::BodyState;
 /// The pre-call `node` values, so we only write back fields the script changed
 /// (avoids quat↔euler drift on untouched rotations, etc.).
 pub(crate) struct NodePre {
-    x: f64,
-    y: f64,
-    z: f64,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) z: f64,
     sx: f64,
     sy: f64,
     sz: f64,

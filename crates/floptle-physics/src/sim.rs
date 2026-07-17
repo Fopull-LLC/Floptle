@@ -866,6 +866,22 @@ impl Sim {
         }
     }
 
+    /// TELEPORT a body to an absolute world position (a script wrote the node's
+    /// position): velocity is preserved, the render anchor moves with it so the
+    /// jump doesn't smear across interpolation.
+    pub fn set_body_position(&mut self, eid: u32, pos: DVec3) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                let local = (pos - self.world.origin).as_vec3();
+                self.world.bodies[l.body].pos = local;
+                if let Some(p) = self.tick_prev.get_mut(l.body) {
+                    *p = local;
+                }
+                return;
+            }
+        }
+    }
+
     /// Every dynamic body's entity index + ABSOLUTE world position (carry pass).
     pub fn body_positions(&self) -> Vec<(u32, DVec3)> {
         self.map

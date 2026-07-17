@@ -749,6 +749,7 @@ impl ScriptHost {
             bodies: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
+            body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -828,6 +829,7 @@ impl ScriptHost {
             bodies: shared.bodies.clone(),
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
+            body_pos_changes: shared.body_pos_changes.clone(),
             colliders,
             hulls,
             sim_origin,
@@ -1361,6 +1363,13 @@ impl ScriptHost {
     /// the editor to apply to the sim (crouch). Call after [`run`](Self::run).
     pub fn take_body_height_changes(&self) -> HashMap<u32, f32> {
         std::mem::take(&mut *self.body_height_changes.borrow_mut())
+    }
+
+    /// Drain cross-node position writes on BODY entities — the driver teleports
+    /// each body there (the transform alone would be stomped by the physics
+    /// writeback next frame).
+    pub fn take_body_pos_changes(&self) -> HashMap<u32, [f64; 3]> {
+        std::mem::take(&mut *self.body_pos_changes.borrow_mut())
     }
 
     /// Lend the material presets (name → Material) so a script can apply one with
@@ -2143,6 +2152,18 @@ impl ScriptHost {
             let h: f64 = node.get("height").unwrap_or(b.height as f64);
             if h as f32 != b.height {
                 self.body_height_changes.borrow_mut().insert(eid, h as f32);
+            }
+            // OWN-node position writes on a body entity teleport the body,
+            // exactly like cross-node handle writes do — without this, the
+            // physics writeback reverts the transform next frame and
+            // `node.x = spawn_x` (respawns!) silently does nothing.
+            let (x, y, z) = (
+                node.get::<f64>("x").unwrap_or(pre.x),
+                node.get::<f64>("y").unwrap_or(pre.y),
+                node.get::<f64>("z").unwrap_or(pre.z),
+            );
+            if x != pre.x || y != pre.y || z != pre.z {
+                self.body_pos_changes.borrow_mut().insert(eid, [x, y, z]);
             }
         }
         apply_node(&node, tr, &pre)

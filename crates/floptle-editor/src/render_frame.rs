@@ -3554,6 +3554,9 @@ impl Editor {
                 for (eid, h) in self.script_host.take_body_height_changes() {
                     sim.set_body_height(eid, h);
                 }
+                for (eid, p) in self.script_host.take_body_pos_changes() {
+                    sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
+                }
             }
             // Terrain edits queued by the frame pass (`terrain.sculpt/dig/...`):
             // applied to the authority field + the sim's collider copy before any
@@ -3670,6 +3673,9 @@ impl Editor {
                         }
                         for (eid, h) in self.script_host.take_body_height_changes() {
                             sim.set_body_height(eid, h);
+                        }
+                        for (eid, p) in self.script_host.take_body_pos_changes() {
+                            sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
                         }
                     }
                     // This tick's terrain edits (`fixedUpdate` digs) land BEFORE the

@@ -160,6 +160,9 @@ pub struct ScriptHost {
     /// Capsule heights scripts wrote this frame (entity index → height), drained and
     /// applied to the sim — for crouching.
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// Cross-node position writes on body entities → the driver teleports the
+    /// body (see `Shared::body_pos_changes`).
+    body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
@@ -470,6 +473,10 @@ struct Shared {
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
+    /// Cross-node POSITION writes onto entities that HAVE a physics body —
+    /// the driver TELEPORTS the body there (otherwise the physics writeback
+    /// stomps the transform next frame and the write silently vanishes).
+    body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// (entity index, script kind) → that instance's live Lua environment table, so a
     /// script handle can read its state, call its methods, and read its params.
     envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
@@ -2129,6 +2136,64 @@ mod tests {
         run("writer");
         assert!(root.join("save/main.ron").exists(), "flush wrote the slot file");
         assert_eq!(run("reader"), 42.0 + 7000.0 + 5.0);
+    }
+
+    /// Position writes on BODY nodes must queue real teleports — the physics
+    /// writeback stomps bare transform writes next frame, which silently ate
+    /// respawns ("G restores the ship… nothing moves") and the parked-in-hull
+    /// astronaut. Both write paths: own-node raw fields AND cross-node handles.
+    #[test]
+    fn body_position_writes_queue_teleports() {
+        let dir = std::env::temp_dir().join("floptle_script_test_teleport");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "teleporter",
+            "function fixedUpdate(node, dt)\n\
+               node.y = 50.0\n\
+               local buddy = find(\"Buddy\")\n\
+               if buddy then buddy.x = 7.0 end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "teleporter".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        world.insert(e, floptle_core::Name("Pilot".into()));
+        let buddy = world.spawn();
+        world.insert(buddy, Transform::IDENTITY);
+        world.insert(buddy, floptle_core::Name("Buddy".into()));
+        let mut host = ScriptHost::new();
+        // Both entities HAVE bodies this tick (the gate for teleport queuing).
+        let mut states = HashMap::new();
+        for eid in [e.index(), buddy.index()] {
+            states.insert(eid, BodyState::default());
+        }
+        host.set_bodies(states.clone());
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.set_bodies(states);
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tp = host.take_body_pos_changes();
+        assert_eq!(
+            tp.get(&e.index()).map(|p| p[1]),
+            Some(50.0),
+            "own-node position write must queue a body teleport (got {tp:?})"
+        );
+        assert_eq!(
+            tp.get(&buddy.index()).map(|p| p[0]),
+            Some(7.0),
+            "cross-node handle position write must queue a body teleport (got {tp:?})"
+        );
     }
 
     /// A4 scheduler: tick-driven determinism, cancel, tween endpoints — and the

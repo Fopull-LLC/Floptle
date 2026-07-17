@@ -84,7 +84,8 @@ function lateUpdate(node, dt)
   local maxd = piloting and math.max(params.max_distance, 40.0) or params.max_distance
   -- On foot you can scroll all the way IN: first person (the astronaut hides
   -- so you don't sit inside the capsule). Flying keeps a minimum orbit.
-  local mind = piloting and params.min_distance or 0.0
+  -- Flying: never zoom INSIDE the hull (the ship visual spans ~2 units).
+  local mind = piloting and math.max(params.min_distance, 5.0) or 0.0
   if params.distance > maxd then params.distance = maxd end
   if params.distance < mind then params.distance = mind end
 

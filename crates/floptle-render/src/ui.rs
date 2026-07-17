@@ -579,9 +579,18 @@ impl Ui {
                 Align::Center | Align::Stretch => 0.5,
                 Align::End => 1.0,
             };
-            let baseline = rect_px[1] + (rect_px[3] - line_h) * vf + ascent;
+            let mut baseline = rect_px[1] + (rect_px[3] - line_h) * vf + ascent;
             let (clip, clip_r) = clip_px(&t.clip);
+            let line_start = pen_x;
             for c in t.text.chars() {
+                // Multi-line: '\n' wraps to the next line (HUDs, readouts).
+                // Center/End alignment measures the WHOLE run, so multi-line
+                // text aligns best with Start — fine for the panels using it.
+                if c == '\n' {
+                    pen_x = line_start;
+                    baseline += line_h * 1.15;
+                    continue;
+                }
                 let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
                 if g.size[0] > 0.0 {
                     push(

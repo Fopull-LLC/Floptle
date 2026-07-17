@@ -17,11 +17,15 @@ fn main() {
     let out_dir = args.get(1).map(String::as_str).unwrap_or("solar/terrain");
     let seed: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7);
 
-    const RADIUS: f32 = 30.0;
+    // Planet-scale world (Ty: "these planets aren't a realistic scale"): radius
+    // 300 with µ tuned to g ≈ 9.8 at the surface. Orbital velocity in low orbit
+    // ≈ 53 u/s, escape ≈ 76 — you REACH orbit with technique, you don't trip
+    // into it. Voxel 1.5: crust chunks only ≈ tens of MB resident (sparse).
+    const RADIUS: f32 = 300.0;
     let relief: f32 =
-        std::env::var("RELIEF").ok().and_then(|v| v.parse().ok()).unwrap_or(4.5);
+        std::env::var("RELIEF").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
     let caves: u32 = std::env::var("CAVES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
-    let voxel = 0.75;
+    let voxel = 2.0;
     let noise = Noise::new(seed);
 
     let mut field = ChunkField::new(voxel);
@@ -44,15 +48,16 @@ fn main() {
             }
             // Caves as part of the SDF, not carved after: tunnels live where two
             // independent noise fields are BOTH near zero (their implicit surfaces
-            // intersect along winding curves). Gated to ≥1.2 units below the local
-            // surface — you DIG to find them, which is the gameplay. (Carving with
-            // brush dabs after the fill exposed band-clamped rock: literal terraces.)
-            let a = noise.fbm(p * 0.07, 3);
-            let b = noise.fbm(p * 0.07 + Vec3::splat(51.7), 3);
-            let tunnel = (a.abs().max(b.abs()) - 0.11) * 9.0;
-            // Keep ≥3 units of crust (4 voxels) — a thinner skin over a fat tunnel
-            // meshes as pinholes.
-            let gated = tunnel.max(3.0 + planet);
+            // intersect along winding curves). Gated below the local surface —
+            // you DIG to find them, which is the gameplay. (Carving with brush
+            // dabs after the fill exposed band-clamped rock: literal terraces.)
+            let a = noise.fbm(p * 0.018, 3);
+            let b = noise.fbm(p * 0.018 + Vec3::splat(51.7), 3);
+            let tunnel = (a.abs().max(b.abs()) - 0.1) * 34.0;
+            // Keep ≥3 voxels of crust (pinhole guard), and confine caves to the
+            // outer 50 units: a cave network running to the CORE keeps every
+            // interior chunk resident (measured: 389 MB → this cut it ~4×).
+            let gated = tunnel.max(6.0 + planet).max(-(planet + 50.0));
             planet.max(-gated)
         },
         |p| {
@@ -94,8 +99,8 @@ fn main() {
     let t0 = std::time::Instant::now();
     field.sculpt(
         Brush::Lower,
-        Vec3::new(2.5, RADIUS + noise.fbm(Vec3::Y * 4.3, 5) * relief, 0.0),
-        2.0,
+        Vec3::new(5.0, RADIUS + noise.fbm(Vec3::Y * 4.3, 5) * relief, 0.0),
+        4.0,
         0.5,
         BrushProfile::default(),
     );
@@ -122,10 +127,10 @@ fn main() {
     // dents subtracted at seeded surface points; carving after the fill would
     // hit band-clamped rock and terrace).
     let t0 = std::time::Instant::now();
-    const MOON_R: f32 = 13.0;
+    const MOON_R: f32 = 40.0;
     let mnoise = Noise::new(seed.wrapping_mul(31).wrapping_add(5));
     let mut rng = floptle_core::noise::Rng::new(seed.wrapping_add(99));
-    let craters: Vec<(Vec3, f32)> = (0..9)
+    let craters: Vec<(Vec3, f32)> = (0..14)
         .map(|_| {
             let d = Vec3::new(
                 rng.range(-1.0, 1.0) as f32,
@@ -134,18 +139,18 @@ fn main() {
             )
             .normalize_or_zero();
             let d = if d == Vec3::ZERO { Vec3::X } else { d };
-            (d * (MOON_R + 1.0), rng.range(1.6, 3.4) as f32)
+            (d * (MOON_R + 2.0), rng.range(4.0, 9.5) as f32)
         })
         .collect();
-    let mut moon = ChunkField::new(0.6);
-    let mext = MOON_R + 3.0;
+    let mut moon = ChunkField::new(1.0);
+    let mext = MOON_R + 6.0;
     moon.fill_with(
         Vec3::splat(-mext),
         Vec3::splat(mext),
         |p| {
             let r = p.length();
             let dir = if r > 1e-3 { p / r } else { Vec3::X };
-            let bump = mnoise.fbm(dir * 5.1, 4) * 1.1;
+            let bump = mnoise.fbm(dir * 5.1, 4) * 3.0;
             let mut d = r - (MOON_R + bump);
             for (c, cr) in &craters {
                 let dent = (p - *c).length() - cr;

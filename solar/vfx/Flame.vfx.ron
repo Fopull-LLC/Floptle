@@ -1,0 +1,59 @@
+(
+    name: "Flame",
+    lifetime: 1.0,
+    playback: Looping,
+    end: Persist,
+    tracks: [
+        (
+            name: "Jet",
+            render: Billboard(
+                texture: Some("solar/textures/VFXTEX/Fire/3.png"),
+            ),
+            blend: Additive,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.34,
+                    emit: Some(Rate(
+                        rate: 90.0,
+                    )),
+                ),
+                (
+                    start: 0.34,
+                    end: 0.67,
+                    emit: Some(Rate(
+                        rate: 90.0,
+                    )),
+                ),
+                (
+                    start: 0.67,
+                    end: 1.0,
+                    emit: Some(Rate(
+                        rate: 90.0,
+                    )),
+                ),
+            ],
+            automation: [],
+            shape: Cone(
+                angle: 9.0,
+                radius: 0.35,
+            ),
+            velocity: Range(Vec3((0.0, 16.0, 0.0)), Vec3((0.0, 24.0, 0.0))),
+            size: Range(F32(0.9), F32(1.5)),
+            rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
+            angular_velocity: Range(Vec3((0.0, 0.0, -4.0)), Vec3((0.0, 0.0, 4.0))),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((1.0, 0.95, 0.6, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 0.4, v: Rgba((1.0, 0.55, 0.15, 0.9)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((0.6, 0.15, 0.03, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 1.2,
+        ),
+    ],
+    seed: 3,
+)
