@@ -8,7 +8,17 @@ fn main() {
     let mut failed = false;
     for arg in std::env::args().skip(1) {
         let p = std::path::Path::new(&arg);
-        if p.file_name().is_some_and(|f| f == "project.ron") {
+        if arg.ends_with(".vfx.ron") {
+            match floptle_scene::load_vfx_effect(p) {
+                Ok(doc) => {
+                    println!("OK  {arg}: effect \"{}\", {} track(s)", doc.name, doc.tracks.len())
+                }
+                Err(e) => {
+                    println!("ERR {arg}: {e}");
+                    failed = true;
+                }
+            }
+        } else if p.file_name().is_some_and(|f| f == "project.ron") {
             match floptle_scene::try_load_project(p) {
                 Ok(Some(cfg)) => println!(
                     "OK  {arg}: project \"{}\", entry {:?}, {} layer(s)",
