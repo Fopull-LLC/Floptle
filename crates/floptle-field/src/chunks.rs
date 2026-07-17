@@ -725,6 +725,31 @@ impl ChunkField {
         sdf: impl Fn(Vec3) -> f32,
         color: impl Fn(Vec3) -> [f32; 3],
     ) {
+        // Alpha 255 is the legacy "no slot" sentinel (untextured), NOT slot 255 —
+        // generators that want textured voxels use `fill_with_rgba` and author the
+        // palette slot in the alpha byte themselves.
+        self.fill_with_rgba(min, max, sdf, |p| {
+            let c = color(p);
+            [
+                (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+                (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+                255,
+            ]
+        });
+    }
+
+    /// [`Self::fill_with`] with full control of the voxel color: RGB tint bytes plus
+    /// the ALPHA byte, which is the 1-based terrain palette slot (0 and 255 both mean
+    /// untextured). This is how procedural generators author *materials* — strata,
+    /// biomes, glowing cave veins — not just tints.
+    pub fn fill_with_rgba(
+        &mut self,
+        min: Vec3,
+        max: Vec3,
+        sdf: impl Fn(Vec3) -> f32,
+        color: impl Fn(Vec3) -> [u8; 4],
+    ) {
         let band = self.band();
         let lo = (min - Vec3::splat(band + self.voxel)) / self.voxel;
         let hi = (max + Vec3::splat(band + self.voxel)) / self.voxel;
@@ -741,14 +766,7 @@ impl ChunkField {
                     if d.min(cur) >= cur - 1e-6 && d > -band {
                         continue; // no-op write near the surface: skip the materialize
                     }
-                    let c = color(p);
-                    let cu = [
-                        (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-                        255,
-                    ];
-                    self.set_voxel([ix, iy, iz], d.min(cur), Some(cu));
+                    self.set_voxel([ix, iy, iz], d.min(cur), Some(color(p)));
                     touched.push(chunk_of([ix, iy, iz]));
                 }
             }
@@ -2030,6 +2048,29 @@ mod tests {
         assert_eq!(f.color(hit)[3], 7, "painted slot lands at the brush centre");
         let far = f.raycast(Vec3::new(-40.0, 40.0, -40.0), Vec3::NEG_Y, 100.0).unwrap();
         assert_eq!(f.color(far)[3], 3, "far voxels keep the filled slot");
+    }
+
+    /// `fill_with_rgba` authors the palette slot per voxel (alpha byte) and it
+    /// survives serialization; the plain `fill_with` stays untextured (sentinel 255).
+    #[test]
+    fn fill_with_rgba_authors_slots() {
+        let mut f = ChunkField::new(1.0);
+        let sphere = |p: Vec3| p.length() - 8.0;
+        f.fill_with_rgba(Vec3::splat(-9.0), Vec3::splat(9.0), sphere, |p| {
+            let slot = if p.y > 0.0 { 2 } else { 5 };
+            [200, 180, 160, slot]
+        });
+        let top = f.raycast(Vec3::new(0.0, 20.0, 0.0), Vec3::NEG_Y, 40.0).unwrap();
+        let bot = f.raycast(Vec3::new(0.0, -20.0, 0.0), Vec3::Y, 40.0).unwrap();
+        assert_eq!(f.color(top)[3], 2, "north hemisphere carries slot 2");
+        assert_eq!(f.color(bot)[3], 5, "south hemisphere carries slot 5");
+        let back = ChunkField::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(back.color(top)[3], 2, "slot survives the cfield round-trip");
+
+        let mut plain = ChunkField::new(1.0);
+        plain.fill_with(Vec3::splat(-9.0), Vec3::splat(9.0), sphere, |_| [0.5, 0.5, 0.5]);
+        let hit = plain.raycast(Vec3::new(0.0, 20.0, 0.0), Vec3::NEG_Y, 40.0).unwrap();
+        assert_eq!(plain.color(hit)[3], 255, "fill_with keeps the untextured sentinel");
     }
 
     /// `bounds` covers data AND solid interior, and grows when sculpting outward —

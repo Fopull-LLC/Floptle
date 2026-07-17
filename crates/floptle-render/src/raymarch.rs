@@ -333,8 +333,10 @@ pub struct Raymarch {
     custom_support: String,
 }
 
-/// Layers in the terrain texture palette + the size each is stored at.
-pub const TERRAIN_SLOTS: u32 = 6;
+/// Layers in the terrain texture palette + the size each is stored at. 12 layers:
+/// enough for a planet's biomes + strata + cave materials AND a moon's, in one scene
+/// palette (the palette is per-scene, shared by every terrain volume in it).
+pub const TERRAIN_SLOTS: u32 = 12;
 const TERRAIN_TEX_SIZE: u32 = 256;
 
 impl Raymarch {

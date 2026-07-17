@@ -724,11 +724,12 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
-            // Meshed terrain reads the per-slot NEAREST bitmask + triplanar scale here.
+            // Meshed terrain reads the per-slot NEAREST bitmask, triplanar scale and
+            // per-slot GLOW bitmask here.
             terrain_mask: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
                 0.22,
-                0.0,
+                self.terrain_glow_mask as f32,
                 0.0,
             ],
         };
@@ -1196,6 +1197,7 @@ impl Editor {
         let terrain_brush = &mut self.terrain_brush;
         let terrain_voxel = &mut self.terrain_voxel;
         let terrain_textures = &mut self.terrain_textures;
+        let terrain_glow = &mut self.terrain_glow_mask;
         let terrain_present = !self.terrains.is_empty();
         // Terrain 2.0 stats: volumes, resident data chunks, resident bytes — the
         // honest sparse numbers (the dense field's O(n³) voxel count is gone).
@@ -1783,6 +1785,7 @@ impl Editor {
                 terrain_brush,
                 terrain_voxel,
                 terrain_textures,
+                terrain_glow,
                 terrain_present,
                 terrain_stats,
                 assets_grid,
@@ -4836,11 +4839,12 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
-            // Meshed terrain reads the per-slot NEAREST bitmask + triplanar scale here.
+            // Meshed terrain reads the per-slot NEAREST bitmask, triplanar scale and
+            // per-slot GLOW bitmask here.
             terrain_mask: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
                 0.22,
-                0.0,
+                self.terrain_glow_mask as f32,
                 0.0,
             ],
         };

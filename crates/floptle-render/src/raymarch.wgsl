@@ -362,8 +362,8 @@ fn terrain_albedo(p: vec3<f32>, n: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
         + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel + o2), 0.0).a
         + textureSampleLevel(color_tex, vol_samp, atlas_uvw(i, rel - o2), 0.0).a
     ) * (255.0 / 5.0);
-    if (a < 0.5) {
-        return tint; // fully untextured here
+    if (a < 0.5 || a > 254.5) {
+        return tint; // fully untextured here (255 = the legacy no-slot sentinel)
     }
     let lo = floor(a);
     let f = a - lo;
