@@ -23,7 +23,9 @@ defaults = {
   rcs = 1.4,           -- attitude authority, rad/s²
   sas_damp = 5.0,      -- how hard SAS kills residual rotation
   crash_speed = 12.0,  -- impact speed along the surface normal that wrecks
-  max_g = 9.0,         -- sustained accel that overstresses the frame
+  -- Frame stress limit. MUST clear max_thrust/mass (= 15 here) or full
+  -- throttle wrecks you on the pad — this is headroom for future aero forces.
+  max_g = 28.0,
   board_range = 5.0,
   throttle_rate = 0.6, -- full throttle in ~1.7 s of held SHIFT
 }
@@ -161,6 +163,8 @@ function fixedUpdate(node, dt)
   local acc = throttle * params.max_thrust / params.mass
   if acc > params.max_g then
     wrecked = true
+    throttle = 0.0
+    spawnEffect("Explosion", node.x, node.y, node.z)
     print(string.format("STRUCTURAL FAILURE at %.1f g — ship wrecked (G to restore)", acc))
     return
   end
@@ -210,6 +214,7 @@ function onCollisionEnter(node, other, hit)
   if vn > params.crash_speed then
     wrecked = true
     throttle = 0.0
+    spawnEffect("Explosion", hit.x, hit.y, hit.z)
     print(string.format("CRASH at %.1f m/s — ship wrecked (board + G to restore)", vn))
   end
 end

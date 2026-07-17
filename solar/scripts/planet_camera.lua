@@ -50,6 +50,7 @@ local function cross(ax, ay, az, bx, by, bz)
 end
 
 local ship
+local was_piloting = false
 
 local function acquire()
   for _, s in ipairs(findScripts("planet_walker")) do
@@ -61,12 +62,14 @@ end
 
 function lateUpdate(node, dt)
   -- While flying, the SHIP is the subject (wider orbit); on exit, snap back.
+  -- Swap on the TRANSITION, not by handle comparison (handles are fresh
+  -- tables per access — equality never matches, which stuck the camera on
+  -- the ship after exit).
   if not ship then ship = findScript("ship_controller") end
-  local piloting = ship and ship.piloting
-  if piloting then
-    if target ~= ship.node then target = ship.node end
-  elseif target == (ship and ship.node) then
-    target = nil -- just exited: reacquire the walker
+  local piloting = (ship and ship.piloting) or false
+  if piloting ~= was_piloting then
+    was_piloting = piloting
+    target = piloting and ship.node or acquire()
   end
   if not (target and target.valid) then
     target = acquire()
@@ -79,8 +82,11 @@ function lateUpdate(node, dt)
 
   params.distance = params.distance - input.scroll() * params.zoom_speed
   local maxd = piloting and math.max(params.max_distance, 40.0) or params.max_distance
+  -- On foot you can scroll all the way IN: first person (the astronaut hides
+  -- so you don't sit inside the capsule). Flying keeps a minimum orbit.
+  local mind = piloting and params.min_distance or 0.0
   if params.distance > maxd then params.distance = maxd end
-  if params.distance < params.min_distance then params.distance = params.min_distance end
+  if params.distance < mind then params.distance = mind end
 
   -- Local up from the body (−gravity). Fallback: away from the origin (the
   -- planet sits at 0,0,0) if the body state isn't available yet.
@@ -135,7 +141,14 @@ function lateUpdate(node, dt)
   local back = params.distance
   local hit = raycast(hx, hy, hz, -fx, -fy, -fz, params.distance + 0.3, target)
   if hit and hit.distance then
-    back = math.max(params.min_distance * 0.5, hit.distance - 0.3)
+    back = math.max(mind * 0.5, hit.distance - 0.3)
+  end
+
+  -- First person on foot: with the camera at the head, hide the body so you
+  -- aren't looking at the inside of your own capsule. (While piloting the
+  -- ship script owns the astronaut's visibility — leave it alone.)
+  if not piloting then
+    target.visible = back >= 0.7
   end
 
   local px = hx - fx * back
