@@ -1279,6 +1279,24 @@ fields — vectors, tables, nodes — so there's never a conversion dance.
 
 ---
 
+### Seeded randomness & noise
+
+For gameplay that must **reproduce** — loot rolls, procedural scatter, anything a
+server might replay — use the engine's deterministic stream instead of
+`math.random`:
+
+```lua
+local r = rng(42)                 -- same seed = same sequence, every machine
+local roll = r:next()             -- [0, 1)
+local dmg  = r:range(4, 9)        -- [4, 9)
+local n    = r:int(1, 3)          -- 1, 2 or 3
+local item = r:pick({"sword", "bow", "wand"})
+
+-- Terrain-style variation (identical numbers to the Rust generators):
+local h = math.fbm(x * 0.05, 0, z * 0.05)      -- ≈ -1..1, 4 octaves
+local v = math.noise(x, y, z, 7)               -- one octave, seed 7
+```
+
 ## 20. Collision & trigger events
 
 Define these hooks in any script on a node and the engine calls them when the
