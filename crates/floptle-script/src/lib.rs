@@ -61,6 +61,7 @@ mod math_api;
 mod net_api;
 mod preprocess;
 mod save_api;
+mod sched_api;
 mod terrain_api;
 
 pub(crate) use api::install_handle_api;
@@ -205,6 +206,10 @@ pub struct ScriptHost {
     /// The `save.*` persistent store (roadmap A2): per-slot key→NetValue map,
     /// lazily loaded, flushed by the editor on Stop + periodically during Play.
     save_state: Rc<RefCell<save_api::SaveState>>,
+    /// The `after`/`every`/`tween` scheduler (roadmap A4). Tick-driven: advanced
+    /// ONLY by the global `run_fixed` — never by `run_fixed_for`/replays, or
+    /// prediction would double-fire every pending timer.
+    sched: Rc<RefCell<sched_api::SchedState>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
@@ -2118,6 +2123,76 @@ mod tests {
         run("writer");
         assert!(root.join("save/main.ron").exists(), "flush wrote the slot file");
         assert_eq!(run("reader"), 42.0 + 7000.0 + 5.0);
+    }
+
+    /// A4 scheduler: tick-driven determinism, cancel, tween endpoints — and the
+    /// invariant that targeted replays (`run_fixed_for`) do NOT advance timers
+    /// (netcode prediction re-runs one entity's tick; a scheduler advancing
+    /// there would double-fire everything pending).
+    #[test]
+    fn scheduler_fires_on_ticks_and_ignores_replays() {
+        let dir = std::env::temp_dir().join("floptle_script_test_sched");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "sched",
+            "local fired, everies, tw_last, tw_calls = 0, 0, -1, 0\n\
+             local cancelled_ran = false\n\
+             function start(node)\n\
+               after(0.045, function() fired = fired + 1 end)\n\
+               local h = after(0.045, function() cancelled_ran = true end)\n\
+               h:cancel()\n\
+               every(0.095, function() everies = everies + 1 end)\n\
+               tween(0.1, function(a) tw_last = a; tw_calls = tw_calls + 1 end, \"smooth\")\n\
+             end\n\
+             function update(node, dt)\n\
+               node.x = fired\n\
+               node.y = everies + (cancelled_ran and 100 or 0)\n\
+               node.z = tw_last * 1000 + tw_calls\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "sched".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        let dt = 1.0 / 60.0;
+        host.run(&mut world, &dir, dt, 0.0); // start() schedules everything
+        // 30 global ticks = 0.5s: after(0.045) fired once, every(0.095) fired 5
+        // times (0.095, 0.19, 0.285, 0.38, 0.475 — periods deliberately OFF the
+        // tick grid so f64 accumulation can't make the count edge-dependent),
+        // and the 0.1s tween completed, ending exactly at eased(1.0) = 1.0.
+        for i in 0..30 {
+            host.run_fixed(&mut world, dt, i as f32 * dt);
+        }
+        // Replays must not advance the clock: this would double-fire everything.
+        for _ in 0..100 {
+            host.run_fixed_for(&mut world, e.index(), dt, 0.5);
+        }
+        host.run(&mut world, &dir, dt, 0.5); // update() copies counters out
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let t = world.get::<Transform>(e).unwrap().translation;
+        assert_eq!(t.x, 1.0, "after() must fire exactly once (got {})", t.x);
+        assert_eq!(
+            t.y, 5.0,
+            "every(0.095) over 0.5s = 5 fires, cancelled timer never runs (got {})",
+            t.y
+        );
+        let (final_alpha, tw_calls) = ((t.z as i32) / 1000, (t.z as i32) % 1000);
+        assert_eq!(final_alpha, 1, "tween's final alpha must be exactly 1.0 (z = {})", t.z);
+        assert!(
+            (6..=8).contains(&tw_calls),
+            "a 0.1s tween at 60Hz is ~7 per-tick calls, then stops (got {tw_calls})"
+        );
     }
 
     fn hull(eid: u32, x: f32) -> floptle_physics::BodyHull {

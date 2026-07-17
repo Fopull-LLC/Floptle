@@ -2391,6 +2391,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
+    "after", "every", "tween",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2403,6 +2404,7 @@ const API_CATEGORIES: &[&str] = &[
     "networking — net.*, synced",
     "terrain — runtime sculpt & queries",
     "persistence — save.*",
+    "timers — after, every, tween",
     "components — getcomponent",
     "animation — node:animator",
     "audio — sounds & the mixer",
@@ -2434,6 +2436,8 @@ fn api_category(label: &str) -> &'static str {
         "networking — net.*, synced"
     } else if label.starts_with("save.") {
         "persistence — save.*"
+    } else if matches!(label, "after" | "every" | "tween") {
+        "timers — after, every, tween"
     } else if label.starts_with("terrain") {
         "terrain — runtime sculpt & queries"
     } else if label.starts_with("gizmo") {
@@ -2549,6 +2553,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "save.slot", insert: "save.slot(", doc: "save.slot(\"slot2\") — switch the active save slot (the old one flushes first); save.slot() reads the current name. Each slot is its own file under save/." },
     ApiEntry { label: "save.flush", insert: "save.flush()", doc: "save.flush() — write the store to disk NOW (checkpoints, before risky sections). Returns false on an IO error (also shown in the Console)." },
     ApiEntry { label: "math.fbm", insert: "math.fbm(", doc: "math.fbm(x, y, z [, octaves [, seed]]) — seeded fractal noise (default 4 octaves, rotated so features never align to the axes), about -1..1. Terrain-style variation for scripts: scatter decorations, vary spawns, wobble paths." },
+    ApiEntry { label: "after", insert: "after(", doc: "after(seconds, fn) — run fn once after that much GAME time (tick-driven, deterministic, pauses with the game). Returns a handle: h:cancel() aborts. Capture what you need as locals — the callback gets no arguments. after(2, function() door.visible = false end)" },
+    ApiEntry { label: "every", insert: "every(", doc: "every(seconds, fn) — run fn repeatedly (first fire after one period). Anchored cadence: long sessions don't drift. Keep the handle to stop it: local h = every(1, tickDown) ... h:cancel()." },
+    ApiEntry { label: "tween", insert: "tween(", doc: "tween(seconds, fn [, ease]) — animate: fn(alpha) runs every tick with alpha easing 0→1, final call exactly at 1.0. ease: \"linear\" (default), \"smooth\", \"in\", \"out\". tween(0.5, function(a) node.y = startY + a * 3 end, \"smooth\"). Returns a cancellable handle." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
     ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },

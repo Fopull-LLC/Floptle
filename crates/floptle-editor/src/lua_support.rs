@@ -744,16 +744,45 @@ function save.slot(name) end
 ---(also surfaced in the Console).
 ---@return boolean
 function save.flush() end
+
+---A scheduled timer. `cancel()` aborts it (safe to call after it fired).
+---@class TimerHandle
+---@field cancel fun(self: TimerHandle)
+
+---Run `fn` once after `seconds` of GAME TIME (tick-driven and deterministic;
+---paused when the game is paused). The callback gets no arguments — capture
+---what you need as locals. Errors log to the Console and kill only that timer.
+---@param seconds number
+---@param fn fun()
+---@return TimerHandle
+function after(seconds, fn) end
+
+---Run `fn` repeatedly, first after `seconds`, then every `seconds` (anchored:
+---long sessions don't drift). Cancel via the returned handle.
+---@param seconds number
+---@param fn fun()
+---@return TimerHandle
+function every(seconds, fn) end
+
+---Animate: call `fn(alpha)` every tick for `seconds`, alpha easing 0→1, final
+---call guaranteed exactly at 1.0. `ease` is \"linear\" (default), \"smooth\",
+---\"in\", or \"out\". e.g. `tween(0.5, function(a) node.y = a * 3 end, \"smooth\")`
+---@param seconds number
+---@param fn fun(alpha: number)
+---@param ease? \"linear\"|\"smooth\"|\"in\"|\"out\"
+---@return TimerHandle
+function tween(seconds, fn, ease) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"rng\", \"save\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"rng\", \"save\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"rng\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",

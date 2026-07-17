@@ -808,6 +808,10 @@ impl ScriptHost {
             project_root.clone(),
             logs.clone(),
         );
+        // The `after`/`every`/`tween` scheduler (roadmap A4).
+        let sched: Rc<RefCell<crate::sched_api::SchedState>> =
+            Rc::new(RefCell::new(crate::sched_api::SchedState::default()));
+        crate::sched_api::install_sched_api(&lua, sched.clone());
 
         Self {
             lua,
@@ -836,6 +840,7 @@ impl ScriptHost {
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             save_state,
+            sched,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
@@ -877,6 +882,8 @@ impl ScriptHost {
     /// against the new world, and every `start` re-fires. Compiled sources stay
     /// cached (rebuilding is per-instance, not per-file).
     pub fn reset_instances(&mut self) {
+        // Pending timers belong to the old session — a scene switch drops them.
+        self.sched.borrow_mut().clear();
         let all: Vec<_> = self.instances.drain().collect();
         for (k, inst) in all {
             let _ = self.lua.remove_registry_value(inst.env);
@@ -1455,6 +1462,11 @@ impl ScriptHost {
         // Re-mirror the scene: earlier ticks this frame moved transforms/physics, and
         // handles must read post-step state, not the frame-start snapshot.
         self.sync_scene(world);
+        // Advance `after`/`every`/`tween` timers — HERE and only here (the global
+        // tick). `run_fixed_for` replays must not touch the scheduler, or a net
+        // correction double-fires every pending timer. Before the script pass, so
+        // a timer's effects are visible to this tick's `fixedUpdate`s.
+        crate::sched_api::tick(&self.sched, &self.logs, dt as f64);
         let work: Vec<(Entity, Scripts)> =
             world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
         self.run_pass(world, &work, dt, time, Pass::Fixed);

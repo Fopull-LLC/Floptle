@@ -1483,3 +1483,33 @@ error, not silent data loss.
 call `save.*` inside server-side paths (`net.isServer()`) and hand results to
 clients via `synced` vars or RPC.
 
+## 24. Timers: `after`, `every` & `tween`
+
+Schedule work in **game time** — tick-driven and deterministic (timers pause
+with the game, fire at the same tick on every machine, and never drift with
+frame rate). Callbacks get no arguments; capture what you need as locals.
+
+```lua
+after(2, function() door.visible = false end)      -- once, in 2 s
+
+local beeper = every(1, function()                 -- repeatedly, every 1 s
+  audio.play("sounds/beep.ogg")
+end)
+beeper:cancel()                                    -- stop it (handles all have :cancel())
+
+local y0 = node.y                                  -- animate: alpha eases 0 → 1
+tween(0.5, function(a) node.y = y0 + a * 3 end, "smooth")
+```
+
+* `after(seconds, fn) → handle` — fire once.
+* `every(seconds, fn) → handle` — first fire after one period, then anchored
+  repeats (a long session doesn't drift; a stall never bursts to catch up).
+* `tween(seconds, fn [, ease]) → handle` — `fn(alpha)` every tick, the final
+  call landing **exactly** at `1.0`. Eases: `"linear"` (default), `"smooth"`,
+  `"in"`, `"out"`.
+
+An error inside a callback logs to the Console and kills only that timer. On a
+scene switch all pending timers drop (they belonged to the old scene). In a
+networked session timers advance on the global tick only — prediction replays
+can't double-fire them.
+
