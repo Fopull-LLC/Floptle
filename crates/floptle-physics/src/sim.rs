@@ -848,6 +848,34 @@ impl Sim {
         }
     }
 
+    /// Translate one body by `delta` WITHOUT touching its velocity — the
+    /// dominant-frame carry: when an on-rails moon moves, everything inside its
+    /// sphere of influence moves WITH it (patched conics: you're simulated in
+    /// the dominant body's frame). The render anchor shifts too, so the carry
+    /// never smears interpolation.
+    pub fn shift_body(&mut self, eid: u32, delta: DVec3) {
+        for l in &self.map {
+            if l.entity.index() == eid {
+                let d = delta.as_vec3();
+                self.world.bodies[l.body].pos += d;
+                if let Some(p) = self.tick_prev.get_mut(l.body) {
+                    *p += d;
+                }
+                return;
+            }
+        }
+    }
+
+    /// Every dynamic body's entity index + ABSOLUTE world position (carry pass).
+    pub fn body_positions(&self) -> Vec<(u32, DVec3)> {
+        self.map
+            .iter()
+            .map(|l| {
+                (l.entity.index(), self.world.bodies[l.body].pos.as_dvec3() + self.world.origin)
+            })
+            .collect()
+    }
+
     pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
         self.world
             .colliders

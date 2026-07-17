@@ -18,6 +18,7 @@ defaults = {
 }
 
 local cam
+local ship
 local rig
 local running = false
 local tap = { w = -10, a = -10, s = -10, d = -10 }
@@ -35,6 +36,9 @@ end
 
 function update(node, dt)
   if not cam then cam = findScript("planet_camera") end
+  -- Hands off while flying the ship (it parks + carries this body itself).
+  if not ship then ship = findScript("ship_controller") end
+  if ship and ship.piloting then return end
 
   -- Local up: the body's −gravity axis (fallback: radially out from origin).
   local ux, uy, uz = node.up_x, node.up_y, node.up_z
