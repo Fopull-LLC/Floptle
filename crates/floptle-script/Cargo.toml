@@ -18,3 +18,5 @@ floptle-physics = { path = "../floptle-physics" }
 glam = { workspace = true }
 mlua = { version = "0.10", features = ["luajit", "vendored"] }
 floptle-net = { path = "../floptle-net" }
+ron = { workspace = true }
+serde = { workspace = true }

@@ -799,6 +799,15 @@ impl ScriptHost {
             colliders.clone(),
             logs.clone(),
         );
+        // The `save.*` persistent store (roadmap A2).
+        let save_state: Rc<RefCell<crate::save_api::SaveState>> =
+            Rc::new(RefCell::new(crate::save_api::SaveState::default()));
+        crate::save_api::install_save_api(
+            &lua,
+            save_state.clone(),
+            project_root.clone(),
+            logs.clone(),
+        );
 
         Self {
             lua,
@@ -826,6 +835,7 @@ impl ScriptHost {
             component_changes: shared.component_changes.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
+            save_state,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
@@ -1254,6 +1264,20 @@ impl ScriptHost {
     /// [`run`](Self::run), before stepping the sim.
     pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
         std::mem::take(&mut self.colliders.borrow_mut())
+    }
+
+    /// Flush the `save.*` store to disk if dirty (editor calls this on Stop and
+    /// every few seconds during Play, so a crash loses little). Errors surface in
+    /// the Console via the script log channel.
+    pub fn flush_save(&self) {
+        let mut s = self.save_state.borrow_mut();
+        if let Err(e) = crate::save_api::flush(&mut s, &self.project_root.borrow()) {
+            self.logs.borrow_mut().push(crate::ScriptLog {
+                level: crate::LogLevel::Error,
+                msg: e,
+                source: None,
+            });
+        }
     }
 
     /// Drain the terrain edits scripts queued this pass (`terrain.sculpt/dig/paint`).

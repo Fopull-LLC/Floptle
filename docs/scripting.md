@@ -31,6 +31,7 @@ it up immediately.
 20. [Collision & trigger events](#20-collision--trigger-events)
 21. [Prefabs: `spawn` & `destroy`](#21-prefabs-spawn--destroy)
 22. [Terrain: `terrain.sculpt`, `dig` & queries](#22-terrain-terrainsculpt-dig--queries)
+23. [Saving: `save.set`, `save.get` & slots](#23-saving-saveset-saveget--slots)
 
 ---
 
@@ -1457,3 +1458,28 @@ Notes:
   RPC that repeats the call on clients (`net.rpc("dig", {x=…}, …)` →
   `onRpc.dig` calls `terrain.dig` locally). The local test harness (ghost
   client) doesn't support terrain edits yet and will say so in the Console.
+
+## 23. Saving: `save.set`, `save.get` & slots
+
+Persistent game data — survives Play sessions, editor restarts, and ships with
+exported builds. One key→value store per **slot** (its own file under `save/`).
+
+```lua
+save.set("gold", save.get("gold", 0) + 10)
+save.set("checkpoint", { scene = scene.current(), x = node.x, y = node.y, z = node.z })
+save.flush()                       -- checkpoint NOW (else: auto on Stop + ~5 s)
+
+local cp = save.get("checkpoint")
+if cp then scene.load(cp.scene) end
+
+save.slot("slot2")                 -- separate profile; save.slot() reads the name
+```
+
+Values follow the `synced`-var guardrails: numbers, strings, booleans, tables up
+to depth 4 and ≤ 1 KB each — no functions/userdata. A violation is a script
+error, not silent data loss.
+
+**Multiplayer**: this is *local* storage. For server-authoritative progress,
+call `save.*` inside server-side paths (`net.isServer()`) and hand results to
+clients via `synced` vars or RPC.
+

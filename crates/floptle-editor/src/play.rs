@@ -292,6 +292,9 @@ impl Editor {
             // texture palette). Disk can't stand in: it may be behind unsaved
             // sculpts, and a mid-play scene switch swapped the live fields for
             // the played scene's.
+            // Persistent `save.*` data flushes on Stop — the one guarantee scripts
+            // rely on (periodic flushes during Play only bound crash loss).
+            self.script_host.flush_save();
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {
