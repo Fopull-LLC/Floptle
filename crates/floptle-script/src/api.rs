@@ -631,6 +631,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let bodies = shared.bodies.clone();
         let body_changes = shared.body_changes.clone();
         let body_height = shared.body_height_changes.clone();
+        let body_pos = shared.body_pos_changes.clone();
         let model_changes = shared.model_changes.clone();
         let material_changes = shared.material_changes.clone();
         let visible_changes = shared.visible_changes.clone();
@@ -659,6 +660,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     if let Some(tr) = s.transforms.get_mut(&e) {
                         tr.translation = v;
                         s.dirty.insert(e);
+                        // A body node: the physics writeback would stomp this —
+                        // queue a real TELEPORT for the driver.
+                        if bodies.borrow().contains_key(&e) {
+                            body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
+                        }
                     }
                 }
                 return Ok(());
@@ -725,6 +731,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         _ => handled = false,
                     }
                     if handled {
+                        // Position writes on a BODY node also teleport the body
+                        // (the writeback would revert the transform otherwise).
+                        if matches!(key.as_str(), "x" | "y" | "z")
+                            && bodies.borrow().contains_key(&e)
+                        {
+                            let t = tr.translation;
+                            body_pos.borrow_mut().insert(e, [t.x, t.y, t.z]);
+                        }
                         s.dirty.insert(e);
                         return Ok(());
                     }
