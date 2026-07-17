@@ -141,6 +141,17 @@ function lateUpdate(node, dt)
   -- Wall clip: cast from the head back toward the camera, ignore the player.
   local back = params.distance
   local hit = raycast(hx, hy, hz, -fx, -fy, -fz, params.distance + 0.3, target)
+  -- The wall clip must see WALLS only: the player's hull and the ship (and the
+  -- astronaut parked INSIDE the ship while flying) are not walls — clipping on
+  -- them glued the camera to the hull.
+  if hit and hit.node then
+    local astro = find("Astronaut")
+    local shipnode = ship and ship.node
+    if (astro and hit.node.id == astro.id)
+      or (shipnode and hit.node.id == shipnode.id) then
+      hit = nil
+    end
+  end
   if hit and hit.distance then
     back = math.max(mind * 0.5, hit.distance - 0.3)
   end
