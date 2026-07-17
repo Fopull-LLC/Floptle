@@ -8,7 +8,7 @@
 //! just works. LuaJIT-friendly: components are plain doubles, ops allocate
 //! one small userdata — fine at gameplay call rates.
 
-use mlua::{Lua, MetaMethod, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 
 /// A 3-component vector (f64 — matches the engine's world coordinates).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -287,6 +287,80 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     "distance takes (a, b) or (x1,y1,z1, x2,y2,z2)".into(),
                 )),
             }
+        })?,
+    )?;
+
+    // ---- deterministic noise + RNG (floptle-core::noise — the SAME numbers the
+    // Rust generators produce, on every machine; the substrate for replicated
+    // procgen and netcode-safe gameplay randomness) ------------------------------
+
+    let math: Table = lua.globals().get("math")?;
+    // math.noise(x, y, z [, seed]) — one octave of seeded value noise, ≈ [-1, 1].
+    math.set(
+        "noise",
+        lua.create_function(|_, (x, y, z, seed): (f64, f64, f64, Option<f64>)| {
+            let n = floptle_core::noise::Noise::new(seed.unwrap_or(0.0) as u32);
+            Ok(n.value(glam::Vec3::new(x as f32, y as f32, z as f32)) as f64)
+        })?,
+    )?;
+    // math.fbm(x, y, z [, octaves [, seed]]) — fractal noise, rotated octaves.
+    math.set(
+        "fbm",
+        lua.create_function(
+            |_, (x, y, z, octaves, seed): (f64, f64, f64, Option<f64>, Option<f64>)| {
+                let n = floptle_core::noise::Noise::new(seed.unwrap_or(0.0) as u32);
+                Ok(n.fbm(
+                    glam::Vec3::new(x as f32, y as f32, z as f32),
+                    octaves.unwrap_or(4.0).clamp(1.0, 10.0) as u32,
+                ) as f64)
+            },
+        )?,
+    )?;
+
+    // rng(seed) — a deterministic random stream: same seed, same sequence, every
+    // machine. r:next() [0,1), r:range(a,b), r:int(a,b) inclusive, r:pick(list).
+    // (`math.random` stays for throwaway randomness; THIS is for gameplay that
+    // must reproduce — loot, procgen scatter, anything a server might replay.)
+    lua.globals().set(
+        "rng",
+        lua.create_function(|lua, seed: f64| {
+            let state = std::cell::RefCell::new(floptle_core::noise::Rng::new(seed as u32));
+            let t = lua.create_table()?;
+            {
+                let s = std::rc::Rc::new(state);
+                let sc = s.clone();
+                t.set(
+                    "next",
+                    lua.create_function(move |_, _: Value| Ok(sc.borrow_mut().next_f64()))?,
+                )?;
+                let sc = s.clone();
+                t.set(
+                    "range",
+                    lua.create_function(move |_, (_, a, b): (Value, f64, f64)| {
+                        Ok(sc.borrow_mut().range(a, b))
+                    })?,
+                )?;
+                let sc = s.clone();
+                t.set(
+                    "int",
+                    lua.create_function(move |_, (_, a, b): (Value, f64, f64)| {
+                        Ok(sc.borrow_mut().int(a as i64, b as i64))
+                    })?,
+                )?;
+                let sc = s.clone();
+                t.set(
+                    "pick",
+                    lua.create_function(move |_, (_, list): (Value, Table)| {
+                        let n = list.raw_len();
+                        if n == 0 {
+                            return Ok(Value::Nil);
+                        }
+                        let i = sc.borrow_mut().int(1, n as i64);
+                        list.raw_get::<Value>(i)
+                    })?,
+                )?;
+            }
+            Ok(t)
         })?,
     )?;
     Ok(())

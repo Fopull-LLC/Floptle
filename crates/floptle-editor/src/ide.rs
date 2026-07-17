@@ -2390,7 +2390,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
-    "net", "synced", "replicated", "onRpc", "audio", "terrain",
+    "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2538,6 +2538,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "terrain.paintTexture", insert: "terrain.paintTexture(", doc: "terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color)." },
     ApiEntry { label: "terrain.query", insert: "terrain.query(", doc: "terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Cheap: read it every frame (burrow checks, depth meters)." },
     ApiEntry { label: "terrain.height", insert: "terrain.height(", doc: "terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor." },
+    ApiEntry { label: "rng", insert: "rng(", doc: "rng(seed) — a DETERMINISTIC random stream: same seed, same sequence, every machine. r:next() in [0,1), r:range(a,b), r:int(a,b) inclusive, r:pick(list). Use for gameplay that must reproduce (loot, procgen scatter, server replays); math.random stays for throwaway rolls." },
+    ApiEntry { label: "math.noise", insert: "math.noise(", doc: "math.noise(x, y, z [, seed]) — seeded value noise, one octave, about -1..1, identical on every machine (the same numbers the engine's Rust generators use). Scale the inputs to pick a frequency." },
+    ApiEntry { label: "math.fbm", insert: "math.fbm(", doc: "math.fbm(x, y, z [, octaves [, seed]]) — seeded fractal noise (default 4 octaves, rotated so features never align to the axes), about -1..1. Terrain-style variation for scripts: scatter decorations, vary spawns, wobble paths." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
     ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },

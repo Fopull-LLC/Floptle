@@ -30,6 +30,7 @@ pub mod material;
 pub mod math;
 pub mod matter;
 pub mod net;
+pub mod noise;
 pub mod origin;
 pub mod script;
 pub mod time;
