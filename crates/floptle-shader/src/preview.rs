@@ -128,7 +128,9 @@ pub fn transpile_preview(
     // the ray direction (tile top ≈ zenith, middle ≈ horizon), and knobs ride the same
     // `P` param block as fragment previews. The real sky still renders in the scene.
     let ctx = match stage {
-        Stage::Fragment => EmitCtx::Fragment,
+        // Ui previews ride the fragment tile path too: `uv`/`instanceColor`/
+        // `time` all exist there and knobs read the same `P` block.
+        Stage::Fragment | Stage::Ui => EmitCtx::Fragment,
         Stage::Sky => EmitCtx::SkyPreview,
         Stage::Sdf => EmitCtx::Sdf { slot: 0 },
     };
@@ -136,7 +138,7 @@ pub fn transpile_preview(
     w.dyn_nums = Some(Default::default());
 
     match stage {
-        Stage::Fragment | Stage::Sky => w.raw(FRAG_PRELUDE),
+        Stage::Fragment | Stage::Sky | Stage::Ui => w.raw(FRAG_PRELUDE),
         Stage::Sdf => w.raw(SDF_PRELUDE),
     }
     w.raw(stdlib::SUPPORT_WGSL);
@@ -205,7 +207,7 @@ pub fn transpile_preview(
 
     w.raw(PV_VERTEX);
     match stage {
-        Stage::Fragment | Stage::Sky => w.raw(FRAG_MAIN),
+        Stage::Fragment | Stage::Sky | Stage::Ui => w.raw(FRAG_MAIN),
         Stage::Sdf => w.raw(SDF_MAIN),
     }
 
@@ -258,7 +260,7 @@ fn target_vis(
                 Ty::Vec4 => "",
             };
             let e = match stage {
-                Stage::Fragment | Stage::Sky => format!("P.u{u}{access}"),
+                Stage::Fragment | Stage::Sky | Stage::Ui => format!("P.u{u}{access}"),
                 Stage::Sdf => format!("G.shape_uniforms[{u}u]{access}"),
             };
             wrap(e, uni.ty)
@@ -266,7 +268,14 @@ fn target_vis(
         // Mirrors the emitter's Input arm (which needs a real expr id).
         PreviewTarget::Input(i) => {
             let e = match (stage, i) {
-                (Stage::Fragment, Input::Uv) => "in.uv",
+                (Stage::Fragment | Stage::Ui, Input::Uv) => "in.uv",
+                (Stage::Ui, Input::InstanceColor) => "in.color",
+                (Stage::Ui, _) => {
+                    return Err(TranspileError {
+                        message: format!("`{}` is not available in ui shaders", i.name()),
+                        span: Default::default(),
+                    });
+                }
                 (Stage::Fragment, Input::Normal) => "normalize(in.normal)",
                 (Stage::Fragment, Input::WorldPos) => "in.view_pos",
                 (Stage::Fragment, Input::ViewDir) => "normalize(-in.view_pos)",
@@ -301,7 +310,7 @@ fn target_vis(
             format!("textureSample(flsl_tex{t}, flsl_samp{t}, in.uv)")
         }
         PreviewTarget::Output => match stage {
-            Stage::Fragment | Stage::Sky => match ir.outputs.get("color") {
+            Stage::Fragment | Stage::Sky | Stage::Ui => match ir.outputs.get("color") {
                 Some(&out) => match ck.ty(out) {
                     Ty::Vec4 => format!("({})", w.emit(out)?),
                     _ => format!("vec4<f32>({}, 1.0)", w.emit(out)?),

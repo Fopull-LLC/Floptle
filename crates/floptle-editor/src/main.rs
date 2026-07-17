@@ -1810,6 +1810,13 @@ struct Editor {
     flsl_binds: shaders::FlslBinds,
     /// Retired binding slots, reused before growing the raster's registry.
     flsl_free: Vec<floptle_render::FlslBindingId>,
+    /// Compiled `stage ui` `.flsl` shaders by path (mtime hot reload).
+    ui_flsl_cache: shaders::UiFlslCache,
+    /// Live UI-shader param bindings per element (keyed by entity index —
+    /// the id the UI draw list carries).
+    ui_flsl_binds: shaders::UiFlslBinds,
+    /// Retired UI binding slots, reused before growing the registry.
+    ui_flsl_free: Vec<floptle_render::UiBindingId>,
     /// Parsed Sdf-stage shaders by material path (Field Shapes, mtime-cached).
     sdf_cache: shaders::SdfCache,
     /// Live Field Shape entities → their splice slot (0..4).

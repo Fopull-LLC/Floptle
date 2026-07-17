@@ -126,6 +126,44 @@ local function set_hud(node, text)
   if text then hud.text = text end
 end
 
+local navball
+local function set_navball(on)
+  if not navball then navball = find("Navball") end
+  if not navball then return end
+  local el = navball:getcomponent("UiElement")
+  if el then el.visible = on and 1 or 0 end
+end
+
+-- Feed the navball shader: the ship's basis expressed in the LOCAL HORIZON
+-- frame (x = east, y = radial up, z = north) + the prograde direction. The
+-- ball is drawn entirely by shaders/navball.flsl — these are its uniforms.
+local function update_navball(node)
+  if not navball then return end
+  local d = space.dominant(node.x, node.y, node.z)
+  local b = d and space.body(d)
+  if not b then return end
+  local ux, uy, uz = norm(node.x - b.x, node.y - b.y, node.z - b.z)
+  local ex, ey, ez = norm(cross(0, 1, 0, ux, uy, uz))
+  if ex == 0 and ey == 0 and ez == 0 then ex, ey, ez = 1, 0, 0 end
+  local nhx, nhy, nhz = cross(ux, uy, uz, ex, ey, ez)
+  local function toH(vx, vy, vz)
+    return vx * ex + vy * ey + vz * ez,
+           vx * ux + vy * uy + vz * uz,
+           vx * nhx + vy * nhy + vz * nhz
+  end
+  local rx2, ry2, rz2 = cross(fx, fy, fz, nx, ny, nz)
+  local bx2, by2, bz2 = cross(nx, ny, nz, rx2, ry2, rz2)
+  navball:setShaderParam("right", toH(rx2, ry2, rz2))
+  navball:setShaderParam("up", toH(bx2, by2, bz2))
+  navball:setShaderParam("nose", toH(nx, ny, nz))
+  local vl = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
+  if vl > 2.0 then
+    navball:setShaderParam("prograde", toH(node.vx / vl, node.vy / vl, node.vz / vl))
+  else
+    navball:setShaderParam("prograde", 0, 0, 0)
+  end
+end
+
 function fixedUpdate(node, dt)
   if not astronaut then astronaut = find("Astronaut") end
 
@@ -144,9 +182,11 @@ function fixedUpdate(node, dt)
       throttle = 0.0
       set_flame(node, false, 0)
       set_hud(node, nil)
+      set_navball(false)
     elseif distance(astronaut, node) <= params.board_range then
       piloting = true
       astronaut.visible = false
+      set_navball(true)
       spawn_t = math.max(spawn_t, time - params.grace + 0.75) -- brief settle grace
     end
   end
@@ -242,6 +282,7 @@ function fixedUpdate(node, dt)
     -- Parked warp (waiting out a transfer window on the pad): keep the brake
     -- pinned so the sphere hull can't slow-slide down a slope for game-days.
     if node.grounded then node.vx, node.vy, node.vz = 0, 0, 0 end
+    update_navball(node)
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end
@@ -312,6 +353,8 @@ function fixedUpdate(node, dt)
   local cx2, sx2 = math.cos(-pit2), math.sin(-pit2)
   local by = ay * cx2 - az * sx2
   node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
+
+  update_navball(node)
 
   -- ---- HUD (10 Hz) --------------------------------------------------------
   if time - hud_t >= 0.1 then

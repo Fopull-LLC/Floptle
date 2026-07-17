@@ -347,6 +347,15 @@ pub struct ElementSpec {
     /// Clip the named target elements (+ subtrees) to this element's rect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<MaskSpec>,
+    /// Custom `.flsl` face (a `stage ui` shader, project-relative path): the
+    /// element's rect is drawn by that shader — procedural instruments
+    /// (navballs, gauges, radar). Draws between shape and image.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shader: String,
+    /// Per-element uniform overrides for `shader` (name → vec4 lanes) —
+    /// scripts drive these via `node:setShaderParam(...)`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shader_params: std::collections::BTreeMap<String, [f32; 4]>,
     /// Clickable: the pointer can hover/press/click this element, firing the
     /// script hooks (`hoverStart`/`hoverEnd`/`pressed`/`released`/`clicked`)
     /// on this node's scripts. No imposed look — style the states in Lua.
@@ -378,6 +387,8 @@ impl Default for ElementSpec {
             slider: None,
             part: None,
             mask: None,
+            shader: String::new(),
+            shader_params: std::collections::BTreeMap::new(),
             button: false,
             visible: true,
             opacity: 1.0,
@@ -688,6 +699,9 @@ pub struct Quad {
     pub uv: [f32; 4],
     /// Set when a mask claims this element.
     pub clip: Option<Clip>,
+    /// Custom-shader face: `(flsl path, owner element id)` — the renderer
+    /// resolves this to a pipeline + per-element param binding.
+    pub shader: Option<(String, u32)>,
 }
 
 /// One text run (the renderer owns the font and lays out glyphs).
@@ -775,6 +789,22 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 texture: String::new(),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 clip,
+                shader: None,
+            });
+        }
+        if !spec.shader.is_empty() {
+            // A custom-shader face: white tint (the shader reads it as
+            // `instanceColor`, alpha = the element's opacity).
+            dl.quads.push(Quad {
+                rect: p.rect,
+                color: [1.0, 1.0, 1.0, a],
+                radius: 0.0,
+                border: 0.0,
+                border_color: [0.0; 4],
+                texture: String::new(),
+                uv: [0.0, 0.0, 1.0, 1.0],
+                clip,
+                shader: Some((spec.shader.clone(), p.id)),
             });
         }
         if let Some(img) = &spec.image
@@ -791,6 +821,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 texture: img.texture.clone(),
                 uv: img.cell_uv(),
                 clip,
+                shader: None,
             });
         }
         if let Some(t) = &spec.text

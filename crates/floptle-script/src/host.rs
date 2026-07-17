@@ -750,6 +750,7 @@ impl ScriptHost {
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
+            shader_param_sets: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -830,6 +831,7 @@ impl ScriptHost {
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
+            shader_param_sets: shared.shader_param_sets.clone(),
             colliders,
             hulls,
             sim_origin,
@@ -1372,6 +1374,7 @@ impl ScriptHost {
         std::mem::take(&mut *self.body_pos_changes.borrow_mut())
     }
 
+
     /// Lend the material presets (name → Material) so a script can apply one with
     /// `node.material = "<name>"`. Call before [`run`](Self::run).
     pub fn set_materials(&self, map: HashMap<String, Material>) {
@@ -1692,6 +1695,23 @@ impl ScriptHost {
             for ((eid, comp, field), val) in self.component_changes.borrow().iter() {
                 if let Some(&ent) = scene.ents.get(eid) {
                     apply_component_field(world, ent, comp, field, *val);
+                }
+            }
+            // `node:setShaderParam(name, ...)`: fold into the node's UI element
+            // (when it has a `stage ui` shader) or its Material's params. The
+            // per-frame shader drivers see the change and upload a uniform
+            // write — never a recompile.
+            for (eid, name, v) in self.shader_param_sets.borrow_mut().drain(..) {
+                let Some(&ent) = scene.ents.get(&eid) else { continue };
+                let on_ui = world
+                    .get::<floptle_ui::ElementSpec>(ent)
+                    .is_some_and(|s| !s.shader.is_empty());
+                if on_ui {
+                    if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
+                        spec.shader_params.insert(name, v);
+                    }
+                } else if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
+                    mat.shader_params.insert(name, v);
                 }
             }
         }

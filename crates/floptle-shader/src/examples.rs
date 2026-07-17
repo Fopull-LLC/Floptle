@@ -529,6 +529,9 @@ mod tests {
                 Some(Stage::Sky) => {
                     crate::compile_sky(src).unwrap_or_else(|e| panic!("{name}: {e}"));
                 }
+                Some(Stage::Ui) => {
+                    crate::compile_ui(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+                }
                 None => panic!("{name}: missing stage"),
             }
         }

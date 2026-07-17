@@ -147,6 +147,7 @@ impl Editor {
         // all read `flsl_binds`, so this must run before any of them. Field
         // Shapes follow: their sdf shaders splice into both passes on change.
         self.ensure_flsl_materials();
+        self.ensure_ui_shaders();
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
@@ -240,6 +241,10 @@ impl Editor {
         self.update_game_viewport(elapsed);
         // The ◈ Shaders tab's per-node preview atlas (only while it's visible).
         self.update_shader_graph_preview(elapsed);
+        // `stage ui` shaders read `time` from the UI globals' spare lane.
+        if let Some(uir) = self.ui_render.as_mut() {
+            uir.set_time(elapsed);
+        }
 
         // Terrain surface material, resolved BEFORE the GPU destructure borrows `self.raster`
         // out (`terrain_material` is `&self`): the meshed terrain draws with it in the raster
@@ -2826,7 +2831,24 @@ impl Editor {
                         let mut ui_batches = Vec::new();
                         {
                             let reg = &self.texture_registry;
-                            uir.pack(gpu, dl, [0.0, 0.0], 1.0, &mut |p| reg.get(p).copied(), &mut ui_instances, &mut ui_batches);
+                            let uic = &self.ui_flsl_cache;
+                            let uib = &self.ui_flsl_binds;
+                            uir.pack(
+                                gpu,
+                                dl,
+                                [0.0, 0.0],
+                                1.0,
+                                &mut |p| reg.get(p).copied(),
+                                &mut |p, owner| {
+                                    let shader = uic
+                                        .get(p)
+                                        .and_then(|e| e.compiled.as_ref())
+                                        .map(|(_, id)| *id)?;
+                                    Some((shader, uib.get(&owner)?.binding))
+                                },
+                                &mut ui_instances,
+                                &mut ui_batches,
+                            );
                         }
                         uir.draw_world(
                             gpu,
@@ -2939,12 +2961,19 @@ impl Editor {
                     let mut ui_batches = Vec::new();
                     for (dl, scale) in &ui_layers {
                         let reg = &self.texture_registry;
+                        let uic = &self.ui_flsl_cache;
+                        let uib = &self.ui_flsl_binds;
                         uir.pack(
                             gpu,
                             dl,
                             [0.0, 0.0],
                             *scale,
                             &mut |p| reg.get(p).copied(),
+                            &mut |p, owner| {
+                                let shader =
+                                    uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
+                                Some((shader, uib.get(&owner)?.binding))
+                            },
                             &mut ui_instances,
                             &mut ui_batches,
                         );
