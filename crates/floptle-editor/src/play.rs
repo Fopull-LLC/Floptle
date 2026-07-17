@@ -192,6 +192,37 @@ impl Editor {
                 );
             }
         }
+        // Foot-gun guard: a celestial scene with a UNIFORM-Down GravityVolume
+        // adds a constant world −Y pull on top of µ/r² — on the far side of a
+        // planet that pushes AWAY from it, pumping orbital energy every pass
+        // (it cost two debugging sessions as a mystery "orbit escape").
+        {
+            let has_celestial = self
+                .world
+                .query::<floptle_core::CelestialBody>()
+                .any(|(_, b)| b.mu > 0.0);
+            let down_volume = self.world.query::<floptle_core::Matter>().any(|(_, m)| {
+                matches!(
+                    m,
+                    floptle_core::Matter::GravityVolume {
+                        mode: floptle_core::GravityMode::Down,
+                        strength,
+                        ..
+                    } if *strength != 0.0
+                )
+            });
+            if has_celestial && down_volume {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "scene mixes Celestial-Body µ/r² gravity with a uniform DOWN \
+                     GravityVolume — the constant world −Y pull adds energy to orbits \
+                     on a planet's far side (looks like mysterious escapes). Set the \
+                     volume's strength to 0 or delete it."
+                        .into(),
+                    None,
+                );
+            }
+        }
         let origin = self.sim_origin_hint();
         let gravity = Self::build_gravity_field(&self.world, origin);
         let terrain_vols = self.terrain_volumes(&layers);
