@@ -23,6 +23,11 @@ pub enum Stage {
     /// ray direction (spliced into the raymarch's `sky_color`). The only input
     /// that makes sense is the ray direction (`skyDir`) + time.
     Sky,
+    /// A game-UI element's face: `output color` (vec4 — alpha shapes the
+    /// element) drawn by the UI pass over the finished frame. Inputs are the
+    /// element's `uv` (0..1 across its rect), its tint (`instanceColor`) and
+    /// `time` — procedural instruments (navballs, gauges) live here.
+    Ui,
 }
 
 /// How a Fragment-stage surface composites over the scene.
@@ -171,6 +176,7 @@ impl Input {
             Stage::Fragment => !matches!(self, Input::SkyDir),
             Stage::Sdf => matches!(self, Input::WorldPos | Input::Time),
             Stage::Sky => matches!(self, Input::SkyDir | Input::Time),
+            Stage::Ui => matches!(self, Input::Uv | Input::InstanceColor | Input::Time),
         }
     }
 }
@@ -455,6 +461,20 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
                 errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
             }
         }
+        Stage::Ui => {
+            expect_output(ir, "color", &[Ty::Vec3, Ty::Vec4], &let_ty, &mut ck, &mut errors);
+            for name in ir.outputs.keys() {
+                if name != "color" {
+                    errors.push(IrError::new(
+                        format!("ui shaders output `color` only (got `{name}`)"),
+                        ir.expr(ir.outputs[name]).span,
+                    ));
+                }
+            }
+            if ir.blend != Blend::Opaque {
+                errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
+            }
+        }
     }
 
     if errors.is_empty() { Ok(ck) } else { Err(errors) }
@@ -581,6 +601,7 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::Fragment => "fragment",
         Stage::Sdf => "sdf",
         Stage::Sky => "sky",
+        Stage::Ui => "ui",
     }
 }
 

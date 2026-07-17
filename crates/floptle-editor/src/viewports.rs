@@ -444,7 +444,21 @@ impl Editor {
             let mut ui_batches = Vec::new();
             for (dl, scale) in &ui_layers {
                 let reg = &self.texture_registry;
-                uir.pack(gpu, dl, [0.0, 0.0], *scale, &mut |p| reg.get(p).copied(), &mut ui_instances, &mut ui_batches);
+                let uic = &self.ui_flsl_cache;
+                let uib = &self.ui_flsl_binds;
+                uir.pack(
+                    gpu,
+                    dl,
+                    [0.0, 0.0],
+                    *scale,
+                    &mut |p| reg.get(p).copied(),
+                    &mut |p, owner| {
+                        let shader = uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
+                        Some((shader, uib.get(&owner)?.binding))
+                    },
+                    &mut ui_instances,
+                    &mut ui_batches,
+                );
             }
             uir.draw(gpu, &cv, vp, &ui_instances, &ui_batches, raster);
         }

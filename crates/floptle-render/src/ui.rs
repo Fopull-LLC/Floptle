@@ -44,9 +44,35 @@ pub enum UiTex {
     Tex(TexId),
 }
 
+/// Resolves a Quad's `(flsl path, owner element id)` to a registered pipeline
+/// + that element's params binding (None = fall back to a plain quad).
+pub type UiShaderResolve<'a> = &'a mut dyn FnMut(&str, u32) -> Option<(UiShaderId, UiBindingId)>;
+
 pub struct UiBatch {
     pub tex: UiTex,
+    /// Custom-shader batch: the pipeline + per-element param binding to use
+    /// instead of the built-in `fs_main` (a `stage ui` .flsl element).
+    pub shader: Option<(UiShaderId, UiBindingId)>,
     pub range: std::ops::Range<u32>,
+}
+
+/// A registered `stage ui` .flsl pipeline (screen + world variants).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiShaderId(pub u32);
+
+/// A per-element params UBO bound at group(2) of a UI shader pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UiBindingId(pub u32);
+
+struct UiShader {
+    pipeline: wgpu::RenderPipeline,
+    /// Depth-tested variant for world canvases (Scene-view authoring).
+    pipeline_world: wgpu::RenderPipeline,
+}
+
+struct UiShaderBinding {
+    params_buf: wgpu::Buffer,
+    bind: wgpu::BindGroup,
 }
 
 /// A cached glyph's atlas placement + metrics (px at its rasterized size).
@@ -65,7 +91,8 @@ const ATLAS_SIZE: u32 = 1024;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiGlobals {
-    /// x, y = viewport px; z = mode (0 screen, 1 world canvas).
+    /// x, y = viewport px; z = mode (0 screen, 1 world canvas); w = time
+    /// in seconds (`time` in `stage ui` .flsl shaders).
     pub viewport: [f32; 4],
     pub plane_origin: [f32; 4],
     pub plane_right: [f32; 4],
@@ -104,6 +131,16 @@ pub struct Ui {
     atlas_full_warned: bool,
     quad_vbuf: wgpu::Buffer,
     quad_ibuf: wgpu::Buffer,
+    // UI-shader support (`stage ui` .flsl elements): the shared bind layouts
+    // (kept for late pipeline builds), the registered pipelines, and the
+    // per-element param bindings.
+    globals_layout: wgpu::BindGroupLayout,
+    tex_layout: wgpu::BindGroupLayout,
+    params_layout: wgpu::BindGroupLayout,
+    shaders: Vec<UiShader>,
+    shader_binds: Vec<UiShaderBinding>,
+    /// Scene time uploaded into `Globals.viewport.w` (the `time` input).
+    time: f32,
 }
 
 const QUAD_VERTS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
@@ -145,7 +182,9 @@ impl Ui {
             label: Some("ui-globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Fragment too: `stage ui` shaders read `time` from
+                // Globals.viewport.w.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -341,6 +380,20 @@ impl Ui {
             mapped_at_creation: false,
         });
 
+        let params_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ui-flsl-params"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         Ui {
             pipeline,
             pipeline_world,
@@ -358,7 +411,161 @@ impl Ui {
             atlas_full_warned: false,
             quad_vbuf,
             quad_ibuf,
+            globals_layout,
+            tex_layout,
+            params_layout,
+            shaders: Vec::new(),
+            shader_binds: Vec::new(),
+            time: 0.0,
         }
+    }
+
+    /// The UI pass's WGSL source — the prelude a `stage ui` .flsl chunk is
+    /// concatenated onto (the editor validates against this + the shader
+    /// crate's field shim/support before registering).
+    pub fn ui_prelude() -> &'static str {
+        include_str!("ui.wgsl")
+    }
+
+    /// Register (or hot-replace) a `stage ui` .flsl pipeline from its WGSL
+    /// chunk. Like the raster's `register_flsl_shader`, the field shim +
+    /// stdlib SUPPORT arrive INSIDE `chunk` (caller-assembled); the module is
+    /// `ui.wgsl + chunk`. Validate the assembly with naga BEFORE calling — a
+    /// bad module aborts the device.
+    pub fn register_ui_shader(
+        &mut self,
+        gpu: &Gpu,
+        chunk: &str,
+        replace: Option<UiShaderId>,
+    ) -> UiShaderId {
+        let src = format!("{}\n{}", include_str!("ui.wgsl"), chunk);
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ui-flsl"),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ui-flsl"),
+            bind_group_layouts: &[
+                Some(&self.globals_layout),
+                Some(&self.tex_layout),
+                Some(&self.params_layout),
+            ],
+            immediate_size: 0,
+        });
+        let targets = [Some(wgpu::ColorTargetState {
+            format: gpu.surface_format(),
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui-flsl"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_flsl_ui"),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let pipeline_world = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui-flsl-world"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_flsl_ui"),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Gpu::DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let shader = UiShader { pipeline, pipeline_world };
+        match replace {
+            Some(id) => {
+                self.shaders[id.0 as usize] = shader;
+                id
+            }
+            None => {
+                self.shaders.push(shader);
+                UiShaderId(self.shaders.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Create (or replace) a per-element params UBO + bind group for a UI
+    /// shader. `params` are the packed vec4 lanes (`CompiledUi::pack_params`).
+    pub fn set_ui_shader_binding(
+        &mut self,
+        gpu: &Gpu,
+        params: &[u8],
+        replace: Option<UiBindingId>,
+    ) -> UiBindingId {
+        let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ui-flsl-params"),
+            size: params.len().max(16) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&params_buf, 0, params);
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui-flsl-params"),
+            layout: &self.params_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            }],
+        });
+        let binding = UiShaderBinding { params_buf, bind };
+        match replace {
+            Some(id) => {
+                self.shader_binds[id.0 as usize] = binding;
+                id
+            }
+            None => {
+                self.shader_binds.push(binding);
+                UiBindingId(self.shader_binds.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Update a binding's params in place — a uniform write, never a rebuild
+    /// (scripts drive instrument knobs every tick through this).
+    pub fn write_ui_shader_params(&self, gpu: &Gpu, id: UiBindingId, params: &[u8]) {
+        if let Some(b) = self.shader_binds.get(id.0 as usize) {
+            gpu.queue.write_buffer(&b.params_buf, 0, params);
+        }
+    }
+
+    /// Scene time for `stage ui` shaders' `time` input (Globals.viewport.w).
+    pub fn set_time(&mut self, t: f32) {
+        self.time = t;
     }
 
     /// Register a project font (.ttf/.otf bytes) under its asset path. Parse
@@ -484,6 +691,7 @@ impl Ui {
         origin: [f32; 2],
         scale: f32,
         resolve: &mut dyn FnMut(&str) -> Option<TexId>,
+        resolve_shader: UiShaderResolve,
         instances: &mut Vec<UiInstance>,
         batches: &mut Vec<UiBatch>,
     ) {
@@ -504,12 +712,15 @@ impl Ui {
         let push = |instances: &mut Vec<UiInstance>,
                         batches: &mut Vec<UiBatch>,
                         tex: UiTex,
+                        shader: Option<(UiShaderId, UiBindingId)>,
                         inst: UiInstance| {
             let i = instances.len() as u32;
             instances.push(inst);
             match batches.last_mut() {
-                Some(b) if b.tex == tex && b.range.end == i => b.range.end = i + 1,
-                _ => batches.push(UiBatch { tex, range: i..i + 1 }),
+                Some(b) if b.tex == tex && b.shader == shader && b.range.end == i => {
+                    b.range.end = i + 1
+                }
+                _ => batches.push(UiBatch { tex, shader, range: i..i + 1 }),
             }
         };
         for q in &list.quads {
@@ -521,11 +732,15 @@ impl Ui {
                     None => UiTex::White, // missing texture: tinted solid
                 }
             };
+            // A custom-shader face: unresolved (missing/broken .flsl) falls
+            // back to a plain quad, so the element still shows SOMETHING.
+            let shader = q.shader.as_ref().and_then(|(p, owner)| resolve_shader(p, *owner));
             let (clip, clip_r) = clip_px(&q.clip);
             push(
                 instances,
                 batches,
                 tex,
+                shader,
                 UiInstance {
                     rect: [
                         origin[0] + q.rect[0] * scale,
@@ -597,6 +812,7 @@ impl Ui {
                         instances,
                         batches,
                         UiTex::Atlas,
+                        None,
                         UiInstance {
                             rect: [
                                 pen_x + g.offset[0],
@@ -644,7 +860,7 @@ impl Ui {
             return;
         }
         let g = UiGlobals {
-            viewport: [viewport[0], viewport[1], 0.0, 0.0],
+            viewport: [viewport[0], viewport[1], 0.0, self.time],
             plane_origin: [0.0; 4],
             plane_right: [0.0; 4],
             plane_down: [0.0; 4],
@@ -674,9 +890,27 @@ impl Ui {
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            let mut on_custom = false;
             for b in batches {
                 if b.range.is_empty() {
                     continue;
+                }
+                // Custom-shader batches swap the whole pipeline; groups 0/1
+                // stay layout-compatible so only the pipeline + group(2)
+                // binding change.
+                match b.shader.and_then(|(s, p)| self.shaders.get(s.0 as usize).map(|sh| (sh, p))) {
+                    Some((sh, pid)) => {
+                        rp.set_pipeline(&sh.pipeline);
+                        if let Some(pb) = self.shader_binds.get(pid.0 as usize) {
+                            rp.set_bind_group(2, &pb.bind, &[]);
+                        }
+                        on_custom = true;
+                    }
+                    None if on_custom => {
+                        rp.set_pipeline(&self.pipeline);
+                        on_custom = false;
+                    }
+                    None => {}
                 }
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,
@@ -708,7 +942,7 @@ impl Ui {
             return;
         }
         let g = UiGlobals {
-            viewport: [1.0, 1.0, 1.0, 0.0],
+            viewport: [1.0, 1.0, 1.0, self.time],
             plane_origin: [plane.origin[0], plane.origin[1], plane.origin[2], 0.0],
             plane_right: [plane.right[0], plane.right[1], plane.right[2], 0.0],
             plane_down: [plane.down[0], plane.down[1], plane.down[2], 0.0],
@@ -746,9 +980,24 @@ impl Ui {
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
+            let mut on_custom = false;
             for b in batches {
                 if b.range.is_empty() {
                     continue;
+                }
+                match b.shader.and_then(|(s, p)| self.shaders.get(s.0 as usize).map(|sh| (sh, p))) {
+                    Some((sh, pid)) => {
+                        rp.set_pipeline(&sh.pipeline_world);
+                        if let Some(pb) = self.shader_binds.get(pid.0 as usize) {
+                            rp.set_bind_group(2, &pb.bind, &[]);
+                        }
+                        on_custom = true;
+                    }
+                    None if on_custom => {
+                        rp.set_pipeline(&self.pipeline_world);
+                        on_custom = false;
+                    }
+                    None => {}
                 }
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,

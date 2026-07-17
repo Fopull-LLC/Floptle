@@ -266,7 +266,7 @@ impl ShaderGraphPreview {
         }
         gpu.queue.write_buffer(&bufs.pv, 0, &f32_bytes(&pv));
         // P: knob defaults + neutral tiling (fragment + sky stages both read it).
-        if matches!(compiled.stage, Stage::Fragment | Stage::Sky) {
+        if matches!(compiled.stage, Stage::Fragment | Stage::Sky | Stage::Ui) {
             let mut p = [0f32; 128];
             for (i, u) in compiled.uniforms.iter().enumerate().take(16) {
                 p[i * 4..i * 4 + 4].copy_from_slice(&u.default);
@@ -422,7 +422,7 @@ impl ShaderGraphPreview {
         };
         let layouts: Vec<wgpu::BindGroupLayout> = match compiled.stage {
             // Sky previews through the Fragment tile path (see preview.rs).
-            Stage::Fragment | Stage::Sky => {
+            Stage::Fragment | Stage::Sky | Stage::Ui => {
                 let mut g2 = vec![ubo(0)];
                 for i in 0..compiled.textures.len() as u32 {
                     g2.push(texture(1 + 2 * i));
@@ -490,7 +490,7 @@ impl ShaderGraphPreview {
         }
         let mut binds = Vec::new();
         match compiled.stage {
-            Stage::Fragment | Stage::Sky => {
+            Stage::Fragment | Stage::Sky | Stage::Ui => {
                 binds.push(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("pv-b0"),
                     layout: &pipeline.get_bind_group_layout(0),

@@ -271,6 +271,9 @@ impl Editor {
         self.flsl_cache.clear();
         self.flsl_binds.clear();
         self.flsl_free.clear();
+        self.ui_flsl_cache.clear();
+        self.ui_flsl_binds.clear();
+        self.ui_flsl_free.clear();
         self.sdf_cache.clear();
         self.flsl_field_key.clear();
         // The passes persist across projects — un-splice any Field Shape code.
@@ -609,4 +612,190 @@ fn tiling_pack(t: &floptle_core::Tiling) -> floptle_shader::TilingPack {
 /// Editor-side registry fields, bundled for `Editor` (see main.rs).
 pub(crate) type FlslCache = HashMap<String, FlslEntry>;
 pub(crate) type FlslBinds = HashMap<Entity, FlslMatBind>;
+
+/// One `stage ui` `.flsl` file's compile state, keyed by element shader path.
+pub(crate) struct UiFlslEntry {
+    mtime: Option<SystemTime>,
+    /// The last GOOD compile — kept while `error` reports a newer failure.
+    pub(crate) compiled: Option<(floptle_shader::CompiledUi, floptle_render::UiShaderId)>,
+    pub(crate) error: Option<String>,
+}
+
+/// One element's live UI-shader params binding + what built it.
+pub(crate) struct UiFlslBind {
+    pub(crate) binding: floptle_render::UiBindingId,
+    shader: floptle_render::UiShaderId,
+    params: Vec<u8>,
+}
+
+pub(crate) type UiFlslCache = HashMap<String, UiFlslEntry>;
+/// Keyed by entity INDEX — the id the UI draw list carries per quad.
+pub(crate) type UiFlslBinds = HashMap<u32, UiFlslBind>;
+
+impl Editor {
+    /// Per-frame driver for `stage ui` element shaders: hot-reload every
+    /// `.flsl` a UI element references, then keep one params UBO per element
+    /// (uniform writes when knobs move, zero GPU work when nothing changed).
+    pub(crate) fn ensure_ui_shaders(&mut self) {
+        if self.gpu.is_none() || self.ui_render.is_none() {
+            return;
+        }
+        let elems: Vec<(Entity, String, std::collections::BTreeMap<String, [f32; 4]>)> = self
+            .world
+            .query::<floptle_ui::ElementSpec>()
+            .filter(|(_, s)| !s.shader.is_empty())
+            .map(|(e, s)| (e, s.shader.clone(), s.shader_params.clone()))
+            .collect();
+
+        let mut paths: Vec<String> = elems.iter().map(|(_, p, _)| p.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        for p in &paths {
+            self.ensure_ui_shader(p);
+        }
+
+        let mut seen: HashSet<u32> = HashSet::new();
+        for (e, path, overrides) in &elems {
+            let Some((compiled, shader)) =
+                self.ui_flsl_cache.get(path).and_then(|en| en.compiled.as_ref())
+            else {
+                continue; // never compiled — the element draws its fallback quad
+            };
+            let params = compiled.pack_params(&|name| overrides.get(name).copied());
+            let (shader, eid) = (*shader, e.index());
+            seen.insert(eid);
+            let (Some(gpu), Some(uir)) = (self.gpu.as_ref(), self.ui_render.as_mut()) else {
+                return;
+            };
+            match self.ui_flsl_binds.get_mut(&eid) {
+                Some(b) if b.shader == shader => {
+                    if b.params != params {
+                        uir.write_ui_shader_params(gpu, b.binding, &params);
+                        b.params = params;
+                    }
+                }
+                Some(b) => {
+                    b.binding = uir.set_ui_shader_binding(gpu, &params, Some(b.binding));
+                    b.shader = shader;
+                    b.params = params;
+                }
+                None => {
+                    let reuse = self.ui_flsl_free.pop();
+                    let binding = uir.set_ui_shader_binding(gpu, &params, reuse);
+                    self.ui_flsl_binds.insert(eid, UiFlslBind { binding, shader, params });
+                }
+            }
+        }
+
+        let stale: Vec<u32> =
+            self.ui_flsl_binds.keys().copied().filter(|e| !seen.contains(e)).collect();
+        for e in stale {
+            if let Some(b) = self.ui_flsl_binds.remove(&e) {
+                self.ui_flsl_free.push(b.binding);
+            }
+        }
+    }
+
+    /// Compile (or hot-reload) one `stage ui` `.flsl`. Keeps the last good
+    /// pipeline on failure; Console-reports each new error once.
+    fn ensure_ui_shader(&mut self, rel: &str) {
+        let full = self.resolve_asset_path(rel);
+        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        if let Some(entry) = self.ui_flsl_cache.get(rel)
+            && entry.mtime == mtime
+        {
+            return;
+        }
+        let report = |editor: &mut Editor, msg: String| {
+            let changed =
+                editor.ui_flsl_cache.get(rel).is_none_or(|e| e.error.as_deref() != Some(&msg));
+            if changed {
+                editor.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("◈ {rel}: {msg}"),
+                    None,
+                );
+            }
+            msg
+        };
+        let src = match std::fs::read_to_string(&full) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = report(self, format!("can't read shader ({e})"));
+                let old = self.ui_flsl_cache.remove(rel);
+                self.ui_flsl_cache.insert(
+                    rel.to_string(),
+                    UiFlslEntry { mtime, compiled: old.and_then(|o| o.compiled), error: Some(msg) },
+                );
+                return;
+            }
+        };
+        let outcome = floptle_shader::compile_ui(&src).and_then(|compiled| {
+            // naga against the REAL ui pass source (+ the field shim the
+            // shared stdlib support needs) — passing here means the pipeline
+            // build below can't fail on the shader.
+            let prelude = format!(
+                "{}\n{}",
+                floptle_render::Ui::ui_prelude(),
+                floptle_shader::transpile::UI_FIELD_SHIM
+            );
+            floptle_shader::validate(&prelude, &compiled.chunk).map_err(|d| {
+                match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
+                    Some(span) => {
+                        let (l, c) = floptle_shader::text::line_col(&src, span.start);
+                        format!("{l}:{c}: {}", d.message)
+                    }
+                    None => d.message,
+                }
+            })?;
+            Ok(compiled)
+        });
+        match outcome {
+            Ok(compiled) => {
+                let replace =
+                    self.ui_flsl_cache.get(rel).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id);
+                let chunk_full = format!(
+                    "{}\n{}\n{}",
+                    floptle_shader::transpile::UI_FIELD_SHIM,
+                    floptle_shader::stdlib::SUPPORT_WGSL,
+                    compiled.chunk
+                );
+                let (Some(gpu), Some(uir)) = (self.gpu.as_ref(), self.ui_render.as_mut()) else {
+                    return;
+                };
+                let id = uir.register_ui_shader(gpu, &chunk_full, replace);
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("◈ compiled {rel} (ui)"),
+                    None,
+                );
+                // Param layout may have changed shape: retire live bindings of
+                // this shader so the next ensure pass rebuilds them.
+                let stale: Vec<u32> = self
+                    .ui_flsl_binds
+                    .iter()
+                    .filter(|(_, b)| b.shader == id)
+                    .map(|(e, _)| *e)
+                    .collect();
+                for e in stale {
+                    if let Some(b) = self.ui_flsl_binds.remove(&e) {
+                        self.ui_flsl_free.push(b.binding);
+                    }
+                }
+                self.ui_flsl_cache.insert(
+                    rel.to_string(),
+                    UiFlslEntry { mtime, compiled: Some((compiled, id)), error: None },
+                );
+            }
+            Err(msg) => {
+                let msg = report(self, msg);
+                let old = self.ui_flsl_cache.remove(rel);
+                self.ui_flsl_cache.insert(
+                    rel.to_string(),
+                    UiFlslEntry { mtime, compiled: old.and_then(|o| o.compiled), error: Some(msg) },
+                );
+            }
+        }
+    }
+}
 pub(crate) type SdfCache = HashMap<String, SdfEntry>;

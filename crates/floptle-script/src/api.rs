@@ -1408,6 +1408,36 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 Ok(t)
             })?,
         )?;
+
+        // node:setShaderParam(name, x, y?, z?, w?) — drive a `.flsl` uniform
+        // from a script every tick (a uniform write on the GPU, never a
+        // recompile). Works on a mesh Material's shader AND on a UI element's
+        // `stage ui` shader — instruments like the navball live on this.
+        {
+            let sets = shared.shader_param_sets.clone();
+            methods.set(
+                "setShaderParam",
+                lua.create_function(
+                    move |_,
+                          (this, name, x, y, z, w): (
+                        Table,
+                        String,
+                        f32,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                    )| {
+                        let e: u32 = this.raw_get("__id")?;
+                        sets.borrow_mut().push((
+                            e,
+                            name,
+                            [x, y.unwrap_or(0.0), z.unwrap_or(0.0), w.unwrap_or(0.0)],
+                        ));
+                        Ok(())
+                    },
+                )?,
+            )?;
+        }
     }
 
     lua.set_named_registry_value("floptle_node_methods", methods)?;

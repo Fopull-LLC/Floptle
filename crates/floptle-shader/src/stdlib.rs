@@ -64,10 +64,10 @@ const fn opt(name: &'static str, ty: SigTy, default: f64) -> SigInput {
 
 const BOTH: &[Stage] = &[Stage::Fragment, Stage::Sdf];
 const FRAG: &[Stage] = &[Stage::Fragment];
-// Pure math/noise/color: valid in ANY stage, including a Sky shader.
-const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky];
-// Fragment + Sky (surface-or-sky color helpers; no field position needed).
-const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky];
+// Pure math/noise/color: valid in ANY stage, including Sky and Ui shaders.
+const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky, Stage::Ui];
+// Fragment + Sky + Ui (color helpers; no field position needed).
+const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky, Stage::Ui];
 
 const F: SigTy = SigTy::Exact(Ty::Float);
 const V2: SigTy = SigTy::Exact(Ty::Vec2);

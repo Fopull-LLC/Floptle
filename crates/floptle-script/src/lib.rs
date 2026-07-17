@@ -40,6 +40,9 @@ use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material};
 use mlua::{Lua, RegistryKey, Table};
 
+/// Queued `node:setShaderParam(...)` writes: (entity index, uniform name, vec4 lanes).
+type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
+
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
@@ -163,6 +166,10 @@ pub struct ScriptHost {
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// `node:setShaderParam(name, x, y, z, w)` writes — (entity index, uniform
+    /// name, vec4 lanes), drained by the editor into the node's Material or UI
+    /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
+    shader_param_sets: ShaderParamSets,
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
@@ -480,6 +487,8 @@ struct Shared {
     /// the driver TELEPORTS the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// `node:setShaderParam(...)` writes, drained by the editor per frame.
+    shader_param_sets: ShaderParamSets,
     /// (entity index, script kind) → that instance's live Lua environment table, so a
     /// script handle can read its state, call its methods, and read its params.
     envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
@@ -1669,6 +1678,55 @@ mod tests {
         let tr = world.get::<Transform>(e).unwrap();
         assert_eq!((tr.translation.y, tr.translation.z), (1.0, 7.0));
         assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.25);
+    }
+
+    /// `node:setShaderParam` lands in the UI element's `shader_params` when it
+    /// carries a `stage ui` shader, and in the Material's otherwise — the
+    /// bridge instruments (navball) drive their uniforms through.
+    #[test]
+    fn set_shader_param_reaches_element_and_material() {
+        let dir = std::env::temp_dir().join("floptle_script_test_shader_param");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "inst",
+            concat!(
+                "function update(node, dt)\n",
+                "  node:setShaderParam(\"nose\", 0.1, 0.9, 0.2)\n",
+                "  local m = find(\"Meshy\")\n",
+                "  m:setShaderParam(\"glow\", 2.5)\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let ball = world.spawn();
+        world.insert(ball, Transform::IDENTITY);
+        world.insert(ball, floptle_core::Name("Ball".into()));
+        world.insert(
+            ball,
+            floptle_ui::ElementSpec { shader: "shaders/navball.flsl".into(), ..Default::default() },
+        );
+        world.insert(
+            ball,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "inst".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let meshy = world.spawn();
+        world.insert(meshy, Transform::IDENTITY);
+        world.insert(meshy, floptle_core::Name("Meshy".into()));
+        world.insert(meshy, Material { shader: Some("shaders/x.flsl".into()), ..Default::default() });
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let spec = world.get::<floptle_ui::ElementSpec>(ball).unwrap();
+        assert_eq!(spec.shader_params.get("nose"), Some(&[0.1, 0.9, 0.2, 0.0]));
+        let mat = world.get::<Material>(meshy).unwrap();
+        assert_eq!(mat.shader_params.get("glow"), Some(&[2.5, 0.0, 0.0, 0.0]));
     }
 
     #[test]

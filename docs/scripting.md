@@ -474,6 +474,26 @@ Handles are `nil` when the node lacks the component — a node without an Elemen
 has no `"UiElement"`, only slider tracks have `"UiSlider"`, only layers have
 `"UiLayer"`.
 
+### Shader-drawn elements (`stage ui` .flsl) & `setShaderParam`
+
+A UI element can carry a **custom shader face**: set its `shader` to a
+`stage ui` `.flsl` file and the element's rect is drawn by that shader —
+procedural instruments (the solar demo's navball, gauges, radar sweeps) with
+no textures involved. Inside the shader you get `uv` (0..1 across the rect),
+`instanceColor` (the element's tint × opacity) and `time`; `output color`'s
+alpha shapes the element.
+
+Scripts drive the shader's `uniform`s per tick — on UI elements AND on mesh
+Materials with a shader — via:
+
+```lua
+navball:setShaderParam("nose", x, y, z)   -- vec3 (unset lanes are 0)
+crystal:setShaderParam("glow", 2.5)       -- float
+```
+
+Each call is a GPU uniform write, never a recompile — per-tick driving is the
+intended use.
+
 ### Buttons & pointer hooks
 
 Turn on **button (clickable)** on any element (or Add ⏵ UI ⏵ Button) and its

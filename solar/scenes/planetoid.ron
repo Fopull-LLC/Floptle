@@ -19,9 +19,6 @@
     ),
     nodes: [
         (
-            // Radius-300 planet BAKED at world scale (node scale 1 — the field
-            // carries the size now). Surface gravity = µ/r² ≈ 9.8; low orbit
-            // ≈ 53 u/s, escape ≈ 76 — spaceflight takes real technique.
             name: "Planetoid",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -45,7 +42,6 @@
             )),
         ),
         (
-            // The moon: real cratered terrain, g ≈ 3 at its surface, SOI ≈ 148.
             name: "Pebble",
             transform: (
                 translation: (1200.0, 0.0, 0.0),
@@ -216,10 +212,6 @@
             scripts: [],
         ),
         (
-            // The ship. Hull = sphere r 2.0 MATCHING the visual's half-extent
-            // (the old 2.4 sphere floated the mesh 0.4 into/over the ground —
-            // the "grinding"). The parking brake in the script pins it when
-            // landed; the celestial µ/r² field is the ONLY gravity it needs.
             name: "Ship",
             transform: (
                 translation: (20.0, 324.0, 0.0),
@@ -243,11 +235,6 @@
                 height: 4.0,
                 half_extents: (0.5, 0.5, 0.5),
                 restitution: 0.0,
-                // NEAR-ZERO friction: contact friction eats TANGENTIAL velocity,
-                // and against a slope/dip wall "up" IS tangential — high friction
-                // literally pinned the ship to hillsides under full throttle
-                // ("can't take off unless I mess with the rotation"). Rest is the
-                // parking brake's job, not friction's.
                 friction: 0.05,
                 gravity: true,
                 lock_pos: (false, false, false),
@@ -255,15 +242,10 @@
             )),
         ),
         (
-            // Engine plume: a looping fire effect + a throttle-driven light,
-            // parented under the tail, +Y flipped to point out the nozzle.
-            // ship_controller plays/stops it and scales the light with throttle.
             name: "Ship Flame",
             transform: (
                 translation: (0.0, -1.0, 0.0),
                 rotation: (1.0, 0.0, 0.0, 0.0),
-                // Cancels the ship's non-uniform (1.6, 2.4, 1.6) so the plume
-                // cone isn't squashed by inherited scale.
                 scale: (0.625, 0.41667, 0.625),
             ),
             matter: PointLight(
@@ -272,11 +254,11 @@
                 range: 16.0,
             ),
             scripts: [],
-            parent: Some(8),
             particles: Some((
                 asset: "vfx/Flame",
                 play_on_start: false,
             )),
+            parent: Some(8),
         ),
         (
             name: "Ship HUD",
@@ -322,6 +304,41 @@
                 visible: false,
                 opacity: 0.95,
             )),
+        ),
+        (
+            name: "Navball",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(10),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (0.0, -12.0),
+                ),
+                size: (Fixed(170.0), Fixed(170.0)),
+                shader: "shaders/navball.flsl",
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
+            name: "Gravity",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: GravityVolume(
+                radial: false,
+                strength: 0.0,
+                radius: 20.0,
+            ),
+            scripts: [],
         ),
     ],
 )

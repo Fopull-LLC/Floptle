@@ -87,7 +87,7 @@ fn render_atlas(gpu: &Gpu, irr: &ir::ShaderIr, compiled: &CompiledPreview, out: 
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: None, entries })
     };
     let layouts = match compiled.stage {
-        Stage::Fragment | Stage::Sky => {
+        Stage::Fragment | Stage::Sky | Stage::Ui => {
             let mut g2 = vec![ubo(0)];
             for i in 0..compiled.textures.len() as u32 {
                 g2.push(texture(1 + 2 * i));
@@ -220,7 +220,7 @@ fn render_atlas(gpu: &Gpu, irr: &ir::ShaderIr, compiled: &CompiledPreview, out: 
     }
     let mut binds = Vec::new();
     match compiled.stage {
-        Stage::Fragment | Stage::Sky => {
+        Stage::Fragment | Stage::Sky | Stage::Ui => {
             binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &pipeline.get_bind_group_layout(0),

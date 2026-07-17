@@ -2590,6 +2590,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.name", insert: "node.name", doc: "The node's name (string)." },
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
+    ApiEntry { label: "node:setShaderParam", insert: "node:setShaderParam(", doc: "node:setShaderParam(\"glow\", 2.5) / node:setShaderParam(\"nose\", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, or its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick). Unset lanes are 0." },
     ApiEntry { label: "node:getparent", insert: "node:getparent()", doc: "The parent node handle, or nil (same as node.parent)." },
     ApiEntry { label: "node:children", insert: "node:children()", doc: "An array of this node's child handles." },
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },

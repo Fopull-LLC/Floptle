@@ -27,7 +27,7 @@ pub use ir::{Blend, IrError, ShaderIr, Stage, Ty, Uniform};
 pub use text::{parse, print, ParseError};
 pub use transpile::{
     transpile_fragment, transpile_sdf, transpile_sky, validate, validate_module, CompiledFragment,
-    CompiledSdf, CompiledSky, TilingPack, TranspileError, WgslDiag,
+    CompiledSdf, CompiledSky, CompiledUi, TilingPack, TranspileError, WgslDiag,
 };
 
 /// File extension for the textual shader format ("FLoptle Shading Language").
@@ -56,7 +56,36 @@ pub fn compile_fragment(src: &str) -> Result<CompiledFragment, String> {
     if ir.stage == Some(Stage::Sky) {
         return Err("this is a sky shader — assign it to the Skybox, not a mesh material".into());
     }
+    if ir.stage == Some(Stage::Ui) {
+        return Err("this is a ui shader — assign it to a UI element, not a mesh material".into());
+    }
     transpile::transpile_fragment(&ir, &ck).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })
+}
+
+/// Parse + type-check + transpile a Ui-stage `.flsl`, for a game-UI element's
+/// custom face. Human-readable `line:col`-prefixed errors; a non-ui shader is
+/// rejected with a hint.
+pub fn compile_ui(src: &str) -> Result<transpile::CompiledUi, String> {
+    let ir = text::parse(src).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })?;
+    let ck = ir::check(&ir).map_err(|errs| {
+        errs.iter()
+            .map(|e| {
+                let (l, c) = text::line_col(src, e.span.start);
+                format!("{l}:{c}: {}", e.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    if ir.stage != Some(Stage::Ui) {
+        return Err("not a ui shader — add `stage ui` and `output color = …`".into());
+    }
+    transpile::transpile_ui(&ir, &ck).map_err(|e| {
         let (l, c) = text::line_col(src, e.span.start);
         format!("{l}:{c}: {}", e.message)
     })
@@ -168,6 +197,40 @@ shader plasma {
 }
 //@layout { warped: (120, 80), n: (320, 80), hue: (520, 96) }
 "#;
+
+    /// A Ui-stage shader compiles, its chunk validates against the UI pass's
+    /// seam contract, params pack in slot order, and round-trips through print.
+    #[test]
+    fn ui_stage_compiles_and_validates() {
+        const GAUGE: &str = r#"
+shader gauge {
+  stage ui
+  uniform fill: float = 0.5 range(0, 1)
+  uniform hot: color = #FF7A2E
+
+  let p = uv * 2 - 1
+  let ring = smoothstep(0.95, 0.9, length(p)) * smoothstep(0.6, 0.65, length(p))
+  let lit = step(1 - uv.y, fill)
+  output color = vec4(hot.rgb * lit + vec3(0.15, 0.16, 0.2) * (1 - lit), ring) * instanceColor
+}
+"#;
+        let compiled = compile_ui(GAUGE).expect("compiles");
+        assert_eq!(compiled.uniforms.len(), 2);
+        let prelude = format!("{}{}", transpile::UI_TEST_PRELUDE, transpile::UI_FIELD_SHIM);
+        transpile::validate(&prelude, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {} in:\n{}", e.message, compiled.chunk));
+        let bytes = compiled.pack_params(&|name| (name == "fill").then_some([0.8, 0.0, 0.0, 0.0]));
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 0.8);
+        // Defaults fill unset slots (the color's red lane).
+        assert!(f32::from_le_bytes(bytes[16..20].try_into().unwrap()) > 0.9);
+        // A ui shader is rejected where a mesh material is expected, with a hint.
+        assert!(compile_fragment(GAUGE).unwrap_err().contains("ui shader"));
+        // And it round-trips through the printer keeping its stage.
+        let ir = parse(GAUGE).expect("parses");
+        let printed = print(&ir);
+        assert_eq!(parse(&printed).unwrap().stage, Some(Stage::Ui));
+    }
 
     #[test]
     fn parses_the_plasma_example() {

@@ -227,6 +227,9 @@ pub(crate) enum EmitCtx {
     /// for the ray direction, and uniforms read the preview's `P` param block
     /// (`sky_uniforms` doesn't exist there).
     SkyPreview,
+    /// UI-element shaders: the UI pass's `VsOut` (uv across the element rect,
+    /// its tint) + a group(2) param block; time rides `globals.viewport.w`.
+    Ui,
 }
 
 /// The preview transpiler's live-scalar registry: every literal number (and
@@ -332,6 +335,20 @@ impl<'a> Writer<'a> {
                 }
                 (EmitCtx::Fragment, Input::WorldPos) => "in.view_pos".into(),
                 (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
+                // The UI pass has no field globals `G`; time rides its own
+                // globals' spare lane (see UiGlobals in floptle-render/ui.rs).
+                (EmitCtx::Ui, Input::Time) => "globals.viewport.w".into(),
+                (EmitCtx::Ui, Input::Uv) => "flsl_uv(in)".into(),
+                (EmitCtx::Ui, Input::InstanceColor) => "in.color".into(),
+                (EmitCtx::Ui, _) => {
+                    return Err(TranspileError::new(
+                        format!(
+                            "`{}` is not available in ui shaders (use `uv`, `instanceColor`, `time`)",
+                            i.name()
+                        ),
+                        e.span,
+                    ));
+                }
                 (_, Input::Time) => "G.params.x".into(),
                 (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
                 // Sky shaders read the ray DIRECTION (`dir`, the fn's parameter).
@@ -366,7 +383,10 @@ impl<'a> Writer<'a> {
                 };
                 match self.ctx {
                     // Previews bind knobs at `P` for sky too (no globals array there).
-                    EmitCtx::Fragment | EmitCtx::SkyPreview => format!("P.u{u}{access}"),
+                    // Ui shaders bind their own `P` param block at group(2).
+                    EmitCtx::Fragment | EmitCtx::SkyPreview | EmitCtx::Ui => {
+                        format!("P.u{u}{access}")
+                    }
                     EmitCtx::Sdf { slot } => {
                         format!("G.shape_uniforms[{}u]{access}", slot * 16 + u)
                     }
@@ -701,6 +721,118 @@ pub fn transpile_sky(ir: &ShaderIr, ck: &Checked) -> Result<CompiledSky, Transpi
     Ok(CompiledSky { name: ir.name.clone(), uniforms: ir.uniforms.clone(), sky_fn: w.out })
 }
 
+/// A compiled Ui-stage shader: a `fs_flsl_ui` entry point over the UI pass's
+/// `VsOut` + a group(2) params UBO. Concatenate as `ui.wgsl + SUPPORT + chunk`.
+#[derive(Clone, Debug)]
+pub struct CompiledUi {
+    pub name: String,
+    pub chunk: String,
+    /// Exposed uniforms in param-block slot order (one vec4 each).
+    pub uniforms: Vec<ir::Uniform>,
+    /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
+    pub line_map: Vec<(u32, Span)>,
+}
+
+impl CompiledUi {
+    /// Size in bytes of the group(2) params UBO (never zero).
+    pub fn param_block_size(&self) -> u64 {
+        (self.uniforms.len().max(1) * 16) as u64
+    }
+
+    /// Pack uniform values (overrides where given, defaults otherwise).
+    pub fn pack_params(&self, overrides: &dyn Fn(&str) -> Option<[f32; 4]>) -> Vec<u8> {
+        let mut out = vec![0u8; self.param_block_size() as usize];
+        for (i, u) in self.uniforms.iter().enumerate() {
+            let v = overrides(&u.name).unwrap_or(u.default);
+            for (l, val) in v.iter().enumerate() {
+                out[i * 16 + l * 4..i * 16 + l * 4 + 4].copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Map a 0-based chunk line to a `.flsl` span (naga errors).
+    pub fn flsl_span_of_chunk_line(&self, line: u32) -> Option<Span> {
+        self.line_map.iter().rev().find(|(l, _)| *l <= line).map(|(_, s)| *s)
+    }
+}
+
+/// Transpile a checked Ui-stage shader into its WGSL chunk.
+pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, TranspileError> {
+    if ir.stage != Some(Stage::Ui) {
+        return Err(TranspileError::new("not a ui shader", Span::default()));
+    }
+    if !ir.textures.is_empty() {
+        return Err(TranspileError::new(
+            "ui shaders can't declare texture slots yet (procedural only)",
+            Span::default(),
+        ));
+    }
+    if ir.uniforms.len() > MAX_UNIFORMS {
+        return Err(TranspileError::new(
+            format!("a shader can expose at most {MAX_UNIFORMS} uniforms"),
+            Span::default(),
+        ));
+    }
+
+    let mut w = Writer::new(ir, ck, EmitCtx::Ui);
+    w.line(format!("// generated from shader `{}` — edit the .flsl, not this", ir.name), None);
+    w.line("struct FlslUiParams {".into(), None);
+    if ir.uniforms.is_empty() {
+        w.line("    _pad: vec4<f32>,".into(), None);
+    }
+    for (i, u) in ir.uniforms.iter().enumerate() {
+        w.line(format!("    u{i}: vec4<f32>, // {}", u.name), None);
+    }
+    w.line("};".into(), None);
+    w.line("@group(2) @binding(0) var<uniform> P: FlslUiParams;".into(), None);
+    w.line(String::new(), None);
+    // `uv` spans 0..1 across the element's rect, derived from the rect geometry
+    // (the instance's uv_rect belongs to IMAGE atlas coords, not the shader).
+    w.line("fn flsl_uv(in: VsOut) -> vec2<f32> {".into(), None);
+    w.line("    return in.local / max(in.half_size, vec2<f32>(0.0001)) * 0.5 + vec2<f32>(0.5);".into(), None);
+    w.line("}".into(), None);
+
+    w.line("fn flsl_ui_surface(in: VsOut) -> vec4<f32> {".into(), None);
+    for (i, (name, root)) in ir.lets.iter().enumerate() {
+        let expr = w.emit(*root)?;
+        let ty = ck.ty(*root).wgsl();
+        w.line(format!("    let l{i}_{name}: {ty} = {expr};"), Some(ir.expr(*root).span));
+    }
+    let out = ir.outputs["color"];
+    let expr = w.emit(out)?;
+    let span = ir.expr(out).span;
+    match ck.ty(out) {
+        Ty::Vec4 => w.line(format!("    return {expr};"), Some(span)),
+        _ => w.line(format!("    return vec4<f32>({expr}, 1.0);"), Some(span)),
+    }
+    w.line("}".into(), None);
+    w.line(String::new(), None);
+
+    // Entry point: the authored color × the element's opacity, still honoring
+    // the layer's UI mask clip exactly like the built-in fs_main.
+    w.line("@fragment".into(), None);
+    w.line("fn fs_flsl_ui(in: VsOut) -> @location(0) vec4<f32> {".into(), None);
+    w.line("    var cmask = 1.0;".into(), None);
+    w.line("    if in.clip.z > 0.0 {".into(), None);
+    w.line("        let chalf = in.clip.zw * 0.5;".into(), None);
+    w.line("        let ccenter = in.clip.xy + chalf;".into(), None);
+    w.line("        let cr = min(in.params.w, min(chalf.x, chalf.y));".into(), None);
+    w.line("        let cd = sd_round_rect(in.px - ccenter, chalf, cr);".into(), None);
+    w.line("        cmask = clamp(0.5 - cd, 0.0, 1.0);".into(), None);
+    w.line("    }".into(), None);
+    w.line("    let c = flsl_ui_surface(in);".into(), None);
+    w.line("    return vec4<f32>(c.rgb, c.a * in.color.a * cmask);".into(), None);
+    w.line("}".into(), None);
+
+    Ok(CompiledUi {
+        name: ir.name.clone(),
+        chunk: w.out,
+        uniforms: ir.uniforms.clone(),
+        line_map: w.line_map,
+    })
+}
+
 /// A naga diagnostic mapped back toward the `.flsl` source.
 #[derive(Clone, Debug)]
 pub struct WgslDiag {
@@ -819,4 +951,47 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { re
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
+"#;
+
+/// A minimal stand-in for the UI pass module (floptle-render/ui.wgsl),
+/// declaring exactly what a generated Ui chunk may reference. Same seam
+/// contract as [`TEST_PRELUDE`]: if ui.wgsl reshapes Globals/VsOut, this
+/// must follow.
+pub const UI_TEST_PRELUDE: &str = r#"
+struct UiGlobals {
+    viewport: vec4<f32>,
+    plane_origin: vec4<f32>,
+    plane_right: vec4<f32>,
+    plane_down: vec4<f32>,
+    view_proj: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> globals: UiGlobals;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+    @location(1) border_color: vec4<f32>,
+    @location(2) params: vec4<f32>,
+    @location(3) uv: vec2<f32>,
+    @location(4) local: vec2<f32>,
+    @location(5) half_size: vec2<f32>,
+    @location(6) px: vec2<f32>,
+    @location(7) @interpolate(flat) clip: vec4<f32>,
+};
+fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 { return 0.0; }
+"#;
+
+/// Field-symbol stand-ins the UI module must append before the shared stdlib
+/// SUPPORT: the support's engine-hook wrapper reads `G.ao_params`/`sdf_ao`,
+/// which only exist in the raster/raymarch passes. In the UI pass the field
+/// is absent, so the hooks read as "off". The renderer concatenates
+/// `ui.wgsl + UI_FIELD_SHIM + SUPPORT + chunk`; tests do the same.
+pub const UI_FIELD_SHIM: &str = r#"
+struct UiFieldShim {
+    params: vec4<f32>,
+    ao_params: vec4<f32>,
+};
+var<private> G: UiFieldShim;
+fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 "#;
