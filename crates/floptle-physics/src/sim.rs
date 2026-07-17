@@ -102,6 +102,25 @@ pub struct TouchEvent {
     pub sensor: bool,
 }
 
+/// One terrain volume handed to the sim build: the node's world placement
+/// (anchor + rotation + uniform scale) around its node-local field, plus its
+/// collision identity (layer bit, entity index for touch events).
+pub struct TerrainVolume<'a> {
+    pub anchor: DVec3,
+    pub field: &'a ChunkField,
+    pub layer: u8,
+    pub eid: Option<u32>,
+    pub rot: Quat,
+    pub scale: f32,
+}
+
+impl<'a> TerrainVolume<'a> {
+    /// Placement-free volume (identity rotation, unit scale, Default layer).
+    pub fn new(anchor: DVec3, field: &'a ChunkField) -> Self {
+        Self { anchor, field, layer: 0, eid: None, rot: Quat::IDENTITY, scale: 1.0 }
+    }
+}
+
 /// One body's full dynamic state, in ABSOLUTE world coordinates (f64 position,
 /// floating-origin safe) — the serializable capture the netcode snapshots and
 /// prediction rollback restore. See `docs/netcode-design.md` §2/§6.
@@ -128,8 +147,8 @@ impl Sim {
         gravity: GravityField,
         origin: DVec3,
     ) -> Self {
-        let t: Vec<(DVec3, &ChunkField, u8, Option<u32>)> =
-            terrains.iter().map(|(a, t)| (*a, *t, 0, None)).collect();
+        let t: Vec<TerrainVolume> =
+            terrains.iter().map(|(a, t)| TerrainVolume::new(*a, t)).collect();
         Self::build_layered(ecs, &t, gravity, origin, floptle_core::Layers::default())
     }
 
@@ -141,7 +160,7 @@ impl Sim {
     /// resolve, and masked raycasts filter with the same bits.
     pub fn build_layered(
         ecs: &World,
-        terrains: &[(DVec3, &ChunkField, u8, Option<u32>)],
+        terrains: &[TerrainVolume],
         gravity: GravityField,
         origin: DVec3,
         layers: floptle_core::Layers,
@@ -149,12 +168,16 @@ impl Sim {
         let mut world = PhysicsWorld::new(gravity);
         world.origin = origin.round();
         world.matrix = layers.matrix;
-        for (anchor, t, layer, eid) in terrains {
+        for tv in terrains {
             world.add_collider_tagged(
-                *anchor,
-                Box::new(ChunkTerrain { field: (*t).clone() }),
-                *layer,
-                *eid,
+                tv.anchor,
+                Box::new(ChunkTerrain {
+                    field: tv.field.clone(),
+                    rot: tv.rot,
+                    scale: tv.scale,
+                }),
+                tv.layer,
+                tv.eid,
                 false,
             );
         }
@@ -1032,7 +1055,7 @@ mod runtime_body_tests {
         let e = ents[0];
         let mut sim = Sim::build_layered(
             &ecs,
-            &[(DVec3::ZERO, &field, 0, Some(e.index() + 100))],
+            &[TerrainVolume { eid: Some(e.index() + 100), ..TerrainVolume::new(DVec3::ZERO, &field) }],
             GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
             DVec3::ZERO,
             floptle_core::Layers::default(),
@@ -1067,6 +1090,64 @@ mod runtime_body_tests {
             "the body must FALL into the freshly dug hole (rested at y = {}, now y = {})",
             rest.pos.y,
             after.pos.y
+        );
+    }
+
+    /// A terrain node's rotation + uniform scale must apply to COLLISION: a slab
+    /// built at local y∈[-6,0], scaled 2× and pitched 30°, must catch a falling
+    /// body at the TRANSFORMED surface height — not at the untransformed one.
+    #[test]
+    fn terrain_rotation_and_scale_apply_to_collision() {
+        use floptle_field::ChunkField;
+        let mut field = ChunkField::new(0.75);
+        field.fill_slab(
+            Vec3::new(-20.0, -6.0, -20.0),
+            Vec3::new(20.0, 0.0, 20.0),
+            0.0,
+            [0.5; 3],
+        );
+        let rot = Quat::from_rotation_x(30f32.to_radians());
+        let scale = 2.0f32;
+        // Drop a body above x=0, z=4: the rotated+scaled surface under it sits at
+        // world y = (rot * (local_surface * s)).y for the local point the world
+        // vertical maps to — sample it through the same math the collider uses.
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 30.0, 4.0)));
+        ecs.insert(e, RigidBody { gravity: true, ..Default::default() });
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[TerrainVolume { rot, scale, ..TerrainVolume::new(DVec3::ZERO, &field) }],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        for _ in 0..600 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let rest = sim.body_snapshot(e.index()).unwrap();
+        // The unrotated, unscaled slab top is y = 0. Pitched 30° about X, the
+        // surface under z = 4 rises/falls by tan(30°)·z·…; just assert the body
+        // rests ABOVE the untransformed surface and ON the transformed one:
+        // distance-to-surface through the collider ≈ its capsule radius.
+        let d = {
+            let f = sim.terrain_field_mut(u32::MAX);
+            assert!(f.is_none(), "untagged volume must not resolve by eid");
+            let local = (rot.inverse()
+                * Vec3::new(rest.pos.x as f32, rest.pos.y as f32, rest.pos.z as f32))
+                / scale;
+            field.d(local) * scale
+        };
+        assert!(
+            d > 0.05 && d < 1.5,
+            "body must rest just off the TRANSFORMED surface (collider-frame d = {d}, \
+             pos = {:?})",
+            rest.pos
+        );
+        assert!(
+            rest.pos.y < 30.0 - 5.0,
+            "body must have fallen onto the slab, not floated (y = {})",
+            rest.pos.y
         );
     }
 

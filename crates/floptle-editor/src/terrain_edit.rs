@@ -264,9 +264,13 @@ impl Editor {
             let structural = full_rebuild || !self.terrain_render.contains_key(&e);
             let dirty = self.terrain_chunks_dirty.remove(&e);
             let render = self.terrain_render.entry(e).or_default();
-            let anchor = floptle_core::world_transform(&self.world, e).translation;
+            let wt = floptle_core::world_transform(&self.world, e);
+            let (anchor, rot, ts) =
+                (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6));
             let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
-            let cl = (cam_world - anchor).as_vec3() / chunk_units;
+            // Camera into the FIELD's local frame (rotation + uniform scale), so
+            // LOD rings follow the terrain wherever its node puts it.
+            let cl = (rot.inverse() * (cam_world - anchor).as_vec3()) / (chunk_units * ts);
             let cam_chunk =
                 [cl.x.floor() as i32, cl.y.floor() as i32, cl.z.floor() as i32];
             let dist_of = |c: [i32; 3]| {
@@ -410,8 +414,14 @@ pub(crate) fn push_terrain_instances(
         if render.slots.is_empty() {
             continue;
         }
-        let anchor = floptle_core::world_transform(world, e).translation;
-        let model = Mat4::from_translation((anchor - cam_world).as_vec3());
+        let wt = floptle_core::world_transform(world, e);
+        // The node's FULL placement: rotation + uniform scale finally apply to
+        // terrain (physics converts through the same frame — see ChunkTerrain).
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::splat(wt.scale.x.max(1e-6)),
+            wt.rotation.normalize(),
+            (wt.translation - cam_world).as_vec3(),
+        );
         for &(mid, _) in render.slots.values() {
             let mut mp = *base_mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
@@ -671,31 +681,36 @@ impl Editor {
         let rd = (far.truncate() / far.w - ro_rel).normalize();
         let rd_a = [rd.x, rd.y, rd.z];
 
-        // Each field is in its node's LOCAL space — raycast every terrain and brush
-        // the one whose surface the cursor ray hits NEAREST the camera.
+        // Each field is in its node's LOCAL frame (translation + rotation +
+        // uniform scale) — transform the cursor ray into each and brush the one
+        // whose surface it hits NEAREST the camera. `hit` stays LOCAL; world
+        // positions reconstruct through the same frame.
+        type BrushPick = (Entity, Vec3, (DVec3, Quat, f32), f64);
         let entities: Vec<Entity> = self.terrains.keys().copied().collect();
-        let mut best: Option<(Entity, Vec3, DVec3, f64)> = None;
+        let mut best: Option<BrushPick> = None;
         for e in entities {
-            let origin = self.terrain_world_origin(e);
-            let ro_local = cam.world_position + ro_rel.as_dvec3() - origin;
-            let ro = Vec3::new(ro_local.x as f32, ro_local.y as f32, ro_local.z as f32);
-            if let Some(hit) = self.terrains[&e].field.raycast(ro, Vec3::from(rd_a), 4096.0) {
-                let hitw = DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64) + origin;
+            let frame = self.terrain_world_frame_of(e);
+            let (origin, rot, ts) = frame;
+            let inv = rot.inverse();
+            let ro = (inv * (cam.world_position + ro_rel.as_dvec3() - origin).as_vec3()) / ts;
+            let rd_l = (inv * Vec3::from(rd_a)).normalize_or_zero();
+            if let Some(hit) = self.terrains[&e].field.raycast(ro, rd_l, 4096.0 / ts) {
+                let hitw = origin + (rot * (hit * ts)).as_dvec3();
                 let dist = (hitw - cam.world_position).length();
                 if best.as_ref().is_none_or(|b| dist < b.3) {
-                    best = Some((e, hit, origin, dist));
+                    best = Some((e, hit, frame, dist));
                 }
             }
         }
-        let Some((active, hit, origin, _)) = best else {
+        let Some((active, hit, (origin, trot, tscale), _)) = best else {
             return;
         };
         self.active_terrain = Some(active);
-        let n = self.terrains[&active].field.grad(hit);
+        let n = (trot * self.terrains[&active].field.grad(hit)).normalize_or_zero();
         let radius = self.terrain_brush.radius;
 
         // Telegraph: a ring of `radius` around the hit in the surface tangent plane.
-        let hitw = DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64) + origin;
+        let hitw = origin + (trot * (hit * tscale)).as_dvec3();
         let t1 = n.cross(if n.y.abs() > 0.9 { Vec3::X } else { Vec3::Y }).normalize_or_zero();
         let t2 = n.cross(t1);
         let mut ring = Vec::with_capacity(40);
@@ -739,6 +754,8 @@ impl Editor {
         };
         if due {
             let brush = self.terrain_brush;
+            // Brush radius is WORLD units; the field works in LOCAL units.
+            let r_local = brush.radius / tscale;
             let id = match self.world.get::<Matter>(active) {
                 Some(Matter::Terrain { id }) => *id,
                 _ => 0,
@@ -747,7 +764,7 @@ impl Editor {
             // Capture the pre-dab chunks into the stroke's undo record — lazily, only
             // the chunks this dab could touch that aren't already captured. The whole
             // stroke stays a single undo step of a few MB, not a whole-field snapshot.
-            let candidates = terrain.field.chunks_in_box(hit, brush.radius * 1.5);
+            let candidates = terrain.field.chunks_in_box(hit, r_local * 1.5);
             let snap = terrain.field.snapshot_chunks(&candidates);
             match &mut self.stroke_snapshot {
                 Some((sid, undo)) if *sid == id => undo.merge(snap),
@@ -759,12 +776,12 @@ impl Editor {
             let is_paint = matches!(brush.mode, floptle_field::Brush::Paint);
             let touched = match brush.mode {
                 floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
-                    terrain.field.paint_texture(hit, brush.radius, brush.tex_slot as u8 + 1)
+                    terrain.field.paint_texture(hit, r_local, brush.tex_slot as u8 + 1)
                 }
                 floptle_field::Brush::Paint => {
-                    terrain.field.paint(hit, brush.radius, brush.strength, brush.color, brush.profile)
+                    terrain.field.paint(hit, r_local, brush.strength, brush.color, brush.profile)
                 }
-                m => terrain.field.sculpt(m, hit, brush.radius, brush.strength, brush.profile),
+                m => terrain.field.sculpt(m, hit, r_local, brush.strength, brush.profile),
             };
             if !touched.is_empty() {
                 self.stroke_dabbed = true; // mark this stroke as worth an undo step
@@ -778,7 +795,7 @@ impl Editor {
                 if geom {
                     self.mirror_terrain_chunks_to_sim(active, &touched);
                 }
-                self.queue_terrain_dirty(active, hit, brush.radius, geom, touched);
+                self.queue_terrain_dirty(active, hit, r_local, geom, touched);
             }
         }
     }
@@ -801,30 +818,33 @@ impl Editor {
         use floptle_field::{Brush, BrushProfile};
         use floptle_script::TerrainOpMode as M;
         let pos = DVec3::new(op.pos[0], op.pos[1], op.pos[2]);
-        // Nearest terrain by |field distance| at the op position.
-        let mut best: Option<(Entity, Vec3, f32)> = None;
+        // Nearest terrain by |world distance| at the op position — each field is
+        // converted through its node's full frame (rotation + uniform scale), so
+        // ops land right on placed/tilted/scaled terrains too.
+        let mut best: Option<(Entity, Vec3, f32, f32)> = None;
         for &e in self.terrains.keys() {
-            let anchor = self.terrain_world_origin(e);
-            let local = (pos - anchor).as_vec3();
-            let d = self.terrains[&e].field.d(local).abs();
+            let (_, _, ts) = self.terrain_world_frame_of(e);
+            let local = self.terrain_world_to_local(e, pos);
+            let d = self.terrains[&e].field.d(local).abs() * ts;
             if best.as_ref().is_none_or(|b| d < b.2) {
-                best = Some((e, local, d));
+                best = Some((e, local, d, ts));
             }
         }
-        let Some((e, local, d)) = best else { return };
+        let Some((e, local, d, ts)) = best else { return };
         // Too far from every surface: a mis-aimed op must not edit a random field.
-        if d > op.radius + self.terrains[&e].field.band() * 2.0 {
+        if d > op.radius + self.terrains[&e].field.band() * 2.0 * ts {
             return;
         }
+        let r_local = op.radius / ts;
         let profile = BrushProfile::default();
         let t = self.terrains.get_mut(&e).unwrap();
         let touched = match op.mode {
-            M::Raise => t.field.sculpt(Brush::Raise, local, op.radius, op.strength, profile),
-            M::Lower => t.field.sculpt(Brush::Lower, local, op.radius, op.strength, profile),
-            M::Smooth => t.field.sculpt(Brush::Smooth, local, op.radius, op.strength, profile),
-            M::Flatten => t.field.sculpt(Brush::Flatten, local, op.radius, op.strength, profile),
-            M::Paint(c) => t.field.paint(local, op.radius, op.strength, c, profile),
-            M::PaintTexture(slot) => t.field.paint_texture(local, op.radius, slot),
+            M::Raise => t.field.sculpt(Brush::Raise, local, r_local, op.strength, profile),
+            M::Lower => t.field.sculpt(Brush::Lower, local, r_local, op.strength, profile),
+            M::Smooth => t.field.sculpt(Brush::Smooth, local, r_local, op.strength, profile),
+            M::Flatten => t.field.sculpt(Brush::Flatten, local, r_local, op.strength, profile),
+            M::Paint(c) => t.field.paint(local, r_local, op.strength, c, profile),
+            M::PaintTexture(slot) => t.field.paint_texture(local, r_local, slot),
         };
         if touched.is_empty() {
             return;
@@ -835,7 +855,7 @@ impl Editor {
         if geom {
             self.mirror_terrain_chunks_to_sim(e, &touched);
         }
-        self.queue_terrain_dirty(e, local, op.radius, geom, touched);
+        self.queue_terrain_dirty(e, local, r_local, geom, touched);
     }
 
     /// Make the play sim's collider copy of terrain `e` agree with the authority
@@ -1069,8 +1089,19 @@ impl Editor {
     }
 
     /// The world translation of a terrain node (places its field in world space).
-    pub(crate) fn terrain_world_origin(&self, e: Entity) -> DVec3 {
-        floptle_core::world_transform(&self.world, e).translation
+    /// A terrain node's world placement: translation + rotation + UNIFORM scale
+    /// (x drives — an SDF can't stretch per-axis without breaking the distance
+    /// metric). The one frame every terrain consumer (render, physics, brush,
+    /// script ops, LOD) converts through, so they can never disagree.
+    pub(crate) fn terrain_world_frame_of(&self, e: Entity) -> (DVec3, Quat, f32) {
+        let wt = floptle_core::world_transform(&self.world, e);
+        (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6))
+    }
+
+    /// World point → a terrain's field-local frame.
+    pub(crate) fn terrain_world_to_local(&self, e: Entity, p: DVec3) -> Vec3 {
+        let (anchor, rot, s) = self.terrain_world_frame_of(e);
+        (rot.inverse() * (p - anchor).as_vec3()) / s
     }
 
     /// Which terrain a whole-terrain op (Fill) targets: the selected terrain node, or
@@ -1111,7 +1142,25 @@ impl Editor {
             // A just-deleted terrain leaves a stale slot for one frame — leave it
             // absent (w = 0); the dirty flag re-uploads the set next frame.
             let Some(t) = terrains.get(&e) else { continue };
-            let anchor = floptle_core::world_transform(world, e).translation;
+            let wt = floptle_core::world_transform(world, e);
+            // The shadow/AO volume shader samples an AXIS-ALIGNED, unit-scale box:
+            // a rotated or scaled terrain would cast its UNROTATED shadow, which
+            // reads as broken. Skip its volume instead (meshes still render + AO
+            // via SSAO; revisit with per-volume rotation in the field shader).
+            let placed = wt.rotation.normalize().w.abs() < 0.99999
+                || (wt.scale.x - 1.0).abs() > 1e-3;
+            if placed {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!(
+                        "[terrain] a rotated/scaled terrain skips SDF sun-shadow/AO \
+                         casting (v1 limitation — rendering & collision are exact)"
+                    );
+                }
+                continue;
+            }
+            let anchor = wt.translation;
             let bc = t.shadow.center;
             let hf = t.shadow.half_extent;
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
