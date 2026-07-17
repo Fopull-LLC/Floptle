@@ -1,0 +1,24 @@
+(
+    retro: true,
+    retro_height: 240,
+    matter: true,
+    title: Some("Floptle Solar"),
+    entry_scene: Some("scenes/planetoid.ron"),
+    engine_version: Some("0.0.0"),
+    layers: [
+        "entity",
+        "level",
+    ],
+    mixer: (
+        master: (
+            name: "Master",
+            gain_db: 0.0,
+            pan: 0.0,
+            muted: false,
+            soloed: false,
+            effects: [],
+            output: None,
+        ),
+        tracks: [],
+    ),
+)
