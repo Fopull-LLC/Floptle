@@ -479,6 +479,8 @@ struct EditorTabViewer<'a> {
     /// density knob (Terrain 2.0: an honest units-per-voxel, not a cell count).
     terrain_voxel: &'a mut f32,
     terrain_textures: &'a mut Vec<String>,
+    /// Per-slot glow bitmask (bit i = slot i self-lit) — the Terrain tab's ✨ toggle.
+    terrain_glow: &'a mut u32,
     terrain_present: bool,
     /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
     terrain_stats: Option<(usize, usize, usize)>,
@@ -1475,6 +1477,10 @@ struct Editor {
     terrain_voxel: f32,
     /// Terrain texture palette — image paths per slot (empty = unused).
     terrain_textures: Vec<String>,
+    /// Bit i = palette slot i GLOWS (self-lit albedo, bypasses lighting + AO — how
+    /// magma veins and cave crystals stay visible underground). Persisted in the
+    /// `.palette` sidecar as a `|glow` suffix on the slot's line.
+    terrain_glow_mask: u32,
     /// The terrain palette needs re-uploading to the GPU.
     terrain_textures_dirty: bool,
     /// The skybox texture path currently uploaded to the GPU (`None` = solid/white), so

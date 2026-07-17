@@ -18,7 +18,7 @@ struct RasterGlobals {
     point_count: vec4<f32>,            // x = active point-light count
     point_pos: array<vec4<f32>, 16>,   // xyz camera-relative pos, w = range
     point_color: array<vec4<f32>, 16>, // rgb = color * intensity
-    terrain_mask: vec4<f32>,           // x = per-slot NEAREST bitmask, y = triplanar scale
+    terrain_mask: vec4<f32>,           // x = per-slot NEAREST bitmask, y = triplanar scale, z = per-slot GLOW bitmask
 };
 
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
@@ -199,7 +199,10 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 fn terrain_splat_albedo(in: VsOut) -> vec3<f32> {
     let tint = in.vcolor.rgb;
     let a = in.vcolor.a * 255.0; // 1-based slot; 0 = untextured
-    if (a < 0.5) {
+    // 255 is the legacy "no slot" sentinel (pre-slot generators and the default
+    // base_color wrote alpha 255) — it must read as untextured, or filling the
+    // palette makes every old voxel wear the LAST slot's texture.
+    if (a < 0.5 || a > 254.5) {
         return tint;
     }
     let lo = floor(a);
@@ -207,6 +210,24 @@ fn terrain_splat_albedo(in: VsOut) -> vec3<f32> {
     let c_lo = terrain_triplanar(i32(lo) - 1, in.lpos, in.lnorm) * tint * 1.6;
     let c_hi = terrain_triplanar(i32(ceil(a)) - 1, in.lpos, in.lnorm) * tint * 1.6;
     return mix(c_lo, c_hi, f);
+}
+
+// Per-slot GLOW weight: bit i of terrain_mask.z marks palette slot i (0-based) as
+// self-lit — its albedo is re-added AFTER lighting and AO, so magma veins and crystal
+// pockets stay visible in pitch-dark caves. Crossfaded across slot boundaries exactly
+// like the texture itself, so a glowing seam fades in instead of popping.
+fn terrain_glow_weight(in: VsOut) -> f32 {
+    let a = in.vcolor.a * 255.0;
+    if (a < 0.5 || a > 254.5) {
+        return 0.0;
+    }
+    let mask = u32(g.terrain_mask.z);
+    let f = a - floor(a);
+    let lo = u32(max(i32(floor(a)) - 1, 0));
+    let hi = u32(max(i32(ceil(a)) - 1, 0));
+    let g_lo = f32((mask >> lo) & 1u);
+    let g_hi = f32((mask >> hi) & 1u);
+    return mix(g_lo, g_hi, f);
 }
 
 // The base texture sampled through the material's tiling block (rim.w flags +
@@ -341,7 +362,14 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
 
-    return vec4<f32>(apply_fog(lit * occ + emissive, in.view_pos, pix), alpha);
+    // Glowing terrain slots: their albedo bypasses lighting AND the AO multiply —
+    // the cave-readability channel (per-voxel emissive without a new vertex stream).
+    var glow = vec3<f32>(0.0);
+    if (terrain) {
+        glow = albedo * terrain_glow_weight(in) * 0.9;
+    }
+
+    return vec4<f32>(apply_fog(lit * occ + emissive + glow, in.view_pos, pix), alpha);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

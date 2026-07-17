@@ -783,10 +783,22 @@ impl Editor {
         self.save_paint();
         self.save_tex_paint();
         // The texture PALETTE (which image fills each painted slot) is editor state,
-        // not in the field — persist it so painted textures survive a reload.
+        // not in the field — persist it so painted textures survive a reload. Glowing
+        // slots keep their `|glow` marker (see adopt_terrain's load).
         if !self.terrains.is_empty() {
-            let palette = self.terrain_textures.join("\n");
-            let _ = std::fs::write(self.terrain_palette_path(), palette);
+            let palette: Vec<String> = self
+                .terrain_textures
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    if self.terrain_glow_mask & (1 << i.min(31)) != 0 {
+                        format!("{p}|glow")
+                    } else {
+                        p.clone()
+                    }
+                })
+                .collect();
+            let _ = std::fs::write(self.terrain_palette_path(), palette.join("\n"));
         }
         if ok {
             self.scene_dirty = false;

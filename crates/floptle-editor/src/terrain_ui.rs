@@ -166,6 +166,7 @@ impl EditorTabViewer<'_> {
         let terrain_brush = &mut *self.terrain_brush;
         let terrain_voxel = &mut *self.terrain_voxel;
         let terrain_textures = &mut *self.terrain_textures;
+        let terrain_glow = &mut *self.terrain_glow;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let terrain_present = self.terrain_present;
@@ -291,6 +292,23 @@ impl EditorTabViewer<'_> {
                                 }
                             }
                         });
+                    // Self-lit slot: its texture stays visible with no light at all —
+                    // glowing crystals, magma veins, anything meant to read in caves.
+                    if !tex.is_empty() {
+                        let mut glows = *terrain_glow & (1 << slot) != 0;
+                        if ui
+                            .checkbox(&mut glows, "✨")
+                            .on_hover_text("glow — this texture is self-lit (visible in unlit caves)")
+                            .changed()
+                        {
+                            if glows {
+                                *terrain_glow |= 1 << slot;
+                            } else {
+                                *terrain_glow &= !(1 << slot);
+                            }
+                            cmd.terrain_palette_changed = true;
+                        }
+                    }
                 });
             }
             ui.small("Extract a model's textures (Inspector) or add PNGs to textures/, assign them to slots, then paint. Color tints the texture.");

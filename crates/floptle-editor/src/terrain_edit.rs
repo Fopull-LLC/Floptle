@@ -509,7 +509,7 @@ fn terrain_voxel_size(baked: &floptle_field::BakedSdf) -> f32 {
 
 /// Bitmask of terrain palette slots whose texture asked for Pixelated filtering
 /// (bit i = slot i). Packed into `terrain_tint.w` — an exact small int in f32, the same
-/// idiom `rim.w` uses for tiling flags. `TERRAIN_SLOTS` is 16, so it fits easily.
+/// idiom `rim.w` uses for tiling flags. `TERRAIN_SLOTS` is 12, so it fits easily.
 ///
 /// A free function, not a method: the render loop holds `self.gpu.as_mut()` and friends,
 /// so `&self` is unavailable there — but borrowing these two fields is fine.
@@ -1078,12 +1078,26 @@ impl Editor {
         self.next_terrain_id = max_id + 1;
         self.terrain_gpu_dirty = !self.terrains.is_empty();
         // Restore the texture palette so painted-texture slots map to images again.
+        // A slot line may end in `|glow` — that slot's texture is self-lit (the
+        // cave-visibility channel); the marker rides the sidecar, not the path.
         if !self.terrains.is_empty()
             && let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
-                let mut palette: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+                let mut glow = 0u32;
+                let mut palette: Vec<String> = text
+                    .lines()
+                    .enumerate()
+                    .map(|(i, s)| match s.strip_suffix("|glow") {
+                        Some(path) => {
+                            glow |= 1 << i.min(31);
+                            path.to_string()
+                        }
+                        None => s.to_string(),
+                    })
+                    .collect();
                 palette.resize(slots, String::new());
                 self.terrain_textures = palette;
+                self.terrain_glow_mask = glow;
                 self.terrain_textures_dirty = true;
             }
     }
