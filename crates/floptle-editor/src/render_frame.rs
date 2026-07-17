@@ -64,13 +64,13 @@ impl Editor {
         // shared 3D atlas (where shadow-only mesh occluders also live).
         //
         // Capture the terrain dirty state BEFORE `sync_terrain_gpu` consumes it: the atlas
-        // upload feeds shadows/AO, then `sync_terrain_meshes` rebuilds the PRIMARY-ray
-        // chunk meshes from the same change (Terrain 2.0 / P2). Structural change = full
-        // re-derive; a sculpt dab re-meshes only the touched terrain.
+        // upload feeds shadows/AO from each terrain's shadow proxy, then
+        // `sync_terrain_meshes` re-extracts the PRIMARY-ray chunk meshes straight from the
+        // authority field (Terrain 2.0 / P3). Structural change = full re-mesh; a sculpt
+        // dab re-meshes only the chunks it touched (`terrain_chunks_dirty`).
         let terrain_full_rebuild = self.terrain_gpu_dirty;
-        let terrain_region = self.terrain_region_dirty.map(|(e, mn, mx, _)| (e, mn, mx));
         self.sync_terrain_gpu();
-        self.sync_terrain_meshes(terrain_full_rebuild, terrain_region);
+        self.sync_terrain_meshes(terrain_full_rebuild);
         self.sync_sky_texture();
         self.sync_sky_shader();
         // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;
@@ -493,8 +493,10 @@ impl Editor {
             if self.show_terrain_collider && filter.colliders {
                 for (&e, t) in &self.terrains {
                     if !self.terrain_wire_world.iter().any(|(we, _)| *we == e) {
-                        let stride = (t.baked.dims.into_iter().max().unwrap_or(64) / 48).max(2);
-                        self.terrain_wire_world.push((e, terrain_collider_wire(t, stride)));
+                        let stride =
+                            (t.shadow.dims.into_iter().max().unwrap_or(64) / 48).max(2);
+                        self.terrain_wire_world
+                            .push((e, terrain_collider_wire(&t.shadow, stride)));
                     }
                 }
                 self.terrain_wire_world.retain(|(we, _)| self.terrains.contains_key(we));
@@ -1179,33 +1181,16 @@ impl Editor {
         let pending_open_scene = &mut self.pending_open_scene;
         let vertex_brush = &mut self.vertex_brush;
         let terrain_brush = &mut self.terrain_brush;
-        let terrain_detail = &mut self.terrain_detail;
+        let terrain_voxel = &mut self.terrain_voxel;
         let terrain_textures = &mut self.terrain_textures;
         let terrain_present = !self.terrains.is_empty();
-        let terrain_voxels = (!self.terrains.is_empty()).then(|| {
-            let total: u64 = self
-                .terrains
-                .values()
-                .map(|t| t.baked.dims.iter().map(|&d| d as u64).product::<u64>())
-                .sum();
-            (self.terrains.len(), total)
+        // Terrain 2.0 stats: volumes, resident data chunks, resident bytes — the
+        // honest sparse numbers (the dense field's O(n³) voxel count is gone).
+        let terrain_stats = (!self.terrains.is_empty()).then(|| {
+            let chunks: usize = self.terrains.values().map(|t| t.field.data_chunks()).sum();
+            let bytes: usize = self.terrains.values().map(|t| t.field.memory_bytes()).sum();
+            (self.terrains.len(), chunks, bytes)
         });
-        // The coarsest / most stretched voxel in the scene — the one that shows as a
-        // lattice. Reported in the Terrain tab because this number was invisible, which
-        // is precisely how a 9.17 × 0.50 × 9.17 terrain got authored without anyone
-        // being told.
-        let terrain_worst_voxel = self
-            .terrains
-            .values()
-            .map(|t| {
-                let v = Editor::terrain_voxel_size(t);
-                let aniso = v[0].max(v[1]).max(v[2]) / v[0].min(v[1]).min(v[2]).max(1e-6);
-                (v, aniso)
-            })
-            .max_by(|a, b| {
-                let key = |x: &([f32; 3], f32)| x.0[0].max(x.0[1]).max(x.0[2]);
-                key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
-            });
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
         let show_preferences = &mut self.show_preferences;
@@ -1783,11 +1768,10 @@ impl Editor {
                 has_active_camera,
                 vertex_brush,
                 terrain_brush,
-                terrain_detail,
+                terrain_voxel,
                 terrain_textures,
                 terrain_present,
-                terrain_voxels,
-                terrain_worst_voxel,
+                terrain_stats,
                 assets_grid,
                 assets_grid_dir,
                 project_root,
@@ -2621,30 +2605,18 @@ impl Editor {
                         });
                         // The size/detail pair silently decides quality, and the old
                         // copy here ("set detail higher before sculpting a large one")
-                        // was actively misleading: detail is a CELL COUNT, so past a few
-                        // dozen units it cannot rescue anything. Show the real voxel
-                        // edge instead, live, and say plainly when it's too coarse.
-                        let (dims, vs) =
-                            crate::terrain_ui::new_terrain_preview(cfg.size_xz, cfg.thickness, *terrain_detail);
-                        let cells = dims.iter().map(|&d| d as u64).product::<u64>();
+                        // Terrain 2.0: the field is sparse and unbounded — the dialog
+                        // sizes a STARTING slab, and memory scales with the surface,
+                        // not the volume. Show the honest estimate live.
+                        let (chunks, mb) = crate::terrain_ui::new_terrain_preview(
+                            cfg.size_xz,
+                            cfg.thickness,
+                            *terrain_voxel,
+                        );
                         ui.small(format!(
-                            "→ {}×{}×{} cells · voxel {vs:.2} units · {:.0} MB",
-                            dims[0], dims[1], dims[2],
-                            cells as f64 * 8.0 / 1.0e6,
+                            "→ voxel {:.2} units · ~{chunks} chunks · ~{mb:.1} MB (sparse — grows as you sculpt)",
+                            *terrain_voxel,
                         ));
-                        if vs > 1.5 {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(235, 170, 90),
-                                format!("⚠ {vs:.1} units per voxel — sculpted bumps will show the grid"),
-                            )
-                            .on_hover_text(
-                                "Detail is a cell COUNT, not a density, so it can't rescue a huge \
-                                 slab: the voxels just get bigger with the terrain. A flat slab \
-                                 stays smooth at any size, but the moment you sculpt, cells this \
-                                 big read as dark lattice lines and terraced steps. Prefer several \
-                                 smaller terrains laid side by side — overlapping ones blend.",
-                            );
-                        }
                         ui.horizontal(|ui| {
                             ui.label("color");
                             ui.color_edit_button_rgb(&mut cfg.color);
@@ -3101,7 +3073,7 @@ impl Editor {
                 occ_items.sort_by(|a, b| a.0.cmp(&b.0));
                 let occ_entities: Vec<Entity> = occ_items.iter().map(|(_, e)| *e).collect();
                 let mut baked: Vec<&floptle_field::BakedSdf> =
-                    entities.iter().map(|e| &self.terrains[e].baked).collect();
+                    entities.iter().map(|e| &self.terrains[e].shadow).collect();
                 baked.extend(occ_entities.iter().map(|e| &*self.mesh_occluders[e].1));
                 let accepted = raymarch.set_volumes(gpu, &baked);
                 let total = entities.len() + occ_entities.len();
@@ -3132,7 +3104,7 @@ impl Editor {
                 self.terrains.get(&e),
                 self.terrain_slots.iter().position(|&se| se == e),
             ) {
-                raymarch.set_volume_region(gpu, slot, &t.baked, mn, mx);
+                raymarch.set_volume_region(gpu, slot, &t.shadow, mn, mx);
             }
             if geom {
                 // Sculpt moved this terrain's surface — rebuild just its wireframe.
@@ -4556,19 +4528,22 @@ impl Editor {
         }
         if let Some(fill) = cmd.fill_terrain
             && let Some(e) = self.target_terrain() {
-                // Snapshot for undo (one step), then fill the whole field.
+                // Snapshot for undo (one step), then fill the whole field. Fills only
+                // modify EXISTING chunks, so the stored set is the exact undo cover.
                 let id = match self.world.get::<Matter>(e) {
                     Some(Matter::Terrain { id }) => *id,
                     _ => 0,
                 };
                 if let Some(t) = self.terrains.get(&e) {
-                    self.push_history(Snapshot::Terrain(id, t.to_bytes()));
+                    let undo = t.field.snapshot_chunks(&t.field.all_chunk_coords());
+                    self.push_history(Snapshot::Terrain(id, undo));
                 }
                 if let Some(t) = self.terrains.get_mut(&e) {
                     match fill {
-                        TerrainFill::Color(c) => t.fill_color(c),
-                        TerrainFill::Texture(slot) => t.fill_texture(slot),
+                        TerrainFill::Color(c) => t.field.fill_color(c),
+                        TerrainFill::Texture(slot) => t.field.fill_texture(slot),
                     }
+                    t.rebuild_shadow();
                     self.terrain_gpu_dirty = true;
                 }
             }
@@ -4579,7 +4554,20 @@ impl Editor {
                     _ => 0,
                 };
                 if let Some(t) = self.terrains.get(&e) {
-                    self.push_history(Snapshot::Terrain(id, t.to_bytes()));
+                    // Fill-bounds may CREATE chunks inside the bounds box — cover the
+                    // stored set plus that box so undo can also REMOVE them.
+                    let mut cand = t.field.all_chunk_coords();
+                    if let Some((lo, hi)) = t.field.bounds() {
+                        let pad = t.field.band() + 2.0 * t.field.voxel();
+                        cand.extend(t.field.chunks_in_world_box(
+                            lo - Vec3::splat(pad),
+                            hi + Vec3::splat(pad),
+                        ));
+                        cand.sort_unstable();
+                        cand.dedup();
+                    }
+                    let undo = t.field.snapshot_chunks(&cand);
+                    self.push_history(Snapshot::Terrain(id, undo));
                 }
                 let (top, floor, inset, color) = (
                     self.terrain_brush.fill_top,
@@ -4588,7 +4576,8 @@ impl Editor {
                     self.terrain_brush.color,
                 );
                 if let Some(t) = self.terrains.get_mut(&e) {
-                    t.fill_bounds(top, floor, inset, color);
+                    t.field.fill_bounds(top, floor, inset, color);
+                    t.rebuild_shadow();
                     self.terrain_gpu_dirty = true;
                 }
             }

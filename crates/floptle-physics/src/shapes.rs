@@ -138,6 +138,26 @@ impl CollisionShape for SdfTerrain {
     }
 }
 
+/// The Terrain 2.0 collider: collides against the **same sparse chunk field the mesher
+/// extracts the drawn surface from** — the authority the brushes (and, at runtime, Lua)
+/// write. Distances saturate at the field's narrow band a few voxels out, which is all
+/// a penetration solver ever reads; ray queries step at most a band per iteration.
+/// World placement rides the [`AnchoredCollider`] `f64` anchor exactly like
+/// [`SdfTerrain`] (ADR-0015), and unlike the dense grid there is **no size cap**: the
+/// field is unbounded, so physics finally agrees with the renderer everywhere.
+pub struct ChunkTerrain {
+    pub field: floptle_field::ChunkField,
+}
+
+impl CollisionShape for ChunkTerrain {
+    fn distance(&self, p: Vec3) -> f32 {
+        self.field.d(p)
+    }
+    fn normal(&self, p: Vec3) -> Vec3 {
+        self.field.grad(p).try_normalize().unwrap_or(Vec3::Y)
+    }
+}
+
 /// Grid cell index containing `p` (one cell = `cell` units on a side).
 fn cell_coord(p: Vec3, cell: f32) -> (i32, i32, i32) {
     ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32, (p.z / cell).floor() as i32)

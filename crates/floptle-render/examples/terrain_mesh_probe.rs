@@ -209,6 +209,10 @@ fn main() {
             .map(|&id| {
                 let mut m = mat;
                 m.terrain_paint_base = raster.dyn_paint_base(id);
+                // Terrain colors carry the palette SLOT in alpha (0 = untextured);
+                // without this flag the alpha-cutout path reads slot 0 as "alpha 0"
+                // and discards the whole surface. Mirrors `push_terrain_instances`.
+                m.terrain_splat = true;
                 (id, None, instance_of_mat(model, &m))
             })
             .collect();
@@ -275,6 +279,7 @@ fn main() {
                 .map(|&id| {
                     let mut m = mat;
                     m.terrain_paint_base = raster.dyn_paint_base(id);
+                    m.terrain_splat = true;
                     (id, None, instance_of_mat(model, &m))
                 })
                 .collect();
@@ -337,6 +342,7 @@ fn main() {
                 .map(|&id| {
                     let mut m = m2;
                     m.terrain_paint_base = raster.dyn_paint_base(id);
+                    m.terrain_splat = true;
                     (id, None, instance_of_mat(model, &m))
                 })
                 .collect();

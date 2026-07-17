@@ -146,6 +146,38 @@ impl ChunkField {
         self.data_chunks() * CHUNK_VOXELS * (4 + 4)
     }
 
+    /// Every stored chunk coordinate — data AND uniform sentinels. The undo-snapshot
+    /// set for whole-field ops (Fill), where any stored chunk may change.
+    pub fn all_chunk_coords(&self) -> Vec<[i32; 3]> {
+        self.chunks.keys().copied().collect()
+    }
+
+    /// Every chunk coordinate overlapping a world-space AABB (present or absent) —
+    /// the undo-snapshot set for ops that may CREATE chunks inside a known box.
+    pub fn chunks_in_world_box(&self, min: Vec3, max: Vec3) -> Vec<[i32; 3]> {
+        let (c0, c1) = (
+            chunk_of([
+                (min.x / self.voxel).floor() as i32,
+                (min.y / self.voxel).floor() as i32,
+                (min.z / self.voxel).floor() as i32,
+            ]),
+            chunk_of([
+                (max.x / self.voxel).ceil() as i32,
+                (max.y / self.voxel).ceil() as i32,
+                (max.z / self.voxel).ceil() as i32,
+            ]),
+        );
+        let mut out = Vec::new();
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                for cx in c0[0]..=c1[0] {
+                    out.push([cx, cy, cz]);
+                }
+            }
+        }
+        out
+    }
+
     /// Every chunk coordinate holding data, for meshing/persistence.
     pub fn chunk_coords(&self) -> Vec<[i32; 3]> {
         self.chunks
@@ -604,8 +636,13 @@ impl ChunkField {
                 for ix in lo.x.floor() as i32..=hi.x.ceil() as i32 {
                     let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
                     let d = box_sdf(p, bcenter, bhalf);
-                    if d.abs() >= band {
-                        continue; // outside the band: the sentinel already says this
+                    // Skip far AIR only — never far SOLID. Skipping deep solid leaves the
+                    // interior at the chunk's materialization default (+band = air): a
+                    // hollow shell with a phantom inner surface, exactly the bug
+                    // `resample_dense` documents. Deep-solid writes are free after
+                    // `compact` collapses saturated chunks to `Uniform(-band)` sentinels.
+                    if d >= band {
+                        continue; // outside, far: the air sentinel already says this
                     }
                     let cur = self.voxel_at([ix, iy, iz]);
                     self.set_voxel([ix, iy, iz], d.min(cur), Some(c));
@@ -910,6 +947,422 @@ impl ChunkField {
         touched
     }
 
+    // ---- whole-field ops (the Fill tools) -------------------------------------
+
+    /// Recolor every stored voxel (and the base colour) — "fill terrain with this
+    /// color". Leaves shape and painted texture slots (alpha) alone.
+    pub fn fill_color(&mut self, color: [f32; 3]) {
+        let rgb = [
+            (color[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (color[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (color[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ];
+        self.base_color = [rgb[0], rgb[1], rgb[2], self.base_color[3]];
+        for c in self.chunks.values_mut() {
+            if let Chunk::Data(d) = c {
+                for v in &mut d.color {
+                    v[0] = rgb[0];
+                    v[1] = rgb[1];
+                    v[2] = rgb[2];
+                }
+            }
+        }
+    }
+
+    /// Fill the WHOLE terrain with a texture palette `slot` (1-based; 0 = untextured).
+    /// The slot rides the colour alpha channel — same convention as the dense field
+    /// and the splat shader. Leaves shape + RGB tint.
+    pub fn fill_texture(&mut self, slot: u8) {
+        self.base_color[3] = slot;
+        for c in self.chunks.values_mut() {
+            if let Chunk::Data(d) = c {
+                for v in &mut d.color {
+                    v[3] = slot;
+                }
+            }
+        }
+    }
+
+    /// Paint a texture palette `slot` (alpha channel) over near-surface voxels inside
+    /// the brush ball. Mirrors the dense [`crate::Terrain::paint_texture`].
+    pub fn paint_texture(&mut self, center: Vec3, radius: f32, slot: u8) -> Vec<[i32; 3]> {
+        let (lo, hi) = self.voxel_range(center, radius);
+        let band = self.band();
+        let mut touched = Vec::new();
+        for iz in lo[2]..=hi[2] {
+            for iy in lo[1]..=hi[1] {
+                for ix in lo[0]..=hi[0] {
+                    let p = Vec3::new(ix as f32, iy as f32, iz as f32) * self.voxel;
+                    if (p - center).length() > radius {
+                        continue;
+                    }
+                    // Only near the surface — the band is all anyone can ever see.
+                    let d = self.voxel_at([ix, iy, iz]);
+                    if d.abs() > band {
+                        continue;
+                    }
+                    let mut c = self.color_at([ix, iy, iz]);
+                    if c[3] == slot {
+                        continue;
+                    }
+                    c[3] = slot;
+                    self.set_voxel([ix, iy, iz], d, Some(c));
+                    touched.push(chunk_of([ix, iy, iz]));
+                }
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        touched
+    }
+
+    /// Lay flat ground across the field's CURRENT bounds ("fill bounds"): a solid slab
+    /// from `floor_y` up to `top_y`, inset from the X/Z rim, unioned with what's there.
+    pub fn fill_bounds(&mut self, top_y: f32, floor_y: f32, inset: f32, color: [f32; 3]) {
+        let Some((lo, hi)) = self.bounds() else { return };
+        let min = Vec3::new(lo.x + inset, floor_y.min(top_y), lo.z + inset);
+        let max = Vec3::new(hi.x - inset, top_y, hi.z - inset);
+        if min.x >= max.x || min.z >= max.z {
+            return;
+        }
+        self.fill_slab(min, max, top_y.max(floor_y), color);
+    }
+
+    /// World-space AABB of everything stored (data chunks AND solid interior
+    /// sentinels), or `None` for an empty field. This is the box the shadow proxy,
+    /// the collider wireframe, and camera framing use — an unbounded field still has
+    /// bounded *content*.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        for (c, ch) in &self.chunks {
+            let solid = match ch {
+                Chunk::Data(_) => true,
+                Chunk::Uniform(v) => *v < 0.0,
+            };
+            if !solid {
+                continue;
+            }
+            for k in 0..3 {
+                lo[k] = lo[k].min(c[k]);
+                hi[k] = hi[k].max(c[k]);
+            }
+        }
+        if lo[0] > hi[0] {
+            return None;
+        }
+        let s = CHUNK as f32 * self.voxel;
+        Some((
+            Vec3::new(lo[0] as f32, lo[1] as f32, lo[2] as f32) * s,
+            Vec3::new((hi[0] + 1) as f32, (hi[1] + 1) as f32, (hi[2] + 1) as f32) * s,
+        ))
+    }
+
+    // ---- undo: per-stroke chunk snapshots -------------------------------------
+
+    /// Every chunk coordinate a brush of `radius` at `center` COULD touch (its voxel
+    /// range, chunk-rounded, plus the one-chunk ring `renormalize` may write into) —
+    /// the pre-dab snapshot set. Includes absent coords: undo must also remember that
+    /// a chunk did not exist.
+    pub fn chunks_in_box(&self, center: Vec3, radius: f32) -> Vec<[i32; 3]> {
+        let (lo, hi) = self.voxel_range(center, radius);
+        let (mut c0, mut c1) = (chunk_of(lo), chunk_of(hi));
+        for k in 0..3 {
+            c0[k] -= 1; // renormalize's neighbour ring (Smooth/Flatten)
+            c1[k] += 1;
+        }
+        let mut out = Vec::new();
+        for cz in c0[2]..=c1[2] {
+            for cy in c0[1]..=c1[1] {
+                for cx in c0[0]..=c1[0] {
+                    out.push([cx, cy, cz]);
+                }
+            }
+        }
+        out
+    }
+
+    /// Clone the current contents of `coords` into an undo record. A typical stroke
+    /// touches 1–8 chunks ≈ 0.3–2.5 MB — versus the 192 MB the dense field's
+    /// whole-field snapshot cost per stroke.
+    pub fn snapshot_chunks(&self, coords: &[[i32; 3]]) -> ChunkUndo {
+        ChunkUndo {
+            entries: coords.iter().map(|c| (*c, self.chunks.get(c).cloned())).collect(),
+        }
+    }
+
+    /// Restore the chunks recorded in `undo`, returning the inverse record (what was
+    /// there instead) — so undo/redo is a value swap, exactly like the scene history.
+    pub fn apply_undo(&mut self, undo: &ChunkUndo) -> ChunkUndo {
+        let inverse = ChunkUndo {
+            entries: undo
+                .entries
+                .iter()
+                .map(|(c, _)| (*c, self.chunks.get(c).cloned()))
+                .collect(),
+        };
+        for (c, ch) in &undo.entries {
+            match ch {
+                Some(ch) => {
+                    self.chunks.insert(*c, ch.clone());
+                }
+                None => {
+                    self.chunks.remove(c);
+                }
+            }
+        }
+        inverse
+    }
+
+    // ---- persistence -----------------------------------------------------------
+
+    /// Serialize to a compact `.cfield` blob. Distances quantize to i8 in band units
+    /// (≤ voxel/32 error — far under the mesher's 0.3-voxel acceptance) and both
+    /// channels RLE-encode, so the band's saturated plateaus cost almost nothing.
+    /// Air-uniform chunks are implicit (absent == air) and never written.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 * 1024);
+        out.extend_from_slice(b"FCF1");
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&self.voxel.to_le_bytes());
+        out.extend_from_slice(&self.base_color);
+        let band = self.band();
+        // Stored chunks: data + non-air uniforms (solid interior). Air is implicit.
+        let mut coords: Vec<[i32; 3]> = self
+            .chunks
+            .iter()
+            .filter(|(_, ch)| match ch {
+                Chunk::Data(_) => true,
+                Chunk::Uniform(v) => *v < band - 1e-6,
+            })
+            .map(|(c, _)| *c)
+            .collect();
+        coords.sort_unstable(); // deterministic output (byte-identical saves)
+        out.extend_from_slice(&(coords.len() as u32).to_le_bytes());
+        for c in coords {
+            for k in c {
+                out.extend_from_slice(&k.to_le_bytes());
+            }
+            match &self.chunks[&c] {
+                Chunk::Uniform(v) => {
+                    out.push(0);
+                    out.extend_from_slice(&v.to_le_bytes());
+                }
+                Chunk::Data(d) => {
+                    out.push(1);
+                    // Distance: i8 in band units, RLE (u16 run, i8 value).
+                    let q = |v: f32| ((v / band) * 127.0).round().clamp(-127.0, 127.0) as i8;
+                    let mut runs: Vec<(u16, i8)> = Vec::new();
+                    for v in &d.dist {
+                        let qv = q(*v);
+                        match runs.last_mut() {
+                            Some((n, lv)) if *lv == qv && *n < u16::MAX => *n += 1,
+                            _ => runs.push((1, qv)),
+                        }
+                    }
+                    out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
+                    for (n, v) in runs {
+                        out.extend_from_slice(&n.to_le_bytes());
+                        out.push(v as u8);
+                    }
+                    // Colour: RLE (u16 run, RGBA8).
+                    let mut cruns: Vec<(u16, [u8; 4])> = Vec::new();
+                    for v in &d.color {
+                        match cruns.last_mut() {
+                            Some((n, lv)) if lv == v && *n < u16::MAX => *n += 1,
+                            _ => cruns.push((1, *v)),
+                        }
+                    }
+                    out.extend_from_slice(&(cruns.len() as u32).to_le_bytes());
+                    for (n, v) in cruns {
+                        out.extend_from_slice(&n.to_le_bytes());
+                        out.extend_from_slice(&v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Parse a `.cfield` blob written by [`Self::to_bytes`]. `None` on any malformed
+    /// input — the caller falls back exactly as it does for a garbled `.tfield`.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut at = 0usize;
+        let take = |at: &mut usize, n: usize| -> Option<&[u8]> {
+            let s = data.get(*at..*at + n)?;
+            *at += n;
+            Some(s)
+        };
+        if take(&mut at, 4)? != b"FCF1" {
+            return None;
+        }
+        let u32_at = |s: &[u8]| u32::from_le_bytes(s.try_into().ok().unwrap_or([0; 4]));
+        if u32_at(take(&mut at, 4)?) != 1 {
+            return None;
+        }
+        let voxel = f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
+        if !(voxel.is_finite() && voxel > 1e-3) {
+            return None;
+        }
+        let mut f = Self::new(voxel);
+        f.base_color = take(&mut at, 4)?.try_into().ok()?;
+        let band = f.band();
+        let count = u32_at(take(&mut at, 4)?) as usize;
+        if count > 4_000_000 {
+            return None; // corrupt count guard: nobody has 4M chunks
+        }
+        for _ in 0..count {
+            let mut c = [0i32; 3];
+            for k in &mut c {
+                *k = i32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
+            }
+            match take(&mut at, 1)?[0] {
+                0 => {
+                    let v = f32::from_le_bytes(take(&mut at, 4)?.try_into().ok()?);
+                    if !v.is_finite() {
+                        return None;
+                    }
+                    f.chunks.insert(c, Chunk::Uniform(v.clamp(-band, band)));
+                }
+                1 => {
+                    let mut dist = Vec::with_capacity(CHUNK_VOXELS);
+                    let nruns = u32_at(take(&mut at, 4)?) as usize;
+                    for _ in 0..nruns {
+                        let n = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
+                        let v = take(&mut at, 1)?[0] as i8;
+                        let d = v as f32 / 127.0 * band;
+                        if dist.len() + n > CHUNK_VOXELS {
+                            return None;
+                        }
+                        dist.resize(dist.len() + n, d);
+                    }
+                    if dist.len() != CHUNK_VOXELS {
+                        return None;
+                    }
+                    let mut color = Vec::with_capacity(CHUNK_VOXELS);
+                    let ncruns = u32_at(take(&mut at, 4)?) as usize;
+                    for _ in 0..ncruns {
+                        let n = u16::from_le_bytes(take(&mut at, 2)?.try_into().ok()?) as usize;
+                        let v: [u8; 4] = take(&mut at, 4)?.try_into().ok()?;
+                        if color.len() + n > CHUNK_VOXELS {
+                            return None;
+                        }
+                        color.resize(color.len() + n, v);
+                    }
+                    if color.len() != CHUNK_VOXELS {
+                        return None;
+                    }
+                    f.chunks.insert(c, Chunk::Data(Box::new(ChunkData { dist, color })));
+                }
+                _ => return None,
+            }
+        }
+        Some(f)
+    }
+
+    // ---- shadow proxy (dense downsample for the SDF atlas) ----------------------
+
+    /// Downsample the sparse field into a dense [`crate::mesh2sdf::BakedSdf`] for the
+    /// GPU shadow/AO atlas — the interim stand-in until the P5 shadow clipmap. Longest
+    /// axis capped at `max_dim` cells, so the proxy's cost is bounded no matter how
+    /// large the map grows (soft sun shadows are visually forgiving of a coarse field;
+    /// primary visibility — the unforgiving part — is the chunk meshes, not this).
+    ///
+    /// Stored distances saturate at ±band, which would cap every shadow-march step at
+    /// a few units and starve the march's iteration budget across a big map — so after
+    /// sampling, a two-pass chamfer sweep re-expands the AIR side into true-ish
+    /// distance. (The solid side stays clamped; nothing marches through rock.)
+    pub fn to_dense(&self, max_dim: u32) -> Option<crate::mesh2sdf::BakedSdf> {
+        let (lo, hi) = self.bounds()?;
+        let pad = self.band() * 1.5;
+        let (lo, hi) = (lo - Vec3::splat(pad), hi + Vec3::splat(pad));
+        let ext = hi - lo;
+        let vp = (ext.max_element() / max_dim.max(2) as f32).max(self.voxel);
+        // Voxel CENTERS at (i+0.5)/n across the box — the convention `Terrain::sample`,
+        // the atlas upload, and the GPU field shader all share.
+        let dims = [
+            ((ext.x / vp).ceil() as u32).max(2),
+            ((ext.y / vp).ceil() as u32).max(2),
+            ((ext.z / vp).ceil() as u32).max(2),
+        ];
+        let n = dims[0] as usize * dims[1] as usize * dims[2] as usize;
+        let mut baked = crate::mesh2sdf::BakedSdf {
+            dims,
+            center: ((lo + hi) * 0.5).to_array(),
+            half_extent: (ext * 0.5).to_array(),
+            distance: vec![0.0; n],
+            color: vec![self.base_color; n],
+        };
+        self.sample_into_dense(&mut baked, [0, 0, 0], [dims[0] - 1, dims[1] - 1, dims[2] - 1]);
+        chamfer_expand_air(&mut baked, self.band());
+        Some(baked)
+    }
+
+    /// Re-sample a world-space box of this field into an existing proxy, returning the
+    /// proxy voxel index box it rewrote (inclusive min, exclusive max — the exact
+    /// arguments the atlas's `set_volume_region` wants). The dab fast path.
+    pub fn refresh_dense_region(
+        &self,
+        baked: &mut crate::mesh2sdf::BakedSdf,
+        wmin: Vec3,
+        wmax: Vec3,
+    ) -> ([u32; 3], [u32; 3]) {
+        let [w, h, d] = baked.dims;
+        let lo = Vec3::from(baked.center) - Vec3::from(baked.half_extent);
+        let vs = Vec3::new(
+            2.0 * baked.half_extent[0] / w.max(1) as f32,
+            2.0 * baked.half_extent[1] / h.max(1) as f32,
+            2.0 * baked.half_extent[2] / d.max(1) as f32,
+        );
+        let idx = |p: Vec3| {
+            let g = (p - lo) / vs - Vec3::splat(0.5);
+            [g.x, g.y, g.z]
+        };
+        let a = idx(wmin);
+        let b = idx(wmax);
+        let mn = [
+            (a[0].floor() as i64 - 1).clamp(0, w as i64 - 1) as u32,
+            (a[1].floor() as i64 - 1).clamp(0, h as i64 - 1) as u32,
+            (a[2].floor() as i64 - 1).clamp(0, d as i64 - 1) as u32,
+        ];
+        let mx = [
+            (b[0].ceil() as i64 + 1).clamp(0, w as i64 - 1) as u32,
+            (b[1].ceil() as i64 + 1).clamp(0, h as i64 - 1) as u32,
+            (b[2].ceil() as i64 + 1).clamp(0, d as i64 - 1) as u32,
+        ];
+        self.sample_into_dense(baked, mn, mx);
+        (mn, [mx[0] + 1, mx[1] + 1, mx[2] + 1])
+    }
+
+    /// Sample this field (trilinear distance, nearest colour) into the proxy's grid
+    /// over the inclusive index box `[mn, mx]`. Voxel centers at `(i+0.5)/n` — the
+    /// same convention `Terrain::sample` and the GPU field shader read with.
+    fn sample_into_dense(
+        &self,
+        baked: &mut crate::mesh2sdf::BakedSdf,
+        mn: [u32; 3],
+        mx: [u32; 3],
+    ) {
+        let [w, h, _d] = baked.dims;
+        let lo = Vec3::from(baked.center) - Vec3::from(baked.half_extent);
+        let vs = Vec3::new(
+            2.0 * baked.half_extent[0] / baked.dims[0].max(1) as f32,
+            2.0 * baked.half_extent[1] / baked.dims[1].max(1) as f32,
+            2.0 * baked.half_extent[2] / baked.dims[2].max(1) as f32,
+        );
+        for iz in mn[2]..=mx[2] {
+            for iy in mn[1]..=mx[1] {
+                for ix in mn[0]..=mx[0] {
+                    let p = lo
+                        + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * vs;
+                    let i = ((iz * h + iy) * w + ix) as usize;
+                    baked.distance[i] = self.d(p);
+                    baked.color[i] = self.color(p);
+                }
+            }
+        }
+    }
+
     /// Worst |∇d| over the near-surface band, and the fraction of samples violating the
     /// 1-Lipschitz bound. The dense field's growth path shipped 11.1% / 12.00 here; this
     /// is the measurement that caught it, kept as a permanent gate on write paths.
@@ -944,6 +1397,121 @@ impl ChunkField {
         }
         (worst, if n == 0 { 0.0 } else { bad as f32 / n as f32 })
     }
+}
+
+/// A per-stroke terrain undo record: the pre-stroke contents of every chunk the stroke
+/// could touch. Opaque outside this module (chunks are an implementation detail);
+/// undo/redo swaps it against the live field via [`ChunkField::apply_undo`].
+#[derive(Clone, Debug, Default)]
+pub struct ChunkUndo {
+    entries: Vec<([i32; 3], Option<Chunk>)>,
+}
+
+impl ChunkUndo {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The chunk coords this record covers — the remesh set after a swap.
+    pub fn coords(&self) -> Vec<[i32; 3]> {
+        self.entries.iter().map(|(c, _)| *c).collect()
+    }
+
+    /// Fold another snapshot in, keeping the FIRST-seen entry per coord — later dabs
+    /// of the same stroke must not overwrite the pre-stroke state already captured.
+    pub fn merge(&mut self, other: ChunkUndo) {
+        for (c, ch) in other.entries {
+            if !self.entries.iter().any(|(ec, _)| *ec == c) {
+                self.entries.push((c, ch));
+            }
+        }
+    }
+
+    /// Approximate heap size — lets the editor's history cap account honestly.
+    pub fn memory_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|(_, ch)| match ch {
+                Some(Chunk::Data(_)) => CHUNK_VOXELS * 8,
+                _ => 16,
+            })
+            .sum()
+    }
+}
+
+/// Two-pass 26-neighbour chamfer sweep expanding the AIR (positive) side of a
+/// band-clamped proxy toward true distance: `d[i] ≤ d[n] + |i-n|`. Saturated air
+/// cells (≥ band, where the clamp erased the real value) reseed to +∞ so distance
+/// propagates outward from the genuine near-surface values; the standard
+/// forward/backward pass pair then lands within a few percent of exact Euclidean
+/// distance — plenty for a shadow march's step sizing.
+fn chamfer_expand_air(baked: &mut crate::mesh2sdf::BakedSdf, band: f32) {
+    // Reseed the clamped plateau: those cells only know "at least band away".
+    let far = baked.half_extent.iter().fold(0.0f32, |a, h| a + 2.0 * h * h).sqrt().max(band);
+    for v in &mut baked.distance {
+        if *v >= band * 0.999 {
+            *v = far;
+        }
+    }
+    let [w, h, d] = baked.dims.map(|v| v as i64);
+    let vs = [
+        2.0 * baked.half_extent[0] / baked.dims[0].max(1) as f32,
+        2.0 * baked.half_extent[1] / baked.dims[1].max(1) as f32,
+        2.0 * baked.half_extent[2] / baked.dims[2].max(1) as f32,
+    ];
+    let idx = |x: i64, y: i64, z: i64| ((z * h + y) * w + x) as usize;
+    // The 13 "already visited" neighbour offsets of a forward raster scan (the
+    // backward pass mirrors them by negation).
+    let mut offs: Vec<([i64; 3], f32)> = Vec::with_capacity(13);
+    for dz in -1i64..=0 {
+        for dy in -1i64..=1 {
+            for dx in -1i64..=1 {
+                if (dz, dy, dx) >= (0, 0, 0) {
+                    continue; // strictly-before in scan order only
+                }
+                let step = Vec3::new(dx as f32 * vs[0], dy as f32 * vs[1], dz as f32 * vs[2])
+                    .length();
+                offs.push(([dx, dy, dz], step));
+            }
+        }
+    }
+    let pass = |forward: bool, dist: &mut [f32]| {
+        // Iterate in scan order (forward) or reverse; offsets negate for the
+        // backward pass so they always point at already-relaxed cells.
+        for zi in 0..d {
+            let z = if forward { zi } else { d - 1 - zi };
+            for yi in 0..h {
+                let y = if forward { yi } else { h - 1 - yi };
+                for xi in 0..w {
+                    let x = if forward { xi } else { w - 1 - xi };
+                    let i = idx(x, y, z);
+                    if dist[i] <= 0.0 {
+                        continue; // solid side stays clamped
+                    }
+                    let mut best = dist[i];
+                    for ([dx, dy, dz], step) in &offs {
+                        let (nx, ny, nz) = if forward {
+                            (x + dx, y + dy, z + dz)
+                        } else {
+                            (x - dx, y - dy, z - dz)
+                        };
+                        if nx < 0 || ny < 0 || nz < 0 || nx >= w || ny >= h || nz >= d {
+                            continue;
+                        }
+                        let nv = dist[idx(nx, ny, nz)];
+                        // A solid neighbour bounds us at its (negative) value + step.
+                        let cand = nv.max(0.0) + step;
+                        if cand < best {
+                            best = cand;
+                        }
+                    }
+                    dist[i] = best;
+                }
+            }
+        }
+    };
+    pass(true, &mut baked.distance);
+    pass(false, &mut baked.distance);
 }
 
 #[cfg(test)]
@@ -1206,5 +1774,124 @@ mod tests {
             .raycast(Vec3::new(18.0, 20.0, 18.0), Vec3::NEG_Y, 100.0)
             .expect("far ground still hit");
         assert!(far.y.abs() < 1.0, "far ground should stay flat at y=0, got {:.2}", far.y);
+    }
+
+    /// Save/load round-trip: distances within one i8 quantization step, colours exact,
+    /// uniform solid interior preserved (a hollow save would shadow/collide wrong),
+    /// and the encoding deterministic (byte-identical re-save — the autosave/backup
+    /// machinery diffs on bytes).
+    #[test]
+    fn cfield_round_trips_within_quantization() {
+        let f = rolling_terrain();
+        let bytes = f.to_bytes();
+        let g = ChunkField::from_bytes(&bytes).expect("parse back");
+        assert_eq!(g.voxel(), f.voxel());
+        let step = f.band() / 127.0;
+        // Compare over every stored voxel of the original.
+        for c in f.chunk_coords() {
+            for lz in 0..CHUNK {
+                for ly in 0..CHUNK {
+                    for lx in 0..CHUNK {
+                        let i = [c[0] * CHUNK + lx, c[1] * CHUNK + ly, c[2] * CHUNK + lz];
+                        let (a, b) = (f.voxel_at(i), g.voxel_at(i));
+                        assert!(
+                            (a - b).abs() <= step * 0.51,
+                            "voxel {i:?}: {a} vs {b} (step {step})"
+                        );
+                    }
+                }
+            }
+        }
+        // Solid interior sentinels survive (deep chunks must stay rock). The slab is
+        // solid from y=-20 to 0; y=-10 is deep interior.
+        let deep = Vec3::new(0.0, -10.0, 0.0);
+        assert!(f.d(deep) < 0.0, "test precondition: the slab interior is solid");
+        assert!(g.d(deep) < 0.0, "deep interior read as air after round-trip");
+        // Determinism + quantization idempotence: re-saving the parsed field is
+        // byte-identical (values already sit on the quantization lattice).
+        assert_eq!(bytes, g.to_bytes());
+        // Colour exactness on a surface point.
+        let p = f.raycast(Vec3::new(0.0, 40.0, 0.0), Vec3::NEG_Y, 100.0).unwrap();
+        assert_eq!(f.color(p), g.color(p));
+    }
+
+    /// Undo swap: snapshot → sculpt → apply_undo restores exactly; the returned
+    /// inverse redoes exactly. This is the 2.5 MB replacement for 192 MB strokes.
+    #[test]
+    fn chunk_undo_swaps_exactly() {
+        let mut f = rolling_terrain();
+        let center = Vec3::new(10.0, 2.0, -5.0);
+        let cand = f.chunks_in_box(center, 12.0);
+        let undo = f.snapshot_chunks(&cand);
+        let before = f.to_bytes();
+        let touched = f.sculpt(Brush::Raise, center, 8.0, 1.0, BrushProfile::default());
+        assert!(!touched.is_empty());
+        // Every touched chunk was inside the candidate (snapshot) set.
+        for t in &touched {
+            assert!(cand.contains(t), "brush touched {t:?} outside its candidate box");
+        }
+        let after = f.to_bytes();
+        assert_ne!(before, after, "the dab must change the field");
+        let redo = f.apply_undo(&undo);
+        assert_eq!(f.to_bytes(), before, "undo must restore the exact pre-stroke field");
+        f.apply_undo(&redo);
+        assert_eq!(f.to_bytes(), after, "redo must restore the exact post-stroke field");
+        // And it's small — the whole point.
+        assert!(undo.memory_bytes() < 40 * 1024 * 1024);
+    }
+
+    /// The shadow proxy: correct sign + near-surface values where it matters, and the
+    /// chamfer sweep re-expands clamped far-air so a shadow march can take real steps.
+    #[test]
+    fn shadow_proxy_matches_field_and_expands_air() {
+        let f = rolling_terrain();
+        let baked = f.to_dense(128).expect("non-empty field has a proxy");
+        // Near-surface agreement: sample the proxy where the field has a surface.
+        let hit = f.raycast(Vec3::new(0.0, 40.0, 0.0), Vec3::NEG_Y, 100.0).unwrap();
+        let t = Terrain { baked: baked.clone() };
+        let pd = t.sample([hit.x, hit.y, hit.z]);
+        assert!(
+            pd.abs() < f.voxel() * 3.0,
+            "proxy reads {pd:.2} at the field surface (proxy voxel {:.2})",
+            2.0 * baked.half_extent[0] / (baked.dims[0] - 1) as f32
+        );
+        // Sign agreement well inside / well outside.
+        assert!(t.sample([hit.x, hit.y - 6.0, hit.z]) < 0.0, "under the surface must be solid");
+        // Far air must exceed the band clamp after the chamfer sweep — otherwise the
+        // proxy would cap every shadow step at ~band and starve the march.
+        let up = t.sample([hit.x, hit.y + 30.0, hit.z]);
+        assert!(
+            up > f.band() * 2.0,
+            "chamfer failed: 30 units above the surface reads {up:.2} (band {:.2})",
+            f.band()
+        );
+    }
+
+    /// Texture ops ride the colour alpha channel (the splat slot), exactly like the
+    /// dense field: fill_texture floods it, paint_texture writes near-surface only.
+    #[test]
+    fn texture_slots_ride_alpha() {
+        let mut f = rolling_terrain();
+        f.fill_texture(3);
+        let hit = f.raycast(Vec3::new(5.0, 40.0, 5.0), Vec3::NEG_Y, 100.0).unwrap();
+        assert_eq!(f.color(hit)[3], 3);
+        let touched = f.paint_texture(hit, 6.0, 7);
+        assert!(!touched.is_empty());
+        assert_eq!(f.color(hit)[3], 7, "painted slot lands at the brush centre");
+        let far = f.raycast(Vec3::new(-40.0, 40.0, -40.0), Vec3::NEG_Y, 100.0).unwrap();
+        assert_eq!(f.color(far)[3], 3, "far voxels keep the filled slot");
+    }
+
+    /// `bounds` covers data AND solid interior, and grows when sculpting outward —
+    /// the proxy/framing box for an unbounded field.
+    #[test]
+    fn bounds_track_content() {
+        let mut f = ChunkField::new(1.0);
+        f.fill_slab(Vec3::new(-10.0, -4.0, -10.0), Vec3::new(10.0, 4.0, 10.0), 0.0, [0.5; 3]);
+        let (lo, hi) = f.bounds().unwrap();
+        assert!(lo.x <= -10.0 && hi.x >= 10.0 && lo.y <= -4.0);
+        f.sculpt(Brush::Raise, Vec3::new(60.0, 0.0, 0.0), 6.0, 1.0, BrushProfile::default());
+        let (_, hi2) = f.bounds().unwrap();
+        assert!(hi2.x >= 60.0, "sculpting outward must grow the bounds ({} < 60)", hi2.x);
     }
 }

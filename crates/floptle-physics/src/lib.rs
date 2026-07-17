@@ -52,7 +52,6 @@ mod tests {
     use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
     use floptle_core::transform::Transform;
     use floptle_core::{BodyKind, RigidBody, World};
-    use floptle_field::Terrain;
 
     use super::*;
 
@@ -364,9 +363,15 @@ mod tests {
     #[test]
     fn sim_drops_a_rigidbody_onto_terrain() {
         // The full ECS bridge: a RigidBody entity above a flat terrain falls and settles
-        // on it, with the result written back to the entity's transform.
-        let terrain =
-            Terrain::flat([16, 16, 16], [0.0, 0.0, 0.0], [8.0, 8.0, 8.0], 0.0, [0.4, 0.6, 0.3]);
+        // on it, with the result written back to the entity's transform. Terrain 2.0:
+        // the sim collides against the sparse chunk field (ground at y = 0).
+        let mut terrain = floptle_field::ChunkField::new(1.0);
+        terrain.fill_slab(
+            Vec3::new(-8.0, -8.0, -8.0),
+            Vec3::new(8.0, 8.0, 8.0),
+            0.0,
+            [0.4, 0.6, 0.3],
+        );
         let mut ecs = World::default();
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
@@ -622,8 +627,13 @@ mod tests {
         // ten million units out must catch a falling body exactly at its surface — the
         // world placement lives in the f64 anchor, the field's own numbers stay small.
         let far = DVec3::new(1.0e7, 0.0, 1.0e7);
-        let terrain =
-            Terrain::flat([16, 16, 16], [0.0, 0.0, 0.0], [8.0, 8.0, 8.0], 0.0, [0.4, 0.6, 0.3]);
+        let mut terrain = floptle_field::ChunkField::new(1.0);
+        terrain.fill_slab(
+            Vec3::new(-8.0, -8.0, -8.0),
+            Vec3::new(8.0, 8.0, 8.0),
+            0.0,
+            [0.4, 0.6, 0.3],
+        );
         let mut ecs = World::default();
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(far + DVec3::new(0.25, 5.0, 0.0)));
