@@ -359,6 +359,9 @@ pub enum VfxCmd {
     Stop,
     /// Restart from t = 0 (re-spawns a fresh instance) — re-fire a one-shot burst.
     Restart,
+    /// Live emission scale (0..~2): multiplies rates/burst counts and shades
+    /// particle size — `ps:setIntensity(throttle)` drives an engine plume.
+    Intensity(f32),
 }
 
 /// Where a script-spawned sound sits: nowhere (flat), a fixed world point, or

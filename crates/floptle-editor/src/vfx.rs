@@ -294,6 +294,11 @@ impl VfxSystem {
                 floptle_script::VfxCmd::Stop => {
                     self.instances.remove(&e);
                 }
+                floptle_script::VfxCmd::Intensity(i) => {
+                    if let Some((_, inst)) = self.instances.get_mut(&e) {
+                        inst.set_intensity(i);
+                    }
+                }
             }
         }
     }

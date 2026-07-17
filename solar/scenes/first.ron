@@ -1,0 +1,79 @@
+(
+    name: "first",
+    lighting: (
+        direction: (0.4, 0.9, 0.45),
+        color: (1.0, 0.98, 0.92),
+        ambient: (0.12, 0.12, 0.16),
+        intensity: 1.0,
+        shadows: true,
+        shadow_softness: 0.35,
+        shadow_strength: 1.0,
+        shadow_tint: (0.0, 0.0, 0.0),
+        shadow_quantize: 0,
+        shadow_dither: false,
+        shadow_distance: 150.0,
+        fog_color: (0.6, 0.65, 0.72),
+        fog_start: 40.0,
+        fog_end: 200.0,
+        fog_dither_strength: 0.5,
+    ),
+    nodes: [
+        (
+            name: "cube",
+            transform: (
+                translation: (-2.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.9, 0.45, 0.35),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "sphere",
+            transform: (
+                translation: (2.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.4, 0.7, 0.95),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "blob",
+            transform: (
+                translation: (0.0, 1.6, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Blob(
+                scale: 1.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Camera",
+            transform: (
+                translation: (0.0, 3.0, 9.0),
+                rotation: (-0.16018224, -0.0, -0.0, 0.9870874),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Camera(
+                fov_y: 1.0471976,
+                active: true,
+            ),
+            scripts: [
+                (
+                    kind: "freelook",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+    ],
+)

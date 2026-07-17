@@ -105,6 +105,8 @@ local function set_flame(node, on, pct)
   local ps = flame:particles()
   if on and not ps:isPlaying() then ps:play() end
   if not on and ps:isPlaying() then ps:stop() end
+  -- The plume's density AND particle size follow the throttle.
+  if on then ps:setIntensity(0.25 + pct * 1.25) end
   local light = flame:getcomponent("PointLight")
   if light then light.intensity = on and (0.8 + pct * 4.0) or 0.0 end
 end
@@ -255,12 +257,21 @@ function fixedUpdate(node, dt)
         nx * upx + ny * upy + nz * upz)))) -- 90 = nose straight up
       lines[2] = string.format("ALT %6.0f   SPD %6.1f   VSPD %+6.1f   NOSE %+3.0f°",
         rlen - b.radius, spd, vsp, pitch_deg)
+      -- THE orbit-insertion instrument: your speed vs circular-orbit speed vs
+      -- escape speed AT THIS RADIUS. Stable orbit = hold SPD near "orb" with
+      -- VSPD ~ 0; past "esc" you are leaving, however it feels.
+      local vorb = math.sqrt(b.mu / rlen)
+      local vesc = vorb * 1.41421
+      local tag = ""
+      if spd >= vesc then tag = "  ▲▲ ESCAPING"
+      elseif spd >= vesc * 0.93 then tag = "  ▲ near escape" end
+      lines[3] = string.format("V-ORBIT %5.1f   V-ESC %5.1f%s", vorb, vesc, tag)
       local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
       if o and o.apoapsis then
-        lines[3] = string.format("ORBIT [%s]  pe %+.0f  ap %+.0f  T %.0fs",
+        lines[4] = string.format("ORBIT [%s]  pe %+.0f  ap %+.0f  T %.0fs",
           o.body, o.periapsis - b.radius, o.apoapsis - b.radius, o.period)
       elseif o then
-        lines[3] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
+        lines[4] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
       end
     end
     lines[#lines + 1] =
