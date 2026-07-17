@@ -118,19 +118,34 @@ fn main() {
             planet.max(-gated)
         },
         |p| {
+            // SMOOTH blends, not hard thresholds: each voxel picks its colour
+            // independently, so an if/else per voxel renders as blocky square
+            // patches (Ty's first playtest: "strange square patterns"). Smooth
+            // weights make bands melt into each other at every scale.
+            let smooth = |lo: f32, hi: f32, x: f32| {
+                let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
+                [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+            };
             let r = p.length();
             let dir = if r > 1e-3 { p / r } else { Vec3::X };
             let alt = (r - RADIUS) / relief; // ≈ -1 valleys .. +1 peaks at the surface
             let patch = noise.fbm(dir * 9.0 + Vec3::splat(37.0), 3);
-            if alt > 0.34 {
-                [0.86, 0.88, 0.92] // icy peaks
-            } else if alt < -0.12 && patch > -0.35 {
-                [0.27, 0.44, 0.23] // mossy lowlands
-            } else if patch > 0.3 {
-                [0.5, 0.42, 0.33] // dusty rock
-            } else {
-                [0.45, 0.44, 0.47] // base rock
-            }
+            let rock = [0.45, 0.44, 0.47];
+            let dust = [0.52, 0.44, 0.34];
+            let moss = [0.27, 0.44, 0.23];
+            let ice = [0.86, 0.88, 0.92];
+            let deep = [0.24, 0.22, 0.26]; // dug-open interior: dark cave rock
+            let mut c = mix(rock, dust, smooth(0.05, 0.5, patch));
+            c = mix(c, moss, smooth(0.05, -0.35, alt) * smooth(-0.5, 0.0, patch));
+            c = mix(c, ice, smooth(0.2, 0.5, alt));
+            // Below the DISPLACED surface, fade to cave rock — dig walls and cave
+            // interiors read as their own material instead of smeared surface.
+            let bump = noise.fbm(dir * 4.3, 5) * relief;
+            let depth = (RADIUS + bump) - r;
+            mix(c, deep, smooth(1.2, 3.0, depth))
         },
     );
     let fill_ms = t0.elapsed().as_millis();

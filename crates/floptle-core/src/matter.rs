@@ -129,6 +129,11 @@ pub struct RigidBody {
     pub lock_pos: [bool; 3],
     /// Freeze the entity's rotation about each axis (keeps a body upright during play).
     pub lock_rot: [bool; 3],
+    /// Rotate the NODE so its local +Y tracks the body's up (−gravity) — characters
+    /// walking a radial-gravity planet stand on it visually, and their children
+    /// (cameras, held items) inherit the tilt. Smoothed; visual-only (the physics
+    /// capsule already follows −gravity regardless). Overrides `lock_rot` when set.
+    pub align_up: bool,
 }
 
 impl Default for RigidBody {
@@ -144,6 +149,7 @@ impl Default for RigidBody {
             gravity: true,
             lock_pos: [false; 3],
             lock_rot: [false; 3],
+            align_up: false,
         }
     }
 }
