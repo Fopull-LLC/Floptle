@@ -812,6 +812,11 @@ impl ScriptHost {
         let sched: Rc<RefCell<crate::sched_api::SchedState>> =
             Rc::new(RefCell::new(crate::sched_api::SchedState::default()));
         crate::sched_api::install_sched_api(&lua, sched.clone());
+        // The `space.*` orbital readouts (solar demo S2).
+        let space_info: Rc<RefCell<crate::space_api::SpaceInfo>> =
+            Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
+        let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
+        crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
 
         Self {
             lua,
@@ -841,6 +846,8 @@ impl ScriptHost {
             project_root,
             save_state,
             sched,
+            space_info,
+            warp_request,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
@@ -904,6 +911,16 @@ impl ScriptHost {
     /// so scripts can read `anim:state()/:time()/:clips()`.
     pub fn set_anim_info(&self, map: HashMap<u32, AnimInfo>) {
         *self.anim_info.borrow_mut() = map;
+    }
+
+    /// Feed this tick's celestial snapshot (`space.*` reads it — solar demo S2).
+    pub fn set_space(&self, info: crate::space_api::SpaceInfo) {
+        *self.space_info.borrow_mut() = info;
+    }
+
+    /// Drain a pending `space.warp(m)` request (the editor applies + clamps it).
+    pub fn take_warp_request(&self) -> Option<f64> {
+        self.warp_request.borrow_mut().take()
     }
 
     /// Drain the animator commands scripts queued this frame — the editor applies

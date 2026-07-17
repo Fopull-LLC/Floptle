@@ -44,6 +44,39 @@ impl Editor {
                 }
             }
         }
+        // Celestial bodies (solar demo S2): real µ/r² sources with patched-conic
+        // SOI dominance — the deepest body whose SOI contains you is the ONE
+        // that pulls (see `GravitySource::InvSq`). SOI 0 auto-derives Laplace
+        // from the parent's µ and the orbit's semi-major axis.
+        let cb: Vec<(Entity, floptle_core::CelestialBody, DVec3)> = world
+            .query::<floptle_core::CelestialBody>()
+            .map(|(e, b)| (e, b.clone(), floptle_core::world_transform(world, e).translation))
+            .collect();
+        let name_of = |e: Entity| {
+            world.get::<floptle_core::Name>(e).map(|n| n.0.clone()).unwrap_or_default()
+        };
+        for (e, b, pos) in &cb {
+            if b.mu <= 0.0 {
+                continue;
+            }
+            let _ = e;
+            let soi = if b.soi > 0.0 {
+                b.soi
+            } else if b.parent.is_empty() {
+                0.0 // root: infinite (≤ 0 means unbounded in the source)
+            } else if let Some((_, pb, _)) =
+                cb.iter().find(|(pe, ..)| name_of(*pe) == b.parent)
+            {
+                floptle_core::frames::System::soi_radius(b.a.abs(), b.mu, pb.mu)
+            } else {
+                0.0
+            };
+            field.sources.push(floptle_physics::GravitySource::InvSq {
+                center: (*pos - origin).as_vec3(),
+                mu: b.mu as f32,
+                soi: soi as f32,
+            });
+        }
         field
     }
 
@@ -340,6 +373,8 @@ impl Editor {
             self.play_t = 0.0;
             self.paused = false;
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
+            self.space_time = 0.0; // rails restart from the authored epoch
+            self.space_warp = 1.0;
             // Fresh gameplay-tick clock (the netcode timebase): no banked time, tick 0,
             // and no stale per-tick input edges from before Play.
             self.game_tick.reset();

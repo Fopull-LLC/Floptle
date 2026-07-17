@@ -652,3 +652,96 @@ function terrain.query(x, y, z) end
 ---@param z number
 ---@return number|nil
 function terrain.height(x, z) end
+
+---Seeded value noise, one octave, ≈ -1..1. Deterministic on every machine —
+---the SAME numbers the engine's Rust generators produce. Scale the inputs to
+---pick a frequency (lattice cell = 1 unit).
+---@param x number
+---@param y number
+---@param z number
+---@param seed? number
+---@return number
+function math.noise(x, y, z, seed) end
+
+---Seeded fractal noise (fbm): `octaves` layers (default 4), rotated so features
+---never align to the axes. ≈ -1..1, deterministic everywhere.
+---@param x number
+---@param y number
+---@param z number
+---@param octaves? number
+---@param seed? number
+---@return number
+function math.fbm(x, y, z, octaves, seed) end
+
+---A deterministic random stream: the same seed gives the same sequence on
+---every machine. Use for gameplay that must reproduce (loot, procgen scatter,
+---anything a server might replay); `math.random` stays for throwaway rolls.
+---@class Rng
+---@field next fun(self: Rng): number Uniform in [0, 1).
+---@field range fun(self: Rng, a: number, b: number): number Uniform in [a, b).
+---@field int fun(self: Rng, a: number, b: number): integer Uniform integer in [a, b] inclusive.
+---@field pick fun(self: Rng, list: any[]): any A uniform element of `list` (nil if empty).
+
+---Make a deterministic random stream from a seed.
+---@param seed number
+---@return Rng
+function rng(seed) end
+
+---Persistent game data: a per-slot key→value store that survives Play
+---sessions, editor restarts, and ships with exported builds. Values take the
+---synced-var guardrails (numbers/strings/bools/tables ≤ depth 4, ≤ 1 KB).
+---Flushes on Stop + every few seconds during Play; `save.flush()` forces it.
+---Multiplayer: LOCAL storage — for server-authoritative progress call save.*
+---on the server and hand results to clients via synced/RPC.
+---@class Save
+save = {}
+---Store a value under `key` (guardrails apply; violations are script errors).
+---@param key string
+---@param value any
+function save.set(key, value) end
+---The stored value, else `default`, else nil.
+---@param key string
+---@param default? any
+---@return any
+function save.get(key, default) end
+---Remove a key. Returns true if something was removed.
+---@param key string
+---@return boolean
+function save.delete(key) end
+---Switch the active save slot (flushing the old one), or read the current
+---slot's name when called with no argument. Names: letters/digits/-/_ only.
+---@param name? string
+---@return string
+function save.slot(name) end
+---Write the store to disk now (checkpoints). Returns false on an IO error
+---(also surfaced in the Console).
+---@return boolean
+function save.flush() end
+
+---A scheduled timer. `cancel()` aborts it (safe to call after it fired).
+---@class TimerHandle
+---@field cancel fun(self: TimerHandle)
+
+---Run `fn` once after `seconds` of GAME TIME (tick-driven and deterministic;
+---paused when the game is paused). The callback gets no arguments — capture
+---what you need as locals. Errors log to the Console and kill only that timer.
+---@param seconds number
+---@param fn fun()
+---@return TimerHandle
+function after(seconds, fn) end
+
+---Run `fn` repeatedly, first after `seconds`, then every `seconds` (anchored:
+---long sessions don't drift). Cancel via the returned handle.
+---@param seconds number
+---@param fn fun()
+---@return TimerHandle
+function every(seconds, fn) end
+
+---Animate: call `fn(alpha)` every tick for `seconds`, alpha easing 0→1, final
+---call guaranteed exactly at 1.0. `ease` is "linear" (default), "smooth",
+---"in", or "out". e.g. `tween(0.5, function(a) node.y = a * 3 end, "smooth")`
+---@param seconds number
+---@param fn fun(alpha: number)
+---@param ease? "linear"|"smooth"|"in"|"out"
+---@return TimerHandle
+function tween(seconds, fn, ease) end

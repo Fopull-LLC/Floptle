@@ -1513,3 +1513,30 @@ scene switch all pending timers drop (they belonged to the old scene). In a
 networked session timers advance on the global tick only — prediction replays
 can't double-fire them.
 
+## 25. Space: orbits, gravity & time-warp
+
+Scenes with **Celestial Body** components (Add Component → 🪐) put planets and
+moons on exact Kepler rails: every tick the engine writes their positions from
+orbital elements (stable at any warp — no integration, no drift), and each body
+pulls real **µ/r² gravity** with patched-conic dominance: the deepest sphere of
+influence containing you is the ONE body that pulls (moon beats planet beats
+sun). The root body (empty `parent`) stays where the scene puts it.
+
+```lua
+print(space.time())                 -- seconds of celestial time (warp-scaled)
+space.warp(50)                      -- rails fast-forward 50×; physics stays 1×
+
+local moon = space.body("Pebble")   -- {name, x,y,z, vx,vy,vz, mu, radius, soi}
+print(space.dominant(node.x, node.y, node.z))   -- who owns me here?
+local gx, gy, gz = space.gravity(node.x, node.y, node.z)
+
+-- The conic your ship is ON around its dominant body (HUD / map readout):
+local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
+if o then print(o.body, o.periapsis, o.apoapsis, o.period) end
+```
+
+`space.elements` returns `{ body, a, e, periapsis, apoapsis, period }` —
+`apoapsis`/`period` are absent on an escape trajectory; distances are from the
+body **center** (subtract `radius` for altitude). Bodies should be **top-level
+nodes** — rails write world positions.
+

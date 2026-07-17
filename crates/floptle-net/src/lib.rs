@@ -235,6 +235,7 @@ mod tests {
             scripts: Vec::new(),
             material: None,
             rigidbody: None,
+            celestial: None,
             mesh_collider: false,
             paint: None,
             tex_paint: None,

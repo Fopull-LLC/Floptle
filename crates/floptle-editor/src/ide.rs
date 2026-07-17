@@ -2391,7 +2391,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
-    "after", "every", "tween",
+    "after", "every", "tween", "space",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2405,6 +2405,7 @@ const API_CATEGORIES: &[&str] = &[
     "terrain — runtime sculpt & queries",
     "persistence — save.*",
     "timers — after, every, tween",
+    "space — orbits & time-warp",
     "components — getcomponent",
     "animation — node:animator",
     "audio — sounds & the mixer",
@@ -2438,6 +2439,8 @@ fn api_category(label: &str) -> &'static str {
         "persistence — save.*"
     } else if matches!(label, "after" | "every" | "tween") {
         "timers — after, every, tween"
+    } else if label.starts_with("space.") {
+        "space — orbits & time-warp"
     } else if label.starts_with("terrain") {
         "terrain — runtime sculpt & queries"
     } else if label.starts_with("gizmo") {
@@ -2556,6 +2559,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "after", insert: "after(", doc: "after(seconds, fn) — run fn once after that much GAME time (tick-driven, deterministic, pauses with the game). Returns a handle: h:cancel() aborts. Capture what you need as locals — the callback gets no arguments. after(2, function() door.visible = false end)" },
     ApiEntry { label: "every", insert: "every(", doc: "every(seconds, fn) — run fn repeatedly (first fire after one period). Anchored cadence: long sessions don't drift. Keep the handle to stop it: local h = every(1, tickDown) ... h:cancel()." },
     ApiEntry { label: "tween", insert: "tween(", doc: "tween(seconds, fn [, ease]) — animate: fn(alpha) runs every tick with alpha easing 0→1, final call exactly at 1.0. ease: \"linear\" (default), \"smooth\", \"in\", \"out\". tween(0.5, function(a) node.y = startY + a * 3 end, \"smooth\"). Returns a cancellable handle." },
+    ApiEntry { label: "space.time", insert: "space.time()", doc: "space.time() — on-rails celestial time in seconds (0 at Play start; advances with warp). Scenes with Celestial Body components put planets/moons on exact Kepler rails." },
+    ApiEntry { label: "space.warp", insert: "space.warp(", doc: "space.warp(50) — request a time-warp multiplier (1 .. 100000): rails fast-forward, local physics keeps ticking at 1×. space.warp() reads the current value." },
+    ApiEntry { label: "space.bodies", insert: "space.bodies()", doc: "space.bodies() — every celestial body this tick: {name, x,y,z, vx,vy,vz, mu, radius, soi} in world coords (soi -1 = infinite). space.body(\"Pebble\") grabs one by node name." },
+    ApiEntry { label: "space.dominant", insert: "space.dominant(", doc: "space.dominant(x, y, z) — the name of the body whose gravity OWNS that position (deepest sphere of influence — the moon inside the planet inside the sun), or nil." },
+    ApiEntry { label: "space.gravity", insert: "space.gravity(", doc: "space.gravity(x, y, z) — gx, gy, gz: the µ/r² pull of the dominant body at a world position (patched conics: exactly one body pulls)." },
+    ApiEntry { label: "space.elements", insert: "space.elements(", doc: "space.elements(x,y,z, vx,vy,vz) — the orbit a craft is ON around its dominant body: { body, a, e, periapsis, apoapsis, period } (apoapsis/period absent on an escape). Distances from the body CENTER. The map/HUD readout." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
     ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },

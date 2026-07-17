@@ -18,7 +18,7 @@ function start(node)
 end
 
 function update(node, dt)
-  local dig = input.button(0)
+  local dig = input.key("e")
   local build = input.key("q")
   if not (dig or build) then
     last_x = nil -- next press dabs immediately

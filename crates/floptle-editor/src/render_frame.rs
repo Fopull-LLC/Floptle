@@ -3563,6 +3563,10 @@ impl Editor {
                 self.game_tick.accumulate(sdt);
                 while self.game_tick.tick() {
                     self.game_tick_no += 1;
+                    // Celestial rails FIRST (solar demo S2): body nodes + their
+                    // terrain collider anchors + gravity centers + the space.*
+                    // snapshot all reflect THIS tick before scripts and physics.
+                    self.update_space_rails(self.game_tick.step as f64);
                     // Per-tick input: consume the tick accumulators (edges bank between
                     // ticks so a between-tick press is never lost). Neutral when the
                     // Game view isn't focused — but still consumed, so stale edges
@@ -4220,6 +4224,16 @@ impl Editor {
         if let Some(e) = cmd.remove_rigidbody {
             self.record();
             self.world.remove::<floptle_core::RigidBody>(e);
+            self.rebuild_sim();
+        }
+        if let Some(e) = cmd.add_celestial {
+            self.record();
+            self.world.insert(e, floptle_core::CelestialBody::default());
+            self.rebuild_sim(); // it's a gravity source now
+        }
+        if let Some(e) = cmd.remove_celestial {
+            self.record();
+            self.world.remove::<floptle_core::CelestialBody>(e);
             self.rebuild_sim();
         }
         if let Some(e) = cmd.add_networked {

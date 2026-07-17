@@ -1,31 +1,63 @@
 (
     name: "planetoid",
+    lighting: (
+        direction: (0.4, 0.9, 0.45),
+        color: (1.0, 0.98, 0.92),
+        ambient: (0.12, 0.12, 0.16),
+        intensity: 1.0,
+        shadows: true,
+        shadow_softness: 0.35,
+        shadow_strength: 1.0,
+        shadow_tint: (0.0, 0.0, 0.0),
+        shadow_quantize: 0,
+        shadow_dither: false,
+        shadow_distance: 150.0,
+        fog_color: (0.6, 0.65, 0.72),
+        fog_start: 40.0,
+        fog_end: 200.0,
+        fog_dither_strength: 0.5,
+    ),
     nodes: [
         (
             name: "Planetoid",
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.0, 1.0),
+                scale: (2.0, 2.0, 2.0),
             ),
             matter: Terrain(
                 id: 1,
             ),
             scripts: [],
+            // System root: stays put, pulls µ/r² (surface g = µ/r² ≈ 7 at r = 60
+            // with the ×2 node scale). Replaces the old constant GravityVolume.
+            celestial: Some((
+                mu: 25000.0,
+                body_radius: 60.0,
+            )),
         ),
         (
-            name: "Planet Gravity",
+            name: "Pebble",
             transform: (
-                translation: (0.0, 0.0, 0.0),
+                translation: (220.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.0, 1.0),
+                scale: (12.0, 12.0, 12.0),
             ),
-            matter: GravityVolume(
-                radial: true,
-                strength: 22.0,
-                radius: 400.0,
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.62, 0.6, 0.55),
             ),
             scripts: [],
+            // A moon ON RAILS: circles the planetoid every ~2 minutes (watch it
+            // cross the sky), and inside its little SOI, IT pulls instead.
+            celestial: Some((
+                mu: 60.0,
+                body_radius: 10.0,
+                parent: "Planetoid",
+                a: 220.0,
+                i: 0.15,
+                m0: 0.8,
+            )),
         ),
         (
             name: "Skybox",
@@ -38,8 +70,13 @@
                 color: (1.0, 1.0, 1.0),
                 size: 600.0,
                 tint: (0.004, 0.005, 0.012),
-                shader: None,
-                shader_params: {},
+                shader: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/shaders/examples/nebulaDream.flsl"),
+                shader_params: {
+                    "deep": (0.0, 0.0, 0.0, 1.0),
+                    "density": (0.2, 0.0, 0.0, 0.0),
+                    "hueDrift": (2.0, 0.0, 0.0, 0.0),
+                    "swirl": (3.0, 0.0, 0.0, 0.0),
+                },
             ),
             scripts: [],
         ),
@@ -75,18 +112,30 @@
             ),
             matter: Primitive(
                 shape: Capsule,
-                color: (0.85, 0.6, 0.25),
+                color: (0.85, 0.59999996, 0.24999999),
             ),
             scripts: [
                 (
                     kind: "planet_walker",
                     enabled: true,
-                    params: [],
+                    params: [
+                        ("double_tap", 0.3),
+                        ("ground_ray", 1.6),
+                        ("jump", 10.4),
+                        ("run", 9.4),
+                        ("walk", 4.5),
+                    ],
                 ),
                 (
                     kind: "dig_tool",
                     enabled: true,
-                    params: [],
+                    params: [
+                        ("radius", 1.3),
+                        ("range", 30.0),
+                        ("rate", 0.12),
+                        ("spacing", 0.45),
+                        ("strength", 0.6),
+                    ],
                 ),
             ],
             rigidbody: Some((

@@ -62,6 +62,7 @@ mod net_api;
 mod preprocess;
 mod save_api;
 mod sched_api;
+mod space_api;
 mod terrain_api;
 
 pub(crate) use api::install_handle_api;
@@ -70,6 +71,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
+pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -210,6 +212,10 @@ pub struct ScriptHost {
     /// ONLY by the global `run_fixed` — never by `run_fixed_for`/replays, or
     /// prediction would double-fire every pending timer.
     sched: Rc<RefCell<sched_api::SchedState>>,
+    /// This tick's celestial snapshot (`space.*` reads it; the editor feeds it).
+    space_info: Rc<RefCell<space_api::SpaceInfo>>,
+    /// A pending `space.warp(m)` request the editor drains + applies.
+    warp_request: Rc<RefCell<Option<f64>>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.

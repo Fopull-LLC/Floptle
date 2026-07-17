@@ -49,6 +49,13 @@ impl AnchoredCollider {
     pub fn normal(&self, p: Vec3) -> Vec3 {
         self.shape.normal(p - self.offset)
     }
+
+    /// Move the collider: a body ON RAILS (an orbiting planet) re-anchors its
+    /// terrain every tick. `origin` must be the owning world's current origin.
+    pub fn re_anchor(&mut self, anchor: DVec3, origin: DVec3) {
+        self.anchor = anchor;
+        self.offset = (anchor - origin).as_vec3();
+    }
 }
 
 /// The collision world for one scene: a gravity field, a set of colliders, and the
