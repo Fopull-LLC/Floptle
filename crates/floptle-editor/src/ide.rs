@@ -2390,7 +2390,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "vec2", "vec3", "distance", "onCollisionEnter", "onCollisionStay", "onCollisionExit",
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
-    "net", "synced", "replicated", "onRpc", "audio",
+    "net", "synced", "replicated", "onRpc", "audio", "terrain",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2401,6 +2401,7 @@ const API_CATEGORIES: &[&str] = &[
     "scene lookups & raycast",
     "input — keyboard & mouse",
     "networking — net.*, synced",
+    "terrain — runtime sculpt & queries",
     "components — getcomponent",
     "animation — node:animator",
     "audio — sounds & the mixer",
@@ -2430,6 +2431,8 @@ fn api_category(label: &str) -> &'static str {
         || matches!(label, "synced" | "replicated" | "onRpc")
     {
         "networking — net.*, synced"
+    } else if label.starts_with("terrain") {
+        "terrain — runtime sculpt & queries"
     } else if label.starts_with("gizmo") {
         "debug gizmos"
     } else if label.starts_with("audio") || label == "node:sound" || label.starts_with("sound:") {
@@ -2529,6 +2532,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "scene.load", insert: "scene.load(", doc: "scene.load(\"arena\") — switch to another scene at the next frame boundary: the world swaps, physics/animators/particles/audio rebuild, every start re-fires (like the scene booting fresh). Accepts a name, a scenes-relative path (\"arenas/desert\"), or \"scenes/arena.ron\". Multiplayer: only the SERVER may call it — every client follows automatically; a client's call is refused (send the server an RPC instead)." },
     ApiEntry { label: "scene.current", insert: "scene.current()", doc: "scene.current() — the running scene's name (its file stem, e.g. \"first\")." },
     ApiEntry { label: "scene.list", insert: "scene.list()", doc: "scene.list() — every scene in the project as names scene.load accepts (sorted; subfolders kept)." },
+    ApiEntry { label: "terrain.sculpt", insert: "terrain.sculpt(", doc: "terrain.sculpt(x,y,z, radius [, strength [, mode]]) — sculpt the nearest terrain at a world point, landing the SAME tick (collision updates with the surface). mode: \"raise\" (default), \"lower\"/\"dig\", \"smooth\", \"flatten\"; strength 0..1. No-op when no terrain surface is near the point. Multiplayer: run on the server + mirror by RPC (deterministic ops)." },
+    ApiEntry { label: "terrain.dig", insert: "terrain.dig(", doc: "terrain.dig(x,y,z, radius [, strength]) — carve a hole: sugar for terrain.sculpt(..., \"lower\"). Pair with raycast(...) to dig where the player aims." },
+    ApiEntry { label: "terrain.paint", insert: "terrain.paint(", doc: "terrain.paint(x,y,z, radius, r,g,b [, strength]) — recolor the terrain surface inside the brush ball (0..1 colors)." },
+    ApiEntry { label: "terrain.paintTexture", insert: "terrain.paintTexture(", doc: "terrain.paintTexture(x,y,z, radius, slot) — paint a terrain-palette texture slot (1-based, the Terrain tab's palette; 0 clears to flat color)." },
+    ApiEntry { label: "terrain.query", insert: "terrain.query(", doc: "terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Cheap: read it every frame (burrow checks, depth meters)." },
+    ApiEntry { label: "terrain.height", insert: "terrain.height(", doc: "terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor." },
     ApiEntry { label: "assets", insert: "assets", doc: "Reference files under Assets/ in code: assets.getFile(path), assets.getContents(dir)." },
     ApiEntry { label: "assets.getFile", insert: "assets.getFile(", doc: "assets.getFile(\"models/armor.glb\") — the asset's path (or nil), to hand to node.model / node.material. Path is relative to Assets/." },
     ApiEntry { label: "assets.getContents", insert: "assets.getContents(", doc: "assets.getContents(\"models\") — an array of every file under that folder (recursive). Build tables of assets with it." },

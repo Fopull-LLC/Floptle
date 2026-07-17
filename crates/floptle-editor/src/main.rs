@@ -1603,6 +1603,8 @@ struct Editor {
     net_hidden: Option<net::HiddenServer>,
     /// The play world's predicted node + its rewind-replay bookkeeping.
     net_predictor: Option<(Entity, floptle_net::Predictor)>,
+    /// Once-per-play warning that the local test harness drops `terrain.*` edits.
+    net_terrain_warned: bool,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.

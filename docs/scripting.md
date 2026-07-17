@@ -30,6 +30,7 @@ it up immediately.
 19. [Vectors & math: `vec3`, `vec2`, `distance`](#19-vectors--math-vec3-vec2-distance)
 20. [Collision & trigger events](#20-collision--trigger-events)
 21. [Prefabs: `spawn` & `destroy`](#21-prefabs-spawn--destroy)
+22. [Terrain: `terrain.sculpt`, `dig` & queries](#22-terrain-terrainsculpt-dig--queries)
 
 ---
 
@@ -1392,3 +1393,49 @@ replicated nodes through the session automatically; on a client it refuses
 
 **Gotcha**: a spawned prop that should be *solid* needs a Rigidbody in
 **Static** mode (a plain Collidable marker only bakes at Play start).
+
+## 22. Terrain: `terrain.sculpt`, `dig` & queries
+
+Terrain is **runtime-editable**: the same sparse SDF field the editor's Sculpt
+brush writes is exposed to scripts, and an edit lands the **same tick** — the
+drawn surface, the physics collider, and the sun-shadow field all update
+together, so the tick that dug the hole also falls into it.
+
+All coordinates are **world space**. Edits target the nearest terrain surface
+to the given point; a call far from every terrain is a safe no-op.
+
+```lua
+-- Dig where the player aims (LMB), raise with RMB.
+function update(node, dt)
+  local yaw, pitch = input.aimYaw(), input.aimPitch()
+  local cp = math.cos(pitch)
+  local dx, dy, dz = -math.sin(yaw) * cp, math.sin(pitch), -math.cos(yaw) * cp
+  local h = raycast(node.x, node.y + 1.0, node.z, dx, dy, dz, 30, node)
+  if h then
+    if input.button(0) then terrain.dig(h.x, h.y, h.z, 2.5, 0.8) end
+    if input.button(1) then terrain.sculpt(h.x, h.y, h.z, 2.5, 0.8, "raise") end
+  end
+end
+```
+
+| call | effect |
+|---|---|
+| `terrain.sculpt(x,y,z, radius [, strength [, mode]])` | sculpt: mode `"raise"` (default), `"lower"`/`"dig"`, `"smooth"`, `"flatten"`; strength 0–1 |
+| `terrain.dig(x,y,z, radius [, strength])` | sugar for `sculpt(..., "lower")` |
+| `terrain.paint(x,y,z, radius, r,g,b [, strength])` | recolor the surface (0–1 colors) |
+| `terrain.paintTexture(x,y,z, radius, slot)` | paint a palette texture slot (1-based; 0 clears) |
+| `terrain.query(x,y,z)` → `d` | signed distance to the nearest terrain surface (negative = inside rock); `nil` with no terrain |
+| `terrain.height(x, z)` → `y` | world Y of the highest surface under (x,z); `nil` if none |
+
+Notes:
+
+* Edits during Play are **simulation state**: Stop restores the authored
+  terrain exactly, like every other play-mode change.
+* Radius is clamped (≤ 64) and edits cap at 64 per frame — a runaway loop
+  warns instead of freezing the frame.
+* **Multiplayer**: edits apply on the machine that runs them, and the ops are
+  deterministic — the same call produces the same field everywhere. Until
+  replicated terrain ships, run edits **server-side** and mirror them with an
+  RPC that repeats the call on clients (`net.rpc("dig", {x=…}, …)` →
+  `onRpc.dig` calls `terrain.dig` locally). The local test harness (ghost
+  client) doesn't support terrain edits yet and will say so in the Console.

@@ -1012,6 +1012,19 @@ impl Editor {
             self.console.push(floptle_script::LogLevel::Warn, format!("[server] {msg}"), None);
         }
         hs.sim.world.colliders = hs.host.take_colliders();
+        // Terrain edits aren't wired through the hidden-server harness yet (the ghost
+        // world has no render/authority terrain of its own) — drop them loudly rather
+        // than let the queue grow. Real sessions apply them on each machine normally.
+        if !hs.host.take_terrain_ops().is_empty() && !self.net_terrain_warned {
+            self.net_terrain_warned = true;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "[server] terrain.* edits aren't supported in the local test harness yet \
+                 (they apply normally offline and in real sessions)"
+                    .into(),
+                None,
+            );
+        }
         // Apply writes, step physics one tick, publish transforms.
         hs.sim.world.gravity = Self::build_gravity_field(&hs.world, hs.sim.world.origin);
         hs.sim.sync_dynamic_params(&hs.world);

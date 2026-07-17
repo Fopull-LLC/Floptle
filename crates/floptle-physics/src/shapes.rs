@@ -13,6 +13,15 @@ pub trait CollisionShape {
     fn distance(&self, p: Vec3) -> f32;
     /// Outward unit surface normal at `p` (direction of increasing distance).
     fn normal(&self, p: Vec3) -> Vec3;
+    /// Downcast to the sculptable terrain field, if this collider is one — the runtime
+    /// terrain API (Lua `terrain.sculpt/dig`) edits the sim's own copy through this so
+    /// collision keeps agreeing with the authority field it was cloned from.
+    fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
+        None
+    }
+    fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
+        None
+    }
 }
 
 /// A signed-distance query result: distance to surface + the outward normal.
@@ -155,6 +164,12 @@ impl CollisionShape for ChunkTerrain {
     }
     fn normal(&self, p: Vec3) -> Vec3 {
         self.field.grad(p).try_normalize().unwrap_or(Vec3::Y)
+    }
+    fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
+        Some(self)
+    }
+    fn chunk_terrain_mut(&mut self) -> Option<&mut ChunkTerrain> {
+        Some(self)
     }
 }
 
