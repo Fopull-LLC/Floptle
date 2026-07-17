@@ -72,16 +72,21 @@ fn corner_offset(c: usize) -> [i32; 3] {
 /// the sculpting budget. Gathering the box once turns every inner-loop read into array
 /// indexing. It reads the field through exactly the same global-voxel addressing, so
 /// border transparency (and therefore seam agreement) is preserved (T3).
-struct Scratch {
+pub struct MeshScratch {
     lo: [i32; 3],
     dim: usize,
     dist: Vec<f32>,
     color: Vec<[u8; 4]>,
     voxel: f32,
     band: f32,
+    /// The chunk + stride this scratch was gathered for — `mesh_scratch` reads them
+    /// back so a queued job is fully self-contained (the async remesh worker meshes
+    /// from the scratch alone and never touches the live field; trap T4).
+    chunk: [i32; 3],
+    stride: i32,
 }
 
-impl Scratch {
+impl MeshScratch {
     fn new(field: &ChunkField, chunk: [i32; 3], stride: i32) -> Self {
         // Corners span [base - stride, base + CHUNK]: the borrowed -1 cell layer reaches a
         // whole STRIDE below the chunk, not one voxel. Gradients then need ±1 voxel around
@@ -101,7 +106,7 @@ impl Scratch {
         let mut dist = Vec::new();
         let mut color = Vec::new();
         field.gather(lo, dim, &mut dist, &mut color);
-        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band() }
+        Self { lo, dim, dist, color, voxel: field.voxel(), band: field.band(), chunk, stride }
     }
 
     /// Flat scratch index for a global voxel, WITHOUT bounds checks.
@@ -190,10 +195,29 @@ impl Scratch {
 /// neighbouring chunk is meshed at a coarser LOD. ~30 lines here versus ~1500 for
 /// transvoxel stitching; under this engine's fog/retro aesthetic the seam is invisible.
 pub fn mesh_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32, skirt: bool) -> ChunkMesh {
-    let stride = stride.max(1);
-    let voxel = field.voxel();
+    mesh_scratch(&scratch_for_chunk(field, chunk, stride), skirt)
+}
+
+/// Gather everything `mesh_scratch` needs for one chunk into a self-contained scratch —
+/// the CHEAP part (~0.07 ms bulk copy), done on the thread that owns the field. The
+/// returned scratch can be shipped to a worker thread and meshed there without ever
+/// touching the field again (the async remesh pipeline's contract, trap T4).
+pub fn scratch_for_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32) -> MeshScratch {
+    MeshScratch::new(field, chunk, stride.max(1))
+}
+
+/// The HEAVY half of [`mesh_chunk`] (surface nets + per-vertex gradients, ~1-2 ms):
+/// meshes entirely from the scratch, safe on any thread.
+pub fn mesh_scratch(s: &MeshScratch, skirt: bool) -> ChunkMesh {
+    let chunk = s.chunk;
+    let stride = s.stride;
+    let voxel = s.voxel;
     let base = [chunk[0] * CHUNK, chunk[1] * CHUNK, chunk[2] * CHUNK];
-    let origin = field.chunk_origin(chunk);
+    let origin = Vec3::new(
+        chunk[0] as f32 * CHUNK as f32 * voxel,
+        chunk[1] as f32 * CHUNK as f32 * voxel,
+        chunk[2] as f32 * CHUNK as f32 * voxel,
+    );
     // Cells across the chunk at this stride. We mesh cells whose min-corner is inside
     // the chunk; their max corner reaches 1 stride into the neighbour, which the
     // border-transparent sampler serves — that overlap is what makes seams agree.
@@ -219,8 +243,7 @@ pub fn mesh_chunk(field: &ChunkField, chunk: [i32; 3], stride: i32, skirt: bool)
     let mut vert_at = vec![u32::MAX; grid * grid * grid];
     let mut m = ChunkMesh { origin: origin.to_array(), ..Default::default() };
 
-    let s = Scratch::new(field, chunk, stride);
-    // Cell corners are always inside the gathered box (see Scratch::idx) — take the
+    // Cell corners are always inside the gathered box (see MeshScratch::idx) — take the
     // unchecked path; the general `at` stays for the trilinear/gradient reads that can
     // legitimately step outside.
     let vox = |i: [i32; 3]| s.at_fast(i);

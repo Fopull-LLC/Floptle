@@ -68,18 +68,158 @@ fn shadow_proxy_of(field: &floptle_field::ChunkField) -> floptle_field::BakedSdf
 /// stays continuous.
 #[derive(Default)]
 pub(crate) struct TerrainRender {
-    /// One dynamic raster slot per non-empty chunk, keyed by chunk coord so a sculpt can
-    /// re-mesh just the chunks it touched and free the ones that emptied.
-    pub slots: HashMap<[i32; 3], MeshId>,
+    /// One dynamic raster slot per non-empty chunk (+ the LOD it was meshed at),
+    /// keyed by chunk coord so a sculpt can re-mesh just the chunks it touched and
+    /// free the ones that emptied.
+    pub slots: HashMap<[i32; 3], (MeshId, u8)>,
+    /// Chunks a worker job is in flight for: coord → (target lod, job epoch). A
+    /// result is applied only if its (lod, epoch) still matches — anything else is
+    /// stale (the chunk was re-dirtied, re-ringed, or the scene changed) and drops.
+    pub pending: HashMap<[i32; 3], (u8, u64)>,
+    /// Data chunks whose last mesh came out EMPTY (a band remnant with no zero
+    /// crossing). Without this the coverage scan would re-queue them every frame
+    /// forever; a brush dirtying the chunk clears its entry.
+    pub empty: std::collections::HashSet<[i32; 3]>,
+}
+
+/// P4 LOD ring radii, in CHUNKS of Chebyshev distance from the camera's chunk:
+/// within `RINGS[l]` → stride `2^l`; beyond the last ring → stride 8. One chunk
+/// ≈ 48 units at the default 1.5-unit voxel.
+const LOD_RINGS: [i32; 3] = [4, 10, 24];
+
+/// The ring a distance lands in, no hysteresis — for chunks with no current lod.
+fn raw_lod(dist: i32) -> u8 {
+    if dist <= LOD_RINGS[0] {
+        0
+    } else if dist <= LOD_RINGS[1] {
+        1
+    } else if dist <= LOD_RINGS[2] {
+        2
+    } else {
+        3
+    }
+}
+
+/// The ring a distance lands in, with ±1 chunk of hysteresis against the chunk's
+/// current lod so camera drift across a boundary can't thrash remeshing.
+fn lod_for(dist: i32, cur: u8) -> u8 {
+    let raw = raw_lod(dist);
+    if raw == cur {
+        cur
+    } else if raw > cur {
+        // Coarsen only once clearly past the boundary above the current ring.
+        if dist > LOD_RINGS[(cur as usize).min(2)] + 1 {
+            raw
+        } else {
+            cur
+        }
+    } else {
+        // Refine only once clearly inside the finer ring.
+        if dist < LOD_RINGS[raw as usize] {
+            raw
+        } else {
+            cur
+        }
+    }
+}
+
+/// A queued remesh: the scratch is gathered on the main thread (it owns the field);
+/// the worker meshes from the scratch alone and never touches editor state (T4).
+pub(crate) struct RemeshJob {
+    pub entity: Entity,
+    pub coord: [i32; 3],
+    pub lod: u8,
+    pub skirt: bool,
+    pub epoch: u64,
+    pub scratch: floptle_field::MeshScratch,
+}
+
+pub(crate) struct RemeshDone {
+    pub entity: Entity,
+    pub coord: [i32; 3],
+    pub lod: u8,
+    pub epoch: u64,
+    pub mesh: floptle_field::ChunkMesh,
+}
+
+/// The background remesh worker (P4): one thread, jobs in / meshes out over
+/// channels — the same shape as the audio decode worker. Dropping the sender on
+/// editor exit ends the thread.
+pub(crate) struct TerrainWorker {
+    tx: std::sync::mpsc::Sender<RemeshJob>,
+    rx: std::sync::mpsc::Receiver<RemeshDone>,
+    /// Jobs sent and not yet drained — the main thread caps this so a big LOD
+    /// migration streams in nearest-first instead of flooding the queue.
+    pub in_flight: usize,
+}
+
+/// At most this many queued-but-unfinished jobs. Each job's scratch is ~0.5–1.2 MB,
+/// so the cap also bounds transient memory.
+const WORKER_IN_FLIGHT_CAP: usize = 16;
+
+/// Subtracted from a dirty (brush/script-edited) chunk's queue priority: edits sort
+/// ahead of every LOD migration AND bypass the in-flight cap — a stale mesh under
+/// the player is worse than a deep queue.
+const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
+
+impl TerrainWorker {
+    pub(crate) fn spawn() -> Self {
+        let (jtx, jrx) = std::sync::mpsc::channel::<RemeshJob>();
+        let (dtx, drx) = std::sync::mpsc::channel::<RemeshDone>();
+        std::thread::Builder::new()
+            .name("terrain-remesh".into())
+            .spawn(move || {
+                while let Ok(job) = jrx.recv() {
+                    let mesh = floptle_field::mesh_scratch(&job.scratch, job.skirt);
+                    if dtx
+                        .send(RemeshDone {
+                            entity: job.entity,
+                            coord: job.coord,
+                            lod: job.lod,
+                            epoch: job.epoch,
+                            mesh,
+                        })
+                        .is_err()
+                    {
+                        break; // editor gone
+                    }
+                }
+            })
+            .expect("spawn terrain remesh worker");
+        Self { tx: jtx, rx: drx, in_flight: 0 }
+    }
+
+    pub(crate) fn send(&mut self, job: RemeshJob) {
+        if self.tx.send(job).is_ok() {
+            self.in_flight += 1;
+        }
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Option<RemeshDone> {
+        match self.rx.try_recv() {
+            Ok(d) => {
+                self.in_flight = self.in_flight.saturating_sub(1);
+                Some(d)
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 impl Editor {
-    /// Rebuild every terrain's render mesh whose field changed. Cheap when nothing
-    /// changed. Full rebuild on structural change (load / new / fill / undo); the
-    /// sculpt fast-path re-meshes only the chunks a dab actually touched (drained
-    /// from `terrain_chunks_dirty`). Called right after `sync_terrain_gpu` keeps the
-    /// shadow atlas fed.
-    pub(crate) fn sync_terrain_meshes(&mut self, full_rebuild: bool) {
+    /// Keep every terrain's render meshes in sync with its field + the camera (P4).
+    ///
+    /// Per frame: (1) drain finished worker meshes (stale epochs drop); (2) on a
+    /// structural change (load / new / fill / undo) re-plan every chunk; (3) brush/
+    /// script-dirtied chunks remesh — the near ring SYNCHRONOUSLY (sculpting must
+    /// feel instant), the rest through the worker; (4) resident chunks whose LOD
+    /// ring changed (with hysteresis) re-queue; (5) queued work tops up the worker
+    /// nearest-first under the in-flight cap. Called right after `sync_terrain_gpu`
+    /// keeps the shadow atlas fed.
+    pub(crate) fn sync_terrain_meshes(&mut self, full_rebuild: bool, cam_world: DVec3) {
+        if self.terrain_worker.is_none() && !self.terrains.is_empty() {
+            self.terrain_worker = Some(TerrainWorker::spawn());
+        }
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return;
         };
@@ -89,57 +229,159 @@ impl Editor {
             if live.contains(e) {
                 return true;
             }
-            for (_, mid) in r.slots.drain() {
+            for (_, (mid, _)) in r.slots.drain() {
                 raster.free_dynamic(mid);
             }
             false
         });
         self.terrain_chunks_dirty.retain(|e, _| live.contains(e));
 
+        // ---- 1: land finished worker meshes (stale results drop silently) ----
+        if let Some(w) = self.terrain_worker.as_mut() {
+            while let Some(done) = w.try_recv() {
+                let Some(render) = self.terrain_render.get_mut(&done.entity) else { continue };
+                if render.pending.get(&done.coord) != Some(&(done.lod, done.epoch)) {
+                    continue; // superseded while in flight
+                }
+                render.pending.remove(&done.coord);
+                if done.mesh.is_empty() {
+                    if let Some((mid, _)) = render.slots.remove(&done.coord) {
+                        raster.free_dynamic(mid);
+                    }
+                    render.empty.insert(done.coord);
+                } else {
+                    render.empty.remove(&done.coord);
+                    upload_chunk(gpu, raster, render, done.coord, &done.mesh, done.lod);
+                }
+            }
+        }
+
+        // ---- 2..4: plan work per terrain ----
+        // Candidates gather into (priority = chunk distance, entity, coord, lod);
+        // sync work happens immediately, async work is topped up at the end.
+        let mut queue: Vec<(i32, Entity, [i32; 3], u8)> = Vec::new();
         for (&e, terrain) in &self.terrains {
             let structural = full_rebuild || !self.terrain_render.contains_key(&e);
             let dirty = self.terrain_chunks_dirty.remove(&e);
-            if !structural && dirty.is_none() {
-                continue;
-            }
             let render = self.terrain_render.entry(e).or_default();
-
-            // Which chunks to (re)mesh, and whether to prune slots the field no longer
-            // fills. The mesher reads the AUTHORITY field directly — there is no
-            // derived copy to keep in sync any more.
-            let (coords, prune) = if structural {
-                (terrain.field.chunk_coords(), true)
-            } else {
-                let mut d = dirty.unwrap_or_default();
-                d.sort_unstable();
-                d.dedup();
-                (d, false)
+            let anchor = floptle_core::world_transform(&self.world, e).translation;
+            let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
+            let cl = (cam_world - anchor).as_vec3() / chunk_units;
+            let cam_chunk =
+                [cl.x.floor() as i32, cl.y.floor() as i32, cl.z.floor() as i32];
+            let dist_of = |c: [i32; 3]| {
+                (c[0] - cam_chunk[0])
+                    .abs()
+                    .max((c[1] - cam_chunk[1]).abs())
+                    .max((c[2] - cam_chunk[2]).abs())
             };
 
-            for coord in coords {
-                let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
-                if cm.is_empty() {
-                    // Chunk emptied (e.g. dug fully away): free + forget its slot.
-                    if let Some(mid) = render.slots.remove(&coord) {
-                        raster.free_dynamic(mid);
-                    }
-                } else {
-                    upload_chunk(gpu, raster, render, coord, &cm);
-                }
-            }
-
-            if prune {
-                // A full rebuild may have shed chunks entirely; free any slot whose chunk
-                // no longer holds data.
+            if structural {
+                // Everything re-plans: drop pending (their epochs are now stale by
+                // construction — the results check `pending`), free slots the field
+                // no longer fills, and let the coverage scan below re-queue the rest.
+                render.pending.clear();
+                render.empty.clear();
                 let has: std::collections::HashSet<[i32; 3]> =
                     terrain.field.chunk_coords().into_iter().collect();
-                render.slots.retain(|c, mid| {
+                render.slots.retain(|c, (mid, _)| {
                     if has.contains(c) {
                         true
                     } else {
                         raster.free_dynamic(*mid);
                         false
                     }
+                });
+            }
+
+            // Brush / script edits: near chunks synchronously (sculpting must feel
+            // instant), far chunks through the worker — dirty jobs BYPASS the
+            // in-flight cap (a stale mesh is worse than a deep queue).
+            if let Some(mut d) = dirty {
+                d.sort_unstable();
+                d.dedup();
+                for coord in d {
+                    render.empty.remove(&coord);
+                    let dist = dist_of(coord);
+                    let cur = render.slots.get(&coord).map(|&(_, l)| l);
+                    let lod = cur.unwrap_or_else(|| raw_lod(dist));
+                    if lod == 0 {
+                        render.pending.remove(&coord); // a sync mesh supersedes any job
+                        let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
+                        if cm.is_empty() {
+                            if let Some((mid, _)) = render.slots.remove(&coord) {
+                                raster.free_dynamic(mid);
+                            }
+                            render.empty.insert(coord);
+                        } else {
+                            upload_chunk(gpu, raster, render, coord, &cm, 0);
+                        }
+                    } else {
+                        queue.push((dist - DIRTY_PRIORITY_BOOST, e, coord, lod));
+                    }
+                }
+            }
+
+            // Coverage: data chunks with no mesh, no job, and no known-empty verdict
+            // (fresh loads, chunks a dig just created, structural re-plans) stream in
+            // by distance. LOD migration for RESIDENT chunks rides the same queue
+            // (hysteresis inside lod_for).
+            for coord in terrain.field.chunk_coords() {
+                match render.slots.get(&coord) {
+                    None => {
+                        if render.pending.contains_key(&coord)
+                            || render.empty.contains(&coord)
+                        {
+                            continue;
+                        }
+                        let d = dist_of(coord);
+                        if raw_lod(d) == 0 {
+                            // The ground around the player never streams: a fresh
+                            // load (or a dig that created a chunk) meshes it NOW.
+                            let cm =
+                                floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
+                            if cm.is_empty() {
+                                render.empty.insert(coord);
+                            } else {
+                                upload_chunk(gpu, raster, render, coord, &cm, 0);
+                            }
+                        } else {
+                            queue.push((d, e, coord, raw_lod(d)));
+                        }
+                    }
+                    Some(&(_, cur)) => {
+                        let want = lod_for(dist_of(coord), cur);
+                        if want != cur && !render.pending.contains_key(&coord) {
+                            queue.push((dist_of(coord), e, coord, want));
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- 5: top up the worker — dirty edits first (uncapped), then nearest ----
+        if let Some(w) = self.terrain_worker.as_mut() {
+            queue.sort_unstable_by_key(|&(d, ..)| d);
+            for (prio, e, coord, lod) in queue {
+                let dirty = prio <= -DIRTY_PRIORITY_BOOST / 2;
+                if !dirty && w.in_flight >= WORKER_IN_FLIGHT_CAP {
+                    break; // the rest re-plans next frame
+                }
+                let Some(terrain) = self.terrains.get(&e) else { continue };
+                let Some(render) = self.terrain_render.get_mut(&e) else { continue };
+                self.terrain_epoch += 1;
+                render.pending.insert(coord, (lod, self.terrain_epoch));
+                w.send(RemeshJob {
+                    entity: e,
+                    coord,
+                    lod,
+                    skirt: lod > 0,
+                    epoch: self.terrain_epoch,
+                    scratch: floptle_field::scratch_for_chunk(
+                        &terrain.field,
+                        coord,
+                        1 << lod,
+                    ),
                 });
             }
         }
@@ -170,7 +412,7 @@ pub(crate) fn push_terrain_instances(
         }
         let anchor = floptle_core::world_transform(world, e).translation;
         let model = Mat4::from_translation((anchor - cam_world).as_vec3());
-        for &mid in render.slots.values() {
+        for &(mid, _) in render.slots.values() {
             let mut mp = *base_mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
@@ -181,18 +423,22 @@ pub(crate) fn push_terrain_instances(
     }
 }
 
-/// Register (or overwrite) one chunk's dynamic slot in a terrain's render set.
+/// Register (or overwrite) one chunk's dynamic slot in a terrain's render set,
+/// recording the LOD the mesh was extracted at.
 fn upload_chunk(
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
     render: &mut TerrainRender,
     coord: [i32; 3],
     cm: &floptle_field::ChunkMesh,
+    lod: u8,
 ) {
     let data = floptle_render::chunk_mesh_data(cm);
     match render.slots.get(&coord).copied() {
-        Some(mid) if raster.replace_dynamic(gpu, mid, &data) => {}
-        Some(mid) => {
+        Some((mid, _)) if raster.replace_dynamic(gpu, mid, &data) => {
+            render.slots.insert(coord, (mid, lod));
+        }
+        Some((mid, _)) => {
             // Outgrew its slot (rare): drop and re-register at the new size.
             raster.free_dynamic(mid);
             let id = raster.register_dynamic(
@@ -202,7 +448,7 @@ fn upload_chunk(
                 true,
             );
             raster.replace_dynamic(gpu, id, &data);
-            render.slots.insert(coord, id);
+            render.slots.insert(coord, (id, lod));
         }
         None => {
             let id = raster.register_dynamic(
@@ -212,7 +458,7 @@ fn upload_chunk(
                 true,
             );
             raster.replace_dynamic(gpu, id, &data);
-            render.slots.insert(coord, id);
+            render.slots.insert(coord, (id, lod));
         }
     }
 }
@@ -886,7 +1132,31 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::terrain_voxel_size;
+    use super::{lod_for, raw_lod, LOD_RINGS};
     use floptle_field::BakedSdf;
+
+    /// The LOD rings hold their chunk at the boundary (±1 hysteresis) so a camera
+    /// drifting across a ring edge can't flip a chunk's stride every frame.
+    #[test]
+    fn lod_rings_have_hysteresis() {
+        let b = LOD_RINGS[0]; // the lod0/lod1 boundary
+        // Fresh chunks take the raw ring.
+        assert_eq!(raw_lod(b), 0);
+        assert_eq!(raw_lod(b + 1), 1);
+        // A lod0 chunk exactly at the boundary +1 stays lod0…
+        assert_eq!(lod_for(b + 1, 0), 0);
+        // …and coarsens once clearly past it.
+        assert_eq!(lod_for(b + 2, 0), 1);
+        // A lod1 chunk at the boundary stays lod1…
+        assert_eq!(lod_for(b, 1), 1);
+        // …and refines once clearly inside.
+        assert_eq!(lod_for(b - 1, 1), 0);
+        // No-change fast path.
+        assert_eq!(lod_for(2, 0), 0);
+        assert_eq!(lod_for(100, 3), 3);
+        // Far chunks are lod3 regardless of history.
+        assert_eq!(lod_for(LOD_RINGS[2] + 2, 0), 3);
+    }
 
     /// A dense field with the given world size and voxel dims — only the fields
     /// `terrain_voxel_size` reads need to be real.
