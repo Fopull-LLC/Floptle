@@ -81,7 +81,10 @@ impl Editor {
         let t = self.terrains.get_mut(&e)?;
         let inverse = t.field.apply_undo(undo);
         t.rebuild_shadow();
-        self.terrain_chunks_dirty.entry(e).or_default().extend(undo.coords());
+        let coords = undo.coords();
+        // Undo during Play restores geometry the sim never saw — mirror it.
+        self.mirror_terrain_chunks_to_sim(e, &coords);
+        self.terrain_chunks_dirty.entry(e).or_default().extend(coords);
         self.terrain_gpu_dirty = true; // full atlas re-upload (proxy box may have moved)
         Some(inverse)
     }

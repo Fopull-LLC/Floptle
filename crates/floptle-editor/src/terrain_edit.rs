@@ -772,6 +772,12 @@ impl Editor {
                 // (A dab outside the proxy's box clamps — the proxy is re-derived at
                 // stroke end when bounds outgrow it; see `end_sculpt_stroke`.)
                 let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
+                // Sculpting WHILE PLAYING must reach the sim's collider copy too —
+                // this path only fed the renderer, so a mid-Play brush stroke left
+                // bodies standing on the old invisible surface.
+                if geom {
+                    self.mirror_terrain_chunks_to_sim(active, &touched);
+                }
                 self.queue_terrain_dirty(active, hit, brush.radius, geom, touched);
             }
         }
@@ -826,19 +832,55 @@ impl Editor {
         let geom = !matches!(op.mode, M::Paint(_) | M::PaintTexture(_));
         // Mirror geometry edits into the sim's collider copy so collision agrees
         // with the drawn surface THIS tick (color never affects collision).
-        if geom
-            && let Some(sim) = self.sim.as_mut()
-            && let Some(f) = sim.terrain_field_mut(e.index())
-        {
-            match op.mode {
-                M::Raise => f.sculpt(Brush::Raise, local, op.radius, op.strength, profile),
-                M::Lower => f.sculpt(Brush::Lower, local, op.radius, op.strength, profile),
-                M::Smooth => f.sculpt(Brush::Smooth, local, op.radius, op.strength, profile),
-                M::Flatten => f.sculpt(Brush::Flatten, local, op.radius, op.strength, profile),
-                _ => Vec::new(),
-            };
+        if geom {
+            self.mirror_terrain_chunks_to_sim(e, &touched);
         }
         self.queue_terrain_dirty(e, local, op.radius, geom, touched);
+    }
+
+    /// Make the play sim's collider copy of terrain `e` agree with the authority
+    /// field over `touched` chunks — by CLONING those chunks (plus the one-chunk
+    /// renormalize ring writes spill into), not by re-running the edit. A re-run
+    /// can drift; a copy cannot, and a player standing on a stale invisible
+    /// surface is exactly what drift looks like. Call after EVERY authority
+    /// geometry write while a sim exists: script ops, the editor brush during
+    /// Play, fills, undo. Loudly warns (once per Play) if the sim has no
+    /// matching terrain collider — a silent no-op here is unfindable later.
+    pub(crate) fn mirror_terrain_chunks_to_sim(&mut self, e: Entity, touched: &[[i32; 3]]) {
+        if touched.is_empty() || self.sim.is_none() {
+            return;
+        }
+        let mut region: Vec<[i32; 3]> = Vec::new();
+        for c in touched {
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        region.push([c[0] + dx, c[1] + dy, c[2] + dz]);
+                    }
+                }
+            }
+        }
+        region.sort_unstable();
+        region.dedup();
+        let Some(t) = self.terrains.get(&e) else { return };
+        match self.sim.as_mut().and_then(|s| s.terrain_field_mut(e.index())) {
+            Some(f) => f.copy_chunks_from(&t.field, &region),
+            None => {
+                if !self.terrain_mirror_warned {
+                    self.terrain_mirror_warned = true;
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!(
+                            "terrain edit on node #{} couldn't reach the physics sim \
+                             (no matching terrain collider) — collision may not match \
+                             the surface until Play restarts",
+                            e.index()
+                        ),
+                        None,
+                    );
+                }
+            }
+        }
     }
 
     /// Queue the render/shadow refresh for a terrain write at `local` (node-local):

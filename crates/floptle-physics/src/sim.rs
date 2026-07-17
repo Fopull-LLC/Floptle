@@ -1013,6 +1013,63 @@ mod runtime_body_tests {
         (w, ents)
     }
 
+    /// Runtime digs must reach COLLISION, not just the drawn surface: carve the
+    /// floor out from under a resting body through `terrain_field_mut` (the
+    /// exact mirror path `terrain.dig` takes) and the body must fall into the
+    /// hole — "standing on the invisible old surface" is the shipped bug this
+    /// pins down (Ty's solar playtest).
+    #[test]
+    fn digging_under_a_body_updates_collision() {
+        use floptle_field::{Brush, BrushProfile, ChunkField};
+        let mut field = ChunkField::new(0.75);
+        field.fill_slab(
+            Vec3::new(-24.0, -6.0, -24.0),
+            Vec3::new(24.0, 0.0, 24.0),
+            0.0,
+            [0.5; 3],
+        );
+        let (ecs, ents) = world_with_bodies(1);
+        let e = ents[0];
+        let mut sim = Sim::build_layered(
+            &ecs,
+            &[(DVec3::ZERO, &field, 0, Some(e.index() + 100))],
+            GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)),
+            DVec3::ZERO,
+            floptle_core::Layers::default(),
+        );
+        let step = 1.0 / 60.0;
+        for _ in 0..240 {
+            sim.step_tick(step, None);
+        }
+        let rest = sim.body_snapshot(e.index()).unwrap();
+        assert!(
+            rest.pos.y > -1.5 && rest.pos.y < 2.5,
+            "body must come to rest ON the slab first (y = {})",
+            rest.pos.y
+        );
+        // Dig straight down through the mirror path — same dabs the Lua tool lands.
+        let f = sim.terrain_field_mut(e.index() + 100).expect("terrain collider by eid");
+        for i in 0..8 {
+            f.sculpt(
+                Brush::Lower,
+                Vec3::new(rest.pos.x as f32, -0.5 * i as f32, rest.pos.z as f32),
+                2.5,
+                1.0,
+                BrushProfile::default(),
+            );
+        }
+        for _ in 0..240 {
+            sim.step_tick(step, None);
+        }
+        let after = sim.body_snapshot(e.index()).unwrap();
+        assert!(
+            after.pos.y < rest.pos.y - 1.0,
+            "the body must FALL into the freshly dug hole (rested at y = {}, now y = {})",
+            rest.pos.y,
+            after.pos.y
+        );
+    }
+
     #[test]
     fn runtime_spawn_gets_a_live_body_and_despawn_removes_it() {
         let (mut ecs, ents) = world_with_bodies(2);
