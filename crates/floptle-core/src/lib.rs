@@ -21,10 +21,11 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-// Phase 1 modules (the foundation the frame loop hangs on). `scene`, `frames`,
-// `pool`, and `serde_ron` arrive in their roadmap phases; these are live.
+// Phase 1 modules (the foundation the frame loop hangs on). `scene`, `pool`,
+// and `serde_ron` arrive in their roadmap phases; these are live.
 pub mod ecs;
 pub mod event;
+pub mod frames;
 pub mod layers;
 pub mod material;
 pub mod math;
