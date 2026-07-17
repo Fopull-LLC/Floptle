@@ -275,7 +275,15 @@ end
 function onCollisionEnter(node, other, hit)
   if wrecked or not piloting then return end
   if time - spawn_t < params.grace then return end
-  local vn = math.abs(pvx * hit.nx + pvy * hit.ny + pvz * hit.nz)
+  -- The parked astronaut rides INSIDE the hull: its body-overlap events are
+  -- not impacts. (Body-body events have no solver response, and the pair can
+  -- re-fire mid-flight — at orbital speed that read as a phantom crash.)
+  if astronaut and other.id == astronaut.id then return end
+  -- Impact speed is RELATIVE: subtract the other node's velocity when it has
+  -- one (a body). Terrain has none — absolute is correct there.
+  local ovx, ovy, ovz = other.vx or 0, other.vy or 0, other.vz or 0
+  local vn = math.abs(
+    (pvx - ovx) * hit.nx + (pvy - ovy) * hit.ny + (pvz - ovz) * hit.nz)
   if vn > params.crash_speed then
     wrecked = true
     throttle = 0.0
