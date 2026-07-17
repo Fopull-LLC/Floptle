@@ -1203,6 +1203,65 @@ mod runtime_body_tests {
         );
     }
 
+    /// A body coasting in a circular orbit under `InvSq` gravity must STAY
+    /// bound and near-circular for many orbits at the 60 Hz tick — Ty's report
+    /// ("perfect orbit… then it just ends up escaping") is exactly what secular
+    /// energy injection by the integrator would look like.
+    #[test]
+    fn invsq_orbit_stays_bound_for_many_orbits() {
+        let mu = 882_000.0f32; // the demo planet
+        let r0 = 340.0f32;
+        let v0 = (mu / r0).sqrt(); // circular speed ≈ 50.9
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(r0 as f64, 0.0, 0.0)));
+        ecs.insert(e, RigidBody { gravity: true, ..Default::default() });
+        let mut sim = Sim::build(
+            &ecs,
+            &[],
+            GravityField {
+                sources: vec![crate::gravity::GravitySource::InvSq {
+                    center: Vec3::ZERO,
+                    mu,
+                    soi: 0.0, // infinite (root body)
+                }],
+            },
+            DVec3::ZERO,
+        );
+        sim.set_body_velocity(e.index(), Vec3::new(0.0, 0.0, v0));
+        let period = std::f32::consts::TAU * r0 / v0; // ≈ 42 s
+        let ticks = (period * 20.0 * 60.0) as usize; // 20 orbits at 60 Hz
+        let (mut rmin, mut rmax) = (f64::MAX, 0.0f64);
+        for _ in 0..ticks {
+            sim.step_tick(1.0 / 60.0, None);
+            let r = sim.body_snapshot(e.index()).unwrap().pos.length();
+            rmin = rmin.min(r);
+            rmax = rmax.max(r);
+        }
+        assert!(
+            rmax < r0 as f64 * 1.10 && rmin > r0 as f64 * 0.90,
+            "circular orbit drifted out of [±10%] over 20 orbits: r ∈ [{rmin:.1}, {rmax:.1}] \
+             (started {r0}) — the integrator is injecting/removing energy"
+        );
+
+        // The SHIP SCRIPT's cycle: every tick it reads the velocity and writes
+        // it back (+ zero thrust) through set_body_velocity before the step —
+        // that loop must be exactly lossless or orbits decay/escape in game
+        // while the bare sim stays clean.
+        for _ in 0..ticks {
+            let v = sim.body_snapshot(e.index()).unwrap().vel;
+            sim.set_body_velocity(e.index(), v);
+            sim.step_tick(1.0 / 60.0, None);
+            let r = sim.body_snapshot(e.index()).unwrap().pos.length();
+            rmin = rmin.min(r);
+            rmax = rmax.max(r);
+        }
+        assert!(
+            rmax < r0 as f64 * 1.10 && rmin > r0 as f64 * 0.90,
+            "the script read→write velocity cycle perturbs the orbit: r ∈ [{rmin:.1}, {rmax:.1}]"
+        );
+    }
+
     #[test]
     fn runtime_spawn_gets_a_live_body_and_despawn_removes_it() {
         let (mut ecs, ents) = world_with_bodies(2);

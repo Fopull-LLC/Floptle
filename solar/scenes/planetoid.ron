@@ -243,7 +243,12 @@
                 height: 4.0,
                 half_extents: (0.5, 0.5, 0.5),
                 restitution: 0.0,
-                friction: 0.8,
+                // NEAR-ZERO friction: contact friction eats TANGENTIAL velocity,
+                // and against a slope/dip wall "up" IS tangential — high friction
+                // literally pinned the ship to hillsides under full throttle
+                // ("can't take off unless I mess with the rotation"). Rest is the
+                // parking brake's job, not friction's.
+                friction: 0.05,
                 gravity: true,
                 lock_pos: (false, false, false),
                 lock_rot: (false, false, false),
