@@ -115,7 +115,27 @@ impl Editor {
         // its SOI and you orbit IT, not a point it left behind. Velocity is
         // untouched (positions ARE the frame); crossing an SOI boundary swaps
         // frames with a small world-velocity step — the v1 patched-conic seam.
+        //
+        // WARP COASTING (S4): while warp > 1 every IN-FLIGHT body (off the
+        // ground, clear of the surface, actually moving relative to its
+        // dominant celestial) snaps to its OWN Kepler rails — its conic is
+        // captured once on warp engage and evaluated analytically each tick,
+        // so a 1000× warp is exactly as drift-free as the planets' rails. The
+        // realtime sim still steps underneath, but its one-tick integration is
+        // overwritten by the conic every tick and discarded; dropping back to
+        // warp 1 resumes physics from the exact on-conic state. Landed bodies
+        // stay on normal realtime physics + carry (contacts pin them), which is
+        // also what makes warping while parked on a surface safe.
+        let warping = self.space_warp > 1.0 + 1e-9;
+        if !warping && !self.space_coast.is_empty() {
+            self.space_coast.clear();
+        }
         if let Some(sim) = self.sim.as_mut() {
+            let states: std::collections::HashMap<u32, (floptle_core::math::Vec3, bool)> = sim
+                .body_states()
+                .map(|(e, vel, _, grounded, _)| (e.index(), (vel, grounded)))
+                .collect();
+            let t_old = t - tick_dt * self.space_warp;
             for (eid, pos) in sim.body_positions() {
                 let mut dom: Option<(usize, f64)> = None; // (index, soi)
                 for (i, sb) in sys.bodies.iter().enumerate() {
@@ -126,10 +146,62 @@ impl Editor {
                         dom = Some((i, sb.soi));
                     }
                 }
-                if let Some((i, _)) = dom
-                    && deltas[i].length_squared() > 1e-18
-                {
-                    sim.shift_body(eid, deltas[i]);
+                let Some((i, _)) = dom else { continue };
+                let (vel, grounded) = states.get(&eid).copied().unwrap_or_default();
+                let center = DVec3::from(bodies[i].pos);
+                // Relative to the OLD center: `center` already moved by delta
+                // this tick, the body's sim position has not.
+                let rel = (pos - center) + deltas[i];
+                let relv = vel.as_dvec3() - DVec3::from(bodies[i].vel);
+                let flying = warping
+                    && !grounded
+                    && rel.length() > cb[i].1.body_radius + 8.0
+                    && relv.length_squared() > 0.01;
+                if flying && cb[i].1.mu > 0.0 {
+                    let dom_key = cb[i].0.index();
+                    let recapture = self
+                        .space_coast
+                        .get(&eid)
+                        .is_none_or(|(d, _)| *d != dom_key);
+                    if recapture {
+                        // Capture the conic from the PRE-TICK state (old center,
+                        // old time) — from here on the cached elements are truth.
+                        let (_, old_center_vel) = sys.body_pos_vel(i, t_old);
+                        let k = Kepler::from_state(
+                            rel,
+                            vel.as_dvec3() - old_center_vel,
+                            cb[i].1.mu,
+                            t_old,
+                        );
+                        self.space_coast.insert(eid, (dom_key, k));
+                    }
+                    if let Some((_, k)) = self.space_coast.get(&eid) {
+                        let (r2, v2) = k.pos_vel(cb[i].1.mu, t);
+                        // Surface proximity KILLS warp (the KSP rule): a conic
+                        // whose next sample dips near the ground would teleport
+                        // the ship into rock at 1000×. Drop to realtime and let
+                        // physics take it from the last on-conic state.
+                        if r2.length() < cb[i].1.body_radius + 25.0 {
+                            self.space_warp = 1.0;
+                            self.space_coast.remove(&eid);
+                            self.console.push(
+                                floptle_script::LogLevel::Debug,
+                                "time-warp dropped to 1× — surface proximity".into(),
+                                None,
+                            );
+                            continue;
+                        }
+                        sim.set_body_position(eid, center + r2);
+                        sim.set_body_velocity(
+                            eid,
+                            (DVec3::from(bodies[i].vel) + v2).as_vec3(),
+                        );
+                    }
+                } else {
+                    self.space_coast.remove(&eid);
+                    if deltas[i].length_squared() > 1e-18 {
+                        sim.shift_body(eid, deltas[i]);
+                    }
                 }
             }
         }

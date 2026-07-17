@@ -406,6 +406,7 @@ impl Editor {
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
             self.space_time = 0.0; // rails restart from the authored epoch
             self.space_warp = 1.0;
+            self.space_coast.clear();
             // Every Play is a FRESH RUN: drop all script instances so top-level
             // script state can't leak across sessions (Ty's ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.
