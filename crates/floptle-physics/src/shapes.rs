@@ -156,14 +156,32 @@ impl CollisionShape for SdfTerrain {
 /// field is unbounded, so physics finally agrees with the renderer everywhere.
 pub struct ChunkTerrain {
     pub field: floptle_field::ChunkField,
+    /// The terrain NODE's world rotation — queries rotate into the field's local
+    /// frame, so a tilted terrain collides exactly where it draws.
+    pub rot: Quat,
+    /// The node's UNIFORM scale (x drives; an SDF can't stretch non-uniformly
+    /// without breaking the distance metric). Distances scale back up by this.
+    pub scale: f32,
+}
+
+impl ChunkTerrain {
+    pub fn new(field: floptle_field::ChunkField) -> Self {
+        Self { field, rot: Quat::IDENTITY, scale: 1.0 }
+    }
+
+    /// Anchor-relative world point → the field's local frame.
+    #[inline]
+    fn to_local(&self, p: Vec3) -> Vec3 {
+        (self.rot.inverse() * p) / self.scale.max(1e-6)
+    }
 }
 
 impl CollisionShape for ChunkTerrain {
     fn distance(&self, p: Vec3) -> f32 {
-        self.field.d(p)
+        self.field.d(self.to_local(p)) * self.scale.max(1e-6)
     }
     fn normal(&self, p: Vec3) -> Vec3 {
-        self.field.grad(p).try_normalize().unwrap_or(Vec3::Y)
+        (self.rot * self.field.grad(self.to_local(p))).try_normalize().unwrap_or(Vec3::Y)
     }
     fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
         Some(self)

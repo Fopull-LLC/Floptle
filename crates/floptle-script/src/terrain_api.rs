@@ -166,12 +166,17 @@ pub(crate) fn install_terrain_api(
             let mut best: Option<f32> = None;
             for c in cols.borrow().iter() {
                 let Some(t) = c.shape.chunk_terrain() else { continue };
-                let local = Vec3::new(
-                    (x - c.anchor.x) as f32,
-                    (y - c.anchor.y) as f32,
-                    (z - c.anchor.z) as f32,
-                );
-                let d = t.field.d(local);
+                // Through the node's full frame (rotation + uniform scale), and
+                // back to WORLD distance by the scale.
+                let s = t.scale.max(1e-6);
+                let local = (t.rot.inverse()
+                    * Vec3::new(
+                        (x - c.anchor.x) as f32,
+                        (y - c.anchor.y) as f32,
+                        (z - c.anchor.z) as f32,
+                    ))
+                    / s;
+                let d = t.field.d(local) * s;
                 best = Some(match best {
                     Some(b) => b.min(d),
                     None => d,
@@ -193,15 +198,26 @@ pub(crate) fn install_terrain_api(
             for c in cols.borrow().iter() {
                 let Some(t) = c.shape.chunk_terrain() else { continue };
                 let Some((lo, hi)) = t.field.bounds() else { continue };
-                let lx = (x - c.anchor.x) as f32;
-                let lz = (z - c.anchor.z) as f32;
-                if lx < lo.x || lx > hi.x || lz < lo.z || lz > hi.z {
-                    continue;
-                }
-                let start = Vec3::new(lx, hi.y + 2.0, lz);
-                let span = hi.y - lo.y + 4.0;
-                if let Some(hit) = t.field.raycast(start, Vec3::NEG_Y, span) {
-                    let wy = c.anchor.y + hit.y as f64;
+                // Cast the WORLD-down ray in the field's local frame (the node
+                // may be rotated/scaled); reconstruct the hit's world Y through
+                // the same frame.
+                let s = t.scale.max(1e-6);
+                let inv = t.rot.inverse();
+                let down = (inv * Vec3::NEG_Y).normalize_or_zero();
+                // Farthest content point from the anchor bounds the start height:
+                // above THAT is above everything, no matter how the node is rotated.
+                let bound_r = Vec3::new(
+                    lo.x.abs().max(hi.x.abs()),
+                    lo.y.abs().max(hi.y.abs()),
+                    lo.z.abs().max(hi.z.abs()),
+                )
+                .length();
+                let px = Vec3::new((x - c.anchor.x) as f32, 0.0, (z - c.anchor.z) as f32);
+                let start_w = px + Vec3::Y * (bound_r * s + 2.0);
+                let start = (inv * start_w) / s;
+                if let Some(hit) = t.field.raycast(start, down, 2.0 * bound_r + 8.0 / s) {
+                    let hw = t.rot * (hit * s);
+                    let wy = c.anchor.y + hw.y as f64;
                     best = Some(match best {
                         Some(b) if b >= wy => b,
                         _ => wy,

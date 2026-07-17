@@ -190,16 +190,19 @@ impl Editor {
     pub(crate) fn terrain_volumes(
         &self,
         layers: &floptle_core::Layers,
-    ) -> Vec<(DVec3, &floptle_field::ChunkField, u8, Option<u32>)> {
+    ) -> Vec<floptle_physics::TerrainVolume<'_>> {
         self.terrains
             .iter()
             .map(|(&e, t)| {
-                (
-                    floptle_core::world_transform(&self.world, e).translation,
-                    &t.field,
-                    layers.index_for(&self.world, e),
-                    Some(e.index()),
-                )
+                let (anchor, rot, scale) = self.terrain_world_frame_of(e);
+                floptle_physics::TerrainVolume {
+                    anchor,
+                    field: &t.field,
+                    layer: layers.index_for(&self.world, e),
+                    eid: Some(e.index()),
+                    rot,
+                    scale,
+                }
             })
             .collect()
     }
