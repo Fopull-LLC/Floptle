@@ -350,6 +350,7 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
         Backspace => "backspace", Delete => "delete",
         ShiftLeft | ShiftRight => "shift", ControlLeft | ControlRight => "ctrl",
         AltLeft | AltRight => "alt",
+        Comma => ",", Period => ".",
         ArrowLeft => "left", ArrowRight => "right", ArrowUp => "up", ArrowDown => "down",
         _ => return None,
     })
@@ -1629,6 +1630,10 @@ struct Editor {
     space_time: f64,
     /// Current time-warp multiplier (`space.warp(m)` requests land here).
     space_warp: f64,
+    /// Warp-coasting rails (S4): body eid → (dominant celestial eid, captured
+    /// Kepler conic). While warp > 1 each in-flight body is driven analytically
+    /// from its cached conic — drift-free at any warp; cleared at warp 1.
+    space_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.

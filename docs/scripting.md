@@ -203,7 +203,7 @@ Available while playing.
 | `input.setMouseLocked(true)` | pin + hide the cursor (FPS mouselook); `false` releases. Also `input.lockMouse()` / `input.unlockMouse()` |
 
 Key names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`, `backspace`,
-`delete`, `shift`, `ctrl`, `alt`, and arrows `left` `right` `up` `down`.
+`delete`, `shift`, `ctrl`, `alt`, `,`, `.`, and arrows `left` `right` `up` `down`.
 
 A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with

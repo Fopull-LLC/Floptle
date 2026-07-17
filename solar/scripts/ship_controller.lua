@@ -6,6 +6,10 @@
 --   SHIFT / CTRL   throttle up / down        X  cut throttle       Z  full
 --   W/S      pitch      A/D  yaw      Q/E  roll   (hold = turn, release = stop)
 --   T        SAS toggle       G  (while wrecked) restore at the pad
+--   . / ,    time-warp up / down (KSP rules: only while coasting or parked;
+--            any control input drops warp back to 1×; the engine snaps a
+--            coasting ship to exact Kepler rails, so high warp is drift-free
+--            and auto-cancels on surface proximity)
 --
 -- Attitude is RATE-COMMANDED, the way KSP's stability assist feels: holding a
 -- key commands a turn RATE (ramped fast), releasing commands zero and the SAS
@@ -36,6 +40,9 @@ wrecked = false
 throttle = 0.0
 
 local sas = true
+-- Time-warp ladder (KSP-style steps) + a short HUD notice when a step is denied.
+local warp_steps = { 1, 5, 10, 50, 100, 1000, 10000 }
+local warp_note, warp_note_t = nil, -10.0
 -- Ship basis (world space): nose = thrust axis; fwd/right complete the frame.
 local nx, ny, nz = 0.0, 1.0, 0.0
 local fx, fy, fz = 0.0, 0.0, -1.0
@@ -156,6 +163,7 @@ function fixedUpdate(node, dt)
 
   -- ---- wreck & respawn ----------------------------------------------------
   if wrecked then
+    if space.warp() > 1.001 then space.warp(1) end -- a wreck flies realtime
     set_flame(node, false, 0)
     set_hud(node, "SHIP WRECKED — press G to restore at the pad, F to exit")
     if input.pressed("g") then
@@ -169,6 +177,74 @@ function fixedUpdate(node, dt)
   end
 
   if input.pressed("t") then sas = not sas end
+
+  -- ---- time warp -----------------------------------------------------------
+  local warp = space.warp()
+  local function warp_step(dir)
+    local idx = 1
+    for i, w in ipairs(warp_steps) do
+      if warp >= w - 0.5 then idx = i end
+    end
+    local nxt = warp_steps[math.max(1, math.min(#warp_steps, idx + dir))]
+    if nxt > warp then
+      -- Stepping UP obeys the KSP rules: no thrust, and either parked on the
+      -- ground or high enough that the conic can't clip terrain this instant.
+      local alt_ok = node.grounded
+      local d0 = space.dominant(node.x, node.y, node.z)
+      local b0 = d0 and space.body(d0)
+      if not alt_ok and b0 then
+        local rr = math.sqrt((node.x - b0.x) ^ 2 + (node.y - b0.y) ^ 2 + (node.z - b0.z) ^ 2)
+        alt_ok = rr - b0.radius > 40.0
+      end
+      if throttle > 0.01 then
+        warp_note, warp_note_t = "warp locked: cut throttle first", time
+        return
+      elseif not alt_ok then
+        warp_note, warp_note_t = "warp locked: too low", time
+        return
+      end
+    end
+    if nxt ~= warp then space.warp(nxt) end
+  end
+  if input.pressed(".") then warp_step(1) end
+  if input.pressed(",") then warp_step(-1) end
+  -- Any hands-on-stick input cancels warp (throttle keys, attitude keys) —
+  -- you cannot fly the ship at 100×; the engine's rails own it up there.
+  local control_touched = input.key("shift") or input.key("ctrl") or input.key("z")
+    or input.key("w") or input.key("a") or input.key("s") or input.key("d")
+    or input.key("q") or input.key("e")
+  if warp > 1.001 then
+    if control_touched then
+      space.warp(1)
+      warp_note, warp_note_t = "warp canceled — pilot input", time
+    end
+    -- Coasting on rails: HUD only; attitude/thrust/brake wait for realtime.
+    set_flame(node, false, 0)
+    if time - hud_t >= 0.1 then
+      hud_t = time
+      local dom = space.dominant(node.x, node.y, node.z)
+      local b = dom and space.body(dom)
+      local lines = {}
+      lines[1] = string.format("WARP ×%d   (. faster · , slower · any control cancels)", warp)
+      if b then
+        local dxr, dyr, dzr = node.x - b.x, node.y - b.y, node.z - b.z
+        local rlen = math.sqrt(dxr * dxr + dyr * dyr + dzr * dzr)
+        lines[2] = string.format("ALT %6.0f  [%s]  t %.0fs", rlen - b.radius, dom, space.time())
+        local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
+        if o and o.apoapsis then
+          lines[3] = string.format("ORBIT  pe %+.0f  ap %+.0f  T %.0fs",
+            o.periapsis - b.radius, o.apoapsis - b.radius, o.period)
+        end
+      end
+      if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
+      set_hud(node, table.concat(lines, "\n"))
+    end
+    -- Parked warp (waiting out a transfer window on the pad): keep the brake
+    -- pinned so the sphere hull can't slow-slide down a slope for game-days.
+    if node.grounded then node.vx, node.vy, node.vz = 0, 0, 0 end
+    pvx, pvy, pvz = node.vx, node.vy, node.vz
+    return
+  end
 
   -- ---- throttle -----------------------------------------------------------
   if input.key("shift") then throttle = throttle + params.throttle_rate * dt end
@@ -274,8 +350,9 @@ function fixedUpdate(node, dt)
         lines[4] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
       end
     end
+    if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS"
+      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · ./, warp"
     set_hud(node, table.concat(lines, "\n"))
   end
 
