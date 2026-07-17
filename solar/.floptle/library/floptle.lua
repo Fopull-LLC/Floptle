@@ -745,3 +745,47 @@ function every(seconds, fn) end
 ---@param ease? "linear"|"smooth"|"in"|"out"
 ---@return TimerHandle
 function tween(seconds, fn, ease) end
+
+---One celestial body from this tick's on-rails snapshot (world coords).
+---@class SpaceBody
+---@field name string
+---@field x number
+---@field y number
+---@field z number
+---@field vx number
+---@field vy number
+---@field vz number
+---@field mu number Gravitational parameter µ = GM.
+---@field radius number Physical surface radius.
+---@field soi number Sphere-of-influence radius (-1 = infinite, the root).
+
+---Orbital mechanics readouts (scenes with Celestial Body components): planets
+---ride exact Kepler rails; one dominant body pulls µ/r² (patched conics).
+---@class Space
+space = {}
+---Space time in seconds (advances with warp; 0 at Play start).
+---@return number
+function space.time() end
+---Read the warp multiplier, or request one (1 .. 100000). Rails fast-forward;
+---local physics keeps ticking at 1×.
+---@param mult? number
+---@return number
+function space.warp(mult) end
+---Every celestial body this tick.
+---@return SpaceBody[]
+function space.bodies() end
+---One body by node name, or nil.
+---@param name string
+---@return SpaceBody|nil
+function space.body(name) end
+---The dominant body's name at a world position (deepest SOI), or nil.
+---@return string|nil
+function space.dominant(x, y, z) end
+---Gravitational acceleration (µ/r² toward the dominant body) at a position.
+---@return number, number, number
+function space.gravity(x, y, z) end
+---The orbit (conic) a craft at position+velocity is on around its dominant
+---body: { body, a, e, periapsis, apoapsis?, period? } — apoapsis/period absent
+---on an escape trajectory. Distances from the body CENTER.
+---@return table|nil
+function space.elements(x, y, z, vx, vy, vz) end

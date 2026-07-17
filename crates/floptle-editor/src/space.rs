@@ -10,6 +10,7 @@
 
 use floptle_core::frames::{Body, Kepler, System};
 use floptle_core::{CelestialBody, Entity, Transform};
+use floptle_core::math::DVec3;
 
 use crate::Editor;
 
@@ -79,9 +80,14 @@ impl Editor {
         let root_pos = floptle_core::world_transform(&self.world, cb[root].0).translation;
 
         let mut bodies = Vec::with_capacity(cb.len());
+        // Rails deltas for the dominant-frame carry below: how far each
+        // celestial moved this tick (old node pos → new rails pos).
+        let mut deltas = Vec::with_capacity(cb.len());
         for (i, (e, b)) in cb.iter().enumerate() {
             let (sp, sv) = sys.body_pos_vel(i, t);
             let wp = root_pos + sp;
+            let old = floptle_core::world_transform(&self.world, *e).translation;
+            deltas.push(wp - old);
             if i != root
                 && let Some(tr) = self.world.get_mut::<Transform>(*e)
             {
@@ -101,6 +107,31 @@ impl Editor {
                 radius: b.body_radius,
                 soi: sys.bodies[i].soi,
             });
+        }
+        // Dominant-frame CARRY (the patched-conic frame, made physical): every
+        // dynamic body inside a moving celestial's sphere of influence shifts
+        // by that body's rails delta this tick — stand on an orbiting moon and
+        // you ride it instead of it sliding out from under you; orbit inside
+        // its SOI and you orbit IT, not a point it left behind. Velocity is
+        // untouched (positions ARE the frame); crossing an SOI boundary swaps
+        // frames with a small world-velocity step — the v1 patched-conic seam.
+        if let Some(sim) = self.sim.as_mut() {
+            for (eid, pos) in sim.body_positions() {
+                let mut dom: Option<(usize, f64)> = None; // (index, soi)
+                for (i, sb) in sys.bodies.iter().enumerate() {
+                    let center = DVec3::from(bodies[i].pos);
+                    if (pos - center).length() <= sb.soi
+                        && dom.is_none_or(|(_, s)| sb.soi < s)
+                    {
+                        dom = Some((i, sb.soi));
+                    }
+                }
+                if let Some((i, _)) = dom
+                    && deltas[i].length_squared() > 1e-18
+                {
+                    sim.shift_body(eid, deltas[i]);
+                }
+            }
         }
         self.script_host.set_space(floptle_script::SpaceInfo {
             time: t,

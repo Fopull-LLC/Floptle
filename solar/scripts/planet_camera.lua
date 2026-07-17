@@ -49,6 +49,8 @@ local function cross(ax, ay, az, bx, by, bz)
   return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
 end
 
+local ship
+
 local function acquire()
   for _, s in ipairs(findScripts("planet_walker")) do
     if net.isMine(s.node) then return s.node end
@@ -58,16 +60,26 @@ local function acquire()
 end
 
 function lateUpdate(node, dt)
+  -- While flying, the SHIP is the subject (wider orbit); on exit, snap back.
+  if not ship then ship = findScript("ship_controller") end
+  local piloting = ship and ship.piloting
+  if piloting then
+    if target ~= ship.node then target = ship.node end
+  elseif target == (ship and ship.node) then
+    target = nil -- just exited: reacquire the walker
+  end
   if not (target and target.valid) then
     target = acquire()
     if not target then return end
   end
   if pitch == nil then pitch = params.start_pitch end
 
-  if input.pressed("shift") then shiftlock = not shiftlock end
+  -- SHIFT is ship throttle while piloting — don't fight over it.
+  if input.pressed("shift") and not piloting then shiftlock = not shiftlock end
 
   params.distance = params.distance - input.scroll() * params.zoom_speed
-  if params.distance > params.max_distance then params.distance = params.max_distance end
+  local maxd = piloting and math.max(params.max_distance, 40.0) or params.max_distance
+  if params.distance > maxd then params.distance = maxd end
   if params.distance < params.min_distance then params.distance = params.min_distance end
 
   -- Local up from the body (−gravity). Fallback: away from the origin (the

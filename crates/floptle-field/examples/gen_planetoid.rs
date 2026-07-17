@@ -115,4 +115,73 @@ fn main() {
         bytes.len() as f64 / 1e6,
         frac * 100.0,
     );
+
+    // ---- Pebble, the moon (terrain id 2): a cratered grey-ice ball. Every
+    // celestial body in the demo is REAL terrain — walkable, diggable, its own
+    // collider — not a prop sphere. Craters are part of the fill SDF (spherical
+    // dents subtracted at seeded surface points; carving after the fill would
+    // hit band-clamped rock and terrace).
+    let t0 = std::time::Instant::now();
+    const MOON_R: f32 = 13.0;
+    let mnoise = Noise::new(seed.wrapping_mul(31).wrapping_add(5));
+    let mut rng = floptle_core::noise::Rng::new(seed.wrapping_add(99));
+    let craters: Vec<(Vec3, f32)> = (0..9)
+        .map(|_| {
+            let d = Vec3::new(
+                rng.range(-1.0, 1.0) as f32,
+                rng.range(-1.0, 1.0) as f32,
+                rng.range(-1.0, 1.0) as f32,
+            )
+            .normalize_or_zero();
+            let d = if d == Vec3::ZERO { Vec3::X } else { d };
+            (d * (MOON_R + 1.0), rng.range(1.6, 3.4) as f32)
+        })
+        .collect();
+    let mut moon = ChunkField::new(0.6);
+    let mext = MOON_R + 3.0;
+    moon.fill_with(
+        Vec3::splat(-mext),
+        Vec3::splat(mext),
+        |p| {
+            let r = p.length();
+            let dir = if r > 1e-3 { p / r } else { Vec3::X };
+            let bump = mnoise.fbm(dir * 5.1, 4) * 1.1;
+            let mut d = r - (MOON_R + bump);
+            for (c, cr) in &craters {
+                let dent = (p - *c).length() - cr;
+                d = d.max(-dent); // subtract the crater ball
+            }
+            d
+        },
+        |p| {
+            let smooth = |lo: f32, hi: f32, x: f32| {
+                let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+                t * t * (3.0 - 2.0 * t)
+            };
+            let mix = |a: [f32; 3], b: [f32; 3], t: f32| {
+                [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+            };
+            let r = p.length();
+            let dir = if r > 1e-3 { p / r } else { Vec3::X };
+            let patch = mnoise.fbm(dir * 7.0 + Vec3::splat(11.0), 3);
+            let grey = [0.58, 0.57, 0.55];
+            let dark = [0.34, 0.33, 0.35];
+            let ice = [0.82, 0.86, 0.9];
+            let mut c = mix(grey, dark, smooth(0.1, 0.5, patch));
+            c = mix(c, ice, smooth(0.35, 0.6, -patch));
+            c
+        },
+    );
+    let moon_ms = t0.elapsed().as_millis();
+    let (mworst, mfrac) = moon.lipschitz_audit();
+    let mbytes = moon.to_bytes();
+    let mpath = format!("{out_dir}/planetoid.2.cfield");
+    std::fs::write(&mpath, &mbytes).expect("write moon cfield");
+    println!(
+        "moon      seed {seed}: {} chunks, {:.1} MB on disk, fill {moon_ms} ms, \
+         |grad| worst {mworst:.2} ({:.1}% over)\nwrote {mpath}",
+        moon.data_chunks(),
+        mbytes.len() as f64 / 1e6,
+        mfrac * 100.0,
+    );
 }

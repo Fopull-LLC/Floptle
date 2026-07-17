@@ -29,33 +29,42 @@
                 id: 1,
             ),
             scripts: [],
-            // System root: stays put, pulls µ/r² (surface g = µ/r² ≈ 7 at r = 60
-            // with the ×2 node scale). Replaces the old constant GravityVolume.
             celestial: Some((
                 mu: 25000.0,
                 body_radius: 60.0,
+                soi: 0.0,
+                a: 0.0,
+                e: 0.0,
+                i: 0.0,
+                lan: 0.0,
+                arg_pe: 0.0,
+                m0: 0.0,
             )),
         ),
         (
+            // A REAL moon: its own generated terrain (walk it, dig it), its own
+            // gravity well (µ/r², SOI ≈ 46 units), riding exact Kepler rails —
+            // and everything inside its SOI rides WITH it (dominant-frame carry).
             name: "Pebble",
             transform: (
                 translation: (220.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (12.0, 12.0, 12.0),
+                scale: (1.0, 1.0, 1.0),
             ),
-            matter: Primitive(
-                shape: Sphere,
-                color: (0.62, 0.6, 0.55),
+            matter: Terrain(
+                id: 2,
             ),
             scripts: [],
-            // A moon ON RAILS: circles the planetoid every ~2 minutes (watch it
-            // cross the sky), and inside its little SOI, IT pulls instead.
             celestial: Some((
-                mu: 60.0,
-                body_radius: 10.0,
+                mu: 500.0,
+                body_radius: 14.0,
+                soi: 0.0,
                 parent: "Planetoid",
                 a: 220.0,
+                e: 0.0,
                 i: 0.15,
+                lan: 0.0,
+                arg_pe: 0.0,
                 m0: 0.8,
             )),
         ),
@@ -106,7 +115,7 @@
         (
             name: "Astronaut",
             transform: (
-                translation: (0.0, 38.0, 0.0),
+                translation: (0.0, 72.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -154,7 +163,7 @@
         (
             name: "Camera 1",
             transform: (
-                translation: (0.0, 44.0, 8.0),
+                translation: (0.0, 78.0, 8.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -181,7 +190,7 @@
         (
             name: "Sun Glow",
             transform: (
-                translation: (6.0, 40.0, 6.0),
+                translation: (6.0, 74.0, 6.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -191,6 +200,53 @@
                 range: 30.0,
             ),
             scripts: [],
+        ),
+        (
+            name: "Cube",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.5, 0.0, 0.8660254),
+                scale: (450.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.8, 0.4999999, 0.4),
+            ),
+            scripts: [],
+        ),
+        (
+            // The ship (S3 v1): walk up, F to board, Shift/Ctrl throttle,
+            // WASD+QE attitude, T = SAS. Crash hard enough and it wrecks
+            // (G resurrects it at the pad). See scripts/ship_controller.lua.
+            name: "Ship",
+            transform: (
+                translation: (16.0, 70.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.6, 2.4, 1.6),
+            ),
+            matter: Primitive(
+                shape: Capsule,
+                color: (0.85, 0.87, 0.92),
+            ),
+            scripts: [
+                (
+                    kind: "ship_controller",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            rigidbody: Some((
+                capsule: false,
+                radius: 2.4,
+                height: 4.0,
+                half_extents: (0.5, 0.5, 0.5),
+                restitution: 0.0,
+                friction: 0.6,
+                gravity: true,
+                lock_pos: (false, false, false),
+                lock_rot: (false, false, false),
+                align_up: false,
+            )),
         ),
     ],
 )

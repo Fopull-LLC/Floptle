@@ -17,7 +17,12 @@ function start(node)
   cam = findScript("planet_camera")
 end
 
+local ship
+
 function update(node, dt)
+  -- E/Q belong to the ship's roll controls while piloting.
+  if not ship then ship = findScript("ship_controller") end
+  if ship and ship.piloting then return end
   local dig = input.key("e")
   local build = input.key("q")
   if not (dig or build) then
