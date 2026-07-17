@@ -1349,6 +1349,17 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             )?;
         }
         {
+            let cmds = shared.vfx_commands.clone();
+            vfx_methods.set(
+                "setIntensity",
+                lua.create_function(move |_, (this, i): (Table, f32)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    cmds.borrow_mut().push((e, VfxCmd::Intensity(i)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
             let inf = shared.vfx_info.clone();
             vfx_methods.set(
                 "isPlaying",

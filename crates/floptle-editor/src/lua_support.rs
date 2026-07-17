@@ -143,6 +143,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field isPlaying fun(self: ParticleSystemHandle): boolean Is an instance emitting/ageing right now?
 ---@field alive fun(self: ParticleSystemHandle): number Live particle count across the effect's tracks.
 ---@field asset fun(self: ParticleSystemHandle): string|nil The effect asset key this node references.
+---@field setIntensity fun(self: ParticleSystemHandle, i: number) Live emission scale 0..4 (1 = authored): multiplies rates/burst counts and shades particle size — drive an engine plume with the throttle.
 
 ---A node's Audio Source, controlled from a script via `node:sound()`.
 ---@class AudioSourceHandle

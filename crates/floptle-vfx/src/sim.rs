@@ -210,6 +210,9 @@ pub struct EffectInstance {
     pub t: f32,
     prev_t: f32,
     pub playing: bool,
+    /// Live emission scale (0..~2): multiplies every clip's rate/burst count and
+    /// shades birth size — a throttle-driven plume without touching the asset.
+    pub intensity: f32,
     instance_seed: u32,
     tracks: Vec<TrackState>,
     /// World anchor for `Space::World` tracks (the emitter's last world position).
@@ -240,11 +243,17 @@ impl EffectInstance {
             t: 0.0,
             prev_t: START_EPS,
             playing: true,
+            intensity: 1.0,
             instance_seed,
             tracks,
             anchor: DVec3::ZERO,
             anchored: false,
         }
+    }
+
+    /// Set the live emission scale (clamped 0..4). 1 = the authored effect.
+    pub fn set_intensity(&mut self, i: f32) {
+        self.intensity = i.clamp(0.0, 4.0);
     }
 
     /// The world anchor `Space::World` particles are stored relative to (the emitter's
@@ -395,7 +404,7 @@ impl EffectInstance {
                             continue;
                         }
                         let mid = 0.5 * (s + e);
-                        let rate_eff = rate * ct.lane_rate.sample(mid / lifetime);
+                        let rate_eff = rate * ct.lane_rate.sample(mid / lifetime) * self.intensity;
                         if rate_eff <= 0.0 {
                             continue;
                         }
@@ -409,7 +418,7 @@ impl EffectInstance {
                             // Reconstruct the exact accumulator-crossing time so birth
                             // spacing is even regardless of frame boundaries.
                             let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter);
+                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, self.intensity);
                         }
                     }
                     Emit::Burst { count, count_jitter, pulses, interval, interval_jitter } => {
@@ -426,9 +435,11 @@ impl EffectInstance {
                                 let cs = hash3(inst_seed, ci as u32, p ^ 0x9E37);
                                 let cmul = (1.0 + count_jitter * (rand01(cs, SALT_COUNT) * 2.0 - 1.0)).max(0.0);
                                 let lane = ct.lane_count.sample(tp / lifetime);
-                                let n = (count as f32 * cmul * lane).round().max(0.0) as u32;
+                                let n = (count as f32 * cmul * lane * self.intensity)
+                                    .round()
+                                    .max(0.0) as u32;
                                 for _ in 0..n {
-                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter);
+                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, self.intensity);
                                 }
                             }
                         }
@@ -501,6 +512,7 @@ fn spawn(
     lifetime: f32,
     gravity: Vec3,
     emitter: &Transform,
+    intensity: f32,
 ) {
     if ts.particles.count as u32 >= ct.capacity {
         return; // pool full — drop, never reallocate mid-play
@@ -529,7 +541,9 @@ fn spawn(
     }
 
     let speed_mul = ct.lane_speed.sample(un);
-    let birth_size = ct.lane_size.sample(un);
+    // Intensity shades birth size gently (55% at zero → 100% at full → beyond),
+    // so a low-throttle plume reads as a smaller flame, not just a sparser one.
+    let birth_size = ct.lane_size.sample(un) * (0.55 + 0.45 * intensity.min(2.0));
     // Birth velocity: value at life 0, resolving a per-particle `Range` from the seed.
     let v0 = frame * ct.velocity.sample_vec3_rand(0.0, rand01(seed, SALT_VELOCITY)) * speed_mul;
 
