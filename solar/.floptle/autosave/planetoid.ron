@@ -1,5 +1,22 @@
 (
     name: "planetoid",
+    lighting: (
+        direction: (0.4, 0.9, 0.45),
+        color: (1.0, 0.98, 0.92),
+        ambient: (0.12, 0.12, 0.16),
+        intensity: 1.0,
+        shadows: true,
+        shadow_softness: 0.35,
+        shadow_strength: 1.0,
+        shadow_tint: (0.0, 0.0, 0.0),
+        shadow_quantize: 0,
+        shadow_dither: false,
+        shadow_distance: 150.0,
+        fog_color: (0.6, 0.65, 0.72),
+        fog_start: 40.0,
+        fog_end: 200.0,
+        fog_dither_strength: 0.5,
+    ),
     nodes: [
         (
             name: "Planetoid",
@@ -35,11 +52,13 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Skybox(
-                color: (1.0, 1.0, 1.0),
+                color: (0.0, 0.0, 0.0),
                 size: 600.0,
                 tint: (0.004, 0.005, 0.012),
-                shader: None,
-                shader_params: {},
+                shader: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/shaders/examples/starryNight.flsl"),
+                shader_params: {
+                    "skyHigh": (0.06563921, 0.098244324, 0.21236216, 1.0),
+                },
             ),
             scripts: [],
         ),
@@ -79,7 +98,7 @@
             ),
             scripts: [
                 (
-                    kind: "planet_walker",
+                    kind: "third_person",
                     enabled: true,
                     params: [],
                 ),
@@ -99,13 +118,12 @@
                 gravity: true,
                 lock_pos: (false, false, false),
                 lock_rot: (false, false, false),
-                align_up: true,
             )),
         ),
         (
             name: "Camera 1",
             transform: (
-                translation: (0.0, 44.0, 8.0),
+                translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -115,19 +133,20 @@
             ),
             scripts: [
                 (
-                    kind: "planet_camera",
+                    kind: "third_person_camera",
                     enabled: true,
                     params: [
-                        ("distance", 7.0),
-                        ("height", 1.2),
-                        ("max_distance", 14.0),
-                        ("min_distance", 1.5),
-                        ("sensitivity", 0.3),
-                        ("start_pitch", -0.3),
+                        ("distance", 6.0),
+                        ("height", 0.15),
+                        ("max_distance", 11.0),
+                        ("min_distance", 1.2),
+                        ("sensitivity", 0.35),
+                        ("start_pitch", -0.35),
                         ("zoom_speed", 1.0),
                     ],
                 ),
             ],
+            parent: Some(4),
         ),
         (
             name: "Sun Glow",

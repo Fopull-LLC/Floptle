@@ -257,6 +257,9 @@ pub struct RigidBodyDoc {
     pub lock_pos: [bool; 3],
     #[serde(default)]
     pub lock_rot: [bool; 3],
+    /// Tilt the node so local +Y tracks −gravity (radial-planet characters).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub align_up: bool,
 }
 
 fn true_bool() -> bool {
@@ -328,6 +331,7 @@ impl RigidBodyDoc {
             gravity: self.gravity,
             lock_pos: self.lock_pos,
             lock_rot: self.lock_rot,
+            align_up: self.align_up,
         }
     }
     pub fn from_rigidbody(rb: &RigidBody) -> Self {
@@ -343,6 +347,7 @@ impl RigidBodyDoc {
             gravity: rb.gravity,
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
+            align_up: rb.align_up,
         }
     }
 }
@@ -1478,6 +1483,7 @@ mod tests {
                         gravity: false, // exercise the gravity-flag round-trip
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
+                        align_up: true, // exercise the align-to-gravity round-trip
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,
@@ -1677,6 +1683,7 @@ mod tests {
         assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
+        assert!(rb.align_up, "align-to-gravity flag lost in the round-trip");
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");

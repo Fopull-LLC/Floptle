@@ -1699,6 +1699,15 @@ impl EditorTabViewer<'_> {
                                         cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
                                     }
                                 });
+                                cmd.inspector_changed |= ui
+                                    .checkbox(&mut rb.align_up, "align to gravity")
+                                    .on_hover_text(
+                                        "Tilt this node so its up follows −gravity — a \
+                                         character on a radial-gravity planet stands on it \
+                                         (and its camera/children inherit the tilt). \
+                                         Overrides freeze rot.",
+                                    )
+                                    .changed();
                             });
                         }
                     });

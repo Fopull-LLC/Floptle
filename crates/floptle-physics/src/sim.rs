@@ -24,6 +24,8 @@ struct BodyLink {
     /// Local rotation restored on locked axes each writeback: the authored one,
     /// re-captured when a rotation lock engages mid-play (freeze in place).
     rot0: Quat,
+    /// Tilt the node so local +Y tracks the body's up (radial-gravity characters).
+    align_up: bool,
 }
 
 pub struct Sim {
@@ -171,7 +173,7 @@ impl Sim {
                 continue;
             }
             let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
-            map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0 });
+            map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0, align_up: rb.align_up });
         }
         Self {
             world,
@@ -306,7 +308,7 @@ impl Sim {
         let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
         let pos = b.pos;
         let bi = self.world.add_body(b);
-        self.map.push(BodyLink { entity: e, body: bi, lock_rot: rb.lock_rot, rot0 });
+        self.map.push(BodyLink { entity: e, body: bi, lock_rot: rb.lock_rot, rot0, align_up: rb.align_up });
         // Keep the render-interpolation anchors aligned mid-tick (they rebuild
         // from scratch at the next `step_tick` anyway).
         if self.tick_prev.len() == bi {
@@ -852,6 +854,7 @@ impl Sim {
                     self.map[i].rot0 = t.rotation;
                 }
                 self.map[i].lock_rot = rb.lock_rot;
+                self.map[i].align_up = rb.align_up;
                 // Live layer switches: `node.layer = "Ghost"` (or an Inspector
                 // edit) re-resolves against the play-start layer table.
                 let layer = self.layers.index_for(ecs, ent);
@@ -962,6 +965,20 @@ impl Sim {
     fn write_one_transform(&self, ecs: &mut World, link: &BodyLink, p: Vec3) {
         if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
             t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            // Align-to-gravity: tilt the node so local +Y tracks the body's up
+            // (kept along −gravity by the step) — a planet-walker stands on the
+            // planet visually, and its children (camera, held items) inherit the
+            // tilt. Shortest-arc + slerp smoothing preserves the node's own
+            // heading (yaw about up) untouched. Takes priority over lock_rot.
+            if link.align_up {
+                let up = self.world.bodies[link.body].up;
+                let cur = (t.rotation * Vec3::Y).normalize_or_zero();
+                if cur != Vec3::ZERO && cur.dot(up) < 0.99995 {
+                    let target = Quat::from_rotation_arc(cur, up) * t.rotation;
+                    t.rotation = t.rotation.slerp(target, 0.35).normalize();
+                }
+                return;
+            }
             // Rotation constraints: keep the authored angle on each locked axis.
             if link.lock_rot.iter().any(|&l| l) {
                 let (ay, ax, az) = t.rotation.to_euler(EulerRot::YXZ);
