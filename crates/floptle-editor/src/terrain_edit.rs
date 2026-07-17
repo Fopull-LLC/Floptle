@@ -522,27 +522,106 @@ impl Editor {
             };
             if !touched.is_empty() {
                 self.stroke_dabbed = true; // mark this stroke as worth an undo step
-                // Refresh the shadow proxy over the dab box and queue the atlas's
-                // partial upload. (A dab outside the proxy's box clamps — the proxy is
-                // re-derived at stroke end when bounds outgrow it; see `end_sculpt_stroke`.)
-                let pad = terrain.field.band() + terrain.field.voxel();
-                let (wmin, wmax) =
-                    (hit - Vec3::splat(brush.radius + pad), hit + Vec3::splat(brush.radius + pad));
-                let (mn, mx) = terrain.field.refresh_dense_region(&mut terrain.shadow, wmin, wmax);
+                // Shadow-proxy refresh + atlas partial upload + chunk remesh queue.
+                // (A dab outside the proxy's box clamps — the proxy is re-derived at
+                // stroke end when bounds outgrow it; see `end_sculpt_stroke`.)
                 let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
-                self.terrain_region_dirty = Some(match self.terrain_region_dirty {
-                    Some((e, omn, omx, og)) if e == active => (
-                        active,
-                        [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
-                        [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
-                        og || geom,
-                    ),
-                    _ => (active, mn, mx, geom),
-                });
-                // Queue exactly the touched chunks for remesh.
-                self.terrain_chunks_dirty.entry(active).or_default().extend(touched);
+                self.queue_terrain_dirty(active, hit, brush.radius, geom, touched);
             }
         }
+    }
+
+    /// Drain + apply the terrain edits scripts queued this pass (`terrain.sculpt/
+    /// dig/paint/paintTexture` — Terrain 2.0 P6). Call after reclaiming the sim's
+    /// colliders and BEFORE stepping physics, so a dig affects the same tick.
+    pub(crate) fn drain_script_terrain_ops(&mut self) {
+        for op in self.script_host.take_terrain_ops() {
+            self.apply_terrain_op(&op);
+        }
+    }
+
+    /// Apply one script terrain op (world coords) to the nearest terrain: the
+    /// authority field, the sim's collider copy (geometry ops), the chunk remesh
+    /// queue, and the shadow-proxy region — the same pipeline as an editor brush dab.
+    /// Play-mode only state: Stop restores the pre-Play fields (`play_terrains`), so
+    /// script edits never leak into the authored scene.
+    fn apply_terrain_op(&mut self, op: &floptle_script::TerrainOp) {
+        use floptle_field::{Brush, BrushProfile};
+        use floptle_script::TerrainOpMode as M;
+        let pos = DVec3::new(op.pos[0], op.pos[1], op.pos[2]);
+        // Nearest terrain by |field distance| at the op position.
+        let mut best: Option<(Entity, Vec3, f32)> = None;
+        for &e in self.terrains.keys() {
+            let anchor = self.terrain_world_origin(e);
+            let local = (pos - anchor).as_vec3();
+            let d = self.terrains[&e].field.d(local).abs();
+            if best.as_ref().is_none_or(|b| d < b.2) {
+                best = Some((e, local, d));
+            }
+        }
+        let Some((e, local, d)) = best else { return };
+        // Too far from every surface: a mis-aimed op must not edit a random field.
+        if d > op.radius + self.terrains[&e].field.band() * 2.0 {
+            return;
+        }
+        let profile = BrushProfile::default();
+        let t = self.terrains.get_mut(&e).unwrap();
+        let touched = match op.mode {
+            M::Raise => t.field.sculpt(Brush::Raise, local, op.radius, op.strength, profile),
+            M::Lower => t.field.sculpt(Brush::Lower, local, op.radius, op.strength, profile),
+            M::Smooth => t.field.sculpt(Brush::Smooth, local, op.radius, op.strength, profile),
+            M::Flatten => t.field.sculpt(Brush::Flatten, local, op.radius, op.strength, profile),
+            M::Paint(c) => t.field.paint(local, op.radius, op.strength, c, profile),
+            M::PaintTexture(slot) => t.field.paint_texture(local, op.radius, slot),
+        };
+        if touched.is_empty() {
+            return;
+        }
+        let geom = !matches!(op.mode, M::Paint(_) | M::PaintTexture(_));
+        // Mirror geometry edits into the sim's collider copy so collision agrees
+        // with the drawn surface THIS tick (color never affects collision).
+        if geom
+            && let Some(sim) = self.sim.as_mut()
+            && let Some(f) = sim.terrain_field_mut(e.index())
+        {
+            match op.mode {
+                M::Raise => f.sculpt(Brush::Raise, local, op.radius, op.strength, profile),
+                M::Lower => f.sculpt(Brush::Lower, local, op.radius, op.strength, profile),
+                M::Smooth => f.sculpt(Brush::Smooth, local, op.radius, op.strength, profile),
+                M::Flatten => f.sculpt(Brush::Flatten, local, op.radius, op.strength, profile),
+                _ => Vec::new(),
+            };
+        }
+        self.queue_terrain_dirty(e, local, op.radius, geom, touched);
+    }
+
+    /// Queue the render/shadow refresh for a terrain write at `local` (node-local):
+    /// refresh the shadow proxy over the write box + merge the atlas's partial-upload
+    /// region, and queue the touched chunks for remesh. Shared by the editor brush
+    /// dab and the script terrain ops.
+    pub(crate) fn queue_terrain_dirty(
+        &mut self,
+        e: Entity,
+        local: Vec3,
+        radius: f32,
+        geom: bool,
+        touched: Vec<[i32; 3]>,
+    ) {
+        let Some(t) = self.terrains.get_mut(&e) else { return };
+        let pad = t.field.band() + t.field.voxel();
+        let (wmin, wmax) =
+            (local - Vec3::splat(radius + pad), local + Vec3::splat(radius + pad));
+        let (mn, mx) = t.field.refresh_dense_region(&mut t.shadow, wmin, wmax);
+        self.terrain_region_dirty = Some(match self.terrain_region_dirty {
+            Some((se, omn, omx, og)) if se == e => (
+                e,
+                [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
+                [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
+                og || geom,
+            ),
+            _ => (e, mn, mx, geom),
+        });
+        self.terrain_chunks_dirty.entry(e).or_default().extend(touched);
     }
 
     /// End-of-stroke bookkeeping (mouse-up): if the stroke pushed the field past its

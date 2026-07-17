@@ -811,6 +811,19 @@ impl Sim {
     }
 
     /// Set a body's velocity by its entity index (scripts write velocity each frame).
+    /// Mutable access to a terrain collider's chunk field by its node's entity index —
+    /// the runtime terrain API (`terrain.sculpt`/`dig` from Lua) applies each edit to
+    /// the sim's copy through this, keeping collision in lockstep with the authority
+    /// field the editor applies the same op to.
+    pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
+        self.world
+            .colliders
+            .iter_mut()
+            .find(|c| c.eid == Some(eid))
+            .and_then(|c| c.shape.chunk_terrain_mut())
+            .map(|t| &mut t.field)
+    }
+
     pub fn set_body_velocity(&mut self, eid: u32, vel: Vec3) {
         for l in &self.map {
             if l.entity.index() == eid {

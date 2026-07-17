@@ -60,6 +60,7 @@ mod host;
 mod math_api;
 mod net_api;
 mod preprocess;
+mod terrain_api;
 
 pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
@@ -67,6 +68,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
+pub use terrain_api::{TerrainOp, TerrainOpMode};
 
 /// Severity of a captured script log line (the engine Console colors by this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +167,9 @@ pub struct ScriptHost {
     /// World position of the sim's local origin (ADR-0015). Scripts speak world
     /// coordinates; `raycast` converts to the sim frame in f64 at this boundary.
     sim_origin: Rc<RefCell<glam::DVec3>>,
+    /// Terrain edits queued by `terrain.sculpt/dig/paint(...)` this frame, drained by
+    /// the editor after the script pass (applied to the authority field + sim copy).
+    terrain_ops: Rc<RefCell<Vec<terrain_api::TerrainOp>>>,
     /// The scene graph mirror the node handles read/write (synced each `run`).
     scene: Rc<RefCell<SceneMirror>>,
     /// Live per-(entity, script) environments, for script handles.

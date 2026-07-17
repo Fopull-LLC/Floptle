@@ -789,6 +789,16 @@ impl ScriptHost {
         {
             eprintln!("[lua] failed to install the net API: {e}");
         }
+        // The `terrain.*` API (Terrain 2.0 P6): writes queue TerrainOps the editor
+        // drains after the script pass; reads run against the lent colliders.
+        let terrain_ops: Rc<RefCell<Vec<crate::terrain_api::TerrainOp>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        crate::terrain_api::install_terrain_api(
+            &lua,
+            terrain_ops.clone(),
+            colliders.clone(),
+            logs.clone(),
+        );
 
         Self {
             lua,
@@ -803,6 +813,7 @@ impl ScriptHost {
             colliders,
             hulls,
             sim_origin,
+            terrain_ops,
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
             model_changes: shared.model_changes.clone(),
@@ -1243,6 +1254,13 @@ impl ScriptHost {
     /// [`run`](Self::run), before stepping the sim.
     pub fn take_colliders(&self) -> Vec<floptle_physics::AnchoredCollider> {
         std::mem::take(&mut self.colliders.borrow_mut())
+    }
+
+    /// Drain the terrain edits scripts queued this pass (`terrain.sculpt/dig/paint`).
+    /// The editor applies each to the authority field, the sim's collider copy, the
+    /// remesh queue and the shadow proxy — the same pipeline as an editor brush dab.
+    pub fn take_terrain_ops(&self) -> Vec<crate::TerrainOp> {
+        std::mem::take(&mut self.terrain_ops.borrow_mut())
     }
 
     /// Feed this frame's dynamic-body hulls ([`Sim::body_hulls`] copies) so

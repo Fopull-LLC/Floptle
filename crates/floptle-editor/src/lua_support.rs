@@ -624,16 +624,72 @@ function scene.current() end
 ---subfolders kept, e.g. \"arenas/desert\").
 ---@return string[]
 function scene.list() end
+
+---Runtime terrain editing + queries (Terrain 2.0). Edits queue and land the
+---same tick (collision updates with the surface). World coordinates.
+---In multiplayer, run edits on the SERVER and mirror them with an RPC that
+---repeats the same call — the ops are deterministic.
+---@class Terrain
+terrain = {}
+---Sculpt the nearest terrain at (x,y,z): mode \"raise\" (default), \"lower\"/\"dig\",
+---\"smooth\", or \"flatten\". strength 0..1 (default 1). No-op when no terrain
+---surface is near the point.
+---@param x number
+---@param y number
+---@param z number
+---@param radius number
+---@param strength? number
+---@param mode? string
+function terrain.sculpt(x, y, z, radius, strength, mode) end
+---Dig a hole — sugar for `terrain.sculpt(x, y, z, radius, strength, \"lower\")`.
+---@param x number
+---@param y number
+---@param z number
+---@param radius number
+---@param strength? number
+function terrain.dig(x, y, z, radius, strength) end
+---Recolor the terrain surface inside the brush ball (r/g/b are 0..1).
+---@param x number
+---@param y number
+---@param z number
+---@param radius number
+---@param r number
+---@param g number
+---@param b number
+---@param strength? number
+function terrain.paint(x, y, z, radius, r, g, b, strength) end
+---Paint a terrain-palette texture slot (1-based, the Terrain tab's palette;
+---0 clears back to the flat color).
+---@param x number
+---@param y number
+---@param z number
+---@param radius number
+---@param slot number
+function terrain.paintTexture(x, y, z, radius, slot) end
+---Signed distance from (x,y,z) to the nearest terrain surface (negative =
+---inside rock), or nil when the scene has no terrain.
+---@param x number
+---@param y number
+---@param z number
+---@return number|nil
+function terrain.query(x, y, z) end
+---World Y of the highest terrain surface under (x,z), or nil when no terrain
+---is hit there.
+---@param x number
+---@param z number
+---@return number|nil
+function terrain.height(x, z) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"terrain\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"destroy\", \"spawnEffect\", \"scene\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",

@@ -3542,6 +3542,10 @@ impl Editor {
                     sim.set_body_height(eid, h);
                 }
             }
+            // Terrain edits queued by the frame pass (`terrain.sculpt/dig/...`):
+            // applied to the authority field + the sim's collider copy before any
+            // tick steps, so physics never disagrees with the surface.
+            self.drain_script_terrain_ops();
             if self.sim.is_some() {
                 self.game_tick.accumulate(sdt);
                 while self.game_tick.tick() {
@@ -3650,6 +3654,11 @@ impl Editor {
                         for (eid, h) in self.script_host.take_body_height_changes() {
                             sim.set_body_height(eid, h);
                         }
+                    }
+                    // This tick's terrain edits (`fixedUpdate` digs) land BEFORE the
+                    // step: the tick that dug the hole also falls into it.
+                    self.drain_script_terrain_ops();
+                    if let Some(sim) = self.sim.as_mut() {
                         sim.step_tick(self.game_tick.step, focus);
                     }
                     // Collision / trigger events from THIS tick, dispatched to
