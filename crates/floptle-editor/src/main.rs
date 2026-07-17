@@ -106,7 +106,7 @@ pub(crate) type ScriptDefaults = floptle_script::ScriptDefaults;
 
 /// What Stop restores that the scene doc doesn't carry: the terrain fields
 /// (keyed by terrain id) and the terrain texture palette.
-pub(crate) type PlayTerrains = (Vec<(u32, floptle_field::Terrain)>, Vec<String>);
+pub(crate) type PlayTerrains = (Vec<(u32, floptle_field::ChunkField)>, Vec<String>);
 
 #[derive(Default)]
 struct EditorCmd {
@@ -472,13 +472,13 @@ struct EditorTabViewer<'a> {
     vertex_brush: &'a mut VertexBrush,
     /// Terrain dock-tab state.
     terrain_brush: &'a mut TerrainBrush,
-    terrain_detail: &'a mut u32,
+    /// The cubic voxel edge (world units) new terrains are created at — the ONE
+    /// density knob (Terrain 2.0: an honest units-per-voxel, not a cell count).
+    terrain_voxel: &'a mut f32,
     terrain_textures: &'a mut Vec<String>,
     terrain_present: bool,
-    terrain_voxels: Option<(usize, u64)>,
-    /// The scene's coarsest terrain voxel: `(edge per axis, anisotropy)`. Shown in the
-    /// Terrain tab — coarse/stretched cells are what read as a dark lattice.
-    terrain_worst_voxel: Option<([f32; 3], f32)>,
+    /// Terrain stats for the tab: `(volumes, data chunks, resident bytes)`.
+    terrain_stats: Option<(usize, usize, usize)>,
     /// Asset browser view mode (false = tree, true = grid) + the grid's folder.
     assets_grid: &'a mut bool,
     assets_grid_dir: &'a mut PathBuf,
@@ -1375,10 +1375,11 @@ struct Editor {
     /// Per-texture sampling settings (filter + wrap), keyed by image path. Persisted to
     /// `.floptle/textures.ron`. Absent ⏵ the crisp tiling default.
     texture_settings: HashMap<String, TexSetting>,
-    /// Editable terrain SDF fields, keyed by their scene node Entity (each in its
-    /// node's LOCAL space). Empty until "New Terrain". Every volume is uploaded to
-    /// the renderer's 3D atlas at native resolution and fused on the GPU.
-    terrains: HashMap<Entity, floptle_field::Terrain>,
+    /// Editable terrains, keyed by their scene node Entity (each field in its node's
+    /// LOCAL space). Empty until "New Terrain". Terrain 2.0: the AUTHORITY is the
+    /// sparse unbounded [`floptle_field::ChunkField`] (brushes, physics, save, Lua);
+    /// each carries a capped-resolution dense shadow proxy feeding the SDF atlas.
+    terrains: HashMap<Entity, crate::terrain_edit::EditorTerrain>,
     /// The terrain the sculpt brush currently targets (the one under the cursor),
     /// chosen each frame.
     active_terrain: Option<Entity>,
@@ -1390,12 +1391,15 @@ struct Editor {
     /// The GPU volume set needs re-uploading (a terrain was added/edited/deleted/resized).
     terrain_gpu_dirty: bool,
     /// Terrain 2.0 (ADR terrain-mesh): each terrain's PRIMARY-ray rendering is a set of
-    /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing the
-    /// dense voxel field. The dense field (`terrains`) stays the authority — it still feeds
-    /// the atlas for sun shadows + SDF AO (the volume flips to `w = 3` = in-field-but-not-
-    /// drawn), physics, sculpting and save. This map is the DERIVED render mesh, rebuilt
-    /// from the dense field whenever the terrain changes. Keyed per terrain entity.
+    /// extracted chunk meshes drawn through the raster pass, instead of sphere-tracing a
+    /// voxel field. Meshes extract straight from the authoritative `ChunkField`; the
+    /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =
+    /// in-field-but-not-drawn). This map is the per-terrain GPU slot set.
     terrain_render: HashMap<Entity, crate::terrain_edit::TerrainRender>,
+    /// Chunks whose voxels changed since the last remesh, per terrain — the regional
+    /// remesh queue a brush dab (or undo swap) feeds. Drained every frame by
+    /// `sync_terrain_meshes`.
+    terrain_chunks_dirty: HashMap<Entity, Vec<[i32; 3]>>,
     /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
     /// no RigidBody): each level mesh is baked once into an unsigned distance
     /// volume (`bake_occluder`) and uploaded into the SAME 3D atlas as the
@@ -1423,10 +1427,11 @@ struct Editor {
     /// strokes (so the brush behaves like a real paint tool, not 200 dabs/sec).
     last_dab_pos: Option<DVec3>,
     last_dab_time: Option<Instant>,
-    /// Pre-stroke field bytes captured on mouse-down — pushed to the undo timeline
-    /// on mouse-up if the stroke actually deformed the terrain. `None` between
-    /// strokes. The whole stroke collapses to a single undo step.
-    stroke_snapshot: Option<(u32, Vec<u8>)>,
+    /// Pre-stroke chunk snapshots, captured lazily as the stroke's dabs touch new
+    /// chunks — pushed to the undo timeline on mouse-up if the stroke actually
+    /// deformed the terrain. `None` between strokes. The whole stroke collapses to a
+    /// single undo step of only the touched chunks (~MBs, not the whole field).
+    stroke_snapshot: Option<(u32, floptle_field::ChunkUndo)>,
     /// At least one dab landed during the current stroke (so it's worth undoing).
     stroke_dabbed: bool,
     /// LMB held with the Paint tool — keep dabbing on mouse motion.
@@ -1458,7 +1463,8 @@ struct Editor {
     /// Terrain brush settings.
     terrain_brush: TerrainBrush,
     /// New-terrain resolution along the long axis (user-controllable detail).
-    terrain_detail: u32,
+    /// Cubic voxel edge for NEW terrains, world units (the Terrain tab's density knob).
+    terrain_voxel: f32,
     /// Terrain texture palette — image paths per slot (empty = unused).
     terrain_textures: Vec<String>,
     /// The terrain palette needs re-uploading to the GPU.
@@ -1871,9 +1877,10 @@ struct Editor {
 /// one stack means Ctrl+Z walks back through scene + terrain edits in true order.
 enum Snapshot {
     Scene(floptle_scene::SceneDoc),
-    /// A terrain field snapshot: `(terrain id, serialized field)` — keyed by the
-    /// stable id (not Entity) so it survives scene restores.
-    Terrain(u32, Vec<u8>),
+    /// A terrain stroke snapshot: `(terrain id, the touched chunks' pre-stroke
+    /// contents)` — keyed by the stable id (not Entity) so it survives scene
+    /// restores. Undo/redo swaps the chunks back through the live field.
+    Terrain(u32, floptle_field::ChunkUndo),
     /// A vertex-paint snapshot: `(paint id, colors per part)`. Keyed by the stable
     /// paint id for the same reason terrain is — `restore()` respawns the World, so an
     /// Entity here would dangle. Undo/redo is a colors swap that never touches the ECS.
@@ -1968,7 +1975,7 @@ impl ApplicationHandler for Editor {
         }
         self.dock_state = Some(default_dock());
         self.viewport_zoom = 0.9;
-        self.terrain_detail = 64;
+        self.terrain_voxel = 1.5;
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
         self.external_editor = load_external_editor();
         self.prefer_external_editor = load_prefer_external();
@@ -2402,10 +2409,12 @@ impl ApplicationHandler for Editor {
                         self.painting = false;
                         self.end_paint_stroke();
                     }
-                    // End of a sculpt stroke: bank one undo step if it changed anything.
+                    // End of a sculpt stroke: bank one undo step if it changed anything,
+                    // and re-derive the shadow proxy if the stroke outgrew its box.
                     if let Some((id, snap)) = self.stroke_snapshot.take()
                         && self.stroke_dabbed {
                             self.push_history(Snapshot::Terrain(id, snap));
+                            self.end_sculpt_stroke();
                         }
                 }
             }

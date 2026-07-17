@@ -68,16 +68,22 @@ impl Editor {
         })
     }
 
-    /// Restore a terrain field (by id) from serialized `bytes`. Returns the current
-    /// bytes first (for the redo/undo counterpart), or `None` if the id is gone.
-    pub(crate) fn swap_terrain_bytes(&mut self, id: u32, bytes: &[u8]) -> Option<Vec<u8>> {
+    /// Restore a terrain stroke's chunks (by id), returning the inverse record (for
+    /// the redo/undo counterpart), or `None` if the id is gone. Only the touched
+    /// chunks swap; their meshes re-extract, and the shadow proxy re-derives (bounds
+    /// may have shrunk/grown across the swap).
+    pub(crate) fn swap_terrain_chunks(
+        &mut self,
+        id: u32,
+        undo: &floptle_field::ChunkUndo,
+    ) -> Option<floptle_field::ChunkUndo> {
         let e = self.terrain_entity_of_id(id)?;
-        let cur = self.terrains.get(&e).map(|t| t.to_bytes());
-        if let Some(t) = floptle_field::Terrain::from_bytes(bytes) {
-            self.terrains.insert(e, t);
-            self.terrain_gpu_dirty = true;
-        }
-        cur
+        let t = self.terrains.get_mut(&e)?;
+        let inverse = t.field.apply_undo(undo);
+        t.rebuild_shadow();
+        self.terrain_chunks_dirty.entry(e).or_default().extend(undo.coords());
+        self.terrain_gpu_dirty = true; // full atlas re-upload (proxy box may have moved)
+        Some(inverse)
     }
 
     /// Swap a paint id's colors for `colors`, returning what was there — the exact
@@ -118,7 +124,7 @@ impl Editor {
                 self.restore(prev);
             }
             Some(Snapshot::Terrain(id, prev)) => {
-                if let Some(cur) = self.swap_terrain_bytes(id, &prev) {
+                if let Some(cur) = self.swap_terrain_chunks(id, &prev) {
                     self.history.redo.push(Snapshot::Terrain(id, cur));
                 }
             }
@@ -148,7 +154,7 @@ impl Editor {
                 self.restore(next);
             }
             Some(Snapshot::Terrain(id, next)) => {
-                if let Some(cur) = self.swap_terrain_bytes(id, &next) {
+                if let Some(cur) = self.swap_terrain_chunks(id, &next) {
                     self.history.undo.push(Snapshot::Terrain(id, cur));
                 }
             }

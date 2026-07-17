@@ -190,13 +190,13 @@ impl Editor {
     pub(crate) fn terrain_volumes(
         &self,
         layers: &floptle_core::Layers,
-    ) -> Vec<(DVec3, &floptle_field::Terrain, u8, Option<u32>)> {
+    ) -> Vec<(DVec3, &floptle_field::ChunkField, u8, Option<u32>)> {
         self.terrains
             .iter()
             .map(|(&e, t)| {
                 (
                     floptle_core::world_transform(&self.world, e).translation,
-                    t,
+                    &t.field,
                     layers.index_for(&self.world, e),
                     Some(e.index()),
                 )
@@ -295,7 +295,7 @@ impl Editor {
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {
-                        self.terrains.insert(e, t);
+                        self.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(t));
                     }
                 }
                 self.terrain_textures = palette;
@@ -322,7 +322,9 @@ impl Editor {
                 self.terrains
                     .iter()
                     .filter_map(|(&e, t)| match self.world.get::<floptle_core::Matter>(e) {
-                        Some(floptle_core::Matter::Terrain { id }) => Some((*id, t.clone())),
+                        Some(floptle_core::Matter::Terrain { id }) => {
+                            Some((*id, t.field.clone()))
+                        }
                         _ => None,
                     })
                     .collect(),

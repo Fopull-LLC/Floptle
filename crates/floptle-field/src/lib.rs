@@ -31,7 +31,7 @@ pub mod mesher;
 pub mod terrain;
 
 pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
-pub use chunks::{ChunkField, BAND_VOXELS, CHUNK};
+pub use chunks::{ChunkField, ChunkUndo, BAND_VOXELS, CHUNK};
 pub use mesher::{mesh_chunk, mesh_field, ChunkMesh};
 pub use terrain::{Brush, BrushProfile, Falloff, Terrain};
 

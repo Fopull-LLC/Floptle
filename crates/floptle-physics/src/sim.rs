@@ -5,11 +5,11 @@
 use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{world_transform, BodyKind, Entity, RigidBody, World};
-use floptle_field::Terrain;
+use floptle_field::ChunkField;
 
 use crate::body::{Body, BodyShape};
 use crate::gravity::GravityField;
-use crate::shapes::{BoxShape, CapsuleShape, SdfTerrain, SphereShape, TriMeshCollider};
+use crate::shapes::{BoxShape, CapsuleShape, ChunkTerrain, SphereShape, TriMeshCollider};
 use crate::world::{BodyHull, PhysicsWorld, RayHit};
 
 /// Drives a [`PhysicsWorld`] from the ECS each Play (Slice 3 bridge): builds bodies
@@ -122,11 +122,11 @@ impl Sim {
     /// physics differences stay small even when the scene content sits far out.
     pub fn build(
         ecs: &World,
-        terrains: &[(DVec3, &Terrain)],
+        terrains: &[(DVec3, &ChunkField)],
         gravity: GravityField,
         origin: DVec3,
     ) -> Self {
-        let t: Vec<(DVec3, &Terrain, u8, Option<u32>)> =
+        let t: Vec<(DVec3, &ChunkField, u8, Option<u32>)> =
             terrains.iter().map(|(a, t)| (*a, *t, 0, None)).collect();
         Self::build_layered(ecs, &t, gravity, origin, floptle_core::Layers::default())
     }
@@ -139,7 +139,7 @@ impl Sim {
     /// resolve, and masked raycasts filter with the same bits.
     pub fn build_layered(
         ecs: &World,
-        terrains: &[(DVec3, &Terrain, u8, Option<u32>)],
+        terrains: &[(DVec3, &ChunkField, u8, Option<u32>)],
         gravity: GravityField,
         origin: DVec3,
         layers: floptle_core::Layers,
@@ -150,7 +150,7 @@ impl Sim {
         for (anchor, t, layer, eid) in terrains {
             world.add_collider_tagged(
                 *anchor,
-                Box::new(SdfTerrain { terrain: (*t).clone() }),
+                Box::new(ChunkTerrain { field: (*t).clone() }),
                 *layer,
                 *eid,
                 false,

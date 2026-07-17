@@ -765,7 +765,7 @@ impl Editor {
             .terrains
             .iter()
             .filter_map(|(&e, t)| match self.world.get::<Matter>(e) {
-                Some(Matter::Terrain { id }) => Some((*id, t.to_bytes())),
+                Some(Matter::Terrain { id }) => Some((*id, t.field.to_bytes())),
                 _ => None,
             })
             .collect();

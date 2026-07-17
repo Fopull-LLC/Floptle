@@ -29,37 +29,19 @@ pub(crate) struct TerrainBrush {
     pub(crate) fill_inset: f32,
 }
 
-/// Cells + voxel edge a "New terrain" config will actually produce — shown live in the
-/// dialog, because the size/detail pair is what silently decides quality and the old UI
-/// never revealed it.
-pub(crate) fn new_terrain_preview(size_xz: f32, thickness: f32, detail: u32) -> ([u32; 3], f32) {
-    let size = [size_xz.max(0.1), thickness.max(0.1), size_xz.max(0.1)];
-    let dims = terrain_dims_for_size(size, detail);
-    let edge = |i: usize| size[i] / dims[i].max(1) as f32;
-    (dims, edge(0).max(edge(1)).max(edge(2)))
-}
-
-/// The voxel grid for a slab of `size` (full extents), at `detail`. THE single
-/// resolution policy — the New-terrain preview and the real `create_terrain` both call
-/// it, so the number the dialog shows is the number you get.
-pub(crate) fn terrain_dims_for_size(size: [f32; 3], detail: u32) -> [u32; 3] {
-    const MAX_DIM: u32 = 384;
-    let d = detail.clamp(24, 192) as f32;
-    let size = [size[0].max(0.1), size[1].max(0.1), size[2].max(0.1)];
-    let longest = size[0].max(size[1]).max(size[2]).max(0.001);
-    let shortest = size[0].min(size[1]).min(size[2]).max(0.001);
-    // Three constraints on ONE voxel edge, so cells come out cubic:
-    //   * detail asks for `longest/d`;
-    //   * the THINNEST axis needs ≥ ~8 cells to hold a surface at all, so the edge can
-    //     never exceed shortest/8 — ignoring this is what forced the 8-cell floor to
-    //     re-introduce stretch on a wide, thin slab;
-    //   * nothing finer than MAX_DIM on the longest axis is affordable.
-    let vs = (longest / d).min(shortest / 8.0).max(longest / MAX_DIM as f32).max(1e-4);
-    [
-        ((size[0] / vs).round() as u32).clamp(8, MAX_DIM),
-        ((size[1] / vs).round() as u32).clamp(8, MAX_DIM),
-        ((size[2] / vs).round() as u32).clamp(8, MAX_DIM),
-    ]
+/// Rough sparse-field cost a "New terrain" config will produce — `(surface chunks,
+/// resident MB)`, shown live in the dialog. Terrain 2.0: memory scales with the slab's
+/// SURFACE (the narrow band), not its volume, and there is no size cap to warn about.
+pub(crate) fn new_terrain_preview(size_xz: f32, thickness: f32, voxel: f32) -> (u64, f64) {
+    let v = voxel.clamp(0.25, 16.0);
+    let chunk_units = floptle_field::CHUNK as f32 * v;
+    let n_xz = (size_xz.max(0.1) / chunk_units).ceil() as u64;
+    // The band around the top surface + the slab rim: ~1 chunk layer over the
+    // footprint, plus a rim proportional to the perimeter.
+    let _ = thickness; // volume is (nearly) free in a sparse field
+    let chunks = (n_xz * n_xz + 4 * n_xz).max(1);
+    let mb = chunks as f64 * (32.0 * 32.0 * 32.0 * 8.0) / 1.0e6;
+    (chunks, mb)
 }
 
 /// The brush-shape controls, shared verbatim by the Terrain and Paint tabs — the two
@@ -182,54 +164,34 @@ impl EditorTabViewer<'_> {
         use floptle_field::Brush;
         let cmd = &mut *self.cmd;
         let terrain_brush = &mut *self.terrain_brush;
-        let terrain_detail = &mut *self.terrain_detail;
+        let terrain_voxel = &mut *self.terrain_voxel;
         let terrain_textures = &mut *self.terrain_textures;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
         let terrain_present = self.terrain_present;
-        let terrain_voxels = self.terrain_voxels;
-        let terrain_worst_voxel = self.terrain_worst_voxel;
+        let terrain_stats = self.terrain_stats;
 
-        // Detail (resolution) — higher = finer terrain, but heavier.
+        // Voxel density for NEW terrains — an honest units-per-voxel (Terrain 2.0),
+        // not a cell count. Cells are always cubic; existing terrains keep theirs.
         ui.horizontal(|ui| {
-            ui.label("detail");
-            egui::ComboBox::from_id_salt("terrain_detail")
-                .selected_text(match *terrain_detail {
-                    d if d <= 48 => "Low",
-                    d if d <= 80 => "Medium",
-                    d if d <= 112 => "High",
-                    _ => "Ultra",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut *terrain_detail, 40, "Low");
-                    ui.selectable_value(&mut *terrain_detail, 64, "Medium");
-                    ui.selectable_value(&mut *terrain_detail, 96, "High");
-                    ui.selectable_value(&mut *terrain_detail, 144, "Ultra");
-                });
+            ui.label("voxel");
+            ui.add(
+                egui::Slider::new(terrain_voxel, 0.25..=4.0)
+                    .step_by(0.25)
+                    .suffix(" u")
+                    .logarithmic(true),
+            )
+            .on_hover_text(
+                "The cubic voxel edge new terrains are created at, in world units. \
+                 Smaller = finer sculpt detail, more chunks. Applies to NEW terrains; \
+                 an existing terrain keeps the density it was created with.",
+            );
         });
-        if let Some((n, total)) = terrain_voxels {
-            ui.small(format!("{n} volume(s) · {total} voxels (native per-volume)"));
-        }
-        // Voxel size decides whether sculpted terrain reads as a surface or as a
-        // visible lattice — so it is STATED. It being invisible is how a
-        // 9.17 × 0.50 × 9.17 terrain got authored without anyone being warned.
-        if let Some((v, aniso)) = terrain_worst_voxel {
-            let coarse = v[0].max(v[1]).max(v[2]);
-            let txt = format!("voxel {:.2} × {:.2} × {:.2}", v[0], v[1], v[2]);
-            if coarse > 1.5 || aniso > 2.0 {
-                ui.colored_label(egui::Color32::from_rgb(235, 170, 90), format!("⚠ {txt}"))
-                    .on_hover_text(
-                        "Coarse or stretched voxels show up as dark lattice lines and \
-                         terraced steps on sculpted ground — that IS the grid, not a \
-                         shading bug. Prefer several smaller blended terrains over one \
-                         huge one; overlapping terrains fuse.",
-                    );
-                if aniso > 2.0 {
-                    ui.small(format!("   stretched {aniso:.0}:1 — cells this uneven facet badly"));
-                }
-            } else {
-                ui.small(txt);
-            }
+        if let Some((n, chunks, bytes)) = terrain_stats {
+            ui.small(format!(
+                "{n} volume(s) · {chunks} chunks · {:.1} MB resident (sparse, unbounded)",
+                bytes as f64 / 1.0e6
+            ));
         }
         // New terrains can be added any time — each is a node you place + blend.
         if ui.button("✚ New terrain").on_hover_text("adds another terrain node at the cursor; overlapping terrains blend").clicked() {
@@ -360,71 +322,25 @@ impl EditorTabViewer<'_> {
 mod tests {
     use super::new_terrain_preview;
 
-    /// The shipped bug, in one assertion. `terrain_dims` was `[d, d*3/8, d]` — a fixed
-    /// cell count with a hardcoded 8:3 aspect that never looked at the slab's real
-    /// shape. Ty's terrain came out 578 × 12 units at 64 × 24 × 64 cells, i.e. voxels of
-    /// 9.17 × 0.50 × 9.17 — stretched **18:1**. Trilinear interpolation across cells
-    /// that uneven is visibly faceted: dark lattice lines across the surface and
-    /// terraced steps edge-on. Cells must be cubic whatever the slab's proportions.
+    /// The dialog estimate scales with the slab's SURFACE (chunks over the footprint),
+    /// never its volume, and stays sane across sizes and densities. Historical note:
+    /// the dense grid's cell-count policy shipped an 18:1 stretched terrain and a
+    /// 384-cell cap — both retired by the sparse field, cells are cubic by
+    /// construction and there is nothing left to warn about.
     #[test]
-    fn cells_stay_cubic_for_any_slab_shape() {
-        // NOTE: extreme aspects (e.g. 4000 × 0.5) genuinely cannot have cubic cells
-        // inside the 384-cell cap — 8 cells across 0.5 units forces a 0.06 edge while
-        // 4000 units can't go below ~10. That's a limit of a dense grid, not a policy
-        // bug; the dialog warns instead of pretending. These are the shapes that CAN.
-        for &(size_xz, thickness) in &[
-            (578.0f32, 12.0f32), // the real-world case that broke
-            (16.0, 6.0),
-            (128.0, 20.0),
-            (2.0, 200.0), // a tall column
-            (1.0, 1.0),
-        ] {
-            for detail in [24u32, 40, 64, 96, 144, 192] {
-                let (dims, vs) = new_terrain_preview(size_xz, thickness, detail);
-                let edge = |axis: usize, full: f32| full / dims[axis] as f32;
-                let (ex, ey, ez) = (edge(0, size_xz), edge(1, thickness), edge(2, size_xz));
-                let aniso = ex.max(ey).max(ez) / ex.min(ey).min(ez);
-                // Cells are cubic up to one ceil() of rounding per axis — the slack has
-                // to be generous for extreme aspects clamped by the 8-cell floor.
-                // 1.6 covers rounding. Extreme aspects can't do better than the
-                // MAX_DIM clamp allows (a 2 × 200 column lands ~2.1:1) — a dense grid
-                // limit, not a policy bug, and nothing like the 18:1 that shipped.
-                assert!(
-                    aniso < 2.5,
-                    "{size_xz}×{thickness} @ detail {detail}: cells stretched {aniso:.1}:1 \
-                     (dims {dims:?}, voxel {vs:.3}) — the old policy shipped 18:1"
-                );
-                assert!(dims.iter().all(|&d| (8..=384).contains(&d)), "dims {dims:?} out of range");
-                assert!(vs > 0.0 && vs.is_finite(), "voxel size {vs}");
-            }
-        }
-    }
-
-    /// Detail must actually buy resolution — the old policy's count was independent of
-    /// size, so the slider did nothing on a big terrain.
-    #[test]
-    fn more_detail_means_smaller_voxels() {
-        let mut prev = f32::INFINITY;
-        for detail in [24u32, 40, 64, 96, 144, 192] {
-            let (_, vs) = new_terrain_preview(200.0, 60.0, detail);
-            assert!(vs <= prev, "detail {detail}: voxel {vs} grew (was {prev})");
-            prev = vs;
-        }
-        assert!(prev < 200.0 / 24.0, "max detail must beat min detail");
-    }
-
-    /// Ty's terrain, as authored. The old policy gave 9.17 × 0.50 × 9.17 — stretched
-    /// 18:1, which is the dark lattice he photographed.
-    #[test]
-    fn the_reported_terrain_is_no_longer_stretched() {
-        let (dims, vs) = new_terrain_preview(578.0, 12.0, 64);
-        let ex = 578.0 / dims[0] as f32;
-        let ey = 12.0 / dims[1] as f32;
-        let aniso = ex.max(ey) / ex.min(ey);
-        assert!(aniso < 1.6, "still stretched {aniso:.1}:1 (dims {dims:?})");
-        assert!(vs < 2.0, "voxel {vs:.2} — was 9.17 under the old policy");
-        // Still affordable: the whole point is that cubic cells here aren't extravagant.
-        let mb = dims.iter().map(|&d| d as u64).product::<u64>() as f64 * 8.0 / 1.0e6;
-        assert!(mb < 64.0, "{mb:.0} MB is too much for one terrain");
+    fn preview_scales_with_surface_not_volume() {
+        // Thickness must be (nearly) free — the interior collapses to sentinels.
+        let (thin, _) = new_terrain_preview(200.0, 5.0, 1.5);
+        let (thick, _) = new_terrain_preview(200.0, 500.0, 1.5);
+        assert_eq!(thin, thick, "thickness must not change the estimate");
+        // Finer voxels = more chunks over the same footprint; both finite and > 0.
+        let (coarse, mb_c) = new_terrain_preview(578.0, 12.0, 3.0);
+        let (fine, mb_f) = new_terrain_preview(578.0, 12.0, 0.75);
+        assert!(fine > coarse, "finer voxels must cost more chunks ({fine} vs {coarse})");
+        assert!(mb_f > mb_c && mb_f.is_finite() && mb_c > 0.0);
+        // Ty's real 578-unit map at the default density: single-digit-to-tens of MB
+        // resident — versus the 192 MB the dense field cost.
+        let (_, mb) = new_terrain_preview(578.0, 12.0, 1.5);
+        assert!(mb < 64.0, "{mb:.0} MB estimate is too much for one terrain");
     }
 }

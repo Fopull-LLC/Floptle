@@ -26,29 +26,60 @@ use crate::terrain_ui::{NewTerrainCfg};
 use crate::viz::{TerrainViz, project};
 use crate::{Editor};
 
-/// The DERIVED render mesh for one terrain (ADR terrain-mesh / P2). The dense field stays
-/// the authority (physics, sculpt, save, and the atlas that feeds shadows + AO); this is
-/// only what the raster pass DRAWS. Chunk vertices are FIELD-space, so every chunk shares
-/// one camera-relative instance matrix and the triplanar material stays continuous.
+/// One editable terrain (Terrain 2.0 / P3): the sparse unbounded [`ChunkField`] is THE
+/// authority — brushes write it, physics collides it, saves serialize it, the mesher
+/// extracts the drawn surface from it. The dense `shadow` proxy is DERIVED from it at a
+/// capped resolution purely to feed the GPU shadow/AO atlas (until the P5 clipmap).
+pub(crate) struct EditorTerrain {
+    pub field: floptle_field::ChunkField,
+    pub shadow: floptle_field::BakedSdf,
+}
+
+/// Longest-axis cell cap for the shadow proxy. Soft sun shadows are forgiving of a
+/// coarse field; primary visibility (the unforgiving part) is the chunk meshes.
+pub(crate) const TERRAIN_SHADOW_MAX_DIM: u32 = 192;
+
+impl EditorTerrain {
+    /// Wrap a field, deriving its shadow proxy.
+    pub(crate) fn new(field: floptle_field::ChunkField) -> Self {
+        let shadow = shadow_proxy_of(&field);
+        Self { field, shadow }
+    }
+
+    /// Re-derive the shadow proxy from the current field (structural change / undo /
+    /// bounds outgrown). The empty-field proxy is a tiny inert box.
+    pub(crate) fn rebuild_shadow(&mut self) {
+        self.shadow = shadow_proxy_of(&self.field);
+    }
+}
+
+fn shadow_proxy_of(field: &floptle_field::ChunkField) -> floptle_field::BakedSdf {
+    field.to_dense(TERRAIN_SHADOW_MAX_DIM).unwrap_or(floptle_field::BakedSdf {
+        dims: [2, 2, 2],
+        center: [0.0; 3],
+        half_extent: [0.5; 3],
+        distance: vec![1.0; 8],
+        color: vec![[128, 128, 128, 255]; 8],
+    })
+}
+
+/// The GPU residency of one terrain's chunk meshes. Chunk vertices are FIELD-space, so
+/// every chunk shares one camera-relative instance matrix and the triplanar material
+/// stays continuous.
 #[derive(Default)]
 pub(crate) struct TerrainRender {
-    /// The sparse SDF the mesher extracts from. Re-derived from the dense field on change.
-    pub field: floptle_field::ChunkField,
     /// One dynamic raster slot per non-empty chunk, keyed by chunk coord so a sculpt can
     /// re-mesh just the chunks it touched and free the ones that emptied.
     pub slots: HashMap<[i32; 3], MeshId>,
 }
 
 impl Editor {
-    /// Rebuild every terrain's render mesh whose dense field changed. Cheap when nothing
-    /// changed (the guard is the same `terrain_gpu_dirty` / region-dirty the atlas upload
-    /// already tracks). Full rebuild on structural change; the sculpt fast-path re-meshes
-    /// only the dabbed chunks. Called right after `sync_terrain_gpu` keeps the atlas fed.
-    pub(crate) fn sync_terrain_meshes(
-        &mut self,
-        full_rebuild: bool,
-        region: Option<(Entity, [u32; 3], [u32; 3])>,
-    ) {
+    /// Rebuild every terrain's render mesh whose field changed. Cheap when nothing
+    /// changed. Full rebuild on structural change (load / new / fill / undo); the
+    /// sculpt fast-path re-meshes only the chunks a dab actually touched (drained
+    /// from `terrain_chunks_dirty`). Called right after `sync_terrain_gpu` keeps the
+    /// shadow atlas fed.
+    pub(crate) fn sync_terrain_meshes(&mut self, full_rebuild: bool) {
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return;
         };
@@ -63,35 +94,30 @@ impl Editor {
             }
             false
         });
+        self.terrain_chunks_dirty.retain(|e, _| live.contains(e));
 
         for (&e, terrain) in &self.terrains {
             let structural = full_rebuild || !self.terrain_render.contains_key(&e);
-            let region_box = region.filter(|(re, ..)| *re == e);
-            if !structural && region_box.is_none() {
+            let dirty = self.terrain_chunks_dirty.remove(&e);
+            if !structural && dirty.is_none() {
                 continue;
             }
             let render = self.terrain_render.entry(e).or_default();
 
-            // Which chunks to (re)mesh, and whether to prune slots the field no longer fills.
+            // Which chunks to (re)mesh, and whether to prune slots the field no longer
+            // fills. The mesher reads the AUTHORITY field directly — there is no
+            // derived copy to keep in sync any more.
             let (coords, prune) = if structural {
-                // Full re-derive: a cubic-voxel ChunkField resampled off the dense grid.
-                // Resampling to cubic voxels is also what quietly retires the voxel-stretch
-                // artifact on old (18:1-stretched) fields — they mesh at true cubic detail.
-                let voxel = terrain_voxel_size(&terrain.baked);
-                render.field = floptle_field::ChunkField::from_dense(&terrain.baked, voxel);
-                (render.field.chunk_coords(), true)
+                (terrain.field.chunk_coords(), true)
             } else {
-                // Regional: re-derive ONLY the dabbed box from the dense authority and
-                // re-mesh just its chunks — what keeps sculpting a big terrain smooth
-                // (a full resample per dab would be O(whole field)).
-                let (_, mn, mx) = region_box.expect("region present");
-                let (wmin, wmax) = voxel_index_world_box(&terrain.baked, mn, mx);
-                let touched = render.field.refresh_from_dense_region(&terrain.baked, wmin, wmax);
-                (touched, false)
+                let mut d = dirty.unwrap_or_default();
+                d.sort_unstable();
+                d.dedup();
+                (d, false)
             };
 
             for coord in coords {
-                let cm = floptle_field::mesh_chunk(&render.field, coord, 1, false);
+                let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
                 if cm.is_empty() {
                     // Chunk emptied (e.g. dug fully away): free + forget its slot.
                     if let Some(mid) = render.slots.remove(&coord) {
@@ -106,7 +132,7 @@ impl Editor {
                 // A full rebuild may have shed chunks entirely; free any slot whose chunk
                 // no longer holds data.
                 let has: std::collections::HashSet<[i32; 3]> =
-                    render.field.chunk_coords().into_iter().collect();
+                    terrain.field.chunk_coords().into_iter().collect();
                 render.slots.retain(|c, mid| {
                     if has.contains(c) {
                         true
@@ -191,24 +217,7 @@ fn upload_chunk(
     }
 }
 
-/// World-space AABB (in the dense field's frame) of a box given as DENSE voxel indices —
-/// the conversion the sculpt fast-path needs to hand `refresh_from_dense_region` a region.
-/// Mirrors `Terrain::voxel_world`: voxel `i` centers at `center - half + (i+0.5)/dims·2half`.
-fn voxel_index_world_box(
-    baked: &floptle_field::BakedSdf,
-    mn: [u32; 3],
-    mx: [u32; 3],
-) -> (Vec3, Vec3) {
-    let c = baked.center;
-    let hf = baked.half_extent;
-    let [w, h, d] = baked.dims;
-    let f = |i: u32, n: u32, ci: f32, hi: f32| ci - hi + (i as f32 + 0.5) / n.max(1) as f32 * 2.0 * hi;
-    let lo = Vec3::new(f(mn[0], w, c[0], hf[0]), f(mn[1], h, c[1], hf[1]), f(mn[2], d, c[2], hf[2]));
-    let hi = Vec3::new(f(mx[0], w, c[0], hf[0]), f(mx[1], h, c[1], hf[1]), f(mx[2], d, c[2], hf[2]));
-    (lo.min(hi), lo.max(hi))
-}
-
-/// The cubic voxel edge to mesh a dense terrain at.
+/// The cubic voxel edge to import (migrate) a legacy dense terrain at.
 ///
 /// TWO constraints, and the tighter (coarser) wins:
 ///   1. Source detail — the MEDIAN of the three axis resolutions. Using the *min* (my
@@ -419,13 +428,13 @@ impl Editor {
         // Each field is in its node's LOCAL space — raycast every terrain and brush
         // the one whose surface the cursor ray hits NEAREST the camera.
         let entities: Vec<Entity> = self.terrains.keys().copied().collect();
-        let mut best: Option<(Entity, [f32; 3], DVec3, f64)> = None;
+        let mut best: Option<(Entity, Vec3, DVec3, f64)> = None;
         for e in entities {
             let origin = self.terrain_world_origin(e);
             let ro_local = cam.world_position + ro_rel.as_dvec3() - origin;
-            let ro = [ro_local.x as f32, ro_local.y as f32, ro_local.z as f32];
-            if let Some(hit) = self.terrains[&e].raycast(ro, rd_a) {
-                let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64) + origin;
+            let ro = Vec3::new(ro_local.x as f32, ro_local.y as f32, ro_local.z as f32);
+            if let Some(hit) = self.terrains[&e].field.raycast(ro, Vec3::from(rd_a), 4096.0) {
+                let hitw = DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64) + origin;
                 let dist = (hitw - cam.world_position).length();
                 if best.as_ref().is_none_or(|b| dist < b.3) {
                     best = Some((e, hit, origin, dist));
@@ -436,12 +445,11 @@ impl Editor {
             return;
         };
         self.active_terrain = Some(active);
-        let nrm = self.terrains[&active].normal(hit);
+        let n = self.terrains[&active].field.grad(hit);
         let radius = self.terrain_brush.radius;
 
         // Telegraph: a ring of `radius` around the hit in the surface tangent plane.
-        let hitw = DVec3::new(hit[0] as f64, hit[1] as f64, hit[2] as f64) + origin;
-        let n = Vec3::new(nrm[0], nrm[1], nrm[2]);
+        let hitw = DVec3::new(hit.x as f64, hit.y as f64, hit.z as f64) + origin;
         let t1 = n.cross(if n.y.abs() > 0.9 { Vec3::X } else { Vec3::Y }).normalize_or_zero();
         let t2 = n.cross(t1);
         let mut ring = Vec::with_capacity(40);
@@ -485,119 +493,90 @@ impl Editor {
         };
         if due {
             let brush = self.terrain_brush;
-            // Capture the pre-stroke field once per stroke, keyed by terrain id, so
-            // the whole stroke is a single (restorable) undo step.
-            if self.stroke_snapshot.is_none() {
-                let id = match self.world.get::<Matter>(active) {
-                    Some(Matter::Terrain { id }) => *id,
-                    _ => 0,
-                };
-                if let Some(t) = self.terrains.get(&active) {
-                    self.stroke_snapshot = Some((id, t.to_bytes()));
-                }
-            }
+            let id = match self.world.get::<Matter>(active) {
+                Some(Matter::Terrain { id }) => *id,
+                _ => 0,
+            };
             let terrain = self.terrains.get_mut(&active).unwrap();
-            // Infinite terrain: grow the field outward when the brush nears an edge,
-            // so the slab has no fixed bounds. (Skip for Paint — painting never
-            // extends the shape.) Growth keeps voxel size constant.
+            // Capture the pre-dab chunks into the stroke's undo record — lazily, only
+            // the chunks this dab could touch that aren't already captured. The whole
+            // stroke stays a single undo step of a few MB, not a whole-field snapshot.
+            let candidates = terrain.field.chunks_in_box(hit, brush.radius * 1.5);
+            let snap = terrain.field.snapshot_chunks(&candidates);
+            match &mut self.stroke_snapshot {
+                Some((sid, undo)) if *sid == id => undo.merge(snap),
+                _ => self.stroke_snapshot = Some((id, snap)),
+            }
+            // Apply the brush to the AUTHORITY field. No growth step: the sparse field
+            // is unbounded, so sculpting near an edge just allocates chunks (the whole
+            // `ensure_contains`/`grow` bug class is gone with the dense grid).
             let is_paint = matches!(brush.mode, floptle_field::Brush::Paint);
-            // Growing the bounds reallocates the grid (dims change) → must take the full
-            // path. `resized` is checked below to decide partial vs full.
-            let resized = if !is_paint { terrain.ensure_contains(hit, brush.radius * 1.5) } else { false };
-            // Apply the brush; collect the voxel sub-box it actually changed (paint =
-            // its brush box; sculpt = the box of cells whose distance moved).
-            let region = match brush.mode {
+            let touched = match brush.mode {
                 floptle_field::Brush::Paint if brush.tex_slot >= 0 => {
-                    terrain.paint_texture(hit, brush.radius, brush.tex_slot as u8 + 1);
-                    Some(terrain.brush_range(hit, brush.radius))
+                    terrain.field.paint_texture(hit, brush.radius, brush.tex_slot as u8 + 1)
                 }
                 floptle_field::Brush::Paint => {
-                    terrain.paint(hit, brush.radius, brush.strength, brush.color, brush.profile);
-                    Some(terrain.brush_range(hit, brush.radius))
+                    terrain.field.paint(hit, brush.radius, brush.strength, brush.color, brush.profile)
                 }
-                m => terrain.sculpt(m, hit, brush.radius, brush.strength, brush.profile),
+                m => terrain.field.sculpt(m, hit, brush.radius, brush.strength, brush.profile),
             };
-            self.stroke_dabbed = true; // mark this stroke as worth an undo step
-            // Fast path: a single terrain that didn't resize uploads only the dabbed box
-            // (no full re-clone + re-upload — that's the paint/sculpt lag). A resize, an
-            // empty change, or multiple terrains fall back to a full rebuild.
-            match region {
-                Some([mn, mx]) if self.terrains.len() == 1 && !resized => {
-                    let hi = [mx[0] + 1, mx[1] + 1, mx[2] + 1];
-                    let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
-                    self.terrain_region_dirty = Some(match self.terrain_region_dirty {
-                        Some((e, omn, omx, og)) if e == active => (
-                            active,
-                            [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
-                            [omx[0].max(hi[0]), omx[1].max(hi[1]), omx[2].max(hi[2])],
-                            og || geom,
-                        ),
-                        _ => (active, mn, hi, geom),
-                    });
-                }
-                _ => self.terrain_gpu_dirty = true,
+            if !touched.is_empty() {
+                self.stroke_dabbed = true; // mark this stroke as worth an undo step
+                // Refresh the shadow proxy over the dab box and queue the atlas's
+                // partial upload. (A dab outside the proxy's box clamps — the proxy is
+                // re-derived at stroke end when bounds outgrow it; see `end_sculpt_stroke`.)
+                let pad = terrain.field.band() + terrain.field.voxel();
+                let (wmin, wmax) =
+                    (hit - Vec3::splat(brush.radius + pad), hit + Vec3::splat(brush.radius + pad));
+                let (mn, mx) = terrain.field.refresh_dense_region(&mut terrain.shadow, wmin, wmax);
+                let geom = !is_paint; // sculpt changes geometry (resync wireframe + collider)
+                self.terrain_region_dirty = Some(match self.terrain_region_dirty {
+                    Some((e, omn, omx, og)) if e == active => (
+                        active,
+                        [omn[0].min(mn[0]), omn[1].min(mn[1]), omn[2].min(mn[2])],
+                        [omx[0].max(mx[0]), omx[1].max(mx[1]), omx[2].max(mx[2])],
+                        og || geom,
+                    ),
+                    _ => (active, mn, mx, geom),
+                });
+                // Queue exactly the touched chunks for remesh.
+                self.terrain_chunks_dirty.entry(active).or_default().extend(touched);
             }
         }
     }
 
-    /// Voxel dims for the current detail setting over the terrain box (≈2:1:2).
-    pub(crate) fn terrain_dims(&self) -> [u32; 3] {
-        // The legacy default slab (16 × 6 × 16 half-extents) — kept for adopt_terrain's
-        // "terrain node with no field" fallback.
-        self.terrain_dims_for([16.0, 6.0, 16.0])
-    }
-
-    /// Voxel grid for a slab of `half` half-extents: `detail` cells along the LONGEST
-    /// axis, and every other axis sized to the SAME voxel edge — i.e. cubic cells.
-    ///
-    /// The old policy was `[d, d*3/8, d]`: a fixed COUNT with a hardcoded 8:3 aspect,
-    /// which never consulted the terrain's actual size. Two consequences, both of which
-    /// shipped:
-    ///
-    /// * **Stretched cells.** A slab whose real aspect isn't 8:3 got anisotropic voxels
-    ///   — a 578 × 12 terrain came out 9.17 × 0.50 × 9.17, i.e. **18:1**. Trilinear
-    ///   interpolation across cells that stretched is visibly faceted: you see the
-    ///   lattice as dark quad lines, and terraced steps edge-on.
-    /// * **Detail meant nothing at scale.** 64 cells whether the terrain is 16 units or
-    ///   578. The slider looked like it controlled quality; past a few dozen units it
-    ///   couldn't.
-    ///
-    /// Cubic cells fix the facets. They do NOT make a huge slab fine — 578 units at
-    /// `detail` 192 is still ~3 units/voxel — which is exactly why
-    /// [`Self::terrain_voxel_size`] is surfaced in the UI: a terrain this big wants
-    /// several blended volumes, not one coarse one, and the number has to say so.
-    pub(crate) fn terrain_dims_for(&self, half: [f32; 3]) -> [u32; 3] {
-        crate::terrain_ui::terrain_dims_for_size(
-            [2.0 * half[0], 2.0 * half[1], 2.0 * half[2]],
-            self.terrain_detail,
-        )
-    }
-
-    /// The world-space voxel edge of a terrain field, per axis. Anisotropy here is
-    /// what shows up as a visible lattice, so the UI reports it.
-    pub(crate) fn terrain_voxel_size(field: &floptle_field::Terrain) -> [f32; 3] {
-        let b = &field.baked;
-        [0, 1, 2].map(|i| 2.0 * b.half_extent[i] / (b.dims[i].max(2) - 1) as f32)
+    /// End-of-stroke bookkeeping (mouse-up): if the stroke pushed the field past its
+    /// shadow proxy's box, re-derive the proxy and re-upload the whole volume set —
+    /// amortized to once per stroke, never per dab.
+    pub(crate) fn end_sculpt_stroke(&mut self) {
+        let Some(active) = self.active_terrain else { return };
+        let Some(t) = self.terrains.get_mut(&active) else { return };
+        let Some((lo, hi)) = t.field.bounds() else { return };
+        let blo = Vec3::from(t.shadow.center) - Vec3::from(t.shadow.half_extent);
+        let bhi = Vec3::from(t.shadow.center) + Vec3::from(t.shadow.half_extent);
+        if lo.cmplt(blo).any() || hi.cmpgt(bhi).any() {
+            t.rebuild_shadow();
+            self.terrain_gpu_dirty = true;
+        }
     }
 
     /// Create a fresh flat terrain as a NEW scene node (you can have any number). It
-    /// is placed at the cursor's ground point so multiple terrains can be laid out
-    /// and blended; its field is centered in the node's local space. `cfg` (from the
-    /// "New terrain" dialog) sizes the flat slab and paints it with a color/texture
-    /// up front — a flat field renders exactly right at any voxel density (trilinear
-    /// interpolation of a plane is exact), so a huge open field is just as clean as a
-    /// tiny patch; `terrain_dims()`/detail only matters once you start sculpting bumps.
+    /// is placed at the cursor's ground point; its field is in the node's local space.
+    /// `cfg` (from the "New terrain" dialog) sizes the STARTING slab and paints it with
+    /// a color/texture up front — the sparse field is unbounded, so this is a seed to
+    /// sculpt out from, not a boundary (the slab occupies `-thickness..0` in local Y,
+    /// surface at the node's height).
     pub(crate) fn create_terrain(&mut self, cfg: &NewTerrainCfg) {
         self.record();
         let id = self.next_terrain_id;
         self.next_terrain_id += 1;
         let pos = self.cursor_world();
         let half_xz = cfg.size_xz.max(0.1) * 0.5;
-        let half_y = cfg.thickness.max(0.1) * 0.5;
-        let mut field = floptle_field::Terrain::flat(
-            self.terrain_dims_for([half_xz, half_y, half_xz]),
-            [0.0, 0.0, 0.0],
-            [half_xz, half_y, half_xz],
+        let thickness = cfg.thickness.max(0.5);
+        let mut field = floptle_field::ChunkField::new(self.terrain_voxel.clamp(0.25, 16.0));
+        field.fill_slab(
+            Vec3::new(-half_xz, -thickness, -half_xz),
+            Vec3::new(half_xz, 0.0, half_xz),
             0.0,
             cfg.color,
         );
@@ -609,7 +588,7 @@ impl Editor {
         let n = self.terrains.len() + 1;
         self.world.insert(e, Name(format!("Terrain {n}")));
         self.world.insert(e, Matter::Terrain { id });
-        self.terrains.insert(e, field);
+        self.terrains.insert(e, EditorTerrain::new(field));
         self.active_terrain = Some(e);
         self.terrain_gpu_dirty = true;
         self.select_single(e);
@@ -631,8 +610,14 @@ impl Editor {
         Some(i as u8)
     }
 
-    /// Where a terrain node's field is stored — one file per terrain id, per scene.
+    /// Where a terrain node's field is stored — one `.cfield` per terrain id, per
+    /// scene (the Terrain 2.0 sparse format).
     pub(crate) fn terrain_field_path_id(&self, id: u32) -> PathBuf {
+        self.project_root.join("terrain").join(format!("{}.{id}.cfield", self.scene_name))
+    }
+
+    /// The legacy DENSE field path for the same terrain — read-only migration source.
+    pub(crate) fn terrain_tfield_path_id(&self, id: u32) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
     }
 
@@ -641,8 +626,10 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.tfield", self.scene_name))
     }
 
-    /// After loading a scene, adopt every terrain node + load its field from disk
-    /// (id-keyed, with a one-time legacy fallback). Call once `scene_name` is set.
+    /// After loading a scene, adopt every terrain node + load its field from disk.
+    /// Order: `.cfield` (Terrain 2.0) → legacy dense `.tfield` (auto-migrated into the
+    /// sparse store, old scenes just work) → a fresh flat slab. Call once `scene_name`
+    /// is set.
     pub(crate) fn adopt_terrain(&mut self) {
         self.terrains.clear();
         self.active_terrain = None;
@@ -659,30 +646,47 @@ impl Editor {
         let single = nodes.len() == 1;
         for (e, id) in nodes {
             max_id = max_id.max(id);
+            let dense_migration = || {
+                std::fs::read(self.terrain_tfield_path_id(id))
+                    .ok()
+                    .and_then(|b| floptle_field::Terrain::from_bytes(&b))
+                    // legacy single-terrain scenes stored one `<scene>.tfield`.
+                    .or_else(|| {
+                        if single {
+                            std::fs::read(self.legacy_terrain_field_path())
+                                .ok()
+                                .and_then(|b| floptle_field::Terrain::from_bytes(&b))
+                        } else {
+                            None
+                        }
+                    })
+                    // Resample the dense grid into the sparse store at cubic voxels —
+                    // this is also what retires the voxel-stretch artifact on old
+                    // (18:1-stretched) fields.
+                    .map(|t| {
+                        floptle_field::ChunkField::from_dense(
+                            &t.baked,
+                            terrain_voxel_size(&t.baked),
+                        )
+                    })
+            };
             let field = std::fs::read(self.terrain_field_path_id(id))
                 .ok()
-                .and_then(|b| floptle_field::Terrain::from_bytes(&b))
-                // legacy single-terrain scenes stored one `<scene>.tfield`.
-                .or_else(|| {
-                    if single {
-                        std::fs::read(self.legacy_terrain_field_path())
-                            .ok()
-                            .and_then(|b| floptle_field::Terrain::from_bytes(&b))
-                    } else {
-                        None
-                    }
-                })
+                .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
+                .or_else(dense_migration)
                 // a terrain node with no/garbled field → start it flat.
                 .unwrap_or_else(|| {
-                    floptle_field::Terrain::flat(
-                        self.terrain_dims(),
-                        [0.0, 0.0, 0.0],
-                        [16.0, 6.0, 16.0],
+                    let mut f =
+                        floptle_field::ChunkField::new(self.terrain_voxel.clamp(0.25, 16.0));
+                    f.fill_slab(
+                        Vec3::new(-16.0, -6.0, -16.0),
+                        Vec3::new(16.0, 0.0, 16.0),
                         0.0,
                         [0.35, 0.6, 0.28],
-                    )
+                    );
+                    f
                 });
-            self.terrains.insert(e, field);
+            self.terrains.insert(e, EditorTerrain::new(field));
         }
         self.next_terrain_id = max_id + 1;
         self.terrain_gpu_dirty = !self.terrains.is_empty();
@@ -727,7 +731,7 @@ impl Editor {
     /// (Associated fn taking explicit fields — callers sit inside the render section
     /// where `self.gpu`/`self.egui` are mutably borrowed, so `&self` is unavailable.)
     pub(crate) fn fill_terrain_volumes(
-        terrains: &HashMap<Entity, floptle_field::Terrain>,
+        terrains: &HashMap<Entity, EditorTerrain>,
         slots: &[Entity],
         occluders: &HashMap<Entity, (OccKey, std::sync::Arc<floptle_field::BakedSdf>)>,
         occ_slots: &[Entity],
@@ -741,8 +745,8 @@ impl Editor {
             // absent (w = 0); the dirty flag re-uploads the set next frame.
             let Some(t) = terrains.get(&e) else { continue };
             let anchor = floptle_core::world_transform(world, e).translation;
-            let bc = t.baked.center;
-            let hf = t.baked.half_extent;
+            let bc = t.shadow.center;
+            let hf = t.shadow.half_extent;
             let cr = anchor + DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64) - cam_world;
             // w = 3: shadow + AO, NOT drawn. Terrain 2.0 draws the extracted chunk meshes
             // through the raster pass (`push_terrain_instances`); the raymarch stops

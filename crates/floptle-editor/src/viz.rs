@@ -130,8 +130,7 @@ pub(crate) fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::Impo
 /// vertex per straddling cell (averaged edge crossings), connected to its +X/+Y/+Z
 /// neighbors. `stride` sets coarseness (bigger = fewer lines). Cached by the caller and
 /// projected to screen each frame.
-pub(crate) fn terrain_collider_wire(t: &floptle_field::Terrain, stride: u32) -> Vec<(Vec3, Vec3)> {
-    let b = &t.baked;
+pub(crate) fn terrain_collider_wire(b: &floptle_field::BakedSdf, stride: u32) -> Vec<(Vec3, Vec3)> {
     let [w, h, d] = b.dims;
     let s = stride.max(1);
     if w < 2 || h < 2 || d < 2 {
