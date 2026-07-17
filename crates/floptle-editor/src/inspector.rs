@@ -1747,6 +1747,49 @@ impl EditorTabViewer<'_> {
                     }
                 }
 
+                // ===== Celestial Body (on-rails orbit; only when the node has one) =====
+                if world.get::<floptle_core::CelestialBody>(e).is_some() {
+                    ui.separator();
+                    let (_, _, remove) = component_header(ui, "🪐 Celestial Body", false, true);
+                    if remove {
+                        cmd.remove_celestial = Some(e);
+                    }
+                    ui.indent("cb_props", |ui| {
+                        if let Some(cb) = world.get_mut::<floptle_core::CelestialBody>(e) {
+                            let drag = |ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64, hover: &str| -> bool {
+                                ui.horizontal(|ui| {
+                                    ui.label(label);
+                                    ui.add(egui::DragValue::new(v).speed(speed))
+                                        .on_hover_text(hover)
+                                        .changed()
+                                })
+                                .inner
+                            };
+                            let mut ch = false;
+                            ch |= drag(ui, "µ (GM)", &mut cb.mu, 1000.0, "gravitational parameter — surface gravity = µ / radius²");
+                            ch |= drag(ui, "radius", &mut cb.body_radius, 1.0, "physical surface radius (altitude readouts, impostors)");
+                            ch |= drag(ui, "SOI", &mut cb.soi, 10.0, "sphere-of-influence radius; 0 = auto (Laplace) from the parent");
+                            ui.horizontal(|ui| {
+                                ui.label("parent");
+                                ch |= ui
+                                    .text_edit_singleline(&mut cb.parent)
+                                    .on_hover_text("NAME of the parent body's node; empty = system root (stays put)")
+                                    .changed();
+                            });
+                            ui.small("orbit around the parent (radians, semi-major in units):");
+                            ch |= drag(ui, "semi-major a", &mut cb.a, 1.0, "orbit size; NEGATIVE = hyperbolic escape");
+                            ch |= drag(ui, "eccentricity e", &mut cb.e, 0.005, "0 = circle, <1 ellipse, >1 hyperbola");
+                            ch |= drag(ui, "inclination i", &mut cb.i, 0.01, "tilt from the XZ plane (radians)");
+                            ch |= drag(ui, "node Ω", &mut cb.lan, 0.01, "longitude of the ascending node (radians)");
+                            ch |= drag(ui, "periapsis ω", &mut cb.arg_pe, 0.01, "argument of periapsis (radians)");
+                            ch |= drag(ui, "phase M₀", &mut cb.m0, 0.01, "mean anomaly at t = 0 — where on the orbit it starts");
+                            if ch {
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                    });
+                }
+
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
                     if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.texture_settings) {
@@ -2259,6 +2302,7 @@ impl EditorTabViewer<'_> {
                     // One catalog of (category, label, action) — built from current state.
                     enum Add {
                         Rb,
+                        Celestial,
                         Coll,
                         Mat,
                         Net,
@@ -2274,6 +2318,9 @@ impl EditorTabViewer<'_> {
                     let mut items: Vec<(&str, String, Add)> = Vec::new();
                     if !has_rb {
                         items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
+                    }
+                    if world.get::<floptle_core::CelestialBody>(e).is_none() {
+                        items.push(("Physics", "🪐  Celestial Body (orbit rails)".into(), Add::Celestial));
                     }
                     if !has_net {
                         items.push(("Networking", "🌐  Networked".into(), Add::Net));
@@ -2398,6 +2445,7 @@ impl EditorTabViewer<'_> {
                                 if ui.button(l).clicked() {
                                     match a {
                                         Add::Rb => cmd.add_rigidbody = Some(e),
+                                        Add::Celestial => cmd.add_celestial = Some(e),
                                         Add::Net => cmd.add_networked = Some(e),
                                         Add::Coll => cmd.set_collidable = Some((e, true)),
                                         Add::Mat => cmd.add_material = Some(e),

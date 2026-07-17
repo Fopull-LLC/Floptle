@@ -840,6 +840,14 @@ impl Sim {
     /// the runtime terrain API (`terrain.sculpt`/`dig` from Lua) applies each edit to
     /// the sim's copy through this, keeping collision in lockstep with the authority
     /// field the editor applies the same op to.
+    /// Re-anchor a tagged collider (an on-rails planet's terrain moved this tick).
+    pub fn set_collider_anchor(&mut self, eid: u32, anchor: DVec3) {
+        let origin = self.world.origin;
+        if let Some(c) = self.world.colliders.iter_mut().find(|c| c.eid == Some(eid)) {
+            c.re_anchor(anchor, origin);
+        }
+    }
+
     pub fn terrain_field_mut(&mut self, eid: u32) -> Option<&mut floptle_field::ChunkField> {
         self.world
             .colliders

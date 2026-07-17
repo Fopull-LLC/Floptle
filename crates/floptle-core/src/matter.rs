@@ -105,6 +105,54 @@ pub enum BodyMode {
     Static,
 }
 
+/// Puts a node ON RAILS as a celestial body (solar demo S2, `frames` module):
+/// during Play the engine assembles all `CelestialBody` nodes into a
+/// [`crate::frames::System`], advances space time each tick, and WRITES this
+/// node's translation from its Kepler elements — exact analytic orbits, stable
+/// at any time-warp. The node also becomes an inverse-square gravity source
+/// (µ/r²) with patched-conic SOI dominance.
+///
+/// `parent` names another CelestialBody NODE; empty = the system root (which
+/// stays where the scene put it). Angles are radians; `soi = 0` auto-derives
+/// the Laplace radius from the parent's µ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CelestialBody {
+    /// Gravitational parameter µ = GM (units³/s²). 0 = massless marker.
+    pub mu: f64,
+    /// Physical (surface) radius, for altitude readouts + impostor scale.
+    pub body_radius: f64,
+    /// Sphere-of-influence radius; 0 = auto (Laplace) from the parent.
+    pub soi: f64,
+    /// Name of the parent body's NODE (empty = system root).
+    pub parent: String,
+    /// Kepler elements around the parent: semi-major axis (negative =
+    /// hyperbolic), eccentricity, inclination, longitude of ascending node,
+    /// argument of periapsis, mean anomaly at t = 0. Radians.
+    pub a: f64,
+    pub e: f64,
+    pub i: f64,
+    pub lan: f64,
+    pub arg_pe: f64,
+    pub m0: f64,
+}
+
+impl Default for CelestialBody {
+    fn default() -> Self {
+        Self {
+            mu: 1.0e6,
+            body_radius: 30.0,
+            soi: 0.0,
+            parent: String::new(),
+            a: 0.0,
+            e: 0.0,
+            i: 0.0,
+            lan: 0.0,
+            arg_pe: 0.0,
+            m0: 0.0,
+        }
+    }
+}
+
 /// Marks an entity as a physics body, centered on the entity's world
 /// translation. Read by `floptle-physics` to build the sim each Play.
 /// [`BodyMode`] picks how it simulates (dynamic / kinematic / static).

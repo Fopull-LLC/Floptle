@@ -16,6 +16,12 @@ pub enum GravitySource {
     Point { center: Vec3, strength: f32, radius: f32 },
     /// Pull onto a collider's surface along `-∇f` — grounds you on fractal walls.
     SdfSurface { collider: usize, strength: f32 },
+    /// Real inverse-square gravity µ/r² toward a celestial body (solar demo S2).
+    /// PATCHED CONICS: of all `InvSq` sources whose SOI contains the point, only
+    /// the DEEPEST (smallest SOI — the moon inside the planet inside the sun)
+    /// pulls; the rest contribute nothing. `soi ≤ 0` = infinite (the system
+    /// root). Non-InvSq sources still add on top as usual.
+    InvSq { center: Vec3, mu: f32, soi: f32 },
 }
 
 /// Gravity as a sum of composable sources `g(p)`.
@@ -35,8 +41,26 @@ impl GravityField {
     /// world positions when it builds the field.
     pub fn accel_at(&self, p: Vec3, colliders: &[AnchoredCollider]) -> Vec3 {
         let mut a = Vec3::ZERO;
+        // Patched conics: exactly one dominant InvSq body pulls (see `InvSq`).
+        let mut dominant: Option<(f32, Vec3, f32)> = None; // (soi, center, mu)
+        for s in &self.sources {
+            if let GravitySource::InvSq { center, mu, soi } = s {
+                let soi_eff = if *soi <= 0.0 { f32::INFINITY } else { *soi };
+                if (p - *center).length() <= soi_eff
+                    && dominant.is_none_or(|(cur, ..)| soi_eff < cur)
+                {
+                    dominant = Some((soi_eff, *center, *mu));
+                }
+            }
+        }
+        if let Some((_, center, mu)) = dominant {
+            let to = center - p;
+            let r2 = to.length_squared().max(1e-6);
+            a += to / r2.sqrt() * (mu / r2);
+        }
         for s in &self.sources {
             a += match s {
+                GravitySource::InvSq { .. } => Vec3::ZERO, // handled above
                 GravitySource::Uniform(g) => *g,
                 GravitySource::Point { center, strength, radius } => {
                     let to = *center - p;

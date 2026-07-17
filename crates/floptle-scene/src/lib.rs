@@ -71,6 +71,10 @@ pub struct NodeDoc {
     /// A physics rigidbody on this node (`None` = not a physics body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rigidbody: Option<RigidBodyDoc>,
+    /// Puts the node on Kepler rails + makes it an inverse-square gravity
+    /// source (solar demo S2). See [`floptle_core::CelestialBody`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub celestial: Option<CelestialBodyDoc>,
     /// Marks a Mesh node as a static walkable collider (its triangles collide at Play).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mesh_collider: bool,
@@ -348,6 +352,69 @@ impl RigidBodyDoc {
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
             align_up: rb.align_up,
+        }
+    }
+}
+
+/// Serializable on-rails celestial body, mirroring [`floptle_core::CelestialBody`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CelestialBodyDoc {
+    #[serde(default = "mu_default")]
+    pub mu: f64,
+    #[serde(default = "body_radius_default")]
+    pub body_radius: f64,
+    #[serde(default)]
+    pub soi: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    #[serde(default)]
+    pub a: f64,
+    #[serde(default)]
+    pub e: f64,
+    #[serde(default)]
+    pub i: f64,
+    #[serde(default)]
+    pub lan: f64,
+    #[serde(default)]
+    pub arg_pe: f64,
+    #[serde(default)]
+    pub m0: f64,
+}
+
+fn mu_default() -> f64 {
+    1.0e6
+}
+fn body_radius_default() -> f64 {
+    30.0
+}
+
+impl CelestialBodyDoc {
+    pub fn to_body(&self) -> floptle_core::CelestialBody {
+        floptle_core::CelestialBody {
+            mu: self.mu,
+            body_radius: self.body_radius,
+            soi: self.soi,
+            parent: self.parent.clone(),
+            a: self.a,
+            e: self.e,
+            i: self.i,
+            lan: self.lan,
+            arg_pe: self.arg_pe,
+            m0: self.m0,
+        }
+    }
+    pub fn from_body(b: &floptle_core::CelestialBody) -> Self {
+        Self {
+            mu: b.mu,
+            body_radius: b.body_radius,
+            soi: b.soi,
+            parent: b.parent.clone(),
+            a: b.a,
+            e: b.e,
+            i: b.i,
+            lan: b.lan,
+            arg_pe: b.arg_pe,
+            m0: b.m0,
         }
     }
 }
@@ -1240,6 +1307,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(rb) = &node.rigidbody {
         world.insert(e, rb.to_rigidbody());
     }
+    if let Some(cb) = &node.celestial {
+        world.insert(e, cb.to_body());
+    }
     if node.mesh_collider {
         world.insert(e, floptle_core::MeshCollider);
     }
@@ -1382,6 +1452,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .unwrap_or_default();
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
+        let celestial =
+            world.get::<floptle_core::CelestialBody>(e).map(CelestialBodyDoc::from_body);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let paint = world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
@@ -1412,6 +1484,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             scripts,
             material,
             rigidbody,
+            celestial,
             mesh_collider,
             paint,
             tex_paint,
@@ -1484,6 +1557,18 @@ mod tests {
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
                         align_up: true, // exercise the align-to-gravity round-trip
+                    }),
+                    celestial: Some(CelestialBodyDoc {
+                        mu: 25000.0,
+                        body_radius: 60.0,
+                        soi: 0.0,
+                        parent: "Sun".into(),
+                        a: 220.0,
+                        e: 0.1,
+                        i: 0.15,
+                        lan: 0.3,
+                        arg_pe: 1.2,
+                        m0: 0.8,
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,
@@ -1560,6 +1645,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    celestial: None,
                     mesh_collider: false,
                     paint: None,
                     tex_paint: None,
@@ -1588,6 +1674,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    celestial: None,
                     mesh_collider: false,
                     paint: None,
                     tex_paint: None,
@@ -1613,6 +1700,7 @@ mod tests {
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
+                    celestial: None,
                     mesh_collider: false,
                     paint: None,
                     tex_paint: None,
@@ -1684,6 +1772,12 @@ mod tests {
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
         assert!(rb.align_up, "align-to-gravity flag lost in the round-trip");
+        let cb = cube.celestial.as_ref().expect("celestial body lost in round-trip");
+        assert_eq!(cb.parent, "Sun");
+        assert!(
+            cb.mu == 25000.0 && cb.a == 220.0 && cb.e == 0.1 && cb.m0 == 0.8,
+            "celestial elements lost in round-trip: {cb:?}"
+        );
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");

@@ -109,6 +109,10 @@ impl Editor {
         let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
         let rigidbody =
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
+        let celestial = self
+            .world
+            .get::<floptle_core::CelestialBody>(e)
+            .map(floptle_scene::CelestialBodyDoc::from_body);
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         // Carry the paint KEY, not a copy of the colors: the pasted node points at the
         // same block and forks it only if painted (copy-on-write, proposal §9.0). So
@@ -143,6 +147,7 @@ impl Editor {
             scripts,
             material,
             rigidbody,
+            celestial,
             mesh_collider,
             paint,
             tex_paint,
@@ -245,6 +250,7 @@ impl Editor {
             scripts: Vec::new(),
             material: None,
             rigidbody: None,
+            celestial: None,
             mesh_collider: false,
             paint: None,
             tex_paint: None,
@@ -293,6 +299,7 @@ impl Editor {
                 scripts: Vec::new(),
                 material: None,
                 rigidbody: None,
+                celestial: None,
                 mesh_collider: false,
                 paint: None,
                 tex_paint: None,

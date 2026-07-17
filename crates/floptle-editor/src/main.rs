@@ -64,6 +64,7 @@ mod prefs;
 mod project;
 mod render_frame;
 mod scene_ops;
+mod space;
 mod scene_tab;
 mod selection;
 mod shading;
@@ -140,6 +141,8 @@ struct EditorCmd {
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
+    add_celestial: Option<Entity>,
+    remove_celestial: Option<Entity>,
     /// Add a Networked (replication) component on this entity.
     add_networked: Option<Entity>,
     /// Multiplayer harness intents (the 🌐 panel).
@@ -1614,6 +1617,12 @@ struct Editor {
     /// collider copy (no matching terrain collider) — a silent miss here reads
     /// as "standing on an invisible old surface" and is unfindable later.
     terrain_mirror_warned: bool,
+    /// Space time (solar demo S2): seconds of ON-RAILS celestial time, advanced
+    /// each gameplay tick by `space_warp × tick_dt`. Drives every
+    /// `CelestialBody` node's Kepler position.
+    space_time: f64,
+    /// Current time-warp multiplier (`space.warp(m)` requests land here).
+    space_warp: f64,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.
