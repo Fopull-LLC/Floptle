@@ -409,6 +409,7 @@ impl Editor {
             self.space_time = 0.0; // rails restart from the authored epoch
             self.space_warp = 1.0;
             self.space_coast.clear();
+            self.space_frame.clear(); // dominant-frame tracking restarts too
             self.script_lines.clear(); // no stale map lines across runs
             // Every Play is a FRESH RUN: drop all script instances so top-level
             // script state can't leak across sessions (Ty's ship still thought

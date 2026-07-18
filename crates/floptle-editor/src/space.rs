@@ -147,18 +147,43 @@ impl Editor {
                     }
                 }
                 let Some((i, _)) = dom else { continue };
-                let (vel, grounded) = states.get(&eid).copied().unwrap_or_default();
+                let (mut vel, grounded) = states.get(&eid).copied().unwrap_or_default();
+                // FRAME CONVENTION: a dynamic body's sim velocity is measured
+                // in its DOMINANT celestial's carried frame — the carry moves
+                // positions only, so a landed ship reads v ≈ 0 while its
+                // planet orbits the star at full speed. Everything below (and
+                // `space.elements`) treats velocities as frame-relative;
+                // subtracting the center's world velocity here again was the
+                // bug that bent trajectories the moment warp engaged.
+                //
+                // SOI SEAM: crossing into a different dominant frame must keep
+                // the WORLD velocity continuous, so the sim velocity jumps by
+                // (old frame vel − new frame vel) — leave a planet's SOI and
+                // you carry its orbital velocity into the star's frame.
+                let dom_key = cb[i].0.index();
+                let prev = self.space_frame.insert(eid, dom_key);
+                if let Some(p) = prev
+                    && p != dom_key
+                    && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
+                {
+                    let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
+                    vel = (vel.as_dvec3() + dv).as_vec3();
+                    sim.set_body_velocity(eid, vel);
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!("entered {}'s sphere of influence", names[i]),
+                        None,
+                    );
+                }
                 let center = DVec3::from(bodies[i].pos);
                 // Relative to the OLD center: `center` already moved by delta
                 // this tick, the body's sim position has not.
                 let rel = (pos - center) + deltas[i];
-                let relv = vel.as_dvec3() - DVec3::from(bodies[i].vel);
                 let flying = warping
                     && !grounded
                     && rel.length() > cb[i].1.body_radius + 8.0
-                    && relv.length_squared() > 0.01;
+                    && vel.as_dvec3().length_squared() > 0.01;
                 if flying && cb[i].1.mu > 0.0 {
-                    let dom_key = cb[i].0.index();
                     let recapture = self
                         .space_coast
                         .get(&eid)
@@ -166,13 +191,8 @@ impl Editor {
                     if recapture {
                         // Capture the conic from the PRE-TICK state (old center,
                         // old time) — from here on the cached elements are truth.
-                        let (_, old_center_vel) = sys.body_pos_vel(i, t_old);
-                        let k = Kepler::from_state(
-                            rel,
-                            vel.as_dvec3() - old_center_vel,
-                            cb[i].1.mu,
-                            t_old,
-                        );
+                        // The sim velocity IS the frame-relative velocity.
+                        let k = Kepler::from_state(rel, vel.as_dvec3(), cb[i].1.mu, t_old);
                         self.space_coast.insert(eid, (dom_key, k));
                     }
                     if let Some((_, k)) = self.space_coast.get(&eid) {
@@ -192,10 +212,7 @@ impl Editor {
                             continue;
                         }
                         sim.set_body_position(eid, center + r2);
-                        sim.set_body_velocity(
-                            eid,
-                            (DVec3::from(bodies[i].vel) + v2).as_vec3(),
-                        );
+                        sim.set_body_velocity(eid, v2.as_vec3());
                     }
                 } else {
                     self.space_coast.remove(&eid);

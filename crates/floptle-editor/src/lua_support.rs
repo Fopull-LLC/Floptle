@@ -831,7 +831,9 @@ function space.dominant(x, y, z) end
 function space.gravity(x, y, z) end
 ---The orbit (conic) a craft at position+velocity is on around its dominant
 ---body: { body, a, e, periapsis, apoapsis?, period? } — apoapsis/period absent
----on an escape trajectory. Distances from the body CENTER.
+---on an escape trajectory. Distances from the body CENTER. Pass `node.vx/vy/vz`
+---straight through: a body's velocity is ALREADY measured in its dominant
+---celestial's frame (do NOT subtract the body's world velocity).
 ---@return table|nil
 function space.elements(x, y, z, vx, vy, vz) end
 ";

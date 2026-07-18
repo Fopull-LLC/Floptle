@@ -486,9 +486,12 @@ local function update_map3d(node, dt)
   local db = dn and space.body(dn)
   local info_orbit = nil
   if db then
+    -- node velocity is ALREADY in the dominant body's carried frame (the
+    -- engine's SOI frame convention) — subtracting db's world velocity again
+    -- bent the drawn conic once the planet itself started orbiting the star.
     local has, p, ecc, e1x, e1y, e1z, e2x, e2y, e2z = orbit_basis(
       node.x - db.x, node.y - db.y, node.z - db.z,
-      node.vx - db.vx, node.vy - db.vy, node.vz - db.vz, db.mu)
+      node.vx, node.vy, node.vz, db.mu)
     if has then
       info_orbit = { body = db.name, p = p, ecc = ecc, radius = db.radius }
       if map_show.orbits then

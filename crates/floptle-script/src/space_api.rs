@@ -148,6 +148,10 @@ pub(crate) fn install_space_api(
     // space.elements(x,y,z, vx,vy,vz) → the conic you're ON around the dominant
     // body: { body, a, e, period, apoapsis, periapsis } (period/apoapsis nil on
     // an escape). Feed it your ship's position + velocity; the map/HUD draw it.
+    // The velocity is taken AS the dominant-frame velocity — which is exactly
+    // what `node.vx/vy/vz` already are (the carry moves positions only), so
+    // scripts pass node state straight through. Subtracting the body's world
+    // velocity here again bent every readout once planets started moving.
     {
         let info = info.clone();
         if let Ok(f) = lua.create_function(
@@ -157,7 +161,7 @@ pub(crate) fn install_space_api(
                 let Some(i) = dominant(&info, p) else { return Ok(None) };
                 let b = &info.bodies[i];
                 let r = p - DVec3::from(b.pos);
-                let v = DVec3::new(vx, vy, vz) - DVec3::from(b.vel);
+                let v = DVec3::new(vx, vy, vz);
                 let k = Kepler::from_state(r, v, b.mu, info.time);
                 let t = lua.create_table()?;
                 t.set("body", b.name.clone())?;
