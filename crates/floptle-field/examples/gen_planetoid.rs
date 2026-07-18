@@ -66,7 +66,7 @@ fn main() {
     // 300 with µ tuned to g ≈ 9.8 at the surface. Orbital velocity in low orbit
     // ≈ 53 u/s, escape ≈ 76 — you REACH orbit with technique, you don't trip
     // into it. Voxel 2.0: crust chunks only ≈ tens of MB resident (sparse).
-    const RADIUS: f32 = 300.0;
+    const RADIUS: f32 = 340.0;
     let relief: f32 =
         std::env::var("RELIEF").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
     let caves: u32 = std::env::var("CAVES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
@@ -156,7 +156,7 @@ fn main() {
     let t0 = std::time::Instant::now();
     field.sculpt(
         Brush::Lower,
-        Vec3::new(5.0, RADIUS + noise.fbm(Vec3::Y * 4.3, 5) * relief, 0.0),
+        Vec3::new(-(RADIUS + noise.fbm(Vec3::NEG_X * 4.3, 5) * relief), 5.0, 0.0),
         4.0,
         0.5,
         BrushProfile::default(),
@@ -184,7 +184,7 @@ fn main() {
     // dents subtracted at seeded surface points; carving after the fill would
     // hit band-clamped rock and terrace).
     let t0 = std::time::Instant::now();
-    const MOON_R: f32 = 40.0;
+    const MOON_R: f32 = 64.0;
     let mnoise = Noise::new(seed.wrapping_mul(31).wrapping_add(5));
     let mut rng = floptle_core::noise::Rng::new(seed.wrapping_add(99));
     let craters: Vec<(Vec3, f32)> = (0..14)
@@ -196,7 +196,7 @@ fn main() {
             )
             .normalize_or_zero();
             let d = if d == Vec3::ZERO { Vec3::X } else { d };
-            (d * (MOON_R + 2.0), rng.range(4.0, 9.5) as f32)
+            (d * (MOON_R + 2.0), rng.range(6.0, 14.0) as f32)
         })
         .collect();
     let mut moon = ChunkField::new(1.0);

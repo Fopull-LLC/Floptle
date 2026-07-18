@@ -124,26 +124,46 @@ fn main() {
         }
         v
     };
+    // Bounding radius from the chunk footprint — only used as the raycast start.
+    let chunk_units = floptle_field::CHUNK as f32 * planet.voxel();
+    let bound_r = planet
+        .chunk_coords()
+        .iter()
+        .map(|c| (c[0].abs().max(c[1].abs()).max(c[2].abs()) + 1) as f32 * chunk_units)
+        .fold(0.0f32, f32::max);
     let mut best: Option<(Vec3, Vec3, i32)> = None; // (pos, look dir, score)
     for iy in -20..=20 {
         for ix in -40..40 {
             let th = ix as f32 * 0.157;
             let ph = iy as f32 * 0.07;
             let dirv = Vec3::new(th.cos() * ph.cos(), ph.sin(), th.sin() * ph.cos());
-            for rr in 0..14 {
-                let p = dirv * (300.0 - 46.0 + rr as f32 * 1.5);
+            // The REAL surface radius along this direction (raycast in from
+            // outside), so the sub-surface scan tracks any planet size.
+            let Some(hit) = planet.raycast(dirv * (bound_r + 4.0), -dirv, bound_r * 1.5)
+            else {
+                continue;
+            };
+            let surf_r = hit.length();
+            for rr in 0..28 {
+                let p = dirv * (surf_r - 46.0 + rr as f32 * 1.5);
                 if planet.d(p) <= 3.0 {
                     continue;
                 }
                 // Score: glowing material on any nearby wall + open space to look down.
                 let mut score = 0;
                 let mut look = Vec3::X;
+                let mut glow_look: Option<Vec3> = None;
                 let mut longest = 0.0f32;
                 for d in &dirs26 {
                     if let Some(hit) = planet.raycast(p, *d, 40.0) {
                         let slot = planet.color(hit)[3];
                         if slot == 6 || slot == 7 {
                             score += 10;
+                            // Aim AT a glowing wall with some standoff — the
+                            // whole point of the shot is glow in frame.
+                            if glow_look.is_none() && (hit - p).length() > 4.0 {
+                                glow_look = Some(*d);
+                            }
                         }
                         let free = (hit - p).length();
                         if free > longest {
@@ -153,13 +173,15 @@ fn main() {
                     }
                 }
                 score += longest as i32;
+                let aim = glow_look.unwrap_or(look);
                 if best.as_ref().is_none_or(|(_, _, s)| score > *s) {
-                    best = Some((p, look, score));
+                    best = Some((p, aim, score));
                 }
             }
         }
-        if best.as_ref().is_some_and(|(_, _, s)| *s >= 40) {
-            break; // glowing walls + a long gallery: good enough, stop scanning
+        // ≥3 glowing wall hits + a gallery — a cave that actually photographs.
+        if best.as_ref().is_some_and(|(_, _, s)| *s >= 60) {
+            break;
         }
     }
     let (cave, cave_look, cave_score) = best.expect("no cave air found — did the cave gate change?");

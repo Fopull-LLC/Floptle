@@ -1,5 +1,5 @@
 //! Runtime 3D line layer — world-space polylines with per-vertex color, drawn
-//! depth-tested into the scene (planets occlude orbit lines) without writing
+//! OVER the scene (no depth test — see the pipeline comment) without writing
 //! depth. This is the game-visible line facility (S6 v2 map screens, debug
 //! draws): scripts queue segments via the Lua `draw.line` API each tick and
 //! the editor feeds them here per camera. Camera-relative (ADR-0015): callers
@@ -109,12 +109,14 @@ impl Lines {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
-            // Depth-tested against the scene (bodies occlude the lines) but never
-            // written — a line must not occlude geometry drawn after it.
+            // Drawn OVER the scene (no depth test): map orbit lines span tens of
+            // thousands of units, where the depth buffer's precision made
+            // segments flicker in and out against far geometry — and KSP-style
+            // orbit lines should read through planets anyway. Never writes depth.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Gpu::DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -520,11 +520,15 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         if (t1 <= t0) {
             continue;
         }
-        // Optical depth from the chord through the shell, denser near the surface.
+        // Optical depth: EXPONENTIAL extinction over the chord through the
+        // shell (denser near the surface). Beer-Lambert keeps the planet's
+        // disc readable from orbit — the old linear chord saturated the whole
+        // face to a solid ball of sky color — while grazing limb rays still
+        // build up into the halo.
         let midp = rd * (0.5 * (t0 + t1));
         let midalt = length(midp - c) - R;
         let densf = clamp(1.0 - midalt / H, 0.05, 1.0);
-        let a = clamp((t1 - t0) / (H * 2.4) * densf, 0.0, 1.0) * density;
+        let a = (1.0 - exp(-(t1 - t0) / (H * 6.0) * densf)) * density;
         // Day side: how high the star stands over the chord point's horizon.
         let zen = normalize(midp - c);
         let sdir = sun_dir_at(midp);
@@ -547,8 +551,10 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
                     let nse = cloud_fbm(cp * 14.0 + vec3<f32>(drift, 0.0, drift * 0.7));
                     let edge = 1.0 - cov * 0.9;
                     let cl = smoothstep(edge, edge + 0.22, nse);
-                    let ccol = mix(scol, vec3<f32>(daylight), 0.75);
-                    out = mix(out, ccol, cl * clamp(density * 2.0, 0.0, 1.0) * clamp(a * 4.0 + 0.15, 0.0, 1.0));
+                    let ccol = mix(scol, vec3<f32>(daylight * 0.95), 0.75);
+                    // Cloud opacity rides its own gentle curve — never the
+                    // saturated atmosphere alpha (that whited out the disc).
+                    out = mix(out, ccol, cl * 0.85 * clamp(density + 0.25, 0.0, 1.0) * smoothstep(0.02, 0.2, a));
                 }
             }
         }

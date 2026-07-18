@@ -156,6 +156,10 @@ fn main() {
         },
     ];
     let light = Vec3::new(0.55, 0.6, 0.35).normalize();
+    // STARS MODE when FLOPTLE_STARS=1: the same sun as a luminous body 25k
+    // units out along the old light direction — reproduces in-game lighting
+    // (per-star inverse-square + marched shadows against the bound volume).
+    let stars = std::env::var("FLOPTLE_STARS").ok().as_deref() == Some("1");
 
     for v in &views {
         let fwd = (v.target - v.cam.as_vec3()).normalize();
@@ -170,10 +174,24 @@ fn main() {
 
         let bc = Vec3::from(shadow.center);
         let hf = shadow.half_extent;
+        let star_world = light * 25000.0; // world-space star position
+        let star_rel = (star_world.as_dvec3() - v.cam).as_vec3();
+        let (light_dir, star_meta, star_pos, star_color) = if stars {
+            let mut pos = [[0.0f32; 4]; 4];
+            let mut col = [[0.0f32; 4]; 4];
+            pos[0] = [star_rel.x, star_rel.y, star_rel.z, 0.0];
+            col[0] = [1.0, 0.97, 0.9, 625.0 * 1.0e6];
+            ([star_rel.x, star_rel.y, star_rel.z, 1.0], [1.0, 0.0, 0.0, 0.0], pos, col)
+        } else {
+            ([light.x, light.y, light.z, 0.0], [0.0; 4], [[0.0f32; 4]; 4], [[0.0f32; 4]; 4])
+        };
         let rg = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir,
+            star_meta,
+            star_pos,
+            star_color,
             light_color: [1.0, 0.96, 0.9, 0.0],
             ambient: [0.16, 0.17, 0.22, 0.0],
             bg: [0.006, 0.007, 0.016, 1.0], // space
@@ -218,7 +236,7 @@ fn main() {
 
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir,
             light_color: [1.0, 0.96, 0.9, 0.0],
             ambient: [0.16, 0.17, 0.22, 0.0],
             terrain_mask: [0.0, 0.22, glow_mask as f32, 0.0],
