@@ -1,0 +1,39 @@
+// A Garmin-G5-style instrument tape (stage ui): a vertical strip of scrolling
+// tick marks centered on the current value, with a reference line + pointer at
+// the middle. One shader serves both tapes — the ship script feeds
+//   tape = (value, half-span shown, minor tick spacing)
+//   side.x = 0 → ticks grow from the RIGHT edge (speed tape, left of the ball)
+//            1 → ticks grow from the LEFT edge (altitude tape, right of it)
+// The numeric window is a separate text element the script also drives.
+shader tape {
+  stage ui
+  uniform tape: vec3 = vec3(0, 60, 10)
+  uniform side: vec3 = vec3(0, 0, 0)
+  uniform accent: color = #FFB13B
+
+  let q = vec2(uv.x, 1 - uv.y * 2)
+  let v = tape.x + q.y * tape.y
+  let upx = tape.y / 90
+  // Distance (in value units) to the nearest minor / major tick line.
+  let fm = abs(fract(v / tape.z + 0.5) - 0.5) * tape.z
+  let fM = abs(fract(v / (tape.z * 5) + 0.5) - 0.5) * tape.z * 5
+  let minor = 1 - smoothstep(upx * 0.7, upx * 1.5, fm)
+  let major = 1 - smoothstep(upx * 0.9, upx * 1.9, fM)
+  // Ticks protrude from the inner edge (the side facing the navball).
+  let inner = mix(1 - uv.x, uv.x, side.x)
+  let tickm = minor * step(inner, 0.2)
+  let tickM = major * step(inner, 0.4)
+  // No negative-value ticks below zero on tapes that never go there (alt/speed
+  // both read ≥ 0 in practice) — fade any tick drawn for v < 0.
+  let valid = step(0.0, v)
+  let ticks = max(tickM, tickm * 0.6) * valid
+  // Center reference: a full-width line + a pointer wedge on the inner edge.
+  let cl = 1 - smoothstep(0.006, 0.02, abs(q.y))
+  let wedge = (1 - smoothstep(0.0, 0.16, inner + abs(q.y) * 3.5))
+  let bg = vec3(0.03, 0.045, 0.06) * (1.1 - 0.4 * abs(q.y))
+  let c1 = mix(bg, vec3(0.85, 0.9, 0.95), ticks * 0.85)
+  let c2 = mix(c1, accent.rgb, max(cl * 0.9, wedge))
+  let edge = 1 - smoothstep(0.0, 0.02, min(uv.x, 1 - uv.x))
+  let composed = mix(c2, vec3(0.3, 0.55, 0.65), edge * 0.7)
+  output color = vec4(composed, 0.82) * instanceColor
+}

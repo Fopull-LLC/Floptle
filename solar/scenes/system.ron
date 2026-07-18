@@ -385,6 +385,140 @@
             )),
         ),
         (
+            name: "Speed Tape",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(12),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (-128.0, -22.0),
+                ),
+                size: (Fixed(52.0), Fixed(180.0)),
+                shader: "shaders/tape.flsl",
+                shader_params: {
+                    "side": (0.0, 0.0, 0.0, 0.0),
+                    "accent": (0.45, 0.95, 0.6, 1.0),
+                },
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
+            name: "Alt Tape",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(12),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (128.0, -22.0),
+                ),
+                size: (Fixed(52.0), Fixed(180.0)),
+                shader: "shaders/tape.flsl",
+                shader_params: {
+                    "side": (1.0, 0.0, 0.0, 0.0),
+                    "accent": (1.0, 0.75, 0.3, 1.0),
+                },
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
+            name: "Speed Readout",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(12),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (-185.0, -104.0),
+                ),
+                size: (Fixed(58.0), Fixed(24.0)),
+                text: Some((
+                    text: "0",
+                    size: 17.0,
+                    color: (0.45, 0.95, 0.6, 1.0),
+                    align: End,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
+            name: "Alt Readout",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(12),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (185.0, -104.0),
+                ),
+                size: (Fixed(58.0), Fixed(24.0)),
+                text: Some((
+                    text: "0",
+                    size: 17.0,
+                    color: (1.0, 0.75, 0.3, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
+            name: "Heading Readout",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(12),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (0.0, -188.0),
+                ),
+                size: (Fixed(120.0), Fixed(22.0)),
+                text: Some((
+                    text: "HDG 000°",
+                    size: 16.0,
+                    color: (0.85, 0.95, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
             name: "Leg A",
             transform: (
                 translation: (0.52, -0.6, 0.52),
