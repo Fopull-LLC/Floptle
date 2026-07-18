@@ -437,17 +437,20 @@ impl Editor {
             // The directional "sun" Light has no world position, so its direction gizmo
             // only shows when the Lighting node is selected — anchored in front of the
             // editor camera so it's always framed, pointing along the light direction.
+            // A POSITIONAL star instead anchors at the star and points at the camera
+            // (any direction is "toward something" for a point source).
             if filter.lights
                 && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
             {
-                let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
-                let anchor = cam.world_position + fwd * 6.0;
-                let dir = self
-                    .world
-                    .query::<Light>()
-                    .next()
-                    .map(|(_, l)| Vec3::from(l.direction))
-                    .unwrap_or(Vec3::Y);
+                let l = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
+                let (anchor, dir) = if l.positional {
+                    let star = DVec3::from(l.position);
+                    let toward = (cam.world_position - star).normalize_or_zero().as_vec3();
+                    (star, if toward == Vec3::ZERO { Vec3::Y } else { toward })
+                } else {
+                    let fwd = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+                    (cam.world_position + fwd * 6.0, Vec3::from(l.direction))
+                };
                 let lines = light_dir_lines(anchor, dir, cam.world_position, view_proj, gw, gh);
                 if !lines.is_empty() {
                     self.light_gizmos.push(lines);
@@ -711,7 +714,7 @@ impl Editor {
 
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-        let light = Vec3::from(light_node.direction).normalize_or_zero();
+        let sun = crate::shading::sun_vec(&light_node, cam.world_position);
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
@@ -723,7 +726,7 @@ impl Editor {
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
             point_count: pl_count,
@@ -972,7 +975,7 @@ impl Editor {
             RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-                light_dir: [light.x, light.y, light.z, 0.0],
+                light_dir: sun,
                 light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
                 ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],
@@ -4853,7 +4856,7 @@ impl Editor {
         let sky_uniform_vals = self.sky_uniform_values();
 
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-        let light = Vec3::from(light_node.direction).normalize_or_zero();
+        let sun = crate::shading::sun_vec(&light_node, cam.world_position);
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
@@ -4862,7 +4865,7 @@ impl Editor {
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir: sun,
             light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
             ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
             point_count: pl_count,
@@ -5005,7 +5008,7 @@ impl Editor {
             let mut g = RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-                light_dir: [light.x, light.y, light.z, 0.0],
+                light_dir: sun,
                 light_color: [light_node.color[0] * li, light_node.color[1] * li, light_node.color[2] * li, 0.0],
                 ambient: [light_node.ambient[0], light_node.ambient[1], light_node.ambient[2], 0.0],
                 bg: [clear[0], clear[1], clear[2], 1.0],

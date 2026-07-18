@@ -367,6 +367,7 @@ struct VsOut {
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
+fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }

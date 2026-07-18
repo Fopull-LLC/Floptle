@@ -187,7 +187,7 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// MUST stay in sync with `fs` in raster.wgsl.
 pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, front: bool, albedo: vec3<f32>) -> vec3<f32> {
     let n = facing_normal(normalize(in.normal), front);
-    let l = normalize(g.light_dir.xyz);
+    let l = sun_dir_at(in.view_pos);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
@@ -945,6 +945,7 @@ struct VsOut {
     @location(12) @interpolate(flat) tsplat: f32,
 };
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
+fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }

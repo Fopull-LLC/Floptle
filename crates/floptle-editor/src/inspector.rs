@@ -637,12 +637,30 @@ impl EditorTabViewer<'_> {
             Some(e) if world.get::<Light>(e).is_some() => {
                 if let Some(l) = world.get_mut::<Light>(e) {
                     ui.label("Lighting node");
-                    ui.label("direction");
-                    ui.horizontal(|ui| {
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
-                        cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
-                    });
+                    cmd.inspector_changed |= ui
+                        .checkbox(&mut l.positional, "positional star ☀")
+                        .on_hover_text(
+                            "the key light radiates FROM a world position (a star) instead of \
+                             arriving along one global direction — terminators and shadow \
+                             directions line up radially around planets. `direction` is \
+                             ignored while this is on.",
+                        )
+                        .changed();
+                    if l.positional {
+                        ui.label("star position");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[0]).speed(10.0).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[1]).speed(10.0).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[2]).speed(10.0).prefix("z ")).changed();
+                        });
+                    } else {
+                        ui.label("direction");
+                        ui.horizontal(|ui| {
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[0]).speed(0.02).prefix("x ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[1]).speed(0.02).prefix("y ")).changed();
+                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.direction[2]).speed(0.02).prefix("z ")).changed();
+                        });
+                    }
                     ui.horizontal(|ui| {
                         ui.label("light");
                         cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.color).changed();

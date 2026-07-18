@@ -100,6 +100,20 @@ pub(crate) fn collect_point_lights(
     ([n as f32, 0.0, 0.0, 0.0], pos, col)
 }
 
+/// The key light as the `light_dir` uniform vec4 for THIS camera. Directional:
+/// xyz = the normalized direction, w = 0. Positional star (`Light.positional`):
+/// xyz = the star's CAMERA-RELATIVE position, w = 1 — the shaders then compute
+/// the light direction per shaded point (`sun_dir_at`), which is what makes
+/// terminators and shadow directions line up radially around planets.
+pub(crate) fn sun_vec(l: &Light, cam_world: DVec3) -> [f32; 4] {
+    if l.positional {
+        let rel = (DVec3::from(l.position) - cam_world).as_vec3();
+        return [rel.x, rel.y, rel.z, 1.0];
+    }
+    let d = Vec3::from(l.direction).normalize_or_zero();
+    [d.x, d.y, d.z, 0.0]
+}
+
 /// The Lighting node's shadow knobs as the raymarch-globals uniform vec4s
 /// (`shadow_params` / `shadow_tint` / `shadow_extra`). Softness 0..1 maps to the
 /// penumbra sharpness `k` on a log ramp (0 → 64 razor-hard, 1 → 2 dreamy-soft) so
