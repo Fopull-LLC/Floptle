@@ -386,6 +386,17 @@ pub struct CelestialBodyDoc {
     pub atmo_height: f64,
     #[serde(default = "one_f32")]
     pub atmo_density: f32,
+    #[serde(default)]
+    pub clouds: f32,
+    /// Star: irradiance at distance d = luminosity × 1e6 / d². 0 = not a star.
+    #[serde(default)]
+    pub luminosity: f32,
+    #[serde(default = "default_star_color")]
+    pub star_color: [f32; 3],
+}
+
+fn default_star_color() -> [f32; 3] {
+    [1.0, 0.97, 0.9]
 }
 
 fn is_zero3(v: &[f32; 3]) -> bool {
@@ -415,6 +426,9 @@ impl CelestialBodyDoc {
             atmo_color: self.atmo_color,
             atmo_height: self.atmo_height,
             atmo_density: self.atmo_density,
+            clouds: self.clouds,
+            luminosity: self.luminosity,
+            star_color: self.star_color,
         }
     }
     pub fn from_body(b: &floptle_core::CelestialBody) -> Self {
@@ -432,6 +446,9 @@ impl CelestialBodyDoc {
             atmo_color: b.atmo_color,
             atmo_height: b.atmo_height,
             atmo_density: b.atmo_density,
+            clouds: b.clouds,
+            luminosity: b.luminosity,
+            star_color: b.star_color,
         }
     }
 }
@@ -812,13 +829,11 @@ impl From<ShapeDoc> for Shape {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct LightDoc {
     pub direction: [f32; 3],
-    /// Star mode: the key light radiates from `position` instead of arriving
-    /// along `direction` (radial terminator + shadows). Pre-star scenes
-    /// deserialize to off.
+    /// Stars mode: the directional light turns off and celestial bodies with
+    /// `luminosity > 0` become the key lights (radial terminators + shadows,
+    /// genuinely dark far sides, multiple stars). Pre-star scenes → off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub positional: bool,
-    #[serde(default, skip_serializing_if = "is_zero3_f64")]
-    pub position: [f64; 3],
+    pub stars: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
     #[serde(default = "one_f32")]
@@ -852,9 +867,6 @@ pub struct LightDoc {
     pub fog_dither_strength: f32,
 }
 
-fn is_zero3_f64(v: &[f64; 3]) -> bool {
-    *v == [0.0, 0.0, 0.0]
-}
 fn default_shadow_softness() -> f32 {
     0.35
 }
@@ -884,8 +896,7 @@ impl From<&Light> for LightDoc {
     fn from(l: &Light) -> Self {
         Self {
             direction: l.direction,
-            positional: l.positional,
-            position: l.position,
+            stars: l.stars,
             color: l.color,
             ambient: l.ambient,
             intensity: l.intensity,
@@ -910,8 +921,7 @@ impl LightDoc {
     pub fn to_light(self) -> Light {
         Light {
             direction: self.direction,
-            positional: self.positional,
-            position: self.position,
+            stars: self.stars,
             color: self.color,
             ambient: self.ambient,
             intensity: self.intensity,
@@ -1603,6 +1613,9 @@ mod tests {
                         atmo_color: [0.4, 0.55, 0.8], // exercise the atmosphere round-trip
                         atmo_height: 42.0,
                         atmo_density: 0.7,
+                        clouds: 0.35,
+                        luminosity: 12.0, // exercise the star round-trip
+                        star_color: [1.0, 0.9, 0.8],
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,

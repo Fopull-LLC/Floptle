@@ -2,10 +2,9 @@
     name: "planetoid",
     lighting: (
         direction: (0.4, 0.9, 0.45),
-        positional: true,
-        position: (9300.0, 20930.0, 10460.0),
+        stars: true,
         color: (1.0, 0.98, 0.92),
-        ambient: (0.12, 0.12, 0.16),
+        ambient: (0.014, 0.014, 0.02),
         intensity: 1.0,
         shadows: true,
         shadow_softness: 0.35,
@@ -20,6 +19,33 @@
         fog_dither_strength: 0.5,
     ),
     nodes: [
+        (
+            name: "Sol",
+            transform: (
+                translation: (9300.0, 20930.0, 10460.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (700.0, 700.0, 700.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (1.0, 0.92, 0.6),
+            ),
+            scripts: [],
+            material: Some((
+                color: (1.0, 0.92, 0.6),
+                emissive: (1.0, 0.85, 0.45),
+                emissive_strength: 2.0,
+                unlit: true,
+            )),
+            celestial: Some((
+                mu: 0.0,
+                body_radius: 600.0,
+                soi: 1.0,
+                a: 0.0, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 0.0,
+                luminosity: 640.0,
+                star_color: (1.0, 0.97, 0.9),
+            )),
+        ),
         (
             name: "Planetoid",
             transform: (
@@ -44,6 +70,7 @@
                 atmo_color: (0.45, 0.6, 0.85),
                 atmo_height: 100.0,
                 atmo_density: 0.8,
+                clouds: 0.5,
             )),
         ),
         (
@@ -263,7 +290,7 @@
                 asset: "vfx/Flame",
                 play_on_start: false,
             )),
-            parent: Some(8),
+            parent: Some(9),
         ),
         (
             name: "Ship HUD",
@@ -291,7 +318,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: TopLeft,
@@ -319,7 +346,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -354,7 +381,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Center,
@@ -378,7 +405,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(8),
+            parent: Some(9),
         ),
         (
             name: "Leg B",
@@ -392,7 +419,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(8),
+            parent: Some(9),
         ),
         (
             name: "Leg C",
@@ -406,7 +433,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(8),
+            parent: Some(9),
         ),
         (
             name: "Leg D",
@@ -420,7 +447,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(8),
+            parent: Some(9),
         ),
         (
             name: "Speed Tape",
@@ -431,7 +458,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -456,7 +483,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -481,7 +508,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -509,7 +536,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -537,7 +564,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(10),
+            parent: Some(11),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,

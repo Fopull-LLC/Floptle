@@ -278,17 +278,20 @@ local function update_navball(node)
 end
 
 -- ---- the map (S6 v2): a REAL 3D interactive map -----------------------------
--- M toggles KSP-style map mode: the camera detaches and orbits the FOCUSED
--- body (mouse drag rotates, scroll / ↑↓ zooms, TAB cycles focus across every
--- body and the ship), while the engine's runtime line layer (`draw.line`)
--- draws live orbit conics for EVERYTHING — each body's ellipse around its
--- parent (parents inferred from SOIs), their SOI rings, and the ship's own
--- conic with Pe/Ap markers. Bodies occlude the lines naturally (the layer
--- depth-tests). Indicator toggles while open: 1 orbits · 2 SOIs · 3 markers.
+-- M toggles KSP-style map mode, with BLENDER-style navigation (Ty's spec):
+-- opens focused on the SHIP; the mouse does nothing until you hold RIGHT
+-- CLICK — then drag orbits around the selection — and CTRL+RIGHT-drag PANS
+-- the camera offset relative to it, so you're never trapped on the focus.
+-- Scroll / ↑↓ zooms, TAB cycles focus (ship first, then every body). The
+-- engine line layer draws live orbit conics for everything — each body's
+-- ellipse around its SOI-inferred parent, SOI rings, and the ship's own conic
+-- with Pe/Ap markers — occluded naturally by the bodies themselves.
+-- Indicator toggles while open: 1 orbits · 2 SOIs · 3 markers.
 map_view = false -- published: planet_camera stands down while this is true
-local map_focus, map_zoom = 1, nil
+local map_focus, map_zoom = 1, nil -- focus 1 = THE SHIP, 2.. = bodies
 local map_hud_t = -10.0
 local map_yaw2, map_pitch2 = 0.6, 0.45
+local map_offx, map_offy, map_offz = 0.0, 0.0, 0.0 -- CTRL-drag pan offset
 local map_show = { orbits = true, soi = true, markers = true }
 local cam_node
 
@@ -370,10 +373,11 @@ local function update_map3d(node, dt)
   if not map_view then return end
   if not cam_node then cam_node = find("Camera 1") end
   local bodies = space.bodies()
-  local nf = #bodies + 1 -- focus slots: every body, then the ship
+  local nf = #bodies + 1 -- focus slots: the SHIP first, then every body
   if input.pressed("tab") then
     map_focus = map_focus % nf + 1
     map_zoom = nil
+    map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
   end
   if map_focus > nf then map_focus = 1 end
   if input.pressed("1") then map_show.orbits = not map_show.orbits end
@@ -381,32 +385,54 @@ local function update_map3d(node, dt)
   if input.pressed("3") then map_show.markers = not map_show.markers end
 
   local focus, fname, fradius
-  if map_focus <= #bodies then
-    focus = bodies[map_focus]
-    fname, fradius = focus.name, focus.radius
-  else
+  if map_focus == 1 then
     focus = { x = node.x, y = node.y, z = node.z }
     fname, fradius = "SHIP", 6
+  else
+    focus = bodies[map_focus - 1]
+    fname, fradius = focus.name, focus.radius
   end
   if not map_zoom then map_zoom = math.max(fradius * 6, 80) end
 
-  -- Camera: orbit the focus (drag rotates, scroll / ↑↓ zooms).
-  input.setMouseLocked(true)
-  local mdx, mdy = input.mouse_delta()
-  map_yaw2 = map_yaw2 - mdx * 0.005
-  map_pitch2 = math.max(-1.45, math.min(1.45, map_pitch2 - mdy * 0.005))
+  -- Blender-style navigation: the mouse is free (and does nothing) unless
+  -- RIGHT CLICK is held — drag then ORBITS the selection; CTRL+RIGHT-drag
+  -- PANS the view offset in the camera plane instead. Scroll / ↑↓ zooms.
+  local dragging = input.button(1)
+  input.setMouseLocked(dragging)
+  local cp, sp2 = math.cos(map_pitch2), math.sin(map_pitch2)
+  local cy3, sy3 = math.cos(map_yaw2), math.sin(map_yaw2)
+  if dragging then
+    local mdx, mdy = input.mouse_delta()
+    if input.key("ctrl") then
+      -- Pan: move the offset along the camera's right/up axes, scaled by zoom.
+      local rx3, rz3 = cy3, -sy3 -- camera right (horizontal)
+      local uxx = -sp2 * sy3
+      local uyy = cp
+      local uzz = -sp2 * cy3 -- camera up
+      local k = map_zoom * 0.0016
+      map_offx = map_offx + (-mdx * rx3 + mdy * uxx) * k
+      map_offy = map_offy + (mdy * uyy) * k
+      map_offz = map_offz + (-mdx * rz3 + mdy * uzz) * k
+    else
+      map_yaw2 = map_yaw2 - mdx * 0.0035
+      map_pitch2 = math.max(-1.45, math.min(1.45, map_pitch2 - mdy * 0.0035))
+      cp, sp2 = math.cos(map_pitch2), math.sin(map_pitch2)
+      cy3, sy3 = math.cos(map_yaw2), math.sin(map_yaw2)
+    end
+  end
   local sc = input.scroll()
   if sc and sc ~= 0 then map_zoom = map_zoom * (1 - sc * 0.1) end
   if input.key("up") then map_zoom = map_zoom * (1 - 1.5 * dt) end
   if input.key("down") then map_zoom = map_zoom * (1 + 1.5 * dt) end
   map_zoom = math.max(fradius * 1.6, math.min(map_zoom, 200000))
   if cam_node then
-    local cp, sp2 = math.cos(map_pitch2), math.sin(map_pitch2)
-    local cy3, sy3 = math.cos(map_yaw2), math.sin(map_yaw2)
     local dx3, dy3, dz3 = cp * sy3, sp2, cp * cy3
-    cam_node.x = focus.x + dx3 * map_zoom
-    cam_node.y = focus.y + dy3 * map_zoom
-    cam_node.z = focus.z + dz3 * map_zoom
+    local lx = focus.x + map_offx
+    local ly = focus.y + map_offy
+    local lz = focus.z + map_offz
+    cam_node.x = lx + dx3 * map_zoom
+    cam_node.y = ly + dy3 * map_zoom
+    cam_node.z = lz + dz3 * map_zoom
     cam_node.yaw = math.atan2(dx3, dz3)
     cam_node.pitch = -map_pitch2
     cam_node.roll = 0
@@ -465,9 +491,9 @@ local function update_map3d(node, dt)
   if time - map_hud_t >= 0.1 then
     map_hud_t = time
     local lines = {}
-    lines[1] = string.format("MAP  ·  focus %s   (TAB cycle · drag rotate · scroll/↑↓ zoom)", fname)
-    if map_focus <= #bodies then
-      local b = bodies[map_focus]
+    lines[1] = string.format("MAP  ·  focus %s   (TAB cycle · RMB-drag orbit · CTRL+RMB pan · scroll/↑↓ zoom)", fname)
+    if map_focus > 1 then
+      local b = bodies[map_focus - 1]
       local dx4, dy4, dz4 = node.x - b.x, node.y - b.y, node.z - b.z
       local dd = math.sqrt(dx4 * dx4 + dy4 * dy4 + dz4 * dz4)
       lines[2] = string.format("radius %.0f   µ %.3g   SOI %s", b.radius, b.mu,
@@ -557,6 +583,8 @@ function fixedUpdate(node, dt)
   if input.pressed("m") then
     map_view = not map_view
     map_zoom = nil -- re-fit to the focus every time it opens
+    map_focus = 1 -- always open on the ship
+    map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
   end
 
   -- ---- landing gear --------------------------------------------------------
@@ -596,7 +624,9 @@ function fixedUpdate(node, dt)
   if input.pressed(",") then warp_step(-1) end
   -- Any hands-on-stick input cancels warp (throttle keys, attitude keys) —
   -- you cannot fly the ship at 100×; the engine's rails own it up there.
-  local control_touched = input.key("shift") or input.key("ctrl") or input.key("z")
+  local map_drag2 = map_view and input.button(1)
+  local control_touched = ((input.key("shift") or input.key("ctrl")) and not map_drag2)
+    or input.key("z")
     or input.key("w") or input.key("a") or input.key("s") or input.key("d")
     or input.key("q") or input.key("e")
   if warp > 1.001 then
@@ -635,8 +665,10 @@ function fixedUpdate(node, dt)
   end
 
   -- ---- throttle + fuel -----------------------------------------------------
-  if input.key("shift") then throttle = throttle + params.throttle_rate * dt end
-  if input.key("ctrl") then throttle = throttle - params.throttle_rate * dt end
+  -- CTRL/SHIFT during a map RIGHT-drag are camera gestures, not throttle.
+  local map_drag = map_view and input.button(1)
+  if input.key("shift") and not map_drag then throttle = throttle + params.throttle_rate * dt end
+  if input.key("ctrl") and not map_drag then throttle = throttle - params.throttle_rate * dt end
   if input.key("x") then throttle = 0.0 end
   if input.key("z") then throttle = 1.0 end
   if throttle > 1.0 then throttle = 1.0 end

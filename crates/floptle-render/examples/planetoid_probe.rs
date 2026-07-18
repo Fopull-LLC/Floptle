@@ -184,16 +184,22 @@ fn main() {
         );
         let view_proj = cam.view_proj(W as f32 / H as f32);
         let cr = (DVec3::ZERO - cam_pos).as_vec3();
-        // Directional sun by default; `star` switches to the POSITIONAL model
-        // (light_dir.xyz = the star's camera-relative position, w = 1).
-        let light = match star {
+        // Directional sun by default; `star` switches to full STARS MODE — the
+        // multi-star uniforms drive `key_light` (the light_dir mirror keeps
+        // single-light consumers like the atmosphere daylight in agreement).
+        let (light, star_meta, star_pos, star_color) = match star {
             Some(sp) => {
                 let rel = (sp - cam_pos).as_vec3();
-                [rel.x, rel.y, rel.z, 1.0]
+                let mut pos = [[0.0f32; 4]; 4];
+                let mut col = [[0.0f32; 4]; 4];
+                pos[0] = [rel.x, rel.y, rel.z, 0.0];
+                // K = luminosity × 1e6; 625 ≈ full strength at 25k units.
+                col[0] = [1.0, 0.97, 0.9, 6.25e8];
+                ([rel.x, rel.y, rel.z, 1.0], [1.0, 0.0, 0.0, 0.0], pos, col)
             }
             None => {
                 let d = Vec3::new(0.45, 0.75, 0.35).normalize();
-                [d.x, d.y, d.z, 0.0]
+                ([d.x, d.y, d.z, 0.0], [0.0; 4], [[0.0f32; 4]; 4], [[0.0f32; 4]; 4])
             }
         };
 
@@ -202,6 +208,9 @@ fn main() {
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             light_dir: light,
             light_color: [1.0 * sun, 0.97 * sun, 0.9 * sun, 0.0],
+            star_meta,
+            star_pos,
+            star_color,
             ambient: [ambient[0], ambient[1], ambient[2], 0.0],
             bg,
             params: [0.0, 0.0, 0.0, 1.0],

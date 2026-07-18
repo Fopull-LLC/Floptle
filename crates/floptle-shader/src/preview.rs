@@ -367,6 +367,15 @@ struct VsOut {
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
+struct KeyLight { diffuse: vec3<f32>, spec: vec3<f32> }
+fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2<u32>) -> KeyLight {
+    var out: KeyLight;
+    let l = normalize(g.light_dir.xyz);
+    let ndl = max(dot(n, l), 0.0);
+    out.diffuse = g.light_color.rgb * ndl;
+    out.spec = g.light_color.rgb * pow(max(dot(n, normalize(l + v)), 0.0), shininess) * select(0.0, 1.0, ndl > 0.0);
+    return out;
+}
 fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }

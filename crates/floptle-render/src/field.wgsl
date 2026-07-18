@@ -90,11 +90,17 @@ struct Globals {
     // `sky_uniforms`. Appended at the END so the Rust `RaymarchGlobals` stays byte-identical.
     sky_meta: vec4<f32>,
     sky_uniforms: array<vec4<f32>, 16>,
-    // S8 contextual atmosphere: color.rgb + density.w; body center (camera-
-    // relative) + surface radius; params.x = atmosphere height.
-    atmo_color: vec4<f32>,
-    atmo_body: vec4<f32>,
-    atmo_params: vec4<f32>,
+    // S8 atmospheres (meta.x = count): per body color.rgb+density.w, camera-
+    // relative center + surface radius, params = (shell height, clouds, -, -).
+    atmo_meta: vec4<f32>,
+    atmo_color: array<vec4<f32>, 4>,
+    atmo_body: array<vec4<f32>, 4>,
+    atmo_params: array<vec4<f32>, 4>,
+    // Stars mode: meta.x = count (0 = legacy light_dir single light); per star
+    // camera-relative position + (color.rgb, K) with irradiance = K / d².
+    star_meta: vec4<f32>,
+    star_pos: array<vec4<f32>, 4>,
+    star_color: array<vec4<f32>, 4>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -439,9 +445,127 @@ fn field_eps(p: vec3<f32>) -> f32 {
 // is the camera-relative fragment position — the camera is the origin (ADR-0015), so
 // `length(pos)` is the view distance, a small number even at world 1e7 (no depth
 // reconstruction, no precision loss). Off (returns `color`) when fog_params.z == 0.
+// ---- S8 atmospheres: shell scattering shared by SKY rays and GEOMETRY rays.
+// Cheap value-noise fbm for the cloud layer (3 octaves on the shell sphere).
+fn hash31(p3in: vec3<f32>) -> f32 {
+    var p3 = fract(p3in * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn vnoise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash31(i);
+    let b = hash31(i + vec3<f32>(1.0, 0.0, 0.0));
+    let c = hash31(i + vec3<f32>(0.0, 1.0, 0.0));
+    let d = hash31(i + vec3<f32>(1.0, 1.0, 0.0));
+    let e = hash31(i + vec3<f32>(0.0, 0.0, 1.0));
+    let f1 = hash31(i + vec3<f32>(1.0, 0.0, 1.0));
+    let g1 = hash31(i + vec3<f32>(0.0, 1.0, 1.0));
+    let h1 = hash31(i + vec3<f32>(1.0, 1.0, 1.0));
+    let lo = mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    let hi = mix(mix(e, f1, u.x), mix(g1, h1, u.x), u.y);
+    return mix(lo, hi, u.z);
+}
+
+fn cloud_fbm(p: vec3<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.55;
+    var q = p;
+    for (var i = 0; i < 3; i = i + 1) {
+        v += amp * vnoise(q);
+        q = q * 2.13 + vec3<f32>(11.7, 5.1, 7.3);
+        amp *= 0.5;
+    }
+    return v;
+}
+
+// Atmosphere + clouds composited over `base` along the ray `rd` (camera at the
+// origin), stopping at geometry `tmax` (1e9 for sky rays). Every listed body's
+// shell is intersected analytically: the chord length through the shell sets
+// the optical depth, so the SAME math gives a tinted sky from inside, the limb
+// halo seen from space, aerial haze over a planet's disc, and cloud decks both
+// overhead and from orbit. `is_sky` adds the scattered star glow.
+fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) -> vec3<f32> {
+    var out = base;
+    let count = min(u32(G.atmo_meta.x), 4u);
+    if (count == 0u) {
+        return out;
+    }
+    let rd = normalize(rd_in);
+    // The glow/scatter color: star 0 in stars mode, the legacy light otherwise.
+    var gcol = G.light_color.rgb;
+    if (G.star_meta.x > 0.5) {
+        gcol = G.star_color[0].rgb;
+    }
+    for (var i = 0u; i < count; i = i + 1u) {
+        let c = G.atmo_body[i].xyz;
+        let R = G.atmo_body[i].w;
+        let H = G.atmo_params[i].x;
+        let density = G.atmo_color[i].w;
+        if (H < 0.001 || density < 0.001) {
+            continue;
+        }
+        let Ra = R + H;
+        let b = dot(rd, c);
+        let d2 = dot(c, c) - b * b;
+        if (d2 > Ra * Ra || (b < 0.0 && dot(c, c) > Ra * Ra)) {
+            continue; // misses the shell, or the shell is entirely behind us
+        }
+        let hh = sqrt(max(Ra * Ra - d2, 0.0));
+        let t0 = max(b - hh, 0.0);
+        let t1 = min(b + hh, tmax);
+        if (t1 <= t0) {
+            continue;
+        }
+        // Optical depth from the chord through the shell, denser near the surface.
+        let midp = rd * (0.5 * (t0 + t1));
+        let midalt = length(midp - c) - R;
+        let densf = clamp(1.0 - midalt / H, 0.05, 1.0);
+        let a = clamp((t1 - t0) / (H * 2.4) * densf, 0.0, 1.0) * density;
+        // Day side: how high the star stands over the chord point's horizon.
+        let zen = normalize(midp - c);
+        let sdir = sun_dir_at(midp);
+        let daylight = clamp(dot(zen, sdir) * 1.6 + 0.35, 0.02, 1.0);
+        let scol = G.atmo_color[i].rgb * daylight;
+        out = mix(out, scol, a);
+        // Cloud deck: a drifting noise shell at ~1/3 of the atmosphere height.
+        let cov = G.atmo_params[i].y;
+        if (cov > 0.01) {
+            let rc = R + H * 0.35;
+            if (d2 < rc * rc) {
+                let hc = sqrt(rc * rc - d2);
+                var tc = b - hc;
+                if (tc < 0.0) {
+                    tc = b + hc; // camera inside the deck sphere: use the far hit
+                }
+                if (tc > 0.0 && tc < tmax) {
+                    let cp = normalize(rd * tc - c);
+                    let drift = G.params.x * 0.004;
+                    let nse = cloud_fbm(cp * 14.0 + vec3<f32>(drift, 0.0, drift * 0.7));
+                    let edge = 1.0 - cov * 0.9;
+                    let cl = smoothstep(edge, edge + 0.22, nse);
+                    let ccol = mix(scol, vec3<f32>(daylight), 0.75);
+                    out = mix(out, ccol, cl * clamp(density * 2.0, 0.0, 1.0) * clamp(a * 4.0 + 0.15, 0.0, 1.0));
+                }
+            }
+        }
+        if (is_sky) {
+            let sd = max(dot(rd, sun_dir_at(vec3<f32>(0.0))), 0.0);
+            out += gcol * (pow(sd, 180.0) * 1.4 + pow(sd, 10.0) * 0.12) * a * daylight;
+        }
+    }
+    return out;
+}
+
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    // Aerial perspective first: atmosphere + clouds BETWEEN the camera and this
+    // surface (haze over a planet seen from orbit, cloud decks over its disc).
+    let color2 = atmo_composite(color, pos, length(pos), false);
     if (G.fog_params.z < 0.5) {
-        return color;
+        return color2;
     }
     let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
     var f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
@@ -453,7 +577,7 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
         let d = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
         f = clamp(f + (d - 0.5) * amp * 0.06, 0.0, 1.0);
     }
-    return mix(color, G.fog_color.rgb, f);
+    return mix(color2, G.fog_color.rgb, f);
 }
 
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
@@ -732,12 +856,97 @@ fn ign(pix: vec2<u32>) -> f32 {
 // the model: 0 = classic directional sun (xyz = one global direction), 1 = a
 // POSITIONAL star (xyz = the star's camera-relative position) — light then
 // radiates from that point, so terminators and shadow directions line up
-// radially the way a real sun's do.
+// radially the way a real sun's do. In STARS mode the editor also writes the
+// brightest star here, so single-light consumers (atmosphere daylight, sky
+// glow) keep working unchanged.
 fn sun_dir_at(p: vec3<f32>) -> vec3<f32> {
     if (G.light_dir.w > 0.5) {
         return normalize(G.light_dir.xyz - p);
     }
     return normalize(G.light_dir.xyz);
+}
+
+// ---- Stars mode (Lighting `stars`): luminous celestial bodies ARE the key
+// lights. Up to 4 reach the uniforms; irradiance falls off with the inverse
+// square of the distance (capped near the star), so far sides of planets go
+// genuinely dark and a second sun genuinely double-lights.
+fn star_dir_at(i: u32, p: vec3<f32>) -> vec3<f32> {
+    return normalize(G.star_pos[i].xyz - p);
+}
+
+fn star_col_at(i: u32, p: vec3<f32>) -> vec3<f32> {
+    let sv = G.star_pos[i].xyz - p;
+    let d2 = max(dot(sv, sv), 1.0);
+    return G.star_color[i].rgb * min(G.star_color[i].w / d2, 4.0);
+}
+
+// The shadow march's retro post (quantize bands + Bayer dither) + tint mix,
+// shared by the legacy sun shadow and the per-star shadows.
+fn shadow_post(vis_in: f32, pix: vec2<u32>) -> vec3<f32> {
+    var vis = vis_in;
+    let bands = G.shadow_tint.w;
+    if (bands >= 2.0) {
+        var v = vis * (bands - 1.0);
+        if (G.shadow_extra.x > 0.5) {
+            v = floor(v + bayer4(pix));
+        } else {
+            v = round(v);
+        }
+        vis = clamp(v / (bands - 1.0), 0.0, 1.0);
+    }
+    return mix(vec3<f32>(1.0), G.shadow_tint.rgb, G.shadow_params.z * (1.0 - vis));
+}
+
+// Marched shadow toward star `i`.
+fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    if (G.shadow_params.x < 0.5) {
+        return vec3<f32>(1.0);
+    }
+    return shadow_post(light_vis(p, n, star_dir_at(i, p)), pix);
+}
+
+// The full key-light response at a point: Σ over stars (or the one legacy
+// light) of color·NdotL·shadow, plus the matching Blinn-Phong specular energy
+// for a surface with `shininess`. Every lit surface — raster meshes, .flsl
+// materials, raymarched terrain/blobs/shapes — shades through this, so a new
+// light model lands everywhere at once.
+struct KeyLight {
+    diffuse: vec3<f32>,
+    spec: vec3<f32>,
+}
+
+fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2<u32>) -> KeyLight {
+    var out: KeyLight;
+    out.diffuse = vec3<f32>(0.0);
+    out.spec = vec3<f32>(0.0);
+    let ns = u32(G.star_meta.x);
+    if (ns == 0u) {
+        let l = sun_dir_at(p);
+        let ndl = max(dot(n, l), 0.0);
+        var sh = vec3<f32>(1.0);
+        if (ndl > 0.0) {
+            sh = sun_shadow(p, n, pix);
+        }
+        out.diffuse = G.light_color.rgb * ndl * sh;
+        let h = normalize(l + v);
+        let sp = pow(max(dot(n, h), 0.0), shininess) * select(0.0, 1.0, ndl > 0.0);
+        out.spec = G.light_color.rgb * sp * sh;
+        return out;
+    }
+    for (var i = 0u; i < min(ns, 4u); i++) {
+        let l = star_dir_at(i, p);
+        let scol = star_col_at(i, p);
+        let ndl = max(dot(n, l), 0.0);
+        var sh = vec3<f32>(1.0);
+        if (ndl > 0.0) {
+            sh = star_shadow(i, p, n, pix);
+        }
+        out.diffuse += scol * ndl * sh;
+        let h = normalize(l + v);
+        let sp = pow(max(dot(n, h), 0.0), shininess) * select(0.0, 1.0, ndl > 0.0);
+        out.spec += scol * sp * sh;
+    }
+    return out;
 }
 
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
