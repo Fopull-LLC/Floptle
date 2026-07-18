@@ -26,6 +26,28 @@ struct View {
     target: Vec3,
 }
 
+/// Load one palette PNG as a 256² RGBA layer (missing/unreadable → white).
+fn load_layer(path: &str) -> TextureData {
+    let white = || TextureData { pixels: vec![255; 256 * 256 * 4], width: 256, height: 256 };
+    let Ok(file) = std::fs::File::open(path) else { return white() };
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let Ok(mut reader) = decoder.read_info() else { return white() };
+    let mut buf = vec![0; reader.output_buffer_size().unwrap_or(0)];
+    let Ok(info) = reader.next_frame(&mut buf) else { return white() };
+    if info.width != 256 || info.height != 256 {
+        return white();
+    }
+    let pixels = match info.color_type {
+        png::ColorType::Rgba => buf[..(256 * 256 * 4)].to_vec(),
+        png::ColorType::Rgb => buf[..(256 * 256 * 3)]
+            .chunks_exact(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        _ => return white(),
+    };
+    TextureData { pixels, width: 256, height: 256 }
+}
+
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -37,6 +59,48 @@ fn main() {
         field.data_chunks(),
         field.memory_bytes() as f64 / 1e6
     );
+    // Body radius estimate from the field's chunk footprint — frames the views
+    // for any body size (the old constants assumed the tiny first planetoid).
+    let chunk_units = floptle_field::CHUNK as f32 * field.voxel();
+    let radius = field
+        .chunk_coords()
+        .iter()
+        .map(|c| {
+            let m = c[0].abs().max(c[1].abs()).max(c[2].abs());
+            (m as f32) * chunk_units
+        })
+        .fold(0.0f32, f32::max)
+        .max(chunk_units)
+        * 0.82;
+    println!("radius ≈ {radius:.0}");
+    // The scene palette sidecar next to the cfield: <dir>/<scene>.palette.
+    let ppath = {
+        let pb = std::path::Path::new(&path);
+        let scene = pb.file_stem().and_then(|s| s.to_str()).unwrap_or("planetoid");
+        let scene = scene.split('.').next().unwrap_or(scene);
+        pb.with_file_name(format!("{scene}.palette"))
+    };
+    let mut glow_mask = 0u32;
+    let mut layers: Vec<TextureData> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(&ppath) {
+        for (i, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let tex = match line.strip_suffix("|glow") {
+                Some(p2) => {
+                    glow_mask |= 1 << i;
+                    p2
+                }
+                None => line,
+            };
+            layers.push(load_layer(tex));
+        }
+        println!("palette: {} layers from {} (glow {glow_mask:#b})", layers.len(), ppath.display());
+    } else {
+        println!("no palette sidecar at {} — untextured", ppath.display());
+    }
 
     let gpu = Gpu::headless(W, H);
     let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -62,6 +126,9 @@ fn main() {
     let tris: usize = chunks.iter().map(|(_, m)| m.tri_count()).sum();
     println!("mesh : {} chunks, {tris} tris", chunks.len());
     let mut raster = Raster::new(&gpu);
+    if !layers.is_empty() {
+        raster.set_terrain_palette(&gpu, &layers, 0);
+    }
     let mut slots = Vec::new();
     for (_, cm) in &chunks {
         let data = chunk_mesh_data(cm);
@@ -75,12 +142,17 @@ fn main() {
         slots.push(id);
     }
 
+    let r = radius as f64;
     let views = [
-        View { name: "orbit", cam: DVec3::new(62.0, 34.0, 62.0), target: Vec3::ZERO },
+        View {
+            name: "orbit",
+            cam: DVec3::new(1.55 * r, 0.85 * r, 1.55 * r),
+            target: Vec3::ZERO,
+        },
         View {
             name: "surface",
-            cam: DVec3::new(2.0, 37.5, 10.0),
-            target: Vec3::new(-6.0, 30.0, -14.0),
+            cam: DVec3::new(0.05 * r, r * 1.02 + 6.0, 0.25 * r * 0.0 + 10.0),
+            target: Vec3::new(-0.15 * radius, radius * 0.92, -0.35 * radius),
         },
     ];
     let light = Vec3::new(0.55, 0.6, 0.35).normalize();
@@ -130,6 +202,7 @@ fn main() {
             light_dir: [light.x, light.y, light.z, 0.0],
             light_color: [1.0, 0.96, 0.9, 0.0],
             ambient: [0.16, 0.17, 0.22, 0.0],
+            terrain_mask: [0.0, 0.22, glow_mask as f32, 0.0],
             ..Default::default()
         };
         let model = Mat4::from_translation(cr);
@@ -192,13 +265,21 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
     slice.map_async(wgpu::MapMode::Read, |_| {});
     gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     let data = slice.get_mapped_range();
+    // Swap only when the surface really is BGRA (headless commonly gives RGBA).
+    let bgra = matches!(
+        gpu.config.format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
     let mut out = Vec::with_capacity((W * H) as usize);
     for y in 0..H {
         let row = &data[(y * padded) as usize..];
         for x in 0..W {
             let i = (x * bpp) as usize;
-            // BGRA surface format → RGBA png.
-            out.push([row[i + 2], row[i + 1], row[i], 255]);
+            if bgra {
+                out.push([row[i + 2], row[i + 1], row[i], 255]);
+            } else {
+                out.push([row[i], row[i + 1], row[i + 2], 255]);
+            }
         }
     }
     out
