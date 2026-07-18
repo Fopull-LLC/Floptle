@@ -4,7 +4,8 @@
 --
 --   F        board / exit (walk within `board_range`)
 --   SHIFT / CTRL   throttle up / down        X  cut throttle       Z  full
---   W/S      pitch      A/D  yaw      Q/E  roll   (hold = turn, release = stop)
+--   W/S      pitch (S pulls the nose UP)    A/D  yaw    Q/E  roll
+--            (hold = turn, release = stop)
 --   B        landing gear (legs retracted = fragile belly, crash at 6 m/s)
 --   T        SAS toggle       G  (while wrecked) restore at the pad
 --
@@ -201,24 +202,49 @@ local function wreck_ship(node, x, y, z)
   set_ship_visible(node, false)
 end
 
-local navball
+-- The navball + the G5-style flight instruments flanking it (speed tape left,
+-- altitude tape right, heading readout above — the pilot's layout).
+local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg
+-- Published for the HUD blocks: the current compass heading in degrees.
+local heading_deg = 0
+local function find_instruments()
+  if navball then return end
+  navball = find("Navball")
+  tape_spd, tape_alt = find("Speed Tape"), find("Alt Tape")
+  txt_spd, txt_alt = find("Speed Readout"), find("Alt Readout")
+  txt_hdg = find("Heading Readout")
+end
+
 local function set_navball(on)
-  if not navball then navball = find("Navball") end
-  if not navball then return end
-  local el = navball:getcomponent("UiElement")
-  if el then el.visible = on and 1 or 0 end
+  find_instruments()
+  for _, inst in ipairs({ navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg }) do
+    if inst then
+      local el = inst:getcomponent("UiElement")
+      if el then el.visible = on and 1 or 0 end
+    end
+  end
 end
 
 -- Feed the navball shader: the ship's basis expressed in the LOCAL HORIZON
 -- frame (x = east, y = radial up, z = north) + the prograde direction. The
 -- ball is drawn entirely by shaders/navball.flsl — these are its uniforms.
+-- The east reference comes from world-Y — except near the poles, where
+-- cross(Y, up) degenerates and the heading would swim with every position
+-- change (the pilot's "heading changes when I only pitch" report — the pad
+-- IS at the north pole). There we anchor east to world-Z instead.
 local function update_navball(node)
+  find_instruments()
   if not navball then return end
   local d = space.dominant(node.x, node.y, node.z)
   local b = d and space.body(d)
   if not b then return end
   local ux, uy, uz = norm(node.x - b.x, node.y - b.y, node.z - b.z)
-  local ex, ey, ez = norm(cross(0, 1, 0, ux, uy, uz))
+  local ex, ey, ez
+  if math.abs(uy) > 0.93 then
+    ex, ey, ez = norm(cross(0, 0, 1, ux, uy, uz))
+  else
+    ex, ey, ez = norm(cross(0, 1, 0, ux, uy, uz))
+  end
   if ex == 0 and ey == 0 and ez == 0 then ex, ey, ez = 1, 0, 0 end
   local nhx, nhy, nhz = cross(ux, uy, uz, ex, ey, ez)
   local function toH(vx, vy, vz)
@@ -237,6 +263,18 @@ local function update_navball(node)
   else
     navball:setShaderParam("prograde", 0, 0, 0)
   end
+  -- Compass heading of the nose's horizontal projection (0 = north, 90 = east).
+  local he = nx * ex + ny * ey + nz * ez
+  local hn = nx * nhx + ny * nhy + nz * nhz
+  heading_deg = (math.deg(math.atan2(he, hn)) + 360) % 360
+  -- G5 tapes: speed on the left, altitude on the right, value windows + HDG.
+  local dxr, dyr, dzr = node.x - b.x, node.y - b.y, node.z - b.z
+  local alt = math.sqrt(dxr * dxr + dyr * dyr + dzr * dzr) - b.radius
+  if tape_spd then tape_spd:setShaderParam("tape", vl, 40, 5) end
+  if tape_alt then tape_alt:setShaderParam("tape", alt, 150, 25) end
+  if txt_spd then txt_spd.text = string.format("%.0f", vl) end
+  if txt_alt then txt_alt.text = string.format("%.0f", alt) end
+  if txt_hdg then txt_hdg.text = string.format("HDG %03.0f°", heading_deg) end
 end
 
 -- ---- the map screen (S6) ----------------------------------------------------
@@ -493,7 +531,9 @@ function fixedUpdate(node, dt)
   end
 
   -- ---- attitude: RATE-COMMANDED (the KSP feel) ----------------------------
-  local p = (input.key("s") and 1 or 0) - (input.key("w") and 1 or 0)
+  -- Stick convention (per Brody, the resident pilot): PULL BACK (S) pitches
+  -- the nose UP, push forward (W) pitches it DOWN.
+  local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
   local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
   local r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
   local step = params.rate_accel * dt
@@ -503,10 +543,14 @@ function fixedUpdate(node, dt)
   avy = toward(avy, y ~= 0 and y * params.max_rate or (hold or avy), step)
   avr = toward(avr, r ~= 0 and r * params.max_rate or (hold or avr), step)
 
+  -- Axis wiring (the pilot's fix): for a rocket whose long axis is `nose`,
+  -- PITCH tilts about `right`, YAW tilts the nose left/right about `fwd`
+  -- (the belly axis), and ROLL spins about `nose` itself. (These were
+  -- swapped — A/D used to spin the hull, which read as heading drift.)
   local rx2, ry2, rz2 = cross(fx, fy, fz, nx, ny, nz) -- ship right
-  local wx = rx2 * avp + nx * avy + fx * avr
-  local wy = ry2 * avp + ny * avy + fy * avr
-  local wz = rz2 * avp + nz * avy + fz * avr
+  local wx = rx2 * avp + fx * avy + nx * avr
+  local wy = ry2 * avp + fy * avy + ny * avr
+  local wz = rz2 * avp + fz * avy + nz * avr
   local wl = math.sqrt(wx * wx + wy * wy + wz * wz)
   if wl > 1e-6 then
     local ux2, uy2, uz2 = wx / wl, wy / wl, wz / wl

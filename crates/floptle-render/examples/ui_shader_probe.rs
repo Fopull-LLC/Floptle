@@ -164,6 +164,36 @@ fn main() {
     assert!(center[0] > corner[0] + 30, "focus disc should tint the center: {center:?} vs {corner:?}");
     assert!(corner[0] < 45 && corner[1] < 55 && corner[2] < 70, "corner should be deep space, got {corner:?}");
     println!("map ui shader OK; wrote map_probe.png");
+
+    // ---- the G5 tape: speed 42 over a ±40 window, ticks every 5 -------------
+    let px = render_ui_shader(
+        &gpu,
+        &raster,
+        &mut ui,
+        "solar/shaders/tape.flsl",
+        &|name| match name {
+            "tape" => Some([42.0, 40.0, 5.0, 0.0]),
+            "side" => Some([0.0, 0.0, 0.0, 0.0]),
+            _ => None,
+        },
+        "tape_probe.png",
+    );
+    // Ticks are light gray lines; the center reference + wedge use the accent
+    // (default #FFB13B → orange, red > blue).
+    let mut ticks = 0;
+    let mut acc = 0;
+    for p in &px {
+        if p[0] > 170 && p[1] > 180 && p[2] > 190 {
+            ticks += 1;
+        }
+        if p[0] > 200 && p[2] < 150 && p[0] > p[2] + 80 {
+            acc += 1;
+        }
+    }
+    println!("tape: tick px {ticks}, accent px {acc}");
+    assert!(ticks > 60, "expected scrolling tick marks, got {ticks} px");
+    assert!(acc > 40, "expected the accent reference line/wedge, got {acc} px");
+    println!("tape ui shader OK; wrote tape_probe.png");
 }
 
 fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
