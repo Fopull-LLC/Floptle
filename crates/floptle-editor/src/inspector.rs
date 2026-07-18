@@ -638,21 +638,17 @@ impl EditorTabViewer<'_> {
                 if let Some(l) = world.get_mut::<Light>(e) {
                     ui.label("Lighting node");
                     cmd.inspector_changed |= ui
-                        .checkbox(&mut l.positional, "positional star ☀")
+                        .checkbox(&mut l.stars, "stars mode ☀")
                         .on_hover_text(
-                            "the key light radiates FROM a world position (a star) instead of \
-                             arriving along one global direction — terminators and shadow \
-                             directions line up radially around planets. `direction` is \
-                             ignored while this is on.",
+                            "the directional light turns OFF and every Celestial Body with \
+                             luminosity > 0 becomes a real light source — light radiates \
+                             from each star with inverse-square falloff, terminators wrap \
+                             planets, far sides go dark, and multiple stars just work \
+                             (up to 4 reach the shaders).",
                         )
                         .changed();
-                    if l.positional {
-                        ui.label("star position");
-                        ui.horizontal(|ui| {
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[0]).speed(10.0).prefix("x ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[1]).speed(10.0).prefix("y ")).changed();
-                            cmd.inspector_changed |= ui.add(egui::DragValue::new(&mut l.position[2]).speed(10.0).prefix("z ")).changed();
-                        });
+                    if l.stars {
+                        ui.small("light comes from Celestial Bodies with luminosity > 0");
                     } else {
                         ui.label("direction");
                         ui.horizontal(|ui| {
@@ -1816,6 +1812,26 @@ impl EditorTabViewer<'_> {
                                     .add(egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0))
                                     .on_hover_text("how opaque the sky gets at full depth")
                                     .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("clouds");
+                                ch |= ui
+                                    .add(egui::Slider::new(&mut cb.clouds, 0.0..=1.0))
+                                    .on_hover_text("cloud coverage in the atmosphere (0 = clear)")
+                                    .changed();
+                            });
+                            ui.small("star (Lighting `stars mode` uses these as the lights):");
+                            ui.horizontal(|ui| {
+                                ui.label("luminosity");
+                                ch |= ui
+                                    .add(egui::DragValue::new(&mut cb.luminosity).speed(0.5))
+                                    .on_hover_text(
+                                        "0 = not a star. Irradiance at distance d = luminosity × 1e6 / d² \
+                                         — ~36 fully lights a planet 6000 units away.",
+                                    )
+                                    .changed();
+                                ui.label("color");
+                                ch |= ui.color_edit_button_rgb(&mut cb.star_color).changed();
                             });
                             if ch {
                                 cmd.inspector_changed = true;

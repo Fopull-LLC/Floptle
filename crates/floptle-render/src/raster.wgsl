@@ -291,9 +291,7 @@ fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> {
 @fragment
 fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let n = facing_normal(normalize(in.normal), front);
-    let l = sun_dir_at(in.view_pos);
     let v = normalize(-in.view_pos);
-    let ndl = max(dot(n, l), 0.0);
     let texel = base_texel(in);
     // MESHED TERRAIN (tsplat flag): the vertex color's alpha is a palette SLOT, not opacity,
     // and albedo comes from triplanar-splatting the palette. Terrain is always opaque, so it
@@ -338,25 +336,20 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // work when their Lighting/PostProcess switches are off; only the DIRECTIONAL
     // terms are shadowed (ambient + point lights stay as fill), matching the
     // raymarch pass exactly. (`pix` was computed above the unlit branch.)
-    var sh = vec3<f32>(1.0);
-    if (ndl > 0.0) {
-        sh = sun_shadow(in.view_pos, n, pix);
-    }
     var occ = 1.0;
     if (G.ao_params.x > 0.5) {
         occ = sdf_ao(in.view_pos, n);
     }
 
+    // Key light(s): the shared multi-star model — Σ color·NdotL·shadow per
+    // star (or the one legacy directional/positional sun), plus its specular.
     let ambient = g.ambient.rgb * in.params.w;
-    var lit = albedo * (ambient + g.light_color.rgb * ndl * sh);
+    let shininess = max(in.params.x, 1.0);
+    let kl = key_light(in.view_pos, n, v, shininess, pix);
+    var lit = albedo * (ambient + kl.diffuse);
     // Placeable point lights (camera-relative; in.view_pos is in the same space).
     lit += albedo * point_diffuse(in.view_pos, n);
-
-    // Blinn-Phong specular, gated to the lit hemisphere.
-    let h = normalize(l + v);
-    let shininess = max(in.params.x, 1.0);
-    let spec = pow(max(dot(n, h), 0.0), shininess) * in.specular.a * select(0.0, 1.0, ndl > 0.0);
-    lit += in.specular.rgb * spec * g.light_color.rgb * sh;
+    lit += in.specular.rgb * kl.spec * in.specular.a;
 
     // Rim / fresnel — a cheap stylized edge glow.
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;

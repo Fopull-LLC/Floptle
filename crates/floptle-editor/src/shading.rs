@@ -101,40 +101,38 @@ pub(crate) fn collect_point_lights(
 }
 
 /// The key light as the `light_dir` uniform vec4 for THIS camera. Directional:
-/// xyz = the normalized direction, w = 0. Positional star (`Light.positional`):
-/// xyz = the star's CAMERA-RELATIVE position, w = 1 — the shaders then compute
-/// the light direction per shaded point (`sun_dir_at`), which is what makes
-/// terminators and shadow directions line up radially around planets.
-pub(crate) fn sun_vec(l: &Light, cam_world: DVec3) -> [f32; 4] {
-    if l.positional {
-        let rel = (DVec3::from(l.position) - cam_world).as_vec3();
-        return [rel.x, rel.y, rel.z, 1.0];
+/// xyz = the normalized direction, w = 0. Stars mode: xyz = the BRIGHTEST
+/// star's camera-relative position, w = 1 — single-light consumers (atmosphere
+/// daylight, sky glow) follow it; the full per-star loop is `key_light` in the
+/// shaders.
+pub(crate) fn sun_vec(world: &World, l: &Light, cam_world: DVec3) -> [f32; 4] {
+    if l.stars {
+        let (meta, pos, _) = star_uniforms(world, l, cam_world);
+        if meta[0] > 0.0 {
+            return [pos[0][0], pos[0][1], pos[0][2], 1.0];
+        }
     }
     let d = Vec3::from(l.direction).normalize_or_zero();
     [d.x, d.y, d.z, 0.0]
 }
 
-/// The atmosphere the camera currently sits in (S8): the celestial body with
-/// an atmosphere whose shell the camera is deepest inside. Returns the three
-/// `atmo_*` raymarch-globals vec4s; all-zero density when in open space.
-pub(crate) fn atmo_uniforms(
-    world: &World,
-    cam_world: DVec3,
-) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    type AtmoPick = (f64, [f32; 4], [f32; 4], [f32; 4]);
-    let mut best: Option<AtmoPick> = None;
+/// The atmospheres near this camera (S8): up to 4 celestial bodies with
+/// shells, deepest-immersion first, as the `atmo_*` raymarch-globals arrays.
+/// Bodies are included even from SPACE — the shader draws their limb halo,
+/// aerial haze and cloud decks from outside too.
+pub(crate) type AtmoUniforms = ([f32; 4], [[f32; 4]; 4], [[f32; 4]; 4], [[f32; 4]; 4]);
+pub(crate) fn atmo_uniforms(world: &World, cam_world: DVec3) -> AtmoUniforms {
+    type AtmoItem = (f64, [f32; 4], [f32; 4], [f32; 4]);
+    let mut items: Vec<AtmoItem> = Vec::new();
     for (e, cb) in world.query::<floptle_core::CelestialBody>() {
-        if cb.atmo_height <= 0.0 {
+        if cb.atmo_height <= 0.0 || cb.atmo_density <= 0.0 {
             continue;
         }
         let wp = floptle_core::world_transform(world, e).translation;
         let rel = wp - cam_world;
         let frac = (rel.length() - cb.body_radius) / cb.atmo_height;
-        if frac > 1.0 || best.as_ref().is_some_and(|(f, ..)| frac >= *f) {
-            continue;
-        }
         let r = rel.as_vec3();
-        best = Some((
+        items.push((
             frac,
             [
                 cb.atmo_color[0],
@@ -143,11 +141,61 @@ pub(crate) fn atmo_uniforms(
                 cb.atmo_density.clamp(0.0, 1.0),
             ],
             [r.x, r.y, r.z, cb.body_radius as f32],
-            [cb.atmo_height as f32, 0.0, 0.0, 0.0],
+            [cb.atmo_height as f32, cb.clouds.clamp(0.0, 1.0), 0.0, 0.0],
         ));
     }
-    best.map(|(_, a, b, c)| (a, b, c))
-        .unwrap_or(([0.0; 4], [0.0, 0.0, 0.0, 1.0], [0.0; 4]))
+    items.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut meta = [0.0f32; 4];
+    let mut color = [[0.0f32; 4]; 4];
+    let mut body = [[0.0f32, 0.0, 0.0, 1.0]; 4];
+    let mut params = [[0.0f32; 4]; 4];
+    for (i, it) in items.iter().take(4).enumerate() {
+        color[i] = it.1;
+        body[i] = it.2;
+        params[i] = it.3;
+        meta[0] = (i + 1) as f32;
+    }
+    (meta, color, body, params)
+}
+
+/// Stars mode: the luminous celestial bodies as the `star_*` uniform arrays,
+/// brightest-at-camera first (irradiance = luminosity × 1e6 / d²). Zero count
+/// when the Lighting node isn't in stars mode.
+pub(crate) fn star_uniforms(
+    world: &World,
+    light: &Light,
+    cam_world: DVec3,
+) -> ([f32; 4], [[f32; 4]; 4], [[f32; 4]; 4]) {
+    let mut meta = [0.0f32; 4];
+    let mut pos = [[0.0f32; 4]; 4];
+    let mut col = [[0.0f32; 4]; 4];
+    if !light.stars {
+        return (meta, pos, col);
+    }
+    type StarItem = (f64, [f32; 4], [f32; 4]);
+    let mut items: Vec<StarItem> = Vec::new();
+    for (e, cb) in world.query::<floptle_core::CelestialBody>() {
+        if cb.luminosity <= 0.0 {
+            continue;
+        }
+        let wp = floptle_core::world_transform(world, e).translation;
+        let rel = wp - cam_world;
+        let d2 = rel.length_squared().max(1.0);
+        let k = cb.luminosity as f64 * 1.0e6;
+        let r = rel.as_vec3();
+        items.push((
+            k / d2,
+            [r.x, r.y, r.z, 0.0],
+            [cb.star_color[0], cb.star_color[1], cb.star_color[2], k as f32],
+        ));
+    }
+    items.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (i, it) in items.iter().take(4).enumerate() {
+        pos[i] = it.1;
+        col[i] = it.2;
+        meta[0] = (i + 1) as f32;
+    }
+    (meta, pos, col)
 }
 
 /// The Lighting node's shadow knobs as the raymarch-globals uniform vec4s

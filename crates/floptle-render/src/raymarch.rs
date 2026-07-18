@@ -138,13 +138,25 @@ pub struct RaymarchGlobals {
     pub sky_meta: [f32; 4],
     /// The Sky shader's exposed uniforms (`G.sky_uniforms[i]`), packed by the editor.
     pub sky_uniforms: [[f32; 4]; 16],
-    /// S8 contextual atmosphere (dominant body's): rgb = sky color, w = density.
-    /// Density 0 = no atmosphere (space) — the whole effect gates on it.
-    pub atmo_color: [f32; 4],
-    /// xyz = the atmosphere body's CAMERA-RELATIVE center, w = its surface radius.
-    pub atmo_body: [f32; 4],
-    /// x = atmosphere height above the surface (world units); rest padding.
-    pub atmo_params: [f32; 4],
+    /// S8 atmospheres: x = active body count (0..=4). Up to four bodies get
+    /// full shell scattering — visible from INSIDE (tinted sky) and from
+    /// SPACE (limb halo, aerial haze + clouds over the disc).
+    pub atmo_meta: [f32; 4],
+    /// Per body: rgb = sky color, w = density (0 = none).
+    pub atmo_color: [[f32; 4]; 4],
+    /// Per body: xyz = CAMERA-RELATIVE center, w = surface radius.
+    pub atmo_body: [[f32; 4]; 4],
+    /// Per body: x = shell height above the surface, y = cloud coverage 0..1.
+    pub atmo_params: [[f32; 4]; 4],
+    /// Stars mode (Lighting.stars): x = active star count. 0 = the legacy
+    /// single key light in `light_dir`/`light_color` (directional or
+    /// positional via light_dir.w).
+    pub star_meta: [f32; 4],
+    /// Per star: xyz = CAMERA-RELATIVE position, w unused.
+    pub star_pos: [[f32; 4]; 4],
+    /// Per star: rgb = light color, w = K where irradiance = K / d²
+    /// (K = luminosity × 1e6; capped in-shader near the star).
+    pub star_color: [[f32; 4]; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -207,9 +219,13 @@ impl Default for RaymarchGlobals {
             shape_rim: [[0.0; 4]; 4],
             sky_meta: [0.0; 4],
             sky_uniforms: [[0.0; 4]; 16],
-            atmo_color: [0.0; 4],
-            atmo_body: [0.0, 0.0, 0.0, 1.0],
-            atmo_params: [0.0; 4],
+            atmo_meta: [0.0; 4],
+            atmo_color: [[0.0; 4]; 4],
+            atmo_body: [[0.0, 0.0, 0.0, 1.0]; 4],
+            atmo_params: [[0.0; 4]; 4],
+            star_meta: [0.0; 4],
+            star_pos: [[0.0; 4]; 4],
+            star_color: [[0.0; 4]; 4],
         }
     }
 }

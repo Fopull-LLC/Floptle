@@ -445,8 +445,18 @@ impl Editor {
                 && self.selection.iter().any(|&e| self.world.get::<Light>(e).is_some())
             {
                 let l = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-                let (anchor, dir) = if l.positional {
-                    let star = DVec3::from(l.position);
+                // Stars mode: anchor at the brightest star body (if any).
+                let star_anchor = if l.stars {
+                    let (meta, pos, _) =
+                        crate::shading::star_uniforms(&self.world, &l, cam.world_position);
+                    (meta[0] > 0.0).then(|| {
+                        cam.world_position
+                            + DVec3::new(pos[0][0] as f64, pos[0][1] as f64, pos[0][2] as f64)
+                    })
+                } else {
+                    None
+                };
+                let (anchor, dir) = if let Some(star) = star_anchor {
                     let toward = (cam.world_position - star).normalize_or_zero().as_vec3();
                     (star, if toward == Vec3::ZERO { Vec3::Y } else { toward })
                 } else {
@@ -716,7 +726,7 @@ impl Editor {
 
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-        let sun = crate::shading::sun_vec(&light_node, cam.world_position);
+        let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
@@ -724,8 +734,10 @@ impl Editor {
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let (fog_color, fog_params) = fog_uniforms(&light_node);
-        let (atmo_color, atmo_body, atmo_params) =
+        let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
+        let (star_meta, star_pos, star_color) =
+            crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -1022,9 +1034,13 @@ impl Editor {
                 fog_params,
                 sky_meta,
                 sky_uniforms,
+                atmo_meta,
                 atmo_color,
                 atmo_body,
                 atmo_params,
+                star_meta,
+                star_pos,
+                star_color,
                 // vol_tight_* are renderer-patched at draw time from the uploaded
                 // volumes; the default is "unbounded" (behaves like the full brick).
                 ..Default::default()
@@ -4889,13 +4905,15 @@ impl Editor {
         let sky_uniform_vals = self.sky_uniform_values();
 
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
-        let sun = crate::shading::sun_vec(&light_node, cam.world_position);
+        let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let (fog_color, fog_params) = fog_uniforms(&light_node);
-        let (atmo_color, atmo_body, atmo_params) =
+        let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
+        let (star_meta, star_pos, star_color) =
+            crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -5089,9 +5107,13 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                atmo_meta,
                 atmo_color,
                 atmo_body,
                 atmo_params,
+                star_meta,
+                star_pos,
+                star_color,
                 // vol_tight_* are renderer-patched at draw time (default: unbounded).
                 ..Default::default()
             };

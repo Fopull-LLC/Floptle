@@ -281,6 +281,8 @@ fn build_scene() -> String {
                 body_radius: 800.0,
                 soi: 0.0,
                 a: 0.0, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 0.0,
+                luminosity: 40.0,
+                star_color: (1.0, 0.97, 0.9),
             )),
         ),
 "#));
@@ -288,10 +290,10 @@ fn build_scene() -> String {
     // Atmosphere per body: (sky color, shell height, density); moons airless.
     let celestial = |name: &str, id: u32, pos: [f64; 3], mu: f64, radius: f64,
                          parent: &str, a: f64, i: f64, m0: f64,
-                         atmo: Option<([f32; 3], f64, f32)>| -> String {
+                         atmo: Option<([f32; 3], f64, f32, f32)>| -> String {
         let atmo_lines = match atmo {
-            Some((c, h, d)) => format!(
-                "\n                atmo_color: ({:.2}, {:.2}, {:.2}),\n                atmo_height: {h:.1},\n                atmo_density: {d:.2},",
+            Some((c, h, d, cl)) => format!(
+                "\n                atmo_color: ({:.2}, {:.2}, {:.2}),\n                atmo_height: {h:.1},\n                atmo_density: {d:.2},\n                clouds: {cl:.2},",
                 c[0], c[1], c[2]
             ),
             None => String::new(),
@@ -320,9 +322,9 @@ fn build_scene() -> String {
             x = pos[0], y = pos[1], z = pos[2],
         )
     };
-    nodes.push_str(&celestial("Rustholm", 1, [6000.0, 0.0, 0.0], 180000.0, 150.0, "Sun", 6000.0, 0.0, 0.0, Some(([0.78, 0.42, 0.3], 90.0, 0.85))));
-    nodes.push_str(&celestial("Duneveil", 2, [-6050.0, 0.0, 10380.0], 360000.0, 200.0, "Sun", 12000.0, 0.06, 2.1, Some(([0.93, 0.72, 0.42], 120.0, 0.9))));
-    nodes.push_str(&celestial("Palegate", 3, [-6750.0, 0.0, -20940.0], 86400.0, 120.0, "Sun", 22000.0, 0.12, 4.4, Some(([0.5, 0.78, 0.9], 60.0, 0.55))));
+    nodes.push_str(&celestial("Rustholm", 1, [6000.0, 0.0, 0.0], 180000.0, 150.0, "Sun", 6000.0, 0.0, 0.0, Some(([0.78, 0.42, 0.3], 90.0, 0.85, 0.45))));
+    nodes.push_str(&celestial("Duneveil", 2, [-6050.0, 0.0, 10380.0], 360000.0, 200.0, "Sun", 12000.0, 0.06, 2.1, Some(([0.93, 0.72, 0.42], 120.0, 0.9, 0.2))));
+    nodes.push_str(&celestial("Palegate", 3, [-6750.0, 0.0, -20940.0], 86400.0, 120.0, "Sun", 22000.0, 0.12, 4.4, Some(([0.5, 0.78, 0.9], 60.0, 0.55, 0.6))));
     nodes.push_str(&celestial("Ashmoor", 4, [6260.0, 0.0, 330.0], 5200.0, 36.0, "Rustholm", 420.0, 0.1, 0.9, None));
     nodes.push_str(&celestial("Brine", 5, [-5350.0, 0.0, 10380.0], 8700.0, 44.0, "Duneveil", 700.0, 0.05, 0.0, None));
 
@@ -746,10 +748,9 @@ fn build_scene() -> String {
     name: "system",
     lighting: (
         direction: (0.4, 0.9, 0.45),
-        positional: true,
-        position: (0.0, 0.0, 0.0),
+        stars: true,
         color: (1.0, 0.98, 0.92),
-        ambient: (0.1, 0.1, 0.14),
+        ambient: (0.012, 0.012, 0.018),
         intensity: 1.0,
         shadows: true,
         shadow_softness: 0.35,

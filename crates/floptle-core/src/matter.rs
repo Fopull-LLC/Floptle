@@ -140,6 +140,14 @@ pub struct CelestialBody {
     pub atmo_height: f64,
     /// How opaque the sky gets at full depth, 0..1.
     pub atmo_density: f32,
+    /// Cloud coverage inside the atmosphere, 0..1 (0 = clear skies).
+    pub clouds: f32,
+    /// STAR: this body emits light (Lighting `stars` mode). Irradiance at
+    /// distance d = `luminosity × 1e6 / d²` — ~36 lights a body 6000 units
+    /// out at full strength. 0 = not a star.
+    pub luminosity: f32,
+    /// The star's light color (only meaningful with `luminosity > 0`).
+    pub star_color: [f32; 3],
 }
 
 impl Default for CelestialBody {
@@ -158,6 +166,9 @@ impl Default for CelestialBody {
             atmo_color: [0.0, 0.0, 0.0],
             atmo_height: 0.0,
             atmo_density: 1.0,
+            clouds: 0.0,
+            luminosity: 0.0,
+            star_color: [1.0, 0.97, 0.9],
         }
     }
 }
@@ -305,19 +316,18 @@ impl Default for Visible {
 /// them into the frame's light. `direction` need not be unit — the renderer
 /// normalizes it.
 ///
-/// `positional` turns the key light into a STAR: light radiates from
-/// `position` (world space) instead of arriving along one global direction, so
-/// the lit hemisphere, terminator and shadow directions line up radially the
-/// way a real sun's do — on opposite sides of a planet the light comes from
-/// opposite directions. `direction` is ignored while it's on (kept as the
-/// fallback when it's off).
+/// `stars` switches the key light to STARS MODE: the directional light turns
+/// off and every [`CelestialBody`] with `luminosity > 0` becomes a real point
+/// light source — light radiates from each star's world position with
+/// inverse-square falloff, so terminators wrap planets, shadow directions
+/// line up radially, far sides go genuinely dark, and a binary system just
+/// works (up to 4 stars reach the shaders, brightest-at-camera first).
+/// `direction`/`color` are ignored while it's on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub direction: [f32; 3],
-    /// World position of the star when `positional` is on.
-    pub position: [f64; 3],
-    /// Key light radiates from `position` (a star) instead of `direction`.
-    pub positional: bool,
+    /// Stars mode: luminous celestial bodies ARE the key lights.
+    pub stars: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
     /// Brightness multiplier on the key (directional) light color.
@@ -364,8 +374,7 @@ impl Default for Light {
     fn default() -> Self {
         Self {
             direction: [0.4, 0.9, 0.45],
-            position: [0.0, 0.0, 0.0],
-            positional: false,
+            stars: false,
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
             intensity: 1.0,

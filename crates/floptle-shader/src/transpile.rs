@@ -187,25 +187,18 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
 /// MUST stay in sync with `fs` in raster.wgsl.
 pub(crate) const FRAGMENT_LIT_WGSL: &str = r#"fn flsl_lit(in: VsOut, front: bool, albedo: vec3<f32>) -> vec3<f32> {
     let n = facing_normal(normalize(in.normal), front);
-    let l = sun_dir_at(in.view_pos);
     let v = normalize(-in.view_pos);
-    let ndl = max(dot(n, l), 0.0);
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
-    var sh = vec3<f32>(1.0);
-    if (ndl > 0.0) {
-        sh = sun_shadow(in.view_pos, n, pix);
-    }
     var occ = 1.0;
     if (G.ao_params.x > 0.5) {
         occ = sdf_ao(in.view_pos, n);
     }
     let ambient = g.ambient.rgb * in.params.w;
-    var lit = albedo * (ambient + g.light_color.rgb * ndl * sh);
-    lit += albedo * point_diffuse(in.view_pos, n);
-    let h = normalize(l + v);
     let shininess = max(in.params.x, 1.0);
-    let spec = pow(max(dot(n, h), 0.0), shininess) * in.specular.a * select(0.0, 1.0, ndl > 0.0);
-    lit += in.specular.rgb * spec * g.light_color.rgb * sh;
+    let kl = key_light(in.view_pos, n, v, shininess, pix);
+    var lit = albedo * (ambient + kl.diffuse);
+    lit += albedo * point_diffuse(in.view_pos, n);
+    lit += in.specular.rgb * kl.spec * in.specular.a;
     let rim_f = pow(1.0 - max(dot(n, v), 0.0), 2.0) * in.params.y;
     lit += in.rim.rgb * rim_f;
     return lit * occ;
@@ -945,6 +938,15 @@ struct VsOut {
     @location(12) @interpolate(flat) tsplat: f32,
 };
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.0); }
+struct KeyLight { diffuse: vec3<f32>, spec: vec3<f32> }
+fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2<u32>) -> KeyLight {
+    var out: KeyLight;
+    let l = normalize(g.light_dir.xyz);
+    let ndl = max(dot(n, l), 0.0);
+    out.diffuse = g.light_color.rgb * ndl;
+    out.spec = g.light_color.rgb * pow(max(dot(n, normalize(l + v)), 0.0), shininess) * select(0.0, 1.0, ndl > 0.0);
+    return out;
+}
 fn sun_dir_at(p: vec3<f32>) -> vec3<f32> { return normalize(g.light_dir.xyz); }
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return vec3<f32>(1.0); }
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }

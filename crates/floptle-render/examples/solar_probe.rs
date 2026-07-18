@@ -193,12 +193,25 @@ fn main() {
             shadow_params: [1.0, 12.0, 0.85, 220.0],
             shadow_tint: [0.02, 0.02, 0.05, 0.0],
             ao_params: [1.0, 0.85, 1.5, 0.0],
-            // S8 contextual atmosphere: a rusty sky shell half a radius deep.
-            // The orbit view sits far outside it (no-op); the surface view sits
-            // inside and must show a tinted sky instead of raw space.
-            atmo_color: [0.78, 0.42, 0.3, 0.85],
-            atmo_body: [cr.x, cr.y, cr.z, radius],
-            atmo_params: [radius * 0.5, 0.0, 0.0, 0.0],
+            // S8 atmosphere (slot 0): a rusty sky shell half a radius deep with
+            // a 45% cloud deck. The orbit view now sees its limb halo + clouds
+            // from SPACE; the surface view gets the tinted sky + clouds overhead.
+            atmo_meta: [1.0, 0.0, 0.0, 0.0],
+            atmo_color: {
+                let mut a = [[0.0f32; 4]; 4];
+                a[0] = [0.78, 0.42, 0.3, 0.85];
+                a
+            },
+            atmo_body: {
+                let mut a = [[0.0f32, 0.0, 0.0, 1.0]; 4];
+                a[0] = [cr.x, cr.y, cr.z, radius];
+                a
+            },
+            atmo_params: {
+                let mut a = [[0.0f32; 4]; 4];
+                a[0] = [radius * 0.5, 0.45, 0.0, 0.0];
+                a
+            },
             ..Default::default()
         };
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rg);
