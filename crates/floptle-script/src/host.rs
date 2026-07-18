@@ -685,6 +685,43 @@ impl ScriptHost {
             }
         }
 
+        // `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a])` — queue one world-space
+        // 3D line segment for THIS tick. Immediate mode: segments live for one
+        // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
+        // screen draws its orbit conics this way). Depth-tested in the scene.
+        let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let q = draw_lines.clone();
+            if let (Ok(f), Ok(t)) = (
+                lua.create_function(
+                    move |_,
+                          (x1, y1, z1, x2, y2, z2, r, g, b, a): (
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f64,
+                        f32,
+                        f32,
+                        f32,
+                        Option<f32>,
+                    )| {
+                        q.borrow_mut().push(crate::DrawLine {
+                            a: [x1, y1, z1],
+                            b: [x2, y2, z2],
+                            color: [r, g, b, a.unwrap_or(1.0)],
+                        });
+                        Ok(())
+                    },
+                ),
+                lua.create_table(),
+            ) {
+                let _ = t.set("line", f);
+                let _ = lua.globals().set("draw", t);
+            }
+        }
+
         // `spawn(prefab [, pos [, fn]])` — queue a prefab instance. The driver
         // spawns the subtree after this pass (physics/animators/scripts wire up
         // automatically); the optional callback receives the new root's handle
@@ -865,6 +902,7 @@ impl ScriptHost {
             gizmos,
             spawn_effects,
             spawn_requests,
+            draw_lines,
             destroy_queue,
             net,
             synced_stores,
@@ -973,6 +1011,12 @@ impl ScriptHost {
     /// spawns each subtree, then calls [`Self::call_spawn_callback`] per request.
     pub fn take_spawn_requests(&self) -> Vec<crate::SpawnRequest> {
         std::mem::take(&mut *self.spawn_requests.borrow_mut())
+    }
+
+    /// Drain this tick's `draw.line(...)` segments (immediate mode — the editor
+    /// replaces its line list with each tick's drain, so an idle script clears).
+    pub fn take_draw_lines(&self) -> Vec<crate::DrawLine> {
+        std::mem::take(&mut *self.draw_lines.borrow_mut())
     }
 
     /// Drain the nodes scripts asked to remove via `destroy(...)` (entity indices).

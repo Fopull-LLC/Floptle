@@ -1343,6 +1343,10 @@ struct Editor {
     outline: Option<Outline>,
     /// Editor reference-grid renderer.
     grid_render: Option<Grid>,
+    /// The runtime 3D line layer (script `draw.line` — the map's orbit conics).
+    line_layer: Option<floptle_render::Lines>,
+    /// This tick's script-drawn line segments (world space, immediate mode).
+    script_lines: Vec<floptle_script::DrawLine>,
     /// Billboard particle pass (the VFX sim's draw arm).
     particles: Option<floptle_render::Particles>,
     egui: Option<Egui>,
@@ -2095,6 +2099,7 @@ impl ApplicationHandler for Editor {
         self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
+        self.line_layer = Some(floptle_render::Lines::new(&gpu));
         self.particles = Some(floptle_render::Particles::new(&gpu));
         self.ui_render = Some(floptle_render::Ui::new(&gpu));
 

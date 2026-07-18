@@ -312,6 +312,7 @@ impl Editor {
         self.stop_recording();
         self.script_host.clear_anim_state();
         self.script_gizmos.clear();
+        self.script_lines.clear();
         if self.playing {
             self.playing = false;
             self.paused = false;
@@ -407,6 +408,7 @@ impl Editor {
             self.space_time = 0.0; // rails restart from the authored epoch
             self.space_warp = 1.0;
             self.space_coast.clear();
+            self.script_lines.clear(); // no stale map lines across runs
             // Every Play is a FRESH RUN: drop all script instances so top-level
             // script state can't leak across sessions (Ty's ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.

@@ -494,6 +494,22 @@ crystal:setShaderParam("glow", 2.5)       -- float
 Each call is a GPU uniform write, never a recompile — per-tick driving is the
 intended use.
 
+### 3D lines (`draw.line`)
+
+Scripts can draw **world-space 3D lines** — the runtime line layer behind the
+solar demo's KSP-style map (orbit conics, SOI rings, markers) and any debug
+overlay you like:
+
+```lua
+draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)        -- rgb
+draw.line(x1, y1, z1, x2, y2, z2, 0.5, 0.5, 0.6, 0.4)          -- + alpha
+```
+
+Immediate mode: a segment lives **one tick** — call it every `fixedUpdate`
+while you want it visible (an idle script's lines vanish by themselves).
+Lines are depth-tested in the scene, so planets occlude orbit lines the way
+you'd expect, and they render in every game view.
+
 ### Buttons & pointer hooks
 
 Turn on **button (clickable)** on any element (or Add ⏵ UI ⏵ Button) and its
