@@ -18,6 +18,31 @@ fn main() {
                     failed = true;
                 }
             }
+        } else if arg.ends_with(".prefab.ron") {
+            // Same flat Vec<NodeDoc> body the node clipboard uses; tolerate
+            // the clipboard's tag line so a pasted clipboard validates too.
+            let parsed = std::fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|t| {
+                let body = t.trim_start().strip_prefix("//floptle-nodes-v1").unwrap_or(&t).trim_start().to_string();
+                ron::from_str::<Vec<floptle_scene::NodeDoc>>(&body).map_err(|e| e.to_string())
+            });
+            match parsed {
+                Ok(docs) => {
+                    let bad = docs
+                        .iter()
+                        .filter_map(|d| d.parent)
+                        .find(|&i| i >= docs.len());
+                    if let Some(i) = bad {
+                        println!("ERR {arg}: parent index {i} out of range ({} node(s))", docs.len());
+                        failed = true;
+                    } else {
+                        println!("OK  {arg}: prefab, {} node(s)", docs.len());
+                    }
+                }
+                Err(e) => {
+                    println!("ERR {arg}: not a prefab ({e})");
+                    failed = true;
+                }
+            }
         } else if p.file_name().is_some_and(|f| f == "project.ron") {
             match floptle_scene::try_load_project(p) {
                 Ok(Some(cfg)) => println!(
