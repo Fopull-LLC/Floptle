@@ -172,6 +172,7 @@ fn main() {
                 ambient: [f32; 3],
                 bg: [f32; 4],
                 sun: f32,
+                star: Option<DVec3>,
                 raster: &mut Raster,
                 raymarch: &mut Raymarch| {
         let fwd = (target - cam_pos.as_vec3()).normalize();
@@ -183,12 +184,23 @@ fn main() {
         );
         let view_proj = cam.view_proj(W as f32 / H as f32);
         let cr = (DVec3::ZERO - cam_pos).as_vec3();
-        let light = Vec3::new(0.45, 0.75, 0.35).normalize();
+        // Directional sun by default; `star` switches to the POSITIONAL model
+        // (light_dir.xyz = the star's camera-relative position, w = 1).
+        let light = match star {
+            Some(sp) => {
+                let rel = (sp - cam_pos).as_vec3();
+                [rel.x, rel.y, rel.z, 1.0]
+            }
+            None => {
+                let d = Vec3::new(0.45, 0.75, 0.35).normalize();
+                [d.x, d.y, d.z, 0.0]
+            }
+        };
 
         let rm = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir: light,
             light_color: [1.0 * sun, 0.97 * sun, 0.9 * sun, 0.0],
             ambient: [ambient[0], ambient[1], ambient[2], 0.0],
             bg,
@@ -199,7 +211,7 @@ fn main() {
 
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
-            light_dir: [light.x, light.y, light.z, 0.0],
+            light_dir: light,
             light_color: [1.0 * sun, 0.97 * sun, 0.9 * sun, 0.0],
             ambient: [ambient[0], ambient[1], ambient[2], 0.0],
             terrain_mask: [0.0, 0.22, glow_mask as f32, 0.0],
@@ -226,16 +238,47 @@ fn main() {
 
     let space = [0.01, 0.01, 0.03, 1.0];
     // Orbit: the whole planet in frame.
-    shot("orbit", DVec3::new(0.0, 260.0, 780.0), Vec3::ZERO, &planet_ids, [0.25, 0.25, 0.28], space, 1.0, &mut raster, &mut raymarch);
+    shot("orbit", DVec3::new(0.0, 260.0, 780.0), Vec3::ZERO, &planet_ids, [0.25, 0.25, 0.28], space, 1.0, None, &mut raster, &mut raymarch);
     // Surface: standing height near the north-pole spawn, looking at the horizon.
     let eye = Vec3::new(6.0, 312.0, 10.0);
-    shot("surface", eye.as_dvec3(), Vec3::new(60.0, 296.0, 90.0), &planet_ids, [0.25, 0.25, 0.28], space, 1.0, &mut raster, &mut raymarch);
+    shot("surface", eye.as_dvec3(), Vec3::new(60.0, 296.0, 90.0), &planet_ids, [0.25, 0.25, 0.28], space, 1.0, None, &mut raster, &mut raymarch);
     // Cave: sun fully OFF (the probe binds no field, so sun_shadow can't occlude —
     // with sun on, direct light would fake its way through 30 m of rock) plus a
     // whisper of ambient: the glow slots have to carry the image on their own.
-    let cave_px = shot("cave", cave.as_dvec3(), cave + cave_look * 20.0, &planet_ids, [0.04, 0.04, 0.05], [0.0, 0.0, 0.0, 1.0], 0.0, &mut raster, &mut raymarch);
+    let cave_px = shot("cave", cave.as_dvec3(), cave + cave_look * 20.0, &planet_ids, [0.04, 0.04, 0.05], [0.0, 0.0, 0.0, 1.0], 0.0, None, &mut raster, &mut raymarch);
     // Moon: full disc.
-    shot("moon", DVec3::new(0.0, 30.0, 110.0), Vec3::ZERO, &moon_ids, [0.25, 0.25, 0.28], space, 1.0, &mut raster, &mut raymarch);
+    shot("moon", DVec3::new(0.0, 30.0, 110.0), Vec3::ZERO, &moon_ids, [0.25, 0.25, 0.28], space, 1.0, None, &mut raster, &mut raymarch);
+
+    // Terminator: a POSITIONAL star far out on +X — the planet's right limb must
+    // be day and the left limb night from this vantage. This is the radial-light
+    // proof: a directional sun cannot produce a terminator that wraps the body.
+    let term_px = shot(
+        "terminator",
+        DVec3::new(0.0, 260.0, 780.0),
+        Vec3::ZERO,
+        &planet_ids,
+        [0.02, 0.02, 0.03],
+        space,
+        1.0,
+        Some(DVec3::new(25000.0, 0.0, 0.0)),
+        &mut raster,
+        &mut raymarch,
+    );
+    let avg = |px: &[[u8; 4]], x0: u32, y0: u32| -> f32 {
+        let mut sum = 0.0;
+        for dy in 0..24 {
+            for dx in 0..24 {
+                let p = px[((y0 + dy) * W + x0 + dx) as usize];
+                sum += (p[0] as f32 + p[1] as f32 + p[2] as f32) / 3.0;
+            }
+        }
+        sum / (24.0 * 24.0)
+    };
+    let day = avg(&term_px, 600, 268);
+    let night = avg(&term_px, 260, 268);
+    println!("terminator: day side {day:.1}, night side {night:.1}");
+    assert!(day > 60.0, "day side too dark ({day:.1}) — is the star being honored?");
+    assert!(night < day * 0.45, "no terminator: night {night:.1} vs day {day:.1}");
 
     // The cave must not be pitch black: glowing slots bypass lighting, so SOME pixels
     // should be clearly bright even with ambient 0.04.

@@ -537,7 +537,7 @@ fn fs(in: VOut) -> FsOut {
         let ndc_z = clip.z / clip.w;
         if (clip.w > 0.0 && ndc_z >= 0.0 && ndc_z <= 1.0) {
             let n = calc_normal(p);
-            let l = normalize(G.light_dir.xyz);
+            let l = sun_dir_at(p);
             let v = -rd; // toward the camera (the camera sits at the ray origin)
             let diff = max(dot(n, l), 0.0);
             // The terrain palette texture (if painted) modulates the per-voxel tint.

@@ -291,7 +291,7 @@ fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> {
 @fragment
 fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let n = facing_normal(normalize(in.normal), front);
-    let l = normalize(g.light_dir.xyz);
+    let l = sun_dir_at(in.view_pos);
     let v = normalize(-in.view_pos);
     let ndl = max(dot(n, l), 0.0);
     let texel = base_texel(in);

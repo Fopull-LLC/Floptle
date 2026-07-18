@@ -723,11 +723,23 @@ fn ign(pix: vec2<u32>) -> f32 {
 // drives the optional dither): vec3(1) when lit, darkening toward the shadow
 // tint with the configured strength when occluded. Multiplies the directional
 // diffuse + specular only — ambient and point lights are unshadowed fill.
+// Direction TO the key light from `p` (camera-relative). `light_dir.w` picks
+// the model: 0 = classic directional sun (xyz = one global direction), 1 = a
+// POSITIONAL star (xyz = the star's camera-relative position) — light then
+// radiates from that point, so terminators and shadow directions line up
+// radially the way a real sun's do.
+fn sun_dir_at(p: vec3<f32>) -> vec3<f32> {
+    if (G.light_dir.w > 0.5) {
+        return normalize(G.light_dir.xyz - p);
+    }
+    return normalize(G.light_dir.xyz);
+}
+
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.shadow_params.x < 0.5) {
         return vec3<f32>(1.0);
     }
-    let l = normalize(G.light_dir.xyz);
+    let l = sun_dir_at(p);
     var vis = light_vis(p, n, l);
     // Retro styling: posterize the penumbra into N bands; Bayer-dither between
     // adjacent bands when dither is on (quantize 2 + dither ≈ the PS1 edge).

@@ -295,9 +295,20 @@ impl Default for Visible {
 /// script can read and write to drive game-time light changes; the renderer turns
 /// them into the frame's light. `direction` need not be unit — the renderer
 /// normalizes it.
+///
+/// `positional` turns the key light into a STAR: light radiates from
+/// `position` (world space) instead of arriving along one global direction, so
+/// the lit hemisphere, terminator and shadow directions line up radially the
+/// way a real sun's do — on opposite sides of a planet the light comes from
+/// opposite directions. `direction` is ignored while it's on (kept as the
+/// fallback when it's off).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub direction: [f32; 3],
+    /// World position of the star when `positional` is on.
+    pub position: [f64; 3],
+    /// Key light radiates from `position` (a star) instead of `direction`.
+    pub positional: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
     /// Brightness multiplier on the key (directional) light color.
@@ -344,6 +355,8 @@ impl Default for Light {
     fn default() -> Self {
         Self {
             direction: [0.4, 0.9, 0.45],
+            position: [0.0, 0.0, 0.0],
+            positional: false,
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
             intensity: 1.0,
