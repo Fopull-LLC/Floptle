@@ -193,6 +193,12 @@ fn main() {
             shadow_params: [1.0, 12.0, 0.85, 220.0],
             shadow_tint: [0.02, 0.02, 0.05, 0.0],
             ao_params: [1.0, 0.85, 1.5, 0.0],
+            // S8 contextual atmosphere: a rusty sky shell half a radius deep.
+            // The orbit view sits far outside it (no-op); the surface view sits
+            // inside and must show a tinted sky instead of raw space.
+            atmo_color: [0.78, 0.42, 0.3, 0.85],
+            atmo_body: [cr.x, cr.y, cr.z, radius],
+            atmo_params: [radius * 0.5, 0.0, 0.0, 0.0],
             ..Default::default()
         };
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rg);
@@ -229,6 +235,16 @@ fn main() {
         let path = format!("solar_{}.png", v.name);
         save_png(&px, &path);
         println!("wrote {path}");
+        if v.name == "surface" {
+            // The atmosphere must tint the sky above the horizon: warm (r > b),
+            // clearly brighter than raw space. Sampled at top-center.
+            let sky = px[(40 * W + W / 2) as usize];
+            println!("surface sky px {sky:?}");
+            assert!(
+                sky[0] > sky[2] && sky[0] > 40,
+                "atmosphere missing from the surface sky: {sky:?}"
+            );
+        }
     }
 }
 

@@ -1801,6 +1801,22 @@ impl EditorTabViewer<'_> {
                             ch |= drag(ui, "node Ω", &mut cb.lan, 0.01, "longitude of the ascending node (radians)");
                             ch |= drag(ui, "periapsis ω", &mut cb.arg_pe, 0.01, "argument of periapsis (radians)");
                             ch |= drag(ui, "phase M₀", &mut cb.m0, 0.01, "mean anomaly at t = 0 — where on the orbit it starts");
+                            ui.small("atmosphere (S8; height 0 = airless):");
+                            ui.horizontal(|ui| {
+                                ui.label("sky color");
+                                ch |= ui
+                                    .color_edit_button_rgb(&mut cb.atmo_color)
+                                    .on_hover_text("the sky seen from inside the atmosphere")
+                                    .changed();
+                            });
+                            ch |= drag(ui, "atmo height", &mut cb.atmo_height, 1.0, "shell height above the surface; the sky fades to space across it");
+                            ui.horizontal(|ui| {
+                                ui.label("density");
+                                ch |= ui
+                                    .add(egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0))
+                                    .on_hover_text("how opaque the sky gets at full depth")
+                                    .changed();
+                            });
                             if ch {
                                 cmd.inspector_changed = true;
                             }

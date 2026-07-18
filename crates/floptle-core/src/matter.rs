@@ -134,6 +134,12 @@ pub struct CelestialBody {
     pub lan: f64,
     pub arg_pe: f64,
     pub m0: f64,
+    /// S8 atmosphere: the sky color seen from inside it. Black + height 0 = none.
+    pub atmo_color: [f32; 3],
+    /// Atmosphere shell height above the surface (world units); 0 = airless.
+    pub atmo_height: f64,
+    /// How opaque the sky gets at full depth, 0..1.
+    pub atmo_density: f32,
 }
 
 impl Default for CelestialBody {
@@ -149,6 +155,9 @@ impl Default for CelestialBody {
             lan: 0.0,
             arg_pe: 0.0,
             m0: 0.0,
+            atmo_color: [0.0, 0.0, 0.0],
+            atmo_height: 0.0,
+            atmo_density: 1.0,
         }
     }
 }

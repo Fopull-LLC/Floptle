@@ -58,6 +58,9 @@
                 soi: 0.0,
                 parent: "Sun",
                 a: 6000.0, e: 0.0, i: 0, lan: 0.0, arg_pe: 0.0, m0: 0,
+                atmo_color: (0.78, 0.42, 0.30),
+                atmo_height: 90.0,
+                atmo_density: 0.85,
             )),
         ),
         (
@@ -77,6 +80,9 @@
                 soi: 0.0,
                 parent: "Sun",
                 a: 12000.0, e: 0.0, i: 0.06, lan: 0.0, arg_pe: 0.0, m0: 2.1,
+                atmo_color: (0.93, 0.72, 0.42),
+                atmo_height: 120.0,
+                atmo_density: 0.90,
             )),
         ),
         (
@@ -96,6 +102,9 @@
                 soi: 0.0,
                 parent: "Sun",
                 a: 22000.0, e: 0.0, i: 0.12, lan: 0.0, arg_pe: 0.0, m0: 4.4,
+                atmo_color: (0.50, 0.78, 0.90),
+                atmo_height: 60.0,
+                atmo_density: 0.55,
             )),
         ),
         (
