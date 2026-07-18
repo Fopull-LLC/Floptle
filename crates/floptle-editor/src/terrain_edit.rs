@@ -80,12 +80,55 @@ pub(crate) struct TerrainRender {
     /// crossing). Without this the coverage scan would re-queue them every frame
     /// forever; a brush dirtying the chunk clears its entry.
     pub empty: std::collections::HashSet<[i32; 3]>,
+    /// FAR-BODY IMPOSTOR mode: the camera is so far from this (celestial) terrain
+    /// that chunk meshes would be sub-pixel noise — streaming stops, resident
+    /// chunks are evicted, and the body draws as one shaded sphere instead
+    /// (radial star light gives it the correct terminator for free).
+    pub impostor: bool,
+    /// The impostor sphere's albedo — the body's average surface color, sampled
+    /// from the field once on the first switch to impostor mode.
+    pub impostor_color: Option<[f32; 3]>,
 }
 
 /// P4 LOD ring radii, in CHUNKS of Chebyshev distance from the camera's chunk:
 /// within `RINGS[l]` → stride `2^l`; beyond the last ring → stride 8. One chunk
 /// ≈ 48 units at the default 1.5-unit voxel.
 const LOD_RINGS: [i32; 3] = [4, 10, 24];
+
+/// A celestial terrain switches to its sphere impostor beyond this many body
+/// radii of camera distance (~2° of angular diameter — chunk meshes would be
+/// a handful of pixels).
+const IMPOSTOR_RADII: f64 = 60.0;
+
+/// The body's average surface color for its impostor sphere: 26 rays from
+/// outside toward the center, averaging the voxel color where each first hits.
+/// Field-space — celestial terrain fields are authored centered on the origin.
+fn impostor_surface_color(field: &floptle_field::ChunkField, radius: f32) -> [f32; 3] {
+    let mut sum = [0.0f32; 3];
+    let mut n = 0.0f32;
+    for x in -1..=1i32 {
+        for y in -1..=1i32 {
+            for z in -1..=1i32 {
+                if x == 0 && y == 0 && z == 0 {
+                    continue;
+                }
+                let d = Vec3::new(x as f32, y as f32, z as f32).normalize();
+                let start = d * (radius * 1.6 + 8.0);
+                if let Some(hit) = field.raycast(start, -d, radius * 3.2) {
+                    let c = field.color(hit);
+                    sum[0] += c[0] as f32 / 255.0;
+                    sum[1] += c[1] as f32 / 255.0;
+                    sum[2] += c[2] as f32 / 255.0;
+                    n += 1.0;
+                }
+            }
+        }
+    }
+    if n == 0.0 {
+        return [0.75, 0.75, 0.78];
+    }
+    [sum[0] / n, sum[1] / n, sum[2] / n]
+}
 
 /// The ring a distance lands in, no hysteresis — for chunks with no current lod.
 fn raw_lod(dist: i32) -> u8 {
@@ -267,6 +310,37 @@ impl Editor {
             let wt = floptle_core::world_transform(&self.world, e);
             let (anchor, rot, ts) =
                 (wt.translation, wt.rotation.normalize(), wt.scale.x.max(1e-6));
+
+            // FAR-BODY IMPOSTOR gate: a celestial terrain seen from far enough
+            // that its whole disc is a couple of degrees wide stops streaming
+            // entirely and frees its resident chunk meshes; push_terrain_instances
+            // draws the shaded sphere instead. ×0.9 hysteresis so orbiting along
+            // the threshold can't thrash evict/remesh cycles.
+            if let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) {
+                let cam_dist = (cam_world - anchor).length();
+                let enter = cb.body_radius.max(1.0) * IMPOSTOR_RADII;
+                let was = render.impostor;
+                render.impostor =
+                    if render.impostor { cam_dist > enter * 0.9 } else { cam_dist > enter };
+                if render.impostor != was {
+                    // The SDF shadow/AO atlas excludes impostor bodies — re-lay it out.
+                    self.terrain_gpu_dirty = true;
+                }
+                if render.impostor {
+                    if render.impostor_color.is_none() {
+                        render.impostor_color =
+                            Some(impostor_surface_color(&terrain.field, cb.body_radius as f32));
+                    }
+                    render.pending.clear();
+                    render.empty.clear();
+                    for (_, (mid, _)) in render.slots.drain() {
+                        raster.free_dynamic(mid);
+                    }
+                    continue;
+                }
+            } else {
+                render.impostor = false;
+            }
             let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
             // Camera into the FIELD's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
@@ -408,9 +482,31 @@ pub(crate) fn push_terrain_instances(
     raster: &floptle_render::Raster,
     base_mat: &MaterialParams,
     cam_world: DVec3,
+    sphere_mesh: MeshId,
     instances: &mut Vec<(MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw)>,
 ) {
     for (&e, render) in terrain_render {
+        // Far-body impostor: one shaded sphere at the body's position. The
+        // positional star lights it with the correct terminator; beyond real
+        // scale it grows to hold ~a couple of pixels so distant planets read
+        // as bright dots instead of vanishing.
+        if render.impostor {
+            let Some(cb) = world.get::<floptle_core::CelestialBody>(e) else { continue };
+            let wt = floptle_core::world_transform(world, e);
+            let rel = wt.translation - cam_world;
+            let dist = rel.length();
+            let r_eff = cb.body_radius.max(dist * 0.0022);
+            // uv_sphere(0.85): the registered primitive sphere's radius.
+            let scale = (r_eff / 0.85) as f32;
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale),
+                Quat::IDENTITY,
+                rel.as_vec3(),
+            );
+            let mp = MaterialParams::flat(render.impostor_color.unwrap_or([0.75, 0.75, 0.78]));
+            instances.push((sphere_mesh, None, floptle_render::instance_of_mat(model, &mp)));
+            continue;
+        }
         if render.slots.is_empty() {
             continue;
         }

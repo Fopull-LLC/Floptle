@@ -317,7 +317,7 @@ impl Editor {
                     RenderCamera::new(
                         wt.translation,
                         wt.rotation,
-                        Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+                        Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
                     )
                 }
                 None => self.camera.render_camera(),
@@ -890,6 +890,7 @@ impl Editor {
             raster,
             &terrain_base_mat,
             cam.world_position,
+            self.mesh_ids[floptle_core::Shape::Sphere as usize],
             &mut instances,
         );
 
@@ -3097,6 +3098,12 @@ impl Editor {
                 let mut items: Vec<(u32, Entity)> = self
                     .terrains
                     .keys()
+                    // Far-body impostors leave the shadow/AO atlas entirely: their
+                    // SDF can't matter at this range, it frees volume budget, and
+                    // it can't speckle the impostor sphere with self-shadowing.
+                    .filter(|&&e| {
+                        !self.terrain_render.get(&e).is_some_and(|r| r.impostor)
+                    })
                     .map(|&e| {
                         let id = match self.world.get::<Matter>(e) {
                             Some(Matter::Terrain { id }) => *id,
@@ -4982,6 +4989,7 @@ impl Editor {
                 raster,
                 &terrain_mat,
                 cam.world_position,
+                self.mesh_ids[floptle_core::Shape::Sphere as usize],
                 &mut instances,
             );
         }

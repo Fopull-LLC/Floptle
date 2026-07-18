@@ -280,7 +280,7 @@ impl Editor {
         let cam = RenderCamera::new(
             wt.translation,
             wt.rotation,
-            Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+            Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
         );
         self.ensure_cam_preview_target();
         let Some((cv, dv)) =
@@ -350,7 +350,7 @@ impl Editor {
                     RenderCamera::new(
                         wt.translation,
                         wt.rotation,
-                        Projection::Perspective { fov_y, near: 0.05, far: 4000.0 },
+                        Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
                     )
                 }
                 None => self.camera.render_camera(),
