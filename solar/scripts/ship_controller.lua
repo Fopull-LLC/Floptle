@@ -6,6 +6,7 @@
 --   SHIFT / CTRL   throttle up / down        X  cut throttle       Z  full
 --   W/S      pitch      A/D  yaw      Q/E  roll   (hold = turn, release = stop)
 --   T        SAS toggle       G  (while wrecked) restore at the pad
+--   M        map screen (orbit view; ↑/↓ zoom while open)
 --   . / ,    time-warp up / down (KSP rules: only while coasting or parked;
 --            any control input drops warp back to 1×; the engine snaps a
 --            coasting ship to exact Kepler rails, so high warp is drift-free
@@ -164,6 +165,97 @@ local function update_navball(node)
   end
 end
 
+-- ---- the map screen (S6) ----------------------------------------------------
+-- Everything is drawn by shaders/map.flsl; this side only does the orbital
+-- mechanics. We project the world onto the ship's ORBITAL PLANE (normal = the
+-- angular momentum r × v) with periapsis along +X — in that frame the conic
+-- r = p/(1+e·cosθ) is exactly `len(q) + e·q.x = p`, which the shader draws
+-- with zero trig. The dominant body sits at the panel center; the sibling
+-- body (moon ↔ planet), its orbit ring and its SOI are projected in too, so
+-- a transfer is planned by eyeballing your conic against the moon's SOI ring.
+local map_node, map_on, map_span = nil, false, nil
+local function set_map(on)
+  if not map_node then map_node = find("Map") end
+  if not map_node then return end
+  local el = map_node:getcomponent("UiElement")
+  if el then el.visible = on and 1 or 0 end
+end
+
+local function update_map(node, dt)
+  if not map_on or not map_node then return end
+  local dn = space.dominant(node.x, node.y, node.z)
+  local b = dn and space.body(dn)
+  if not b then return end
+  local rx, ry, rz = node.x - b.x, node.y - b.y, node.z - b.z
+  local ux, uy, uz = node.vx - b.vx, node.vy - b.vy, node.vz - b.vz
+  local rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+  local hx, hy, hz = cross(rx, ry, rz, ux, uy, uz)
+  local h2 = hx * hx + hy * hy + hz * hz
+  local has_orbit = h2 > 1e-3 and rlen > 1e-3
+  -- In-plane basis: ê1 = periapsis direction, ê2 = ĥ × ê1 (motion counter-
+  -- clockwise on screen). Parked/degenerate → radial +X so the ship still shows.
+  local e1x, e1y, e1z, e2x, e2y, e2z = 1, 0, 0, 0, 0, 1
+  local p, ecc = 0, 0
+  if has_orbit then
+    p = h2 / b.mu
+    local cx2, cy2, cz2 = cross(ux, uy, uz, hx, hy, hz)
+    local evx = cx2 / b.mu - rx / rlen
+    local evy = cy2 / b.mu - ry / rlen
+    local evz = cz2 / b.mu - rz / rlen
+    ecc = math.sqrt(evx * evx + evy * evy + evz * evz)
+    if ecc > 1e-5 then
+      e1x, e1y, e1z = evx / ecc, evy / ecc, evz / ecc
+    else
+      e1x, e1y, e1z = rx / rlen, ry / rlen, rz / rlen
+    end
+    local hl = math.sqrt(h2)
+    e2x, e2y, e2z = cross(hx / hl, hy / hl, hz / hl, e1x, e1y, e1z)
+  elseif rlen > 1e-3 then
+    e1x, e1y, e1z = rx / rlen, ry / rlen, rz / rlen
+    e2x, e2y, e2z = norm(cross(e1x, e1y, e1z, 0, 1, 0))
+    if e2x == 0 and e2y == 0 and e2z == 0 then e2x, e2y, e2z = 0, 0, 1 end
+  end
+  local sx = rx * e1x + ry * e1y + rz * e1z
+  local sy = rx * e2x + ry * e2y + rz * e2z
+  local vlen = math.sqrt(ux * ux + uy * uy + uz * uz)
+  local vmx, vmy = 0, 0
+  if vlen > 0.5 then
+    vmx = (ux * e1x + uy * e1y + uz * e1z) / vlen
+    vmy = (ux * e2x + uy * e2y + uz * e2z) / vlen
+  end
+  -- The nearest sibling body, projected into the same plane.
+  local ox, oy, orad, osoi, orbr, opres = 0, 0, 0, 0, 0, 0
+  for _, o in ipairs(space.bodies()) do
+    if o.name ~= b.name then
+      local dx2, dy2, dz2 = o.x - b.x, o.y - b.y, o.z - b.z
+      local dd = math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
+      if opres == 0 or dd < orbr then
+        ox = dx2 * e1x + dy2 * e1y + dz2 * e1z
+        oy = dx2 * e2x + dy2 * e2y + dz2 * e2z
+        orad, orbr, opres = o.radius, dd, 1
+        osoi = o.soi > 0 and o.soi or 0
+      end
+    end
+  end
+  -- Auto-fit the view to the current conic on open; ↑/↓ zoom afterwards.
+  if not map_span then
+    map_span = math.max(rlen * 1.4, b.radius * 3.0)
+    if has_orbit and ecc < 1 then
+      map_span = math.max(map_span, p / (1 - ecc) * 1.25)
+    end
+  end
+  if input.key("up") then map_span = map_span * (1 - 1.6 * dt) end
+  if input.key("down") then map_span = map_span * (1 + 1.6 * dt) end
+  map_span = math.max(b.radius * 1.2, math.min(map_span, 500000))
+  map_node:setShaderParam("view", map_span, has_orbit and 1 or 0, vlen > 0.5 and 1 or 0)
+  map_node:setShaderParam("conic", p, ecc, (has_orbit and ecc < 1) and 1 or 0)
+  map_node:setShaderParam("shipm", sx, sy, 0)
+  map_node:setShaderParam("velm", vmx, vmy, 0)
+  map_node:setShaderParam("focusb", b.radius, b.soi > 0 and b.soi or -1, 0)
+  map_node:setShaderParam("otherb", ox, oy, orad)
+  map_node:setShaderParam("otherb2", osoi, orbr, opres)
+end
+
 function fixedUpdate(node, dt)
   if not astronaut then astronaut = find("Astronaut") end
 
@@ -183,6 +275,8 @@ function fixedUpdate(node, dt)
       set_flame(node, false, 0)
       set_hud(node, nil)
       set_navball(false)
+      map_on = false
+      set_map(false)
     elseif distance(astronaut, node) <= params.board_range then
       piloting = true
       astronaut.visible = false
@@ -217,6 +311,13 @@ function fixedUpdate(node, dt)
   end
 
   if input.pressed("t") then sas = not sas end
+
+  -- ---- map screen ----------------------------------------------------------
+  if input.pressed("m") then
+    map_on = not map_on
+    map_span = nil -- re-fit to the current orbit every time it opens
+    set_map(map_on)
+  end
 
   -- ---- time warp -----------------------------------------------------------
   local warp = space.warp()
@@ -283,6 +384,7 @@ function fixedUpdate(node, dt)
     -- pinned so the sphere hull can't slow-slide down a slope for game-days.
     if node.grounded then node.vx, node.vy, node.vz = 0, 0, 0 end
     update_navball(node)
+    update_map(node, dt)
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end
@@ -355,6 +457,7 @@ function fixedUpdate(node, dt)
   node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
 
   update_navball(node)
+  update_map(node, dt)
 
   -- ---- HUD (10 Hz) --------------------------------------------------------
   if time - hud_t >= 0.1 then
@@ -395,7 +498,7 @@ function fixedUpdate(node, dt)
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · ./, warp"
+      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · ./, warp · M map"
     set_hud(node, table.concat(lines, "\n"))
   end
 

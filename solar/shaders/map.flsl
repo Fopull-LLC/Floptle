@@ -1,0 +1,88 @@
+// The map screen — KSP's orbit view as a pure `stage ui` shader (no trig!).
+// The ship script projects everything onto the ship's ORBITAL PLANE with
+// periapsis along +X; in that frame the conic r = p/(1+e·cosθ) is exactly the
+// point set  len(q) + e·q.x = p  — ellipse AND hyperbola, no atan2 needed.
+// Uniforms (fed every tick via setShaderParam):
+//   view   = (halfspan world units, hasOrbit, hasVel)
+//   conic  = (semi-latus rectum p, eccentricity e, hasApoapsis)
+//   shipm  = ship position (x, y) in the map frame
+//   velm   = unit velocity direction (x, y) in the map frame
+//   focusb = (radius, SOI or -1 when infinite, 0) of the focus body
+//   otherb = (x, y, radius), otherb2 = (SOI, orbit ring radius, present)
+shader mapview {
+  stage ui
+  uniform view: vec3 = vec3(500, 1, 1)
+  uniform conic: vec3 = vec3(260, 0.35, 1)
+  uniform shipm: vec3 = vec3(190, 60, 0)
+  uniform velm: vec3 = vec3(0, 1, 0)
+  uniform focusb: vec3 = vec3(120, -1, 0)
+  uniform otherb: vec3 = vec3(0, 0, 0)
+  uniform otherb2: vec3 = vec3(0, 0, 0)
+  uniform focusTint: color = #9A7B60
+  uniform otherTint: color = #97A3B4
+
+  let q = vec2(uv.x * 2 - 1, 1 - uv.y * 2)
+  let span = max(view.x, 1.0)
+  let w = q * span
+  let px = span / 240
+
+  // Deep-space panel: navy vignette + a sparse starfield pinned to the panel
+  // (round sub-cell dots, not lit grid squares).
+  let gc = vec2(q.x * 46 + 40, q.y * 46 + 40)
+  let cell = floor(gc)
+  let sh = fract(sin(cell.x * 12.9898 + cell.y * 78.233) * 43758.545)
+  let lf = fract(gc) - vec2(0.5, 0.5)
+  let star = step(0.985, sh) * (1 - smoothstep(0.015, 0.05, dot(lf, lf))) * (sh - 0.985) * 40
+  let bg = vec3(0.015, 0.03, 0.055) * (1.15 - 0.35 * dot(q, q)) + vec3(star, star, star)
+
+  let rw = length(w)
+  // Focus SOI ring (skipped when the SOI is infinite → focusb.y < 0).
+  let soiring = (1 - smoothstep(px, px * 2.4, abs(rw - focusb.y))) * step(0.0, focusb.y)
+  // The other body's orbit ring around the focus.
+  let oring = (1 - smoothstep(px, px * 2.2, abs(rw - otherb2.y))) * otherb2.z
+
+  // The ship's conic, focal-polar form. Divide by the field's gradient
+  // magnitude so the stroke stays constant-width even at high eccentricity.
+  let wq = normalize(w + vec2(0.0001, 0.0001))
+  let g = length(wq + vec2(conic.y, 0))
+  let cf = abs(rw + conic.y * w.x - conic.x) / max(g, 0.25)
+  let orbit = (1 - smoothstep(px * 1.1, px * 2.6, cf)) * view.y
+
+  // Periapsis / apoapsis markers (Ap only exists on an ellipse).
+  let pe = vec2(conic.x / (1 + conic.y), 0.0)
+  let ap = vec2(0 - conic.x / max(1 - conic.y, 0.0001), 0.0)
+  let ped = (1 - smoothstep(px * 3.4, px * 5.2, length(w - pe))) * view.y
+  let apd = (1 - smoothstep(px * 3.4, px * 5.2, length(w - ap))) * conic.z
+
+  // Body discs (clamped to a few pixels so far zoom never loses them) + the
+  // other body's own SOI ring.
+  let frad = max(focusb.x, px * 3)
+  let focusd = 1 - smoothstep(frad - px, frad + px, rw)
+  let op = vec2(otherb.x, otherb.y)
+  let orad = max(otherb.z, px * 2.5)
+  let od = (1 - smoothstep(orad - px, orad + px, length(w - op))) * otherb2.z
+  let osoi = (1 - smoothstep(px, px * 2.0, abs(length(w - op) - otherb2.x))) * otherb2.z
+
+  // Ship marker + a short velocity tick showing which way it's going.
+  let sp = vec2(shipm.x, shipm.y)
+  let ba = vec2(velm.x, velm.y) * px * 22
+  let hseg = clamp(dot(w - sp, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+  let segd = length(w - sp - ba * hseg)
+  let vtick = (1 - smoothstep(px * 0.8, px * 1.8, segd)) * view.z
+  let shipd = 1 - smoothstep(px * 3.0, px * 4.6, length(w - sp))
+
+  let c1 = mix(bg, vec3(0.35, 0.5, 0.65), max(soiring * 0.5, osoi * 0.45))
+  let c2 = mix(c1, vec3(0.55, 0.6, 0.7), oring * 0.6)
+  let c3 = mix(c2, vec3(0.45, 0.85, 1.0), orbit)
+  let c4 = mix(c3, vec3(1.0, 0.8, 0.25), ped)
+  let c5 = mix(c4, vec3(0.4, 1.0, 0.6), apd)
+  let c6 = mix(c5, focusTint.rgb, focusd)
+  let c7 = mix(c6, otherTint.rgb, od)
+  let c8 = mix(c7, vec3(0.6, 1.0, 0.7), vtick)
+  let c9 = mix(c8, vec3(1.0, 1.0, 1.0), shipd)
+
+  let edge = max(abs(q.x), abs(q.y))
+  let brd = smoothstep(0.985, 0.995, edge)
+  let composed = mix(c9, vec3(0.3, 0.75, 0.85), brd * 0.8)
+  output color = vec4(composed, 0.92) * instanceColor
+}

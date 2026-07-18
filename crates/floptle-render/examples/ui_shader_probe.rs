@@ -1,10 +1,14 @@
-//! Headless `stage ui` shader probe — compiles the solar demo's navball.flsl
+//! Headless `stage ui` shader probe — compiles the solar demo's UI instruments
 //! through the FULL production path (parse → check → transpile_ui → naga
 //! against the real ui.wgsl + field shim → `register_ui_shader` → params
-//! binding → `Ui::pack`/`draw`) and renders the instrument at a 45°-pitched,
-//! north-facing attitude to a PNG. Proves UI shaders end-to-end, no window.
+//! binding → `Ui::pack`/`draw`) and renders each to a PNG. Proves UI shaders
+//! end-to-end, no window.
 //!
-//! Run: cargo run --release -p floptle-render --example ui_shader_probe -- [out.png] [flsl]
+//!   navball.flsl → navball_probe.png  (45°-pitched, north-facing attitude)
+//!   map.flsl     → map_probe.png     (e=0.35 transfer ellipse, ship at
+//!                                     θ=120°, moon + SOI ring at r=780)
+//!
+//! Run: cargo run --release -p floptle-render --example ui_shader_probe
 
 use floptle_render::{Gpu, Raster, Ui};
 use floptle_ui::{DrawList, Quad};
@@ -12,40 +16,30 @@ use floptle_ui::{DrawList, Quad};
 const W: u32 = 440;
 const H: u32 = 440;
 
-fn main() {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "navball_probe.png".into());
-    let path =
-        std::env::args().nth(2).unwrap_or_else(|| "solar/shaders/navball.flsl".into());
-    let src = std::fs::read_to_string(&path).expect("read flsl");
-
+fn render_ui_shader(
+    gpu: &Gpu,
+    raster: &Raster,
+    ui: &mut Ui,
+    path: &str,
+    params_of: &dyn Fn(&str) -> Option<[f32; 4]>,
+    out: &str,
+) -> Vec<[u8; 4]> {
+    let src = std::fs::read_to_string(path).expect("read flsl");
     let compiled = floptle_shader::compile_ui(&src).expect("compile_ui");
     let prelude =
         format!("{}\n{}", Ui::ui_prelude(), floptle_shader::transpile::UI_FIELD_SHIM);
     floptle_shader::validate(&prelude, &compiled.chunk)
-        .unwrap_or_else(|e| panic!("naga rejects: {}", e.message));
+        .unwrap_or_else(|e| panic!("naga rejects {path}: {}", e.message));
 
-    let gpu = Gpu::headless(W, H);
-    let raster = Raster::new(&gpu);
-    let mut ui = Ui::new(&gpu);
     let chunk_full = format!(
         "{}\n{}\n{}",
         floptle_shader::transpile::UI_FIELD_SHIM,
         floptle_shader::stdlib::SUPPORT_WGSL,
         compiled.chunk
     );
-    let shader = ui.register_ui_shader(&gpu, &chunk_full, None);
-
-    // A 45°-pitched, north-facing attitude in the horizon frame (x=east,
-    // y=up, z=north), prograde slightly above the nose.
-    let s = std::f32::consts::FRAC_1_SQRT_2;
-    let params = compiled.pack_params(&|name| match name {
-        "right" => Some([1.0, 0.0, 0.0, 0.0]),
-        "up" => Some([0.0, s, -s, 0.0]),
-        "nose" => Some([0.0, s, s, 0.0]),
-        "prograde" => Some([0.0, 0.35, 0.937, 0.0]),
-        _ => None,
-    });
-    let binding = ui.set_ui_shader_binding(&gpu, &params, None);
+    let shader = ui.register_ui_shader(gpu, &chunk_full, None);
+    let params = compiled.pack_params(params_of);
+    let binding = ui.set_ui_shader_binding(gpu, &params, None);
 
     let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("probe-color"),
@@ -69,14 +63,14 @@ fn main() {
             texture: String::new(),
             uv: [0.0, 0.0, 1.0, 1.0],
             clip: None,
-            shader: Some((path.clone(), 1)),
+            shader: Some((path.to_string(), 1)),
         }],
         texts: Vec::new(),
     };
     let mut instances = Vec::new();
     let mut batches = Vec::new();
     ui.pack(
-        &gpu,
+        gpu,
         &list,
         [0.0, 0.0],
         1.0,
@@ -85,20 +79,91 @@ fn main() {
         &mut instances,
         &mut batches,
     );
-    ui.draw(&gpu, &color_view, [W as f32, H as f32], &instances, &batches, &raster);
+    ui.draw(gpu, &color_view, [W as f32, H as f32], &instances, &batches, raster);
 
-    let px = readback(&gpu, &color_tex);
-    save_png(&px, &out);
+    let px = readback(gpu, &color_tex);
+    save_png(&px, out);
+    px
+}
 
-    // The ball must show BOTH hemispheres at 45° pitch: sky-ish (blue-dominant)
-    // above center, ground-ish (red-dominant) below, and not be empty.
+fn main() {
+    let gpu = Gpu::headless(W, H);
+    let raster = Raster::new(&gpu);
+    let mut ui = Ui::new(&gpu);
+
+    // ---- the navball: 45°-pitched, north-facing, prograde above the nose ----
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let px = render_ui_shader(
+        &gpu,
+        &raster,
+        &mut ui,
+        "solar/shaders/navball.flsl",
+        &|name| match name {
+            "right" => Some([1.0, 0.0, 0.0, 0.0]),
+            "up" => Some([0.0, s, -s, 0.0]),
+            "nose" => Some([0.0, s, s, 0.0]),
+            "prograde" => Some([0.0, 0.35, 0.937, 0.0]),
+            _ => None,
+        },
+        "navball_probe.png",
+    );
     let at = |x: u32, y: u32| px[(y * W + x) as usize];
     let sky = at(220, 120);
     let ground = at(220, 395);
     println!("sky px {sky:?}, ground px {ground:?}");
     assert!(sky[2] > sky[0], "upper half should be sky-blue, got {sky:?}");
     assert!(ground[0] > ground[2], "lower half should be ground-brown, got {ground:?}");
-    println!("navball ui shader OK; wrote {out}");
+    println!("navball ui shader OK; wrote navball_probe.png");
+
+    // ---- the map: a transfer ellipse out toward the moon's SOI ring ---------
+    // Focus body r=120 at center; conic a=600 e=0.35 (p=526.5, pe=390,
+    // ap=810); ship at true anomaly 120° = (-319, 552.6) heading prograde;
+    // moon r=40 soi=260 on its 780 ring at 40°.
+    let px = render_ui_shader(
+        &gpu,
+        &raster,
+        &mut ui,
+        "solar/shaders/map.flsl",
+        &|name| match name {
+            "view" => Some([900.0, 1.0, 1.0, 0.0]),
+            "conic" => Some([526.5, 0.35, 1.0, 0.0]),
+            "shipm" => Some([-319.0, 552.6, 0.0, 0.0]),
+            "velm" => Some([-0.985, -0.171, 0.0, 0.0]),
+            "focusb" => Some([120.0, -1.0, 0.0, 0.0]),
+            "otherb" => Some([597.5, 501.4, 40.0, 0.0]),
+            "otherb2" => Some([260.0, 780.0, 1.0, 0.0]),
+            _ => None,
+        },
+        "map_probe.png",
+    );
+    // Count feature pixels rather than hitting exact coordinates: the conic
+    // stroke (cyan), the ship marker (near-white), the Pe marker (gold), and
+    // the focus-body disc (the warm tint at panel center).
+    let mut cyan = 0;
+    let mut white = 0;
+    let mut gold = 0;
+    for p in &px {
+        if p[2] > 190 && p[1] > 150 && p[0] < 160 {
+            cyan += 1;
+        }
+        if p[0] > 225 && p[1] > 225 && p[2] > 225 {
+            white += 1;
+        }
+        // Gold Pe core (1, 0.8, 0.25) lands at ~(249, 222, 130) after the
+        // 0.92-alpha blend + sRGB encode — blue stays well under red/green.
+        if p[0] > 220 && p[1] > 170 && p[2] < 180 && p[2] < p[1] {
+            gold += 1;
+        }
+    }
+    let center = at(220, 220);
+    let corner = at(30, 30);
+    println!("map: cyan {cyan}, white {white}, gold {gold}, center {center:?}, corner {corner:?}");
+    assert!(cyan > 120, "expected a drawn conic (cyan stroke), got {cyan} px");
+    assert!(white >= 2, "expected a ship marker, got {white} px");
+    assert!(gold >= 2, "expected a Pe marker, got {gold} px");
+    assert!(center[0] > corner[0] + 30, "focus disc should tint the center: {center:?} vs {corner:?}");
+    assert!(corner[0] < 45 && corner[1] < 55 && corner[2] < 70, "corner should be deep space, got {corner:?}");
+    println!("map ui shader OK; wrote map_probe.png");
 }
 
 fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
