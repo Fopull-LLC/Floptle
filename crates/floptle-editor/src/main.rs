@@ -1638,6 +1638,11 @@ struct Editor {
     /// Kepler conic). While warp > 1 each in-flight body is driven analytically
     /// from its cached conic — drift-free at any warp; cleared at warp 1.
     space_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
+    /// Each dynamic body's current dominant celestial (sim body eid → celestial
+    /// node index): the carried patched-conic frame. On a dominance change the
+    /// body's sim velocity is re-expressed in the new frame so its WORLD
+    /// velocity stays continuous across the SOI seam (see space.rs).
+    space_frame: std::collections::HashMap<u32, u32>,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.

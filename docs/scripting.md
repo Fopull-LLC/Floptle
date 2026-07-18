@@ -1578,3 +1578,11 @@ if o then print(o.body, o.periapsis, o.apoapsis, o.period) end
 body **center** (subtract `radius` for altitude). Bodies should be **top-level
 nodes** — rails write world positions.
 
+**Velocity frames.** A dynamic node's `vx/vy/vz` are measured in its dominant
+celestial's carried frame (the SOI you're inside moves, and you move with it) —
+so pass them to `space.elements` as-is, and never subtract the dominant body's
+world velocity from them. Celestial velocities from `space.bodies()`/`body()`
+ARE world-frame — subtracting a parent's from a child's gives the child's
+orbital motion (what the map draws). Crossing an SOI boundary re-expresses your
+velocity in the new frame automatically, keeping world velocity continuous.
+
