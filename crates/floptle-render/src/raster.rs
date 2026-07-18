@@ -1174,6 +1174,62 @@ impl Raster {
         id
     }
 
+    /// Register a live RENDER-TARGET texture as a material texture (A1): a
+    /// `w×h` color texture in the surface format (render attachment + sampled)
+    /// with a matching depth buffer. The editor renders a target-camera into
+    /// the returned views each frame; any material or UI image whose texture
+    /// path resolves to the `TexId` shows the live picture (cockpit screens,
+    /// monitors, mirrors). Returned views: (color attachment, depth).
+    pub fn register_render_target(
+        &mut self,
+        gpu: &Gpu,
+        w: u32,
+        h: u32,
+    ) -> (TexId, wgpu::TextureView, wgpu::TextureView) {
+        let (w, h) = (w.max(1), h.max(1));
+        let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-render-target"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // The surface format, so every scene pipeline renders into it
+            // unchanged; sampling the sRGB view decodes to linear exactly like
+            // a regular sRGB material texture.
+            format: gpu.surface_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let attach = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-render-target-depth"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Gpu::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        // Smooth + clamp: a live feed reads like video, and a screen quad must
+        // never tile its edges.
+        let sampling = TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Clamp };
+        let sampler = self.sampler_for(gpu, sampling);
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-render-target"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        let id = TexId(self.textures.len() as u32);
+        self.textures.push(TexBind { bind, view, sampling, _texture: color });
+        (id, attach, depth_view)
+    }
+
     /// Overwrite a registered texture's pixels in place (same dimensions). For a paint
     /// brush stamping into a per-node texture every dab — re-registering would leak a new
     /// `TexId` per stroke. Dimensions must match what it was registered with; a mismatch or

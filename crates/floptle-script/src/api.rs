@@ -126,7 +126,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             );
         }
     }
-    if let Some(Matter::Camera { fov_y, active }) = world.get::<Matter>(e) {
+    if let Some(Matter::Camera { fov_y, active, .. }) = world.get::<Matter>(e) {
         out.insert(
             "Camera".to_string(),
             HashMap::from([
@@ -282,7 +282,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         "Camera" => {
-            if let Some(Matter::Camera { fov_y, active }) = world.get_mut::<Matter>(ent) {
+            if let Some(Matter::Camera { fov_y, active, .. }) = world.get_mut::<Matter>(ent) {
                 match field {
                     "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
                     "active" => *active = val != 0.0,

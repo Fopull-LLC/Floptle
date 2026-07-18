@@ -272,8 +272,8 @@ impl Editor {
     /// to the selected camera.
     pub(crate) fn update_camera_preview(&mut self, elapsed: f32) {
         let Some(e) = self.selection.last().copied() else { return };
-        let fov_y = match self.world.get::<Matter>(e) {
-            Some(Matter::Camera { fov_y, .. }) => *fov_y,
+        let (fov_y, mask) = match self.world.get::<Matter>(e) {
+            Some(Matter::Camera { fov_y, cull_mask, .. }) => (*fov_y, *cull_mask),
             _ => return,
         };
         let wt = floptle_core::world_transform(&self.world, e);
@@ -288,7 +288,55 @@ impl Editor {
         else {
             return;
         };
-        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed);
+        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None);
+    }
+
+    /// A1 render targets: every camera with a non-empty `target` name renders
+    /// the world into its live `rt:<name>` texture — BEFORE any pass that
+    /// might sample it (the main surface, the game viewport, previews).
+    /// Runs in edit mode too, so a cockpit screen shows its feed while you
+    /// place it. Capped so a scene can't turn into a render farm.
+    pub(crate) fn update_render_targets(&mut self, elapsed: f32) {
+        const RT_W: u32 = 480;
+        const RT_H: u32 = 270;
+        const RT_MAX: usize = 4;
+        let cams: Vec<(floptle_core::Entity, String, f32, u32)> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Camera { fov_y, target, cull_mask, .. } if !target.is_empty() => {
+                    Some((e, target.clone(), *fov_y, *cull_mask))
+                }
+                _ => None,
+            })
+            .take(RT_MAX)
+            .collect();
+        for (e, name, fov_y, mask) in cams {
+            if !self.render_targets.contains_key(&name) {
+                let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+                    return;
+                };
+                let (tex, color, depth) = raster.register_render_target(gpu, RT_W, RT_H);
+                // The registry key materials/UI use. Stale entries from renamed
+                // targets keep their last frame — harmless, and re-rendered the
+                // moment a camera claims the name again.
+                self.texture_registry.insert(format!("rt:{name}"), tex);
+                self.render_targets.insert(name.clone(), (tex, color, depth));
+            }
+            let (tex, cv, dv) = {
+                let s = &self.render_targets[&name];
+                (s.0, s.1.clone(), s.2.clone())
+            };
+            let wt = floptle_core::world_transform(&self.world, e);
+            let cam = RenderCamera::new(
+                wt.translation,
+                wt.rotation,
+                Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
+            );
+            // skip_tex = its own target: a camera can film another camera's
+            // screen, never its own mid-pass (wgpu forbids it).
+            self.render_world_into(&cv, &dv, &cam, RT_W as f32 / RT_H as f32, elapsed, mask, Some(tex));
+        }
     }
 
     /// Lazily (re)create the Game viewport's offscreen target at `w`×`h` pixels, freeing
@@ -336,6 +384,7 @@ impl Editor {
         };
         self.ensure_game_vp(w, h);
         // The active gameplay camera, or the editor camera if the scene has none.
+        let mut cull_mask = u32::MAX;
         let cam = {
             let active = self.world.query::<Matter>().find_map(|(e, m)| {
                 matches!(m, Matter::Camera { active: true, .. }).then_some(e)
@@ -343,7 +392,10 @@ impl Editor {
             match active {
                 Some(e) => {
                     let fov_y = match self.world.get::<Matter>(e) {
-                        Some(Matter::Camera { fov_y, .. }) => *fov_y,
+                        Some(Matter::Camera { fov_y, cull_mask: cm, .. }) => {
+                            cull_mask = *cm;
+                            *fov_y
+                        }
                         _ => 60f32.to_radians(),
                     };
                     let wt = floptle_core::world_transform(&self.world, e);
@@ -413,7 +465,7 @@ impl Editor {
             Some(cv.clone())
         };
         let Some(scene_target) = scene_target else { return };
-        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed);
+        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None);
         // Post composites into the retro color (retro) or the game_vp color (non-retro).
         if post_on && let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
             let proj = cam.proj_matrix(aspect);
@@ -524,7 +576,15 @@ impl Editor {
         );
         let n = self.world.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Camera { .. })).count() + 1;
         self.world.insert(e, Name(format!("Camera {n}")));
-        self.world.insert(e, Matter::Camera { fov_y: 60f32.to_radians(), active });
+        self.world.insert(
+            e,
+            Matter::Camera {
+                fov_y: 60f32.to_radians(),
+                active,
+                target: String::new(),
+                cull_mask: u32::MAX,
+            },
+        );
         if let Some(p) = parent {
             self.world.insert(e, floptle_core::Parent(p));
         }

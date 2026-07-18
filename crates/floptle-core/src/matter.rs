@@ -429,7 +429,15 @@ pub enum Matter {
     /// A camera viewpoint — its transform is the camera pose; `fov_y` is the vertical
     /// field of view in radians. One camera holds play-mode authority at a time
     /// (`active`); the gameplay view renders from it, switchable for cutscenes.
-    Camera { fov_y: f32, active: bool },
+    ///
+    /// A non-empty `target` turns the camera into a RENDER TARGET (A1): every
+    /// frame it renders the world into a live texture addressable as
+    /// `rt:<target>` from any material or UI image — cockpit screens, security
+    /// monitors, mirrors. `cull_mask` is a bitmask over the project's layers
+    /// (bit i = layer i visible; `u32::MAX` = everything) applied wherever
+    /// this camera renders — the game view for the active camera, the target
+    /// texture for a target camera.
+    Camera { fov_y: f32, active: bool, target: String, cull_mask: u32 },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
     /// (The scene's single directional/ambient key stays the special `Light` node.)

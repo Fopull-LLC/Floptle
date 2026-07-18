@@ -87,6 +87,12 @@ impl Editor {
     /// Load + register a material texture (cached by path + its sampling settings),
     /// returning its handle. Re-registers if the texture's filter/wrap was changed.
     pub(crate) fn ensure_texture(&mut self, path: &str) -> Option<TexId> {
+        // Live render targets ("rt:<name>") are registered by the camera
+        // target pass (update_render_targets), never loaded from disk — the
+        // lookup misses until the named camera has rendered once.
+        if path.starts_with("rt:") {
+            return self.texture_registry.get(path).copied();
+        }
         let want = self.texture_settings.get(path).copied().unwrap_or_default();
         if let (Some(id), Some(prev)) =
             (self.texture_registry.get(path), self.texture_registry_setting.get(path))
@@ -1017,7 +1023,12 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             rotation: rot.to_array(),
             scale: [1.0, 1.0, 1.0],
         },
-        matter: floptle_scene::MatterDoc::Camera { fov_y: 60f32.to_radians(), active: true },
+        matter: floptle_scene::MatterDoc::Camera {
+            fov_y: 60f32.to_radians(),
+            active: true,
+            target: String::new(),
+            cull_mask: u32::MAX,
+        },
         // The default camera flies on play (hold right-mouse to look, WASD to move).
         scripts: vec![floptle_scene::ScriptDoc {
             kind: "freelook".into(),

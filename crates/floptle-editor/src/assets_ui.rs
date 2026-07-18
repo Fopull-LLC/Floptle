@@ -415,6 +415,10 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_new_scene = true;
             ui.close();
         }
+        if ui.button("🪐 New Solar System…").on_hover_text("roll a randomized star system — planets, moons, caves, cores — generated in the background").clicked() {
+            self.cmd.open_system_gen = true;
+            ui.close();
+        }
         if ui.button("◎ New Animation Controller").clicked() {
             self.cmd.new_anim_controller = Some(None);
             self.cmd.new_anim_controller_dir = Some(dir.to_string_lossy().to_string());

@@ -237,6 +237,9 @@ impl Editor {
         // VFX assets not yet resolved. Reuses `elapsed` so it costs no extra clock read.
         // Both take &mut self and must live outside the main GPU destructure below, so
         // this is the last safe point before it.
+        // A1 target cameras render FIRST, so every later pass (previews, game
+        // viewport, the surface itself) samples this frame's feed.
+        self.update_render_targets(elapsed);
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
         // The ◈ Shaders tab's per-node preview atlas (only while it's visible).
@@ -301,6 +304,9 @@ impl Editor {
         // full-window render.) Only a FULLSCREEN Game tab renders the active camera
         // straight to the surface (it fills the whole window, so that framing is right).
         let game_view = matches!(self.fullscreen_tab, Some(EditorTab::Game));
+        // The active camera's layer cull mask applies to the FULLSCREEN game
+        // view only — the editor Scene view always shows everything.
+        let mut game_cull_mask = u32::MAX;
         let cam = {
             let active = if game_view {
                 self.world.query::<Matter>().find_map(|(e, m)| {
@@ -312,7 +318,10 @@ impl Editor {
             match active {
                 Some(e) => {
                     let fov_y = match self.world.get::<Matter>(e) {
-                        Some(Matter::Camera { fov_y, .. }) => *fov_y,
+                        Some(Matter::Camera { fov_y, cull_mask, .. }) => {
+                            game_cull_mask = *cull_mask;
+                            *fov_y
+                        }
                         _ => 60f32.to_radians(),
                     };
                     let wt = floptle_core::world_transform(&self.world, e);
@@ -396,7 +405,7 @@ impl Editor {
                 .world
                 .query::<Matter>()
                 .filter_map(|(e, m)| match m {
-                    Matter::Camera { fov_y, active } if filter.cameras => {
+                    Matter::Camera { fov_y, active, .. } if filter.cameras => {
                         Some((e, Giz::Cam(*fov_y, *active)))
                     }
                     Matter::PointLight { range, .. } if filter.lights => {
@@ -819,10 +828,20 @@ impl Editor {
                     instances.push((mid, None, instance_of(model * local, [0.7, 0.85, 1.0])));
                 }
             }
+        // Fullscreen-game cull mask: resolve layer names to bits only when it
+        // actually culls (the editor Scene view renders with MAX = no table).
+        let game_layer_table =
+            (game_cull_mask != u32::MAX).then(|| self.project.build_layers());
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
             // Inspector can toggle this); they still keep transforms, physics, children.
             if matches!(self.world.get::<floptle_core::Visible>(*e), Some(floptle_core::Visible(false))) {
+                continue;
+            }
+            // The active camera's layer cull mask (fullscreen game view only).
+            if let Some(lt) = &game_layer_table
+                && (game_cull_mask >> lt.index_for(&self.world, *e)) & 1 == 0
+            {
                 continue;
             }
             // World transform (composes any parent chain) — a parent carries children.
@@ -1224,6 +1243,8 @@ impl Editor {
         let toast = &mut self.toast;
         let scene_dirty_now = self.scene_dirty;
         let new_terrain_cfg = &mut self.new_terrain_cfg;
+        let system_gen_cfg = &mut self.system_gen_cfg;
+        let system_gen_busy = self.system_gen_job.is_some();
         let pending_open_scene = &mut self.pending_open_scene;
         let vertex_brush = &mut self.vertex_brush;
         let terrain_brush = &mut self.terrain_brush;
@@ -2712,6 +2733,76 @@ impl Editor {
                     });
                 if !open || close {
                     *new_terrain_cfg = None;
+                }
+            }
+
+            // ---- 🪐 new solar system dialog ----
+            // Rolls a whole randomized star system (procgen) on a background
+            // thread; progress streams to the Console, the scene opens when done.
+            if let Some(cfg) = system_gen_cfg.as_mut() {
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new("🪐 New Solar System")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(340.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            "Roll a randomized star system — star class, planets, moons, \
+                             orbits, atmospheres, caves, cores, names: all from one seed.",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("seed");
+                            ui.text_edit_singleline(&mut cfg.seed_text);
+                            if ui.button("🎲").on_hover_text("blank = a fresh random system every Generate").clicked() {
+                                cfg.seed_text.clear();
+                            }
+                        });
+                        ui.small("blank = random every time · a number reproduces that exact system");
+                        ui.horizontal(|ui| {
+                            ui.label("planets");
+                            egui::ComboBox::from_id_salt("sysgen_planets")
+                                .selected_text(if cfg.planets == 0 {
+                                    "random".to_string()
+                                } else {
+                                    cfg.planets.to_string()
+                                })
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(cfg.planets == 0, "random").clicked() {
+                                        cfg.planets = 0;
+                                    }
+                                    for n in 2..=4u32 {
+                                        if ui.selectable_label(cfg.planets == n, n.to_string()).clicked() {
+                                            cfg.planets = n;
+                                        }
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("scene name");
+                            ui.text_edit_singleline(&mut cfg.scene);
+                        });
+                        ui.small("an existing scene + terrain files with this name are OVERWRITTEN");
+                        ui.separator();
+                        if system_gen_busy {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("generating — progress in the Console…");
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            if !system_gen_busy && ui.button("Generate").clicked() {
+                                cmd.start_system_gen = Some(cfg.clone());
+                                close = true;
+                            }
+                            if ui.button(if system_gen_busy { "Close" } else { "Cancel" }).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *system_gen_cfg = None;
                 }
             }
 
@@ -4751,6 +4842,15 @@ impl Editor {
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
         }
+        if cmd.open_system_gen {
+            self.system_gen_cfg = Some(Default::default());
+        }
+        if let Some(cfg) = cmd.start_system_gen {
+            self.start_system_gen(cfg);
+        }
+        // Pump a running 🪐 generation every frame (progress → Console; the
+        // finished scene opens itself).
+        self.poll_system_gen();
         if let Some(name) = cmd.new_scene {
             self.new_scene(&name);
         }
@@ -4893,6 +4993,11 @@ impl Editor {
 
     /// Render the whole scene from `cam` (at `aspect`) into offscreen color+depth views —
     /// the shared body behind the Inspector camera preview and the split-view Game render.
+    /// `cull_mask` is the rendering camera's layer bitmask (bit i = project
+    /// layer i; `u32::MAX` = everything). `skip_tex` excludes one material
+    /// texture from resolution — a target camera must not sample its OWN
+    /// render target mid-pass (wgpu forbids attachment+sampled in one pass).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_world_into(
         &mut self,
         color: &wgpu::TextureView,
@@ -4900,8 +5005,12 @@ impl Editor {
         cam: &RenderCamera,
         aspect: f32,
         elapsed: f32,
+        cull_mask: u32,
+        skip_tex: Option<TexId>,
     ) {
         let view_proj = cam.view_proj(aspect);
+        // Layer names resolve to bits only when a mask actually culls.
+        let layer_table = (cull_mask != u32::MAX).then(|| self.project.build_layers());
 
         // Sky-shader uniforms (Inspector knobs over `.flsl` defaults), resolved before any
         // GPU borrow — the offscreen / Game render reuses the same values as the editor view.
@@ -4964,6 +5073,12 @@ impl Editor {
             if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
                 continue;
             }
+            // Camera cull mask: skip nodes on layers this camera doesn't render.
+            if let Some(lt) = &layer_table
+                && (cull_mask >> lt.index_for(&self.world, *ent)) & 1 == 0
+            {
+                continue;
+            }
             let t = floptle_core::world_transform(&self.world, *ent);
             let mat = self.world.get::<Material>(*ent).cloned();
             // Texture-painted node → ALSO push its paint overlay; the base draws normally
@@ -4976,7 +5091,8 @@ impl Editor {
             let tex = mat
                 .as_ref()
                 .and_then(|m| m.texture.as_deref())
-                .and_then(|p| self.texture_registry.get(p).copied());
+                .and_then(|p| self.texture_registry.get(p).copied())
+                .filter(|id| Some(*id) != skip_tex);
             let flsl = self.flsl_binds.get(ent).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {

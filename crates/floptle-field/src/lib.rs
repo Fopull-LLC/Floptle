@@ -28,6 +28,7 @@
 pub mod chunks;
 pub mod mesh2sdf;
 pub mod mesher;
+pub mod procgen;
 pub mod terrain;
 
 pub use mesh2sdf::{bake, bake_occluder, BakedSdf, TexRef};
