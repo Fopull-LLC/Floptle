@@ -340,5 +340,26 @@
             ),
             scripts: [],
         ),
+        (
+            name: "Map",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(10),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(520.0), Fixed(520.0)),
+                shader: "shaders/map.flsl",
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
     ],
 )

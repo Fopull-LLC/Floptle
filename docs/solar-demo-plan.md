@@ -75,15 +75,19 @@ RenderTexture handle; camera `cullMask` / ortho / near-far / `target`; `rt://`
 bindings usable in UI images + materials; per-light masks via `Layers::mask_of`.
 Also what camera-feed screens inside the ship cockpit want.
 
-### S6 — Trajectory map *(the KSP map screen)*
-- Engine: a runtime **line/curve draw layer** (world-space polylines with
-  cull-mask support — the editor's viz wires, promoted to a game-visible
-  facility, drawn into whichever camera's mask includes them).
-- Map mode (M): dedicated camera on an orbit-lines layer — body orbit ellipses
-  (analytic, from rails), ship's current conic + SOI-transition prediction
-  (patched-conic walk), body markers. Scroll = zoom, drag = rotate; time-warp
-  controls live here. v1 is a full-screen mode (no UI compositing needed);
-  maneuver nodes are v2.
+### S6 — Trajectory map *(the KSP map screen)* — **SHIPPED v1 (differently)**
+Plan predated `stage ui` shaders; v1 landed as a pure UI-shader panel instead
+of a line-draw layer + dedicated camera — zero engine changes:
+- `solar/shaders/map.flsl` draws the whole map: the ship's conic in its own
+  orbital plane via the trig-free focal-polar form `len(q) + e·q.x = p`
+  (ellipse AND hyperbola), Pe/Ap markers, focus body + SOI, the sibling
+  body + its orbit ring + its SOI ring (transfers planned by eyeballing your
+  conic against the moon's SOI), ship marker + velocity tick, starfield.
+- `ship_controller.lua` does the orbital mechanics (e-vector basis, plane
+  projection) and feeds uniforms via `setShaderParam`. M toggles, ↑/↓ zoom,
+  auto-fit on open; works during warp. Time-warp keys already global (./,).
+- Still future (needs A1/line-layer): free 3D map camera, timed SOI-encounter
+  marker from a patched-conic walk, maneuver nodes.
 
 ### S7 — Generated solar system + big planets *(procgen scale-up)*
 - `gen_solar` example → `solar/system.ron` + N `.cfield`s from one master
