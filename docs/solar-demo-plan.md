@@ -64,6 +64,13 @@ New `floptle-core::frames` (the module the lib docs already advertise):
 - Landing gear: child nodes + colliders toggled/animated via scheduler; simple
   ground-contact readout.
 - Exit → walk → dig → re-board loop closes on the current planetoid.
+- **Ship depth SHIPPED post-S6**: B-key landing legs (4 strut children,
+  script-animated deploy/retract; gear up = fragile 6 m/s crash limit),
+  real fuel (throttle-scaled burn, mass drops as the tank drains so TWR
+  climbs into the G limit near empty, pad refuels a parked ship, HUD bar),
+  and honest wrecks (hull hides + explosion + 7 tumbling debris bodies via
+  `spawn("Debris")` prefab; G restore cleans them up). Legs are visual-only
+  (single-shape bodies — the sphere hull still owns contact).
 
 ### S4 — Time-warp *(engine hook + rails payoff)*
 `space.warp(mult)`: 1×–4× = physics warp (more ticks); above that the ship

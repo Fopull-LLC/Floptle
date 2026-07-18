@@ -361,5 +361,61 @@
                 opacity: 1.0,
             )),
         ),
+        (
+            name: "Leg A",
+            transform: (
+                translation: (0.52, -0.6, 0.52),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.1, 0.5, 0.1),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.38, 0.4, 0.46),
+            ),
+            scripts: [],
+            parent: Some(8),
+        ),
+        (
+            name: "Leg B",
+            transform: (
+                translation: (-0.52, -0.6, 0.52),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.1, 0.5, 0.1),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.38, 0.4, 0.46),
+            ),
+            scripts: [],
+            parent: Some(8),
+        ),
+        (
+            name: "Leg C",
+            transform: (
+                translation: (0.52, -0.6, -0.52),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.1, 0.5, 0.1),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.38, 0.4, 0.46),
+            ),
+            scripts: [],
+            parent: Some(8),
+        ),
+        (
+            name: "Leg D",
+            transform: (
+                translation: (-0.52, -0.6, -0.52),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.1, 0.5, 0.1),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.38, 0.4, 0.46),
+            ),
+            scripts: [],
+            parent: Some(8),
+        ),
     ],
 )

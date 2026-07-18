@@ -5,7 +5,14 @@
 --   F        board / exit (walk within `board_range`)
 --   SHIFT / CTRL   throttle up / down        X  cut throttle       Z  full
 --   W/S      pitch      A/D  yaw      Q/E  roll   (hold = turn, release = stop)
+--   B        landing gear (legs retracted = fragile belly, crash at 6 m/s)
 --   T        SAS toggle       G  (while wrecked) restore at the pad
+--
+-- Fuel is real: burning scales with throttle, the ship gets LIGHTER as the
+-- tank drains (thrust/mass — TWR climbs, watch the G limit near empty), an
+-- empty tank means no thrust, and the pad refuels a parked ship. A wreck now
+-- actually falls apart: the hull vanishes into an explosion and a shower of
+-- tumbling debris bodies that rain back onto the terrain (G cleans them up).
 --   M        map screen (orbit view; ↑/↓ zoom while open)
 --   . / ,    time-warp up / down (KSP rules: only while coasting or parked;
 --            any control input drops warp back to 1×; the engine snaps a
@@ -23,8 +30,12 @@
 -- Play starts can't count as a crash.
 
 defaults = {
-  mass = 2.0,           -- tonnes-ish; accel = thrust / mass
-  max_thrust = 44.0,    -- max accel 22 vs surface g 9.8 → TWR ≈ 2.2
+  mass = 2.0,           -- tonnes-ish WET mass; accel = thrust / current mass
+  fuel = 100.0,         -- tank capacity
+  burn_rate = 1.1,      -- units/s at full throttle (~90 s of full burn)
+  fuel_mass = 0.6,      -- how much of `mass` is fuel at a full tank
+  refuel_rate = 15.0,   -- units/s while parked at the pad
+  max_thrust = 44.0,    -- max accel 22 vs surface g 9.8 → TWR ≈ 2.2 (wet)
   max_rate = 1.0,       -- commanded turn rate cap, rad/s
   rate_accel = 2.5,     -- how fast the rate ramps to the command, rad/s²
   crash_speed = 15.0,   -- impact speed along the normal that wrecks
@@ -39,6 +50,7 @@ defaults = {
 piloting = false
 wrecked = false
 throttle = 0.0
+fuel = 100.0
 
 local sas = true
 -- Time-warp ladder (KSP-style steps) + a short HUD notice when a step is denied.
@@ -87,6 +99,7 @@ local function reset_pose(node)
   node.vx, node.vy, node.vz = 0, 0, 0
   avp, avy, avr = 0, 0, 0
   throttle = 0.0
+  fuel = params.fuel
   spawn_t = time
   -- Nose = radially out from the dominant body (upright on the ground).
   local d = space.dominant(node.x, node.y, node.z)
@@ -125,6 +138,67 @@ local function set_hud(node, text)
   local el = hud:getcomponent("UiElement")
   if el then el.visible = text ~= nil end
   if text then hud.text = text end
+end
+
+-- ---- landing legs -----------------------------------------------------------
+-- Four strut children of the hull, authored DEPLOYED in the scene; we cache
+-- their authored local transforms on first sight and animate toward/away from
+-- them (retracted = tucked up beside the hull). Gear down is what makes a
+-- touchdown survivable — a bare belly wrecks at 6 m/s instead of crash_speed.
+local legs, legs_deployed, leg_anim = nil, true, 1.0
+local function find_legs()
+  if legs then return end
+  legs = {}
+  for _, nm in ipairs({ "Leg A", "Leg B", "Leg C", "Leg D" }) do
+    local l = find(nm)
+    if l then
+      legs[#legs + 1] = { node = l, x = l.x, y = l.y, z = l.z, sy = l.scale_y }
+    end
+  end
+end
+
+local function animate_legs(dt)
+  find_legs()
+  local f = leg_anim
+  for _, l in ipairs(legs) do
+    l.node.x = l.x * (0.55 + 0.45 * f)
+    l.node.z = l.z * (0.55 + 0.45 * f)
+    l.node.y = l.y * f + 0.12 * (1 - f)
+    l.node.scale_y = l.sy * (0.3 + 0.7 * f)
+  end
+end
+
+local function set_ship_visible(node, on)
+  node.visible = on
+  find_legs()
+  for _, l in ipairs(legs) do l.node.visible = on end
+end
+
+-- ---- wreckage ---------------------------------------------------------------
+local debris = {}
+local function scatter_debris(node)
+  for i = 1, 7 do
+    local a = i * 0.897 + time
+    local sp = 4 + (i % 3) * 3
+    spawn("Debris", vec3(node.x, node.y + 0.5, node.z), function(d)
+      d.vx = node.vx + math.cos(a) * sp
+      d.vy = node.vy + 3 + (i % 2) * 4
+      d.vz = node.vz + math.sin(a) * sp
+      d.scale_x = 0.5 + 0.16 * (i % 4)
+      d.scale_y = 0.3 + 0.11 * ((i + 1) % 3)
+      d.scale_z = 0.4 + 0.14 * ((i + 2) % 3)
+      debris[#debris + 1] = d
+    end)
+  end
+end
+
+local function wreck_ship(node, x, y, z)
+  wrecked = true
+  throttle = 0.0
+  set_flame(node, false, 0)
+  spawnEffect("Explosion", x, y, z)
+  scatter_debris(node)
+  set_ship_visible(node, false)
 end
 
 local navball
@@ -304,6 +378,11 @@ function fixedUpdate(node, dt)
       wrecked = false
       node.x, node.y, node.z = pad_x, pad_y, pad_z + 0.0
       reset_pose(node)
+      set_ship_visible(node, true)
+      legs_deployed, leg_anim = true, 1.0
+      animate_legs(0)
+      for _, d in ipairs(debris) do destroy(d) end
+      debris = {}
       print("ship restored at the pad")
     end
     pvx, pvy, pvz = node.vx, node.vy, node.vz
@@ -318,6 +397,11 @@ function fixedUpdate(node, dt)
     map_span = nil -- re-fit to the current orbit every time it opens
     set_map(map_on)
   end
+
+  -- ---- landing gear --------------------------------------------------------
+  if input.pressed("b") then legs_deployed = not legs_deployed end
+  leg_anim = toward(leg_anim, legs_deployed and 1 or 0, dt / 0.6)
+  animate_legs(dt)
 
   -- ---- time warp -----------------------------------------------------------
   local warp = space.warp()
@@ -389,13 +473,24 @@ function fixedUpdate(node, dt)
     return
   end
 
-  -- ---- throttle -----------------------------------------------------------
+  -- ---- throttle + fuel -----------------------------------------------------
   if input.key("shift") then throttle = throttle + params.throttle_rate * dt end
   if input.key("ctrl") then throttle = throttle - params.throttle_rate * dt end
   if input.key("x") then throttle = 0.0 end
   if input.key("z") then throttle = 1.0 end
   if throttle > 1.0 then throttle = 1.0 end
   if throttle < 0.0 then throttle = 0.0 end
+  if fuel <= 0.0 then throttle = 0.0 end
+  fuel = math.max(0.0, fuel - throttle * params.burn_rate * dt)
+  -- The pad refuels a parked ship (grounded, engine idle, near the spawn).
+  local refueling = false
+  if node.grounded and throttle < 0.01 and fuel < params.fuel then
+    local pd = math.sqrt((node.x - pad_x) ^ 2 + (node.y - pad_y) ^ 2 + (node.z - pad_z) ^ 2)
+    if pd < 40.0 then
+      fuel = math.min(params.fuel, fuel + params.refuel_rate * dt)
+      refueling = true
+    end
+  end
 
   -- ---- attitude: RATE-COMMANDED (the KSP feel) ----------------------------
   local p = (input.key("s") and 1 or 0) - (input.key("w") and 1 or 0)
@@ -423,10 +518,12 @@ function fixedUpdate(node, dt)
   nx, ny, nz = norm(nx, ny, nz)
 
   -- ---- thrust + parking brake --------------------------------------------
-  local acc = throttle * params.max_thrust / params.mass
+  -- The ship gets lighter as fuel burns; near-empty at full throttle can
+  -- exceed the frame's G limit — the KSP "throttle down when light" rule.
+  local mass = params.mass - params.fuel_mass * (1.0 - fuel / params.fuel)
+  local acc = throttle * params.max_thrust / mass
   if acc > params.max_g then
-    wrecked = true
-    spawnEffect("Explosion", node.x, node.y, node.z)
+    wreck_ship(node, node.x, node.y, node.z)
     print(string.format("STRUCTURAL FAILURE at %.1f g — ship wrecked (G to restore)", acc))
     return
   end
@@ -466,10 +563,18 @@ function fixedUpdate(node, dt)
     local b = dom and space.body(dom)
     local lines = {}
     local bars = math.floor(throttle * 10 + 0.5)
-    lines[1] = string.format("THR [%s%s] %3d%%   SAS %s%s",
+    lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   GEAR %s%s",
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
       sas and "ON " or "off",
+      legs_deployed and "▼" or "▲",
       node.grounded and "   LANDED" or "")
+    local fbars = math.floor(fuel / params.fuel * 10 + 0.5)
+    local ftag = ""
+    if refueling then ftag = "  REFUELING"
+    elseif fuel <= 0.0 then ftag = "  ⚠ TANK EMPTY"
+    elseif acc > params.max_g * 0.88 and throttle > 0.01 then ftag = "  ⚠ NEAR G LIMIT" end
+    lines[2] = string.format("FUEL [%s%s] %3d%%%s",
+      string.rep("|", fbars), string.rep("·", 10 - fbars), fuel / params.fuel * 100, ftag)
     if b then
       local dxr, dyr, dzr = node.x - b.x, node.y - b.y, node.z - b.z
       local rlen = math.sqrt(dxr * dxr + dyr * dyr + dzr * dzr)
@@ -477,7 +582,7 @@ function fixedUpdate(node, dt)
       local vsp = node.vx * upx + node.vy * upy + node.vz * upz
       local pitch_deg = math.deg(math.asin(math.max(-1, math.min(1,
         nx * upx + ny * upy + nz * upz)))) -- 90 = nose straight up
-      lines[2] = string.format("ALT %6.0f   SPD %6.1f   VSPD %+6.1f   NOSE %+3.0f°",
+      lines[#lines + 1] = string.format("ALT %6.0f   SPD %6.1f   VSPD %+6.1f   NOSE %+3.0f°",
         rlen - b.radius, spd, vsp, pitch_deg)
       -- THE orbit-insertion instrument: your speed vs circular-orbit speed vs
       -- escape speed AT THIS RADIUS. Stable orbit = hold SPD near "orb" with
@@ -487,18 +592,18 @@ function fixedUpdate(node, dt)
       local tag = ""
       if spd >= vesc then tag = "  ▲▲ ESCAPING"
       elseif spd >= vesc * 0.93 then tag = "  ▲ near escape" end
-      lines[3] = string.format("V-ORBIT %5.1f   V-ESC %5.1f%s", vorb, vesc, tag)
+      lines[#lines + 1] = string.format("V-ORBIT %5.1f   V-ESC %5.1f%s", vorb, vesc, tag)
       local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
       if o and o.apoapsis then
-        lines[4] = string.format("ORBIT [%s]  pe %+.0f  ap %+.0f  T %.0fs",
+        lines[#lines + 1] = string.format("ORBIT [%s]  pe %+.0f  ap %+.0f  T %.0fs",
           o.body, o.periapsis - b.radius, o.apoapsis - b.radius, o.period)
       elseif o then
-        lines[4] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
+        lines[#lines + 1] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
       end
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · ./, warp · M map"
+      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · B gear · ./, warp · M map"
     set_hud(node, table.concat(lines, "\n"))
   end
 
@@ -518,11 +623,11 @@ function onCollisionEnter(node, other, hit)
   local ovx, ovy, ovz = other.vx or 0, other.vy or 0, other.vz or 0
   local vn = math.abs(
     (pvx - ovx) * hit.nx + (pvy - ovy) * hit.ny + (pvz - ovz) * hit.nz)
-  if vn > params.crash_speed then
-    wrecked = true
-    throttle = 0.0
-    set_flame(node, false, 0)
-    spawnEffect("Explosion", hit.x, hit.y, hit.z)
-    print(string.format("CRASH at %.1f m/s — ship wrecked (G to restore)", vn))
+  -- Gear down absorbs a real landing; a bare belly is fragile.
+  local limit = leg_anim > 0.8 and params.crash_speed or 6.0
+  if vn > limit then
+    wreck_ship(node, hit.x, hit.y, hit.z)
+    print(string.format("CRASH at %.1f m/s%s — ship wrecked (G to restore)", vn,
+      leg_anim > 0.8 and "" or " (gear was up!)"))
   end
 end
