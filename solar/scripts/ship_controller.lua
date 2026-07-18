@@ -324,12 +324,12 @@ end
 -- Draw r = p/(1+e·cosθ) around a world center in the ê1/ê2 plane. Handles
 -- ellipses AND hyperbolas (invalid θ range just breaks the polyline).
 local function draw_conic(cx, cy, cz, e1x, e1y, e1z, e2x, e2y, e2z, p, ecc, r, g, b, a)
-  local segs = 96
+  local segs = 128
   local px2, py2, pz2, has_prev = 0, 0, 0, false
   for i = 0, segs do
     local th = (i / segs) * 2 * math.pi
     local den = 1 + ecc * math.cos(th)
-    if den > 0.05 then
+    if den > 0.02 then
       local rr = p / den
       local ct, st = math.cos(th), math.sin(th)
       local wx = cx + (e1x * ct + e2x * st) * rr
@@ -386,13 +386,36 @@ local function update_map3d(node, dt)
 
   local focus, fname, fradius
   if map_focus == 1 then
-    focus = { x = node.x, y = node.y, z = node.z }
-    fname, fradius = "SHIP", 6
+    if piloting or not astronaut then
+      focus = { x = node.x, y = node.y, z = node.z }
+      fname = "SHIP"
+    else
+      focus = { x = astronaut.x, y = astronaut.y, z = astronaut.z }
+      fname = "YOU"
+    end
+    fradius = 6
   else
     focus = bodies[map_focus - 1]
     fname, fradius = focus.name, focus.radius
   end
-  if not map_zoom then map_zoom = math.max(fradius * 6, 80) end
+  if not map_zoom then
+    -- Auto-fit: opening on the ship/astronaut frames the WHOLE current orbit
+    -- (apoapsis + body), not a close-up of the hull.
+    if map_focus == 1 then
+      local dn0 = space.dominant(focus.x, focus.y, focus.z)
+      local b0 = dn0 and space.body(dn0)
+      if b0 then
+        local rr = math.sqrt((focus.x - b0.x) ^ 2 + (focus.y - b0.y) ^ 2 + (focus.z - b0.z) ^ 2)
+        map_zoom = math.max(rr * 2.2, b0.radius * 3.5)
+        local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
+        if o and o.apoapsis then map_zoom = math.max(map_zoom, o.apoapsis * 1.5) end
+      else
+        map_zoom = 400
+      end
+    else
+      map_zoom = math.max(fradius * 6, 80)
+    end
+  end
 
   -- Blender-style navigation: the mouse is free (and does nothing) unless
   -- RIGHT CLICK is held — drag then ORBITS the selection; CTRL+RIGHT-drag
@@ -552,7 +575,20 @@ function fixedUpdate(node, dt)
     astronaut.vx, astronaut.vy, astronaut.vz = node.vx, node.vy, node.vz
   end
 
+  -- ---- the map works on foot too (Ty: open it from the astronaut) ---------
+  if input.pressed("m") then
+    map_view = not map_view
+    map_zoom = nil -- re-fit to the focus every time it opens
+    map_focus = 1 -- always open on yourself
+    map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
+    -- The instrument cluster stands down while the map owns the screen.
+    set_navball(not map_view and piloting)
+    if not map_view then set_hud(node, piloting and "" or nil) end
+  end
+  update_map3d(node, dt)
+
   if not piloting then
+    if not map_view then set_hud(node, nil) end
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end
@@ -578,14 +614,6 @@ function fixedUpdate(node, dt)
   end
 
   if input.pressed("t") then sas = not sas end
-
-  -- ---- map screen (3D) -----------------------------------------------------
-  if input.pressed("m") then
-    map_view = not map_view
-    map_zoom = nil -- re-fit to the focus every time it opens
-    map_focus = 1 -- always open on the ship
-    map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
-  end
 
   -- ---- landing gear --------------------------------------------------------
   if input.pressed("b") then legs_deployed = not legs_deployed end
@@ -659,7 +687,6 @@ function fixedUpdate(node, dt)
     -- pinned so the sphere hull can't slow-slide down a slope for game-days.
     if node.grounded then node.vx, node.vy, node.vz = 0, 0, 0 end
     update_navball(node)
-    update_map3d(node, dt)
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end
@@ -753,7 +780,6 @@ function fixedUpdate(node, dt)
   node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
 
   update_navball(node)
-  update_map3d(node, dt)
 
   -- ---- HUD (10 Hz; the map's info panel owns the text while it's open) ----
   if not map_view and time - hud_t >= 0.1 then
