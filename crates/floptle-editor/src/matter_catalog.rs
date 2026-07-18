@@ -108,7 +108,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("▭  Plane", Matter::Primitive { shape: Shape::Plane, color: [0.8, 0.8, 0.8] }),
         ("◑  Blob", Matter::Blob { scale: 1.0 }),
         ("🗀  Empty", Matter::Empty),
-        ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false }),
+        ("⌖  Camera", Matter::Camera { fov_y: 60f32.to_radians(), active: false, target: String::new(), cull_mask: u32::MAX }),
         ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
         ("◈  Field Shape", Matter::FieldShape { radius: 1.5 }),

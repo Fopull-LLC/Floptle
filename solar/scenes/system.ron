@@ -3,7 +3,7 @@
     lighting: (
         direction: (0.4, 0.9, 0.45),
         stars: true,
-        color: (1.0, 0.98, 0.92),
+        color: (0.72, 0.82, 1.00),
         ambient: (0.012, 0.012, 0.018),
         intensity: 1.0,
         shadows: true,
@@ -16,36 +16,36 @@
     ),
     nodes: [
         (
-            name: "Sun",
+            name: "Athosil",
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (941.0, 941.0, 941.0),
+                scale: (768.8, 768.8, 768.8),
             ),
             matter: Primitive(
                 shape: Sphere,
-                color: (1.0, 0.92, 0.6),
+                color: (0.72, 0.82, 1.00),
             ),
             scripts: [],
             material: Some((
-                color: (1.0, 0.92, 0.6),
-                emissive: (1.0, 0.85, 0.45),
+                color: (0.72, 0.82, 1.00),
+                emissive: (0.72, 0.82, 1.00),
                 emissive_strength: 2.0,
                 unlit: true,
             )),
             celestial: Some((
-                mu: 60000000.0,
-                body_radius: 800.0,
+                mu: 46457566.0,
+                body_radius: 653.5,
                 soi: 0.0,
                 a: 0.0, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 0.0,
-                luminosity: 40.0,
-                star_color: (1.0, 0.97, 0.9),
+                luminosity: 85.7,
+                star_color: (0.72, 0.82, 1.00),
             )),
         ),
         (
-            name: "Rustholm",
+            name: "Umunquo",
             transform: (
-                translation: (6000.0, 0.0, 0.0),
+                translation: (28.0, 0.0, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -54,21 +54,21 @@
             ),
             scripts: [],
             celestial: Some((
-                mu: 180000.0,
-                body_radius: 150.0,
+                mu: 157533.4,
+                body_radius: 184.7,
                 soi: 0.0,
-                parent: "Sun",
-                a: 6000.0, e: 0.0, i: 0, lan: 0.0, arg_pe: 0.0, m0: 0,
-                atmo_color: (0.78, 0.42, 0.30),
-                atmo_height: 90.0,
-                atmo_density: 0.85,
-                clouds: 0.45,
+                parent: "Athosil",
+                a: 4738.8, e: 0.030, i: 0.052, lan: 0.0, arg_pe: 0.0, m0: 4.718,
+                atmo_color: (0.47, 0.75, 0.85),
+                atmo_height: 58.6,
+                atmo_density: 0.67,
+                clouds: 0.06,
             )),
         ),
         (
-            name: "Duneveil",
+            name: "Oria",
             transform: (
-                translation: (-6050.0, 0.0, 10380.0),
+                translation: (-10473.4, 0.0, 1012.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -77,21 +77,21 @@
             ),
             scripts: [],
             celestial: Some((
-                mu: 360000.0,
-                body_radius: 200.0,
+                mu: 389835.9,
+                body_radius: 227.5,
                 soi: 0.0,
-                parent: "Sun",
-                a: 12000.0, e: 0.0, i: 0.06, lan: 0.0, arg_pe: 0.0, m0: 2.1,
-                atmo_color: (0.93, 0.72, 0.42),
-                atmo_height: 120.0,
-                atmo_density: 0.90,
-                clouds: 0.20,
+                parent: "Athosil",
+                a: 10522.2, e: 0.036, i: 0.013, lan: 0.0, arg_pe: 0.0, m0: 3.045,
+                atmo_color: (0.90, 0.67, 0.40),
+                atmo_height: 85.0,
+                atmo_density: 0.70,
+                clouds: 0.78,
             )),
         ),
         (
-            name: "Palegate",
+            name: "Pelexru",
             transform: (
-                translation: (-6750.0, 0.0, -20940.0),
+                translation: (22038.3, 0.0, 4988.6),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -100,21 +100,21 @@
             ),
             scripts: [],
             celestial: Some((
-                mu: 86400.0,
-                body_radius: 120.0,
+                mu: 243049.5,
+                body_radius: 172.8,
                 soi: 0.0,
-                parent: "Sun",
-                a: 22000.0, e: 0.0, i: 0.12, lan: 0.0, arg_pe: 0.0, m0: 4.4,
-                atmo_color: (0.50, 0.78, 0.90),
-                atmo_height: 60.0,
-                atmo_density: 0.55,
-                clouds: 0.60,
+                parent: "Athosil",
+                a: 22595.9, e: 0.021, i: 0.077, lan: 0.0, arg_pe: 0.0, m0: 0.223,
+                atmo_color: (0.80, 0.60, 0.40),
+                atmo_height: 73.3,
+                atmo_density: 0.60,
+                clouds: 0.58,
             )),
         ),
         (
-            name: "Ashmoor",
+            name: "Pelia",
             transform: (
-                translation: (6260.0, 0.0, 330.0),
+                translation: (-47665.3, 0.0, 7588.9),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -123,17 +123,21 @@
             ),
             scripts: [],
             celestial: Some((
-                mu: 5200.0,
-                body_radius: 36.0,
+                mu: 208992.8,
+                body_radius: 218.0,
                 soi: 0.0,
-                parent: "Rustholm",
-                a: 420.0, e: 0.0, i: 0.1, lan: 0.0, arg_pe: 0.0, m0: 0.9,
+                parent: "Athosil",
+                a: 48265.7, e: 0.037, i: 0.116, lan: 0.0, arg_pe: 0.0, m0: 2.984,
+                atmo_color: (0.90, 0.74, 0.40),
+                atmo_height: 83.6,
+                atmo_density: 0.94,
+                clouds: 0.52,
             )),
         ),
         (
-            name: "Brine",
+            name: "Draol",
             transform: (
-                translation: (-5350.0, 0.0, 10380.0),
+                translation: (-47007.7, 0.0, 6320.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -142,12 +146,112 @@
             ),
             scripts: [],
             celestial: Some((
-                mu: 8700.0,
-                body_radius: 44.0,
+                mu: 5660.0,
+                body_radius: 44.9,
                 soi: 0.0,
-                parent: "Duneveil",
-                a: 700.0, e: 0.0, i: 0.05, lan: 0.0, arg_pe: 0.0, m0: 0,
+                parent: "Pelia",
+                a: 1428.9, e: 0.035, i: 0.059, lan: 0.0, arg_pe: 0.0, m0: 5.191,
             )),
+        ),
+        (
+            name: "Umunquo Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 10.0, 10.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.55, 0.80, 1.00),
+            ),
+            scripts: [],
+            material: Some((
+                color: (0.55, 0.80, 1.00),
+                emissive: (0.40, 0.70, 1.00),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(1),
+        ),
+        (
+            name: "Oria Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (12.3, 12.3, 12.3),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (1.00, 0.55, 0.25),
+            ),
+            scripts: [],
+            material: Some((
+                color: (1.00, 0.55, 0.25),
+                emissive: (1.00, 0.45, 0.15),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(2),
+        ),
+        (
+            name: "Pelexru Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (9.3, 9.3, 9.3),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (1.00, 0.55, 0.25),
+            ),
+            scripts: [],
+            material: Some((
+                color: (1.00, 0.55, 0.25),
+                emissive: (1.00, 0.45, 0.15),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(3),
+        ),
+        (
+            name: "Pelia Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (11.8, 11.8, 11.8),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (1.00, 0.55, 0.25),
+            ),
+            scripts: [],
+            material: Some((
+                color: (1.00, 0.55, 0.25),
+                emissive: (1.00, 0.45, 0.15),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(4),
+        ),
+        (
+            name: "Draol Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 4.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.55, 0.80, 1.00),
+            ),
+            scripts: [],
+            material: Some((
+                color: (0.55, 0.80, 1.00),
+                emissive: (0.40, 0.70, 1.00),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(5),
         ),
         (
             name: "Skybox",
@@ -189,7 +293,7 @@
         (
             name: "Astronaut",
             transform: (
-                translation: (6000.0, 175.0, 0.0),
+                translation: (28.0, 189.8, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -237,7 +341,7 @@
         (
             name: "Camera 1",
             transform: (
-                translation: (6000.0, 180.0, 8.0),
+                translation: (28.0, 194.8, -4730.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -264,7 +368,7 @@
         (
             name: "Ship",
             transform: (
-                translation: (6020.0, 157.0, 0.0),
+                translation: (48.0, 185.8, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.6, 2.4, 1.6),
             ),
@@ -308,7 +412,22 @@
                 asset: "vfx/Flame",
                 play_on_start: false,
             )),
-            parent: Some(10),
+            parent: Some(12),
+        ),
+        (
+            name: "Landing Cam",
+            transform: (
+                translation: (0.0, -1.1, 0.0),
+                rotation: (-0.7071068, 0.0, 0.0, 0.7071068),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Camera(
+                fov_y: 1.4,
+                active: false,
+                target: "landing",
+            ),
+            scripts: [],
+            parent: Some(12),
         ),
         (
             name: "Ship HUD",
@@ -336,7 +455,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: TopLeft,
@@ -364,7 +483,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -377,27 +496,6 @@
             )),
         ),
         (
-            name: "Map",
-            transform: (
-                translation: (0.0, 0.0, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.0, 1.0),
-            ),
-            matter: Empty,
-            scripts: [],
-            parent: Some(12),
-            ui: Some((
-                place: Pin(
-                    anchor: Center,
-                    offset: (0.0, 0.0),
-                ),
-                size: (Fixed(520.0), Fixed(520.0)),
-                shader: "shaders/map.flsl",
-                visible: false,
-                opacity: 1.0,
-            )),
-        ),
-        (
             name: "Speed Tape",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -406,7 +504,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -431,7 +529,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -456,7 +554,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -484,7 +582,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -504,6 +602,30 @@
             )),
         ),
         (
+            name: "Landing Screen",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Pin(
+                    anchor: BottomRight,
+                    offset: (-14.0, -14.0),
+                ),
+                size: (Fixed(206.0), Fixed(116.0)),
+                image: Some((
+                    texture: "rt:landing",
+                    tint: (1.0, 1.0, 1.0, 1.0),
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
             name: "Heading Readout",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -512,7 +634,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(12),
+            parent: Some(13),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -543,7 +665,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(10),
+            parent: Some(12),
         ),
         (
             name: "Leg B",
@@ -557,7 +679,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(10),
+            parent: Some(12),
         ),
         (
             name: "Leg C",
@@ -571,7 +693,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(10),
+            parent: Some(12),
         ),
         (
             name: "Leg D",
@@ -585,7 +707,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(10),
+            parent: Some(12),
         ),
     ],
 )

@@ -541,12 +541,18 @@ pub enum MatterDoc {
         id: u32,
     },
     /// A camera viewpoint. `fov_y` is the vertical field of view (radians); `active`
-    /// marks the camera that holds play-mode authority on load.
+    /// marks the camera that holds play-mode authority on load. A non-empty
+    /// `target` renders the camera into the live `rt:<target>` texture; the
+    /// layer `cull_mask` defaults to everything.
     Camera {
         #[serde(default = "default_fov")]
         fov_y: f32,
         #[serde(default)]
         active: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        target: String,
+        #[serde(default = "all_layers", skip_serializing_if = "is_all_layers")]
+        cull_mask: u32,
     },
     /// A placeable point/omni light (position = node transform).
     PointLight {
@@ -665,6 +671,12 @@ fn default_gravity_strength() -> f32 {
     9.81
 }
 
+fn all_layers() -> u32 {
+    u32::MAX
+}
+fn is_all_layers(m: &u32) -> bool {
+    *m == u32::MAX
+}
 fn default_fov() -> f32 {
     60f32.to_radians()
 }
@@ -691,7 +703,12 @@ impl From<&Matter> for MatterDoc {
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
-            Matter::Camera { fov_y, active } => MatterDoc::Camera { fov_y: *fov_y, active: *active },
+            Matter::Camera { fov_y, active, target, cull_mask } => MatterDoc::Camera {
+                fov_y: *fov_y,
+                active: *active,
+                target: target.clone(),
+                cull_mask: *cull_mask,
+            },
             Matter::PointLight { color, intensity, range } => {
                 MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
             }
@@ -752,7 +769,12 @@ impl MatterDoc {
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
-            MatterDoc::Camera { fov_y, active } => Matter::Camera { fov_y: *fov_y, active: *active },
+            MatterDoc::Camera { fov_y, active, target, cull_mask } => Matter::Camera {
+                fov_y: *fov_y,
+                active: *active,
+                target: target.clone(),
+                cull_mask: *cull_mask,
+            },
             MatterDoc::PointLight { color, intensity, range } => {
                 Matter::PointLight { color: *color, intensity: *intensity, range: *range }
             }
@@ -1743,7 +1765,7 @@ mod tests {
                 NodeDoc {
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX },
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -1838,7 +1860,10 @@ mod tests {
         );
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
-        assert_eq!(eye.matter, MatterDoc::Camera { fov_y: 1.0, active: true });
+        assert_eq!(
+            eye.matter,
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX }
+        );
     }
 
     #[test]

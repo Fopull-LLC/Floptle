@@ -204,7 +204,7 @@ end
 
 -- The navball + the G5-style flight instruments flanking it (speed tape left,
 -- altitude tape right, heading readout above — the pilot's layout).
-local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg
+local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg, landing_cam
 -- Published for the HUD blocks: the current compass heading in degrees.
 local heading_deg = 0
 local function find_instruments()
@@ -213,11 +213,12 @@ local function find_instruments()
   tape_spd, tape_alt = find("Speed Tape"), find("Alt Tape")
   txt_spd, txt_alt = find("Speed Readout"), find("Alt Readout")
   txt_hdg = find("Heading Readout")
+  landing_cam = find("Landing Screen") -- the belly-cam feed (A1 render target)
 end
 
 local function set_navball(on)
   find_instruments()
-  for _, inst in ipairs({ navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg }) do
+  for _, inst in ipairs({ navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg, landing_cam }) do
     if inst then
       local el = inst:getcomponent("UiElement")
       if el then el.visible = on and 1 or 0 end

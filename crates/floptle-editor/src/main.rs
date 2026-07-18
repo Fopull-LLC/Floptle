@@ -65,6 +65,7 @@ mod project;
 mod render_frame;
 mod scene_ops;
 mod space;
+mod system_gen;
 mod scene_tab;
 mod selection;
 mod shading;
@@ -258,6 +259,10 @@ struct EditorCmd {
     add_camera: Option<Option<Entity>>,
     /// Open the "new scene" name prompt.
     open_new_scene: bool,
+    /// Open the "🪐 New Solar System" generation dialog.
+    open_system_gen: bool,
+    /// Kick off randomized solar-system generation (from the dialog).
+    start_system_gen: Option<crate::system_gen::SystemGenCfg>,
     /// Create a new blank scene with this name (from Assets ⏵ New ⏵ Scene).
     new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
@@ -1638,6 +1643,12 @@ struct Editor {
     /// Kepler conic). While warp > 1 each in-flight body is driven analytically
     /// from its cached conic — drift-free at any warp; cleared at warp 1.
     space_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
+    /// A1 render targets: target name → (material TexId, color attachment,
+    /// depth). Registered in the raster texture table as `rt:<name>` so
+    /// materials/UI images sample the live feed; rendered per frame by
+    /// `update_render_targets`.
+    render_targets:
+        std::collections::HashMap<String, (floptle_render::TexId, wgpu::TextureView, wgpu::TextureView)>,
     /// Each dynamic body's current dominant celestial (sim body eid → celestial
     /// node index): the carried patched-conic frame. On a dominance change the
     /// body's sim velocity is re-expressed in the new frame so its WORLD
@@ -1897,6 +1908,10 @@ struct Editor {
     new_scene_buf: Option<String>,
     /// New-terrain size/thickness/color/texture buffer (Some = the dialog is open).
     new_terrain_cfg: Option<NewTerrainCfg>,
+    /// The 🪐 New Solar System dialog state (Some while open).
+    system_gen_cfg: Option<crate::system_gen::SystemGenCfg>,
+    /// A running background system generation (progress pumped per frame).
+    system_gen_job: Option<std::sync::mpsc::Receiver<crate::system_gen::SysGenMsg>>,
     /// The scene has unsaved edits (drives the "save before opening?" prompt).
     scene_dirty: bool,
     /// A scene the user asked to open while there were unsaved changes — the

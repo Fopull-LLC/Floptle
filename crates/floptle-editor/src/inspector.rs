@@ -957,7 +957,7 @@ impl EditorTabViewer<'_> {
                                     cmd.focus_terrain = true;
                                 }
                             }
-                            Matter::Camera { fov_y, active } => {
+                            Matter::Camera { fov_y, active, target, cull_mask } => {
                                 ui.label("camera");
                                 ui.small("a viewpoint — play mode renders from the active camera");
                                 // Live preview of what this camera sees.
@@ -972,6 +972,44 @@ impl EditorTabViewer<'_> {
                                     let mut deg = fov_y.to_degrees();
                                     if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
                                         *fov_y = deg.to_radians();
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                // A1: render-target name — a live texture any material
+                                // or UI image can wear as `rt:<name>`.
+                                ui.horizontal(|ui| {
+                                    ui.label("target").on_hover_text(
+                                        "render this camera into a live texture every frame; \
+                                         use it as texture \"rt:<name>\" on a material or UI \
+                                         image — cockpit screens, monitors, mirrors",
+                                    );
+                                    if ui.text_edit_singleline(target).changed() {
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                                if !target.is_empty() {
+                                    ui.small(format!("live texture: rt:{target}"));
+                                }
+                                // Per-layer cull checkboxes (bit i = project layer i).
+                                let label = if *cull_mask == u32::MAX {
+                                    "renders: all layers".to_string()
+                                } else {
+                                    format!(
+                                        "renders: {}/{} layers",
+                                        cull_mask.count_ones().min(self.layer_names.len() as u32),
+                                        self.layer_names.len()
+                                    )
+                                };
+                                ui.menu_button(label, |ui| {
+                                    for (i, name) in self.layer_names.iter().enumerate() {
+                                        let mut on = (*cull_mask >> i) & 1 == 1;
+                                        if ui.checkbox(&mut on, name).changed() {
+                                            *cull_mask ^= 1 << i;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                    if ui.small_button("all").clicked() {
+                                        *cull_mask = u32::MAX;
                                         cmd.inspector_changed = true;
                                     }
                                 });

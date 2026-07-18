@@ -595,6 +595,48 @@
             )),
         ),
         (
+            // A1 dogfood: the belly landing camera — renders straight down
+            // through the ship's floor into the live "rt:landing" texture the
+            // Landing Screen HUD element displays. Wide FOV for the flare.
+            name: "Landing Cam",
+            transform: (
+                translation: (0.0, -1.1, 0.0),
+                rotation: (-0.7071068, 0.0, 0.0, 0.7071068),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Camera(
+                fov_y: 1.4,
+                active: false,
+                target: "landing",
+            ),
+            scripts: [],
+            parent: Some(9),
+        ),
+        (
+            name: "Landing Screen",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(11),
+            ui: Some((
+                place: Pin(
+                    anchor: BottomRight,
+                    offset: (-14.0, -14.0),
+                ),
+                size: (Fixed(206.0), Fixed(116.0)),
+                image: Some((
+                    texture: "rt:landing",
+                    tint: (1.0, 1.0, 1.0, 1.0),
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
             // Pebble's core kernel — same deal as the Planetoid Core, in the
             // moon's crystal blue.
             name: "Pebble Core",
