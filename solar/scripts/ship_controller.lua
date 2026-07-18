@@ -277,95 +277,220 @@ local function update_navball(node)
   if txt_hdg then txt_hdg.text = string.format("HDG %03.0f°", heading_deg) end
 end
 
--- ---- the map screen (S6) ----------------------------------------------------
--- Everything is drawn by shaders/map.flsl; this side only does the orbital
--- mechanics. We project the world onto the ship's ORBITAL PLANE (normal = the
--- angular momentum r × v) with periapsis along +X — in that frame the conic
--- r = p/(1+e·cosθ) is exactly `len(q) + e·q.x = p`, which the shader draws
--- with zero trig. The dominant body sits at the panel center; the sibling
--- body (moon ↔ planet), its orbit ring and its SOI are projected in too, so
--- a transfer is planned by eyeballing your conic against the moon's SOI ring.
-local map_node, map_on, map_span = nil, false, nil
-local function set_map(on)
-  if not map_node then map_node = find("Map") end
-  if not map_node then return end
-  local el = map_node:getcomponent("UiElement")
-  if el then el.visible = on and 1 or 0 end
+-- ---- the map (S6 v2): a REAL 3D interactive map -----------------------------
+-- M toggles KSP-style map mode: the camera detaches and orbits the FOCUSED
+-- body (mouse drag rotates, scroll / ↑↓ zooms, TAB cycles focus across every
+-- body and the ship), while the engine's runtime line layer (`draw.line`)
+-- draws live orbit conics for EVERYTHING — each body's ellipse around its
+-- parent (parents inferred from SOIs), their SOI rings, and the ship's own
+-- conic with Pe/Ap markers. Bodies occlude the lines naturally (the layer
+-- depth-tests). Indicator toggles while open: 1 orbits · 2 SOIs · 3 markers.
+map_view = false -- published: planet_camera stands down while this is true
+local map_focus, map_zoom = 1, nil
+local map_hud_t = -10.0
+local map_yaw2, map_pitch2 = 0.6, 0.45
+local map_show = { orbits = true, soi = true, markers = true }
+local cam_node
+
+-- Orbital-plane basis + conic from a relative state vector: returns
+-- has_orbit, p, ecc, ê1 (periapsis dir), ê2 (in-plane, motion side).
+local function orbit_basis(rx, ry, rz, vx, vy, vz, mu)
+  local rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+  local hx, hy, hz = cross(rx, ry, rz, vx, vy, vz)
+  local h2 = hx * hx + hy * hy + hz * hz
+  if h2 < 1e-3 or rlen < 1e-3 then
+    return false, 0, 0, 1, 0, 0, 0, 0, 1
+  end
+  local p = h2 / mu
+  local cx2, cy2, cz2 = cross(vx, vy, vz, hx, hy, hz)
+  local evx = cx2 / mu - rx / rlen
+  local evy = cy2 / mu - ry / rlen
+  local evz = cz2 / mu - rz / rlen
+  local ecc = math.sqrt(evx * evx + evy * evy + evz * evz)
+  local e1x, e1y, e1z
+  if ecc > 1e-5 then
+    e1x, e1y, e1z = evx / ecc, evy / ecc, evz / ecc
+  else
+    e1x, e1y, e1z = rx / rlen, ry / rlen, rz / rlen
+  end
+  local hl = math.sqrt(h2)
+  local e2x, e2y, e2z = cross(hx / hl, hy / hl, hz / hl, e1x, e1y, e1z)
+  return true, p, ecc, e1x, e1y, e1z, e2x, e2y, e2z
 end
 
-local function update_map(node, dt)
-  if not map_on or not map_node then return end
-  local dn = space.dominant(node.x, node.y, node.z)
-  local b = dn and space.body(dn)
-  if not b then return end
-  local rx, ry, rz = node.x - b.x, node.y - b.y, node.z - b.z
-  local ux, uy, uz = node.vx - b.vx, node.vy - b.vy, node.vz - b.vz
-  local rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
-  local hx, hy, hz = cross(rx, ry, rz, ux, uy, uz)
-  local h2 = hx * hx + hy * hy + hz * hz
-  local has_orbit = h2 > 1e-3 and rlen > 1e-3
-  -- In-plane basis: ê1 = periapsis direction, ê2 = ĥ × ê1 (motion counter-
-  -- clockwise on screen). Parked/degenerate → radial +X so the ship still shows.
-  local e1x, e1y, e1z, e2x, e2y, e2z = 1, 0, 0, 0, 0, 1
-  local p, ecc = 0, 0
-  if has_orbit then
-    p = h2 / b.mu
-    local cx2, cy2, cz2 = cross(ux, uy, uz, hx, hy, hz)
-    local evx = cx2 / b.mu - rx / rlen
-    local evy = cy2 / b.mu - ry / rlen
-    local evz = cz2 / b.mu - rz / rlen
-    ecc = math.sqrt(evx * evx + evy * evy + evz * evz)
-    if ecc > 1e-5 then
-      e1x, e1y, e1z = evx / ecc, evy / ecc, evz / ecc
+-- Draw r = p/(1+e·cosθ) around a world center in the ê1/ê2 plane. Handles
+-- ellipses AND hyperbolas (invalid θ range just breaks the polyline).
+local function draw_conic(cx, cy, cz, e1x, e1y, e1z, e2x, e2y, e2z, p, ecc, r, g, b, a)
+  local segs = 96
+  local px2, py2, pz2, has_prev = 0, 0, 0, false
+  for i = 0, segs do
+    local th = (i / segs) * 2 * math.pi
+    local den = 1 + ecc * math.cos(th)
+    if den > 0.05 then
+      local rr = p / den
+      local ct, st = math.cos(th), math.sin(th)
+      local wx = cx + (e1x * ct + e2x * st) * rr
+      local wy = cy + (e1y * ct + e2y * st) * rr
+      local wz = cz + (e1z * ct + e2z * st) * rr
+      if has_prev then draw.line(px2, py2, pz2, wx, wy, wz, r, g, b, a) end
+      px2, py2, pz2, has_prev = wx, wy, wz, true
     else
-      e1x, e1y, e1z = rx / rlen, ry / rlen, rz / rlen
+      has_prev = false
     end
-    local hl = math.sqrt(h2)
-    e2x, e2y, e2z = cross(hx / hl, hy / hl, hz / hl, e1x, e1y, e1z)
-  elseif rlen > 1e-3 then
-    e1x, e1y, e1z = rx / rlen, ry / rlen, rz / rlen
-    e2x, e2y, e2z = norm(cross(e1x, e1y, e1z, 0, 1, 0))
-    if e2x == 0 and e2y == 0 and e2z == 0 then e2x, e2y, e2z = 0, 0, 1 end
   end
-  local sx = rx * e1x + ry * e1y + rz * e1z
-  local sy = rx * e2x + ry * e2y + rz * e2z
-  local vlen = math.sqrt(ux * ux + uy * uy + uz * uz)
-  local vmx, vmy = 0, 0
-  if vlen > 0.5 then
-    vmx = (ux * e1x + uy * e1y + uz * e1z) / vlen
-    vmy = (ux * e2x + uy * e2y + uz * e2z) / vlen
+end
+
+local function draw_ring(cx, cy, cz, e1x, e1y, e1z, e2x, e2y, e2z, radius, r, g, b, a)
+  draw_conic(cx, cy, cz, e1x, e1y, e1z, e2x, e2y, e2z, radius, 0, r, g, b, a)
+end
+
+local function draw_cross(x, y, z, s, r, g, b)
+  draw.line(x - s, y, z, x + s, y, z, r, g, b, 1)
+  draw.line(x, y - s, z, x, y + s, z, r, g, b, 1)
+  draw.line(x, y, z - s, x, y, z + s, r, g, b, 1)
+end
+
+-- The parent of body i: the OTHER body with the smallest SOI still containing
+-- it (patched conics — same rule the engine uses for dominance).
+local function body_parent(bodies, i)
+  local b = bodies[i]
+  local best, bs = nil, nil
+  for j, o in ipairs(bodies) do
+    if j ~= i then
+      local dx, dy, dz = b.x - o.x, b.y - o.y, b.z - o.z
+      local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+      local soi = o.soi < 0 and math.huge or o.soi
+      if d <= soi and (bs == nil or soi < bs) then best, bs = o, soi end
+    end
   end
-  -- The nearest sibling body, projected into the same plane.
-  local ox, oy, orad, osoi, orbr, opres = 0, 0, 0, 0, 0, 0
-  for _, o in ipairs(space.bodies()) do
-    if o.name ~= b.name then
-      local dx2, dy2, dz2 = o.x - b.x, o.y - b.y, o.z - b.z
-      local dd = math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
-      if opres == 0 or dd < orbr then
-        ox = dx2 * e1x + dy2 * e1y + dz2 * e1z
-        oy = dx2 * e2x + dy2 * e2y + dz2 * e2z
-        orad, orbr, opres = o.radius, dd, 1
-        osoi = o.soi > 0 and o.soi or 0
+  return best
+end
+
+local function update_map3d(node, dt)
+  if not map_view then return end
+  if not cam_node then cam_node = find("Camera 1") end
+  local bodies = space.bodies()
+  local nf = #bodies + 1 -- focus slots: every body, then the ship
+  if input.pressed("tab") then
+    map_focus = map_focus % nf + 1
+    map_zoom = nil
+  end
+  if map_focus > nf then map_focus = 1 end
+  if input.pressed("1") then map_show.orbits = not map_show.orbits end
+  if input.pressed("2") then map_show.soi = not map_show.soi end
+  if input.pressed("3") then map_show.markers = not map_show.markers end
+
+  local focus, fname, fradius
+  if map_focus <= #bodies then
+    focus = bodies[map_focus]
+    fname, fradius = focus.name, focus.radius
+  else
+    focus = { x = node.x, y = node.y, z = node.z }
+    fname, fradius = "SHIP", 6
+  end
+  if not map_zoom then map_zoom = math.max(fradius * 6, 80) end
+
+  -- Camera: orbit the focus (drag rotates, scroll / ↑↓ zooms).
+  input.setMouseLocked(true)
+  local mdx, mdy = input.mouse_delta()
+  map_yaw2 = map_yaw2 - mdx * 0.005
+  map_pitch2 = math.max(-1.45, math.min(1.45, map_pitch2 - mdy * 0.005))
+  local sc = input.scroll()
+  if sc and sc ~= 0 then map_zoom = map_zoom * (1 - sc * 0.1) end
+  if input.key("up") then map_zoom = map_zoom * (1 - 1.5 * dt) end
+  if input.key("down") then map_zoom = map_zoom * (1 + 1.5 * dt) end
+  map_zoom = math.max(fradius * 1.6, math.min(map_zoom, 200000))
+  if cam_node then
+    local cp, sp2 = math.cos(map_pitch2), math.sin(map_pitch2)
+    local cy3, sy3 = math.cos(map_yaw2), math.sin(map_yaw2)
+    local dx3, dy3, dz3 = cp * sy3, sp2, cp * cy3
+    cam_node.x = focus.x + dx3 * map_zoom
+    cam_node.y = focus.y + dy3 * map_zoom
+    cam_node.z = focus.z + dz3 * map_zoom
+    cam_node.yaw = math.atan2(dx3, dz3)
+    cam_node.pitch = -map_pitch2
+    cam_node.roll = 0
+  end
+
+  -- Orbit lines + SOI rings for every body around its inferred parent.
+  for i, b in ipairs(bodies) do
+    local par = body_parent(bodies, i)
+    if par then
+      local has, p, ecc, e1x, e1y, e1z, e2x, e2y, e2z = orbit_basis(
+        b.x - par.x, b.y - par.y, b.z - par.z,
+        b.vx - par.vx, b.vy - par.vy, b.vz - par.vz, par.mu)
+      if has then
+        if map_show.orbits then
+          draw_conic(par.x, par.y, par.z, e1x, e1y, e1z, e2x, e2y, e2z,
+            p, ecc, 0.55, 0.62, 0.72, 0.8)
+        end
+        if map_show.soi and b.soi > 0 then
+          draw_ring(b.x, b.y, b.z, e1x, e1y, e1z, e2x, e2y, e2z,
+            b.soi, 0.35, 0.5, 0.62, 0.5)
+        end
       end
     end
   end
-  -- Auto-fit the view to the current conic on open; ↑/↓ zoom afterwards.
-  if not map_span then
-    map_span = math.max(rlen * 1.4, b.radius * 3.0)
-    if has_orbit and ecc < 1 then
-      map_span = math.max(map_span, p / (1 - ecc) * 1.25)
+
+  -- The ship's own conic + Pe/Ap markers + a position cross.
+  local dn = space.dominant(node.x, node.y, node.z)
+  local db = dn and space.body(dn)
+  local info_orbit = nil
+  if db then
+    local has, p, ecc, e1x, e1y, e1z, e2x, e2y, e2z = orbit_basis(
+      node.x - db.x, node.y - db.y, node.z - db.z,
+      node.vx - db.vx, node.vy - db.vy, node.vz - db.vz, db.mu)
+    if has then
+      info_orbit = { body = db.name, p = p, ecc = ecc, radius = db.radius }
+      if map_show.orbits then
+        draw_conic(db.x, db.y, db.z, e1x, e1y, e1z, e2x, e2y, e2z,
+          p, ecc, 0.35, 0.85, 1.0, 1.0)
+      end
+      if map_show.markers then
+        local ms = map_zoom * 0.012
+        local rpe = p / (1 + ecc)
+        draw_cross(db.x + e1x * rpe, db.y + e1y * rpe, db.z + e1z * rpe, ms, 1.0, 0.8, 0.25)
+        if ecc < 1 then
+          local rap = p / (1 - ecc)
+          draw_cross(db.x - e1x * rap, db.y - e1y * rap, db.z - e1z * rap, ms, 0.4, 1.0, 0.6)
+        end
+      end
     end
   end
-  if input.key("up") then map_span = map_span * (1 - 1.6 * dt) end
-  if input.key("down") then map_span = map_span * (1 + 1.6 * dt) end
-  map_span = math.max(b.radius * 1.2, math.min(map_span, 500000))
-  map_node:setShaderParam("view", map_span, has_orbit and 1 or 0, vlen > 0.5 and 1 or 0)
-  map_node:setShaderParam("conic", p, ecc, (has_orbit and ecc < 1) and 1 or 0)
-  map_node:setShaderParam("shipm", sx, sy, 0)
-  map_node:setShaderParam("velm", vmx, vmy, 0)
-  map_node:setShaderParam("focusb", b.radius, b.soi > 0 and b.soi or -1, 0)
-  map_node:setShaderParam("otherb", ox, oy, orad)
-  map_node:setShaderParam("otherb2", osoi, orbr, opres)
+  if map_show.markers then
+    draw_cross(node.x, node.y, node.z, map_zoom * 0.008, 0.6, 1.0, 0.7)
+  end
+
+  -- Focused-body info panel (the flight HUD stands down while the map is open).
+  if time - map_hud_t >= 0.1 then
+    map_hud_t = time
+    local lines = {}
+    lines[1] = string.format("MAP  ·  focus %s   (TAB cycle · drag rotate · scroll/↑↓ zoom)", fname)
+    if map_focus <= #bodies then
+      local b = bodies[map_focus]
+      local dx4, dy4, dz4 = node.x - b.x, node.y - b.y, node.z - b.z
+      local dd = math.sqrt(dx4 * dx4 + dy4 * dy4 + dz4 * dz4)
+      lines[2] = string.format("radius %.0f   µ %.3g   SOI %s", b.radius, b.mu,
+        b.soi < 0 and "∞" or string.format("%.0f", b.soi))
+      lines[3] = string.format("ship distance %.0f  (alt over it %+.0f)", dd, dd - b.radius)
+    end
+    if info_orbit then
+      local o = info_orbit
+      if o.ecc < 1 then
+        lines[#lines + 1] = string.format("SHIP ORBIT [%s]  pe %+.0f  ap %+.0f  e %.2f",
+          o.body, o.p / (1 + o.ecc) - o.radius, o.p / (1 - o.ecc) - o.radius, o.ecc)
+      else
+        lines[#lines + 1] = string.format("SHIP ESCAPE [%s]  pe %+.0f  e %.2f",
+          o.body, o.p / (1 + o.ecc) - o.radius, o.ecc)
+      end
+    end
+    lines[#lines + 1] = string.format(
+      "1 orbits %s · 2 SOIs %s · 3 markers %s · M close",
+      map_show.orbits and "ON" or "off",
+      map_show.soi and "ON" or "off",
+      map_show.markers and "ON" or "off")
+    set_hud(node, table.concat(lines, "\n"))
+  end
 end
 
 function fixedUpdate(node, dt)
@@ -387,8 +512,7 @@ function fixedUpdate(node, dt)
       set_flame(node, false, 0)
       set_hud(node, nil)
       set_navball(false)
-      map_on = false
-      set_map(false)
+      map_view = false
     elseif distance(astronaut, node) <= params.board_range then
       piloting = true
       astronaut.visible = false
@@ -429,11 +553,10 @@ function fixedUpdate(node, dt)
 
   if input.pressed("t") then sas = not sas end
 
-  -- ---- map screen ----------------------------------------------------------
+  -- ---- map screen (3D) -----------------------------------------------------
   if input.pressed("m") then
-    map_on = not map_on
-    map_span = nil -- re-fit to the current orbit every time it opens
-    set_map(map_on)
+    map_view = not map_view
+    map_zoom = nil -- re-fit to the focus every time it opens
   end
 
   -- ---- landing gear --------------------------------------------------------
@@ -483,7 +606,7 @@ function fixedUpdate(node, dt)
     end
     -- Coasting on rails: HUD only; attitude/thrust/brake wait for realtime.
     set_flame(node, false, 0)
-    if time - hud_t >= 0.1 then
+    if not map_view and time - hud_t >= 0.1 then
       hud_t = time
       local dom = space.dominant(node.x, node.y, node.z)
       local b = dom and space.body(dom)
@@ -506,7 +629,7 @@ function fixedUpdate(node, dt)
     -- pinned so the sphere hull can't slow-slide down a slope for game-days.
     if node.grounded then node.vx, node.vy, node.vz = 0, 0, 0 end
     update_navball(node)
-    update_map(node, dt)
+    update_map3d(node, dt)
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end
@@ -598,10 +721,10 @@ function fixedUpdate(node, dt)
   node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
 
   update_navball(node)
-  update_map(node, dt)
+  update_map3d(node, dt)
 
-  -- ---- HUD (10 Hz) --------------------------------------------------------
-  if time - hud_t >= 0.1 then
+  -- ---- HUD (10 Hz; the map's info panel owns the text while it's open) ----
+  if not map_view and time - hud_t >= 0.1 then
     hud_t = time
     local dom = space.dominant(node.x, node.y, node.z)
     local b = dom and space.body(dom)
@@ -647,7 +770,7 @@ function fixedUpdate(node, dt)
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · B gear · ./, warp · M map"
+      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · B gear · ./, warp · M map (TAB focus)"
     set_hud(node, table.concat(lines, "\n"))
   end
 

@@ -43,6 +43,16 @@ use mlua::{Lua, RegistryKey, Table};
 /// Queued `node:setShaderParam(...)` writes: (entity index, uniform name, vec4 lanes).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
 
+/// One world-space line segment a script queued via `draw.line(...)` this tick
+/// (immediate mode — re-queued every tick while wanted). Drawn depth-tested by
+/// the runtime line layer; the S6 v2 map draws its orbit conics with these.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawLine {
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+    pub color: [f32; 4],
+}
+
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
@@ -273,6 +283,8 @@ pub struct ScriptHost {
     /// drained by the driver, which spawns the subtree + wires physics, then
     /// invokes each request's callback with the new root's handle.
     spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
+    /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
+    draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// Nodes scripts asked to remove via `destroy(node)` / `node:destroy()`
     /// (entity indices) — drained by the driver, which despawns the subtree
     /// and its physics bodies.

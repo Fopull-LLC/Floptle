@@ -263,6 +263,7 @@ impl Editor {
             Some(retro),
             Some(outline),
             Some(grid_render),
+            Some(line_layer),
             Some(particles),
             Some(post),
             Some(egui),
@@ -274,6 +275,7 @@ impl Editor {
             self.retro.as_mut(),
             self.outline.as_ref(),
             self.grid_render.as_mut(),
+            self.line_layer.as_mut(),
             self.particles.as_mut(),
             self.post.as_mut(),
             self.egui.as_mut(),
@@ -2786,6 +2788,22 @@ impl Editor {
                     gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
                     Some(raymarch.field_bind()),
                 );
+                // Script-drawn 3D lines (draw.line — the map's orbit conics).
+                if !self.script_lines.is_empty() {
+                    let verts: Vec<floptle_render::LineVertex> = self
+                        .script_lines
+                        .iter()
+                        .flat_map(|l| {
+                            let a = (DVec3::from(l.a) - cam.world_position).as_vec3();
+                            let b = (DVec3::from(l.b) - cam.world_position).as_vec3();
+                            [
+                                floptle_render::LineVertex { pos: [a.x, a.y, a.z], color: l.color },
+                                floptle_render::LineVertex { pos: [b.x, b.y, b.z], color: l.color },
+                            ]
+                        })
+                        .collect();
+                    line_layer.draw(gpu, color, depth, view_proj, &verts);
+                }
                 // The reference grid is an editor aid — Scene view only.
                 if self.grid.show && !game_view {
                     let c = self.grid.color;
@@ -3711,6 +3729,9 @@ impl Editor {
                         );
                     }
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
+                    // Immediate-mode 3D lines: this tick's draw.line() calls
+                    // REPLACE the list (an idle script clears its lines).
+                    self.script_lines = self.script_host.take_draw_lines();
                     if let Some(sim) = self.sim.as_mut() {
                         sim.world.colliders = self.script_host.take_colliders(); // reclaim
                         // Apply the tick's writes, then step physics exactly one tick.
@@ -5104,11 +5125,12 @@ impl Editor {
         let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
         resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
 
-        if let (Some(gpu), Some(raster), Some(raymarch), Some(particles)) = (
+        if let (Some(gpu), Some(raster), Some(raymarch), Some(particles), Some(line_layer)) = (
             self.gpu.as_ref(),
             self.raster.as_mut(),
             self.raymarch.as_mut(),
             self.particles.as_mut(),
+            self.line_layer.as_mut(),
         ) {
             let raster_clear = if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
@@ -5123,6 +5145,22 @@ impl Editor {
                 gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
                 Some(raymarch.field_bind()),
             );
+            // Script-drawn 3D lines (draw.line — the map's orbit conics).
+            if !self.script_lines.is_empty() {
+                let verts: Vec<floptle_render::LineVertex> = self
+                    .script_lines
+                    .iter()
+                    .flat_map(|l| {
+                        let a = (DVec3::from(l.a) - cam.world_position).as_vec3();
+                        let b = (DVec3::from(l.b) - cam.world_position).as_vec3();
+                        [
+                            floptle_render::LineVertex { pos: [a.x, a.y, a.z], color: l.color },
+                            floptle_render::LineVertex { pos: [b.x, b.y, b.z], color: l.color },
+                        ]
+                    })
+                    .collect();
+                line_layer.draw(gpu, color, depth, view_proj, &verts);
+            }
             if !vfx_batches.is_empty() {
                 particles.draw(
                     gpu,

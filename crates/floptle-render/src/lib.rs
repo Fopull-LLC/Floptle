@@ -25,6 +25,7 @@ pub mod device;
 pub mod frame;
 pub mod graph;
 pub mod grid;
+pub mod lines;
 pub mod mesh;
 pub mod outline;
 pub mod particles;
@@ -38,6 +39,7 @@ pub use camera::{FlyCamera, Input};
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
+pub use lines::{LineVertex, Lines};
 pub use mesh::{
     capsule, chunk_mesh_data, cone, cube, cylinder, plane, pyramid, uv_sphere, GpuMesh, MeshData,
     MeshId, TextureData, Vertex,

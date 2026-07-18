@@ -61,6 +61,9 @@ local function acquire()
 end
 
 function lateUpdate(node, dt)
+  -- Map mode (S6 v2): the ship script owns the camera while the 3D map is
+  -- open — orbiting the focused body, not the player. Stand down entirely.
+  if ship and ship.map_view then return end
   -- While flying, the SHIP is the subject (wider orbit); on exit, snap back.
   -- Swap on the TRANSITION, not by handle comparison (handles are fresh
   -- tables per access — equality never matches, which stuck the camera on
