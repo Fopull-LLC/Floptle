@@ -20,8 +20,11 @@ pub enum GravitySource {
     /// PATCHED CONICS: of all `InvSq` sources whose SOI contains the point, only
     /// the DEEPEST (smallest SOI — the moon inside the planet inside the sun)
     /// pulls; the rest contribute nothing. `soi ≤ 0` = infinite (the system
-    /// root). Non-InvSq sources still add on top as usual.
-    InvSq { center: Vec3, mu: f32, soi: f32 },
+    /// root). Non-InvSq sources still add on top as usual. INSIDE `body_r`
+    /// (the physical surface radius; 0 = point mass) the pull falls off
+    /// linearly to zero at the center — the uniform-density interior solution —
+    /// so digging to a planet's core never meets the 1/r² singularity.
+    InvSq { center: Vec3, mu: f32, soi: f32, body_r: f32 },
 }
 
 /// Gravity as a sum of composable sources `g(p)`.
@@ -42,21 +45,30 @@ impl GravityField {
     pub fn accel_at(&self, p: Vec3, colliders: &[AnchoredCollider]) -> Vec3 {
         let mut a = Vec3::ZERO;
         // Patched conics: exactly one dominant InvSq body pulls (see `InvSq`).
-        let mut dominant: Option<(f32, Vec3, f32)> = None; // (soi, center, mu)
+        let mut dominant: Option<(f32, Vec3, f32, f32)> = None; // (soi, center, mu, body_r)
         for s in &self.sources {
-            if let GravitySource::InvSq { center, mu, soi } = s {
+            if let GravitySource::InvSq { center, mu, soi, body_r } = s {
                 let soi_eff = if *soi <= 0.0 { f32::INFINITY } else { *soi };
                 if (p - *center).length() <= soi_eff
                     && dominant.is_none_or(|(cur, ..)| soi_eff < cur)
                 {
-                    dominant = Some((soi_eff, *center, *mu));
+                    dominant = Some((soi_eff, *center, *mu, *body_r));
                 }
             }
         }
-        if let Some((_, center, mu)) = dominant {
+        if let Some((_, center, mu, body_r)) = dominant {
             let to = center - p;
             let r2 = to.length_squared().max(1e-6);
-            a += to / r2.sqrt() * (mu / r2);
+            let r = r2.sqrt();
+            // Uniform-density interior below the surface: g = µ·r/R³, reaching
+            // ZERO at the exact center (instead of the 1/r² blow-up that
+            // slingshotted anyone who dug to the core).
+            let g = if body_r > 0.0 && r < body_r {
+                mu * r / (body_r * body_r * body_r)
+            } else {
+                mu / r2
+            };
+            a += to / r * g;
         }
         for s in &self.sources {
             a += match s {

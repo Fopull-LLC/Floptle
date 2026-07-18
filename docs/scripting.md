@@ -505,10 +505,12 @@ draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)        -- rgb
 draw.line(x1, y1, z1, x2, y2, z2, 0.5, 0.5, 0.6, 0.4)          -- + alpha
 ```
 
-Immediate mode: a segment lives **one tick** — call it every `fixedUpdate`
-while you want it visible (an idle script's lines vanish by themselves).
-Lines are depth-tested in the scene, so planets occlude orbit lines the way
-you'd expect, and they render in every game view.
+Immediate mode: a segment lives **one frame** — keep calling it while you want
+it visible (an idle script's lines vanish by themselves). Draw from
+`lateUpdate` when the lines belong to a camera you position there (the solar
+map does): it runs in the camera pass, so the lines land the same frame as the
+camera. Lines draw **over** the scene — never occluded, the way KSP orbit
+lines read through planets — and render in every game view.
 
 ### Buttons & pointer hooks
 

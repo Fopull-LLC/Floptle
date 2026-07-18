@@ -585,7 +585,9 @@ function fixedUpdate(node, dt)
     set_navball(not map_view and piloting)
     if not map_view then set_hud(node, piloting and "" or nil) end
   end
-  update_map3d(node, dt)
+  -- The map itself (camera + line drawing) runs in lateUpdate — the CAMERA
+  -- pass. From fixedUpdate it sampled tick poses while the world renders
+  -- interpolated ones, which showed as constant back-and-forth jitter.
 
   if not piloting then
     if not map_view then set_hud(node, nil) end
@@ -833,6 +835,14 @@ function fixedUpdate(node, dt)
   end
 
   pvx, pvy, pvz = node.vx, node.vy, node.vz
+end
+
+-- The map runs in the CAMERA pass: after physics and the interpolated
+-- writeback, so the map camera (and every drawn orbit line) samples the same
+-- smooth poses the frame renders. Driving it from fixedUpdate stepped the
+-- camera at tick rate against interpolated rendering = perpetual jitter.
+function lateUpdate(node, dt)
+  update_map3d(node, dt)
 end
 
 -- Crashes judged by the PRE-impact velocity (see header). Grace after spawns.

@@ -67,6 +67,10 @@ fn main() {
     // ≈ 53 u/s, escape ≈ 76 — you REACH orbit with technique, you don't trip
     // into it. Voxel 2.0: crust chunks only ≈ tens of MB resident (sparse).
     const RADIUS: f32 = 340.0;
+    /// Solid core ball the cave network never touches: digging to the center
+    /// finds a glowing molten kernel (and the scene's Core node inside it),
+    /// not a degenerate SDF point.
+    const CORE_R: f32 = 24.0;
     let relief: f32 =
         std::env::var("RELIEF").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
     let caves: u32 = std::env::var("CAVES").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
@@ -99,11 +103,22 @@ fn main() {
             // dabs after the fill exposed band-clamped rock: literal terraces.)
             let a = noise.fbm(p * 0.018, 3);
             let b = noise.fbm(p * 0.018 + Vec3::splat(51.7), 3);
-            let tunnel = (a.abs().max(b.abs()) - 0.1) * 34.0;
-            // Keep ≥3 voxels of crust (pinhole guard), and confine caves to the
-            // outer 50 units: a cave network running to the CORE keeps every
-            // interior chunk resident (measured: 389 MB → this cut it ~4×).
-            let gated = tunnel.max(6.0 + planet).max(-(planet + 50.0));
+            // Galleries WIDEN with depth (threshold 0.10 near the surface →
+            // ~0.17 at the bottom): crawlspaces up top, halls further down.
+            let w = 0.1 + (-planet * 0.0006).clamp(0.0, 0.07);
+            let tunnel = (a.abs().max(b.abs()) - w) * 34.0;
+            // Deep CHAMBERS: a second, larger-scale intersection field opens
+            // caverns from depth ~55 down, joining the galleries into rooms.
+            let c1 = noise.fbm(p * 0.008 + Vec3::splat(113.0), 2);
+            let c2 = noise.fbm(p * 0.008 + Vec3::splat(7.9), 2);
+            let chamber = ((c1.abs().max(c2.abs())) - 0.14) * 70.0;
+            let cave = tunnel.min(chamber.max(planet + 55.0));
+            // Keep ≥3 voxels of crust (pinhole guard), stop above the CORE
+            // (a solid ball survives at the center — the core node lives in
+            // it), and cap the network at depth 130. Deeper than the old 50
+            // on purpose (Ty: deeper, more complex caves) — costs resident
+            // chunks, the price of the interior being real.
+            let gated = cave.max(6.0 + planet).max(-(planet + 130.0)).max((CORE_R + 12.0) - r);
             planet.max(-gated)
         },
         |p| {
@@ -114,6 +129,11 @@ fn main() {
             let depth = (RADIUS + bump) - r; // how far below the displaced surface
             let vary = noise.fbm(p * 0.05 + Vec3::splat(83.0), 2);
 
+            // Core zone: molten glow (slot 6) all the way through, so a dig
+            // that reaches the deep interior reads HOT long before the core.
+            if r < CORE_R + 10.0 {
+                return rgba(tint([0.98, 0.82, 0.6], vary), 6);
+            }
             // Crystal pockets: sparse fbm peaks anywhere below the topsoil. They
             // glow (palette slot 7), so a dig or a cave wall that cuts one open
             // reads instantly even in the dark.

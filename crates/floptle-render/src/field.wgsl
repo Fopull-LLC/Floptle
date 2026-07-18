@@ -530,10 +530,17 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         let densf = clamp(1.0 - midalt / H, 0.05, 1.0);
         let a = (1.0 - exp(-(t1 - t0) / (H * 6.0) * densf)) * density;
         // Day side: how high the star stands over the chord point's horizon.
+        // The twilight band is WIDE (scattering wraps well past the terminator)
+        // so the halo fades smoothly around the limb instead of cutting off at
+        // a hard day/night edge, and a faint airglow floor keeps the ring
+        // readable all the way around — dim, but never invisible, on the night
+        // side.
         let zen = normalize(midp - c);
         let sdir = sun_dir_at(midp);
-        let daylight = clamp(dot(zen, sdir) * 1.6 + 0.35, 0.02, 1.0);
-        let scol = G.atmo_color[i].rgb * daylight;
+        let sda = dot(zen, sdir);
+        let daylight = smoothstep(-0.45, 0.35, sda);
+        let scatter = max(daylight, 0.12);
+        let scol = G.atmo_color[i].rgb * scatter;
         out = mix(out, scol, a);
         // Cloud deck: a drifting noise shell at ~1/3 of the atmosphere height.
         let cov = G.atmo_params[i].y;

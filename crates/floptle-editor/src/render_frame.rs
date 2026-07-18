@@ -3745,9 +3745,6 @@ impl Editor {
                         );
                     }
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
-                    // Immediate-mode 3D lines: this tick's draw.line() calls
-                    // REPLACE the list (an idle script clears its lines).
-                    self.script_lines = self.script_host.take_draw_lines();
                     if let Some(sim) = self.sim.as_mut() {
                         sim.world.colliders = self.script_host.take_colliders(); // reclaim
                         // Apply the tick's writes, then step physics exactly one tick.
@@ -3869,6 +3866,13 @@ impl Editor {
             if !self.script_host.errors().is_empty() {
                 self.script_errors = self.script_host.errors().to_vec();
             }
+            // Immediate-mode 3D lines queued this frame — by `update`, `fixedUpdate`
+            // AND `lateUpdate` — drained once per frame, REPLACING the list (an
+            // idle script clears its lines). Drained here, after the late pass,
+            // so a camera-pass drawer (the solar map) lands the SAME frame as the
+            // camera it positioned — draining per tick left the lines a frame
+            // behind an interpolated camera.
+            self.script_lines = self.script_host.take_draw_lines();
             // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
             // drained once here (drawn by the viewport overlay), plus the multiplayer
             // harness's ghost-client markers.

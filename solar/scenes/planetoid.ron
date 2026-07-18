@@ -232,17 +232,27 @@
             scripts: [],
         ),
         (
-            name: "Cube",
+            // The planet's molten heart: a glowing ball inside the solid core
+            // the cave generator guards (dig down and you FIND something).
+            // Parented to the Planetoid so it rides the rails orbit.
+            name: "Planetoid Core",
             transform: (
-                translation: (25470.0, 0.0, 0.0),
-                rotation: (0.0, 0.5, 0.0, 0.8660254),
-                scale: (450.0, 1.0, 1.0),
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (20.0, 20.0, 20.0),
             ),
             matter: Primitive(
-                shape: Cube,
-                color: (0.8, 0.4999999, 0.4),
+                shape: Sphere,
+                color: (1.0, 0.55, 0.25),
             ),
             scripts: [],
+            material: Some((
+                color: (1.0, 0.55, 0.25),
+                emissive: (1.0, 0.45, 0.15),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(1),
         ),
         (
             name: "Ship",
@@ -583,6 +593,28 @@
                 visible: false,
                 opacity: 0.95,
             )),
+        ),
+        (
+            // Pebble's core kernel — same deal as the Planetoid Core, in the
+            // moon's crystal blue.
+            name: "Pebble Core",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.0, 6.0, 6.0),
+            ),
+            matter: Primitive(
+                shape: Sphere,
+                color: (0.55, 0.8, 1.0),
+            ),
+            scripts: [],
+            material: Some((
+                color: (0.55, 0.8, 1.0),
+                emissive: (0.4, 0.7, 1.0),
+                emissive_strength: 2.5,
+                unlit: true,
+            )),
+            parent: Some(2),
         ),
     ],
 )
