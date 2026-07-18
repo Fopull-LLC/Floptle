@@ -75,6 +75,7 @@ impl Editor {
                 center: (*pos - origin).as_vec3(),
                 mu: b.mu as f32,
                 soi: soi as f32,
+                body_r: b.body_radius as f32,
             });
         }
         field

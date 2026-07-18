@@ -1223,7 +1223,8 @@ mod runtime_body_tests {
                 sources: vec![crate::gravity::GravitySource::InvSq {
                     center: Vec3::ZERO,
                     mu,
-                    soi: 0.0, // infinite (root body)
+                    soi: 0.0,     // infinite (root body)
+                    body_r: 0.0, // point mass: the orbit never enters a surface
                 }],
             },
             DVec3::ZERO,

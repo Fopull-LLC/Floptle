@@ -230,13 +230,15 @@ function log(msg) end
 ---@param z number
 function spawnEffect(key, x, y, z) end
 
----The runtime 3D line layer. Immediate mode: a segment lives ONE tick — call it
----every `fixedUpdate` while you want the line on screen. Depth-tested in the
----world (planets occlude orbit lines). This is what the KSP-style map draws
----its conics with.
+---The runtime 3D line layer. Immediate mode: a segment lives ONE frame — call
+---it every `lateUpdate` (preferred: it runs in the camera pass, so lines land
+---the same frame as the camera that framed them) or `update`/`fixedUpdate`
+---while you want the line on screen. Drawn OVER the scene (never occluded —
+---KSP-style orbit lines read through planets). This is what the map draws its
+---conics with.
 draw = {}
 
----Queue one world-space line segment for this tick.
+---Queue one world-space line segment for this frame.
 ---e.g. `draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)`
 ---@param x1 number @param y1 number @param z1 number
 ---@param x2 number @param y2 number @param z2 number

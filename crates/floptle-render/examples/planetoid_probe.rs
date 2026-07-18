@@ -225,7 +225,7 @@ fn main() {
             }
         };
 
-        let rm = RaymarchGlobals {
+        let mut rm = RaymarchGlobals {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             light_dir: light,
@@ -238,6 +238,16 @@ fn main() {
             params: [0.0, 0.0, 0.0, 1.0],
             ..Default::default()
         };
+        if star.is_some() {
+            // The scene's blue atmosphere on the planet (center = world origin):
+            // the terminator shot must show the halo WRAPPING the night limb
+            // (faint airglow) and fading smoothly across the terminator, not
+            // cutting off at the day/night edge.
+            rm.atmo_meta = [1.0, 0.0, 0.0, 0.0];
+            rm.atmo_color[0] = [0.45, 0.6, 0.85, 0.8];
+            rm.atmo_body[0] = [cr.x, cr.y, cr.z, 348.0];
+            rm.atmo_params[0] = [100.0, 0.5, 0.0, 0.0];
+        }
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm);
 
         let globals = Globals {
@@ -310,6 +320,15 @@ fn main() {
     println!("terminator: day side {day:.1}, night side {night:.1}");
     assert!(day > 60.0, "day side too dark ({day:.1}) — is the star being honored?");
     assert!(night < day * 0.45, "no terminator: night {night:.1} vs day {day:.1}");
+    // The atmosphere ring just OUTSIDE the disc: bright on the day limb, and a
+    // faint-but-visible airglow on the NIGHT limb (Ty: the halo must read all
+    // the way around, not cut off at the terminator).
+    let limb_day = avg(&term_px, 716, 288);
+    let limb_night = avg(&term_px, 220, 288);
+    println!("limb halo: day {limb_day:.1}, night {limb_night:.1}");
+    assert!(limb_day > 20.0, "day limb halo missing ({limb_day:.1})");
+    assert!(limb_night > 9.0, "night limb airglow missing ({limb_night:.1}) — halo cut at terminator");
+    assert!(limb_night < limb_day, "night limb should be dimmer than day");
 
     // The cave must not be pitch black: glowing slots bypass lighting, so SOME pixels
     // should be clearly bright even with ambient 0.04.
