@@ -90,6 +90,11 @@ struct Globals {
     // `sky_uniforms`. Appended at the END so the Rust `RaymarchGlobals` stays byte-identical.
     sky_meta: vec4<f32>,
     sky_uniforms: array<vec4<f32>, 16>,
+    // S8 contextual atmosphere: color.rgb + density.w; body center (camera-
+    // relative) + surface radius; params.x = atmosphere height.
+    atmo_color: vec4<f32>,
+    atmo_body: vec4<f32>,
+    atmo_params: vec4<f32>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions

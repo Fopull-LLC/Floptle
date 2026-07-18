@@ -379,6 +379,17 @@ pub struct CelestialBodyDoc {
     pub arg_pe: f64,
     #[serde(default)]
     pub m0: f64,
+    /// S8 atmosphere (black + height 0 = airless).
+    #[serde(default, skip_serializing_if = "is_zero3")]
+    pub atmo_color: [f32; 3],
+    #[serde(default)]
+    pub atmo_height: f64,
+    #[serde(default = "one_f32")]
+    pub atmo_density: f32,
+}
+
+fn is_zero3(v: &[f32; 3]) -> bool {
+    *v == [0.0, 0.0, 0.0]
 }
 
 fn mu_default() -> f64 {
@@ -401,6 +412,9 @@ impl CelestialBodyDoc {
             lan: self.lan,
             arg_pe: self.arg_pe,
             m0: self.m0,
+            atmo_color: self.atmo_color,
+            atmo_height: self.atmo_height,
+            atmo_density: self.atmo_density,
         }
     }
     pub fn from_body(b: &floptle_core::CelestialBody) -> Self {
@@ -415,6 +429,9 @@ impl CelestialBodyDoc {
             lan: b.lan,
             arg_pe: b.arg_pe,
             m0: b.m0,
+            atmo_color: b.atmo_color,
+            atmo_height: b.atmo_height,
+            atmo_density: b.atmo_density,
         }
     }
 }
@@ -1583,6 +1600,9 @@ mod tests {
                         lan: 0.3,
                         arg_pe: 1.2,
                         m0: 0.8,
+                        atmo_color: [0.4, 0.55, 0.8], // exercise the atmosphere round-trip
+                        atmo_height: 42.0,
+                        atmo_density: 0.7,
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,

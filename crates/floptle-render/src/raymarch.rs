@@ -138,6 +138,13 @@ pub struct RaymarchGlobals {
     pub sky_meta: [f32; 4],
     /// The Sky shader's exposed uniforms (`G.sky_uniforms[i]`), packed by the editor.
     pub sky_uniforms: [[f32; 4]; 16],
+    /// S8 contextual atmosphere (dominant body's): rgb = sky color, w = density.
+    /// Density 0 = no atmosphere (space) — the whole effect gates on it.
+    pub atmo_color: [f32; 4],
+    /// xyz = the atmosphere body's CAMERA-RELATIVE center, w = its surface radius.
+    pub atmo_body: [f32; 4],
+    /// x = atmosphere height above the surface (world units); rest padding.
+    pub atmo_params: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -200,6 +207,9 @@ impl Default for RaymarchGlobals {
             shape_rim: [[0.0; 4]; 4],
             sky_meta: [0.0; 4],
             sky_uniforms: [[0.0; 4]; 16],
+            atmo_color: [0.0; 4],
+            atmo_body: [0.0, 0.0, 0.0, 1.0],
+            atmo_params: [0.0; 4],
         }
     }
 }

@@ -285,8 +285,17 @@ fn build_scene() -> String {
         ),
 "#));
     // 1..5 — the terrain bodies on rails.
+    // Atmosphere per body: (sky color, shell height, density); moons airless.
     let celestial = |name: &str, id: u32, pos: [f64; 3], mu: f64, radius: f64,
-                         parent: &str, a: f64, i: f64, m0: f64| -> String {
+                         parent: &str, a: f64, i: f64, m0: f64,
+                         atmo: Option<([f32; 3], f64, f32)>| -> String {
+        let atmo_lines = match atmo {
+            Some((c, h, d)) => format!(
+                "\n                atmo_color: ({:.2}, {:.2}, {:.2}),\n                atmo_height: {h:.1},\n                atmo_density: {d:.2},",
+                c[0], c[1], c[2]
+            ),
+            None => String::new(),
+        };
         format!(
             r#"        (
             name: "{name}",
@@ -304,18 +313,18 @@ fn build_scene() -> String {
                 body_radius: {radius:.1},
                 soi: 0.0,
                 parent: "{parent}",
-                a: {a:.1}, e: 0.0, i: {i}, lan: 0.0, arg_pe: 0.0, m0: {m0},
+                a: {a:.1}, e: 0.0, i: {i}, lan: 0.0, arg_pe: 0.0, m0: {m0},{atmo_lines}
             )),
         ),
 "#,
             x = pos[0], y = pos[1], z = pos[2],
         )
     };
-    nodes.push_str(&celestial("Rustholm", 1, [6000.0, 0.0, 0.0], 180000.0, 150.0, "Sun", 6000.0, 0.0, 0.0));
-    nodes.push_str(&celestial("Duneveil", 2, [-6050.0, 0.0, 10380.0], 360000.0, 200.0, "Sun", 12000.0, 0.06, 2.1));
-    nodes.push_str(&celestial("Palegate", 3, [-6750.0, 0.0, -20940.0], 86400.0, 120.0, "Sun", 22000.0, 0.12, 4.4));
-    nodes.push_str(&celestial("Ashmoor", 4, [6260.0, 0.0, 330.0], 5200.0, 36.0, "Rustholm", 420.0, 0.1, 0.9));
-    nodes.push_str(&celestial("Brine", 5, [-5350.0, 0.0, 10380.0], 8700.0, 44.0, "Duneveil", 700.0, 0.05, 0.0));
+    nodes.push_str(&celestial("Rustholm", 1, [6000.0, 0.0, 0.0], 180000.0, 150.0, "Sun", 6000.0, 0.0, 0.0, Some(([0.78, 0.42, 0.3], 90.0, 0.85))));
+    nodes.push_str(&celestial("Duneveil", 2, [-6050.0, 0.0, 10380.0], 360000.0, 200.0, "Sun", 12000.0, 0.06, 2.1, Some(([0.93, 0.72, 0.42], 120.0, 0.9))));
+    nodes.push_str(&celestial("Palegate", 3, [-6750.0, 0.0, -20940.0], 86400.0, 120.0, "Sun", 22000.0, 0.12, 4.4, Some(([0.5, 0.78, 0.9], 60.0, 0.55))));
+    nodes.push_str(&celestial("Ashmoor", 4, [6260.0, 0.0, 330.0], 5200.0, 36.0, "Rustholm", 420.0, 0.1, 0.9, None));
+    nodes.push_str(&celestial("Brine", 5, [-5350.0, 0.0, 10380.0], 8700.0, 44.0, "Duneveil", 700.0, 0.05, 0.0, None));
 
     // 6 skybox, 7 post (indices fixed from here down — parent refs use them).
     nodes.push_str(&node(r#"        (

@@ -722,6 +722,8 @@ impl Editor {
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let (fog_color, fog_params) = fog_uniforms(&light_node);
+        let (atmo_color, atmo_body, atmo_params) =
+            crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -1018,6 +1020,9 @@ impl Editor {
                 fog_params,
                 sky_meta,
                 sky_uniforms,
+                atmo_color,
+                atmo_body,
+                atmo_params,
                 // vol_tight_* are renderer-patched at draw time from the uploaded
                 // volumes; the default is "unbounded" (behaves like the full brick).
                 ..Default::default()
@@ -4868,6 +4873,8 @@ impl Editor {
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let (fog_color, fog_params) = fog_uniforms(&light_node);
+        let (atmo_color, atmo_body, atmo_params) =
+            crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (prox_count, prox_a, prox_b, prox_rot) =
             collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
         let globals = Globals {
@@ -5061,6 +5068,9 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                atmo_color,
+                atmo_body,
+                atmo_params,
                 // vol_tight_* are renderer-patched at draw time (default: unbounded).
                 ..Default::default()
             };

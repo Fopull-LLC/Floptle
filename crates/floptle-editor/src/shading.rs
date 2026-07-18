@@ -114,6 +114,42 @@ pub(crate) fn sun_vec(l: &Light, cam_world: DVec3) -> [f32; 4] {
     [d.x, d.y, d.z, 0.0]
 }
 
+/// The atmosphere the camera currently sits in (S8): the celestial body with
+/// an atmosphere whose shell the camera is deepest inside. Returns the three
+/// `atmo_*` raymarch-globals vec4s; all-zero density when in open space.
+pub(crate) fn atmo_uniforms(
+    world: &World,
+    cam_world: DVec3,
+) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    type AtmoPick = (f64, [f32; 4], [f32; 4], [f32; 4]);
+    let mut best: Option<AtmoPick> = None;
+    for (e, cb) in world.query::<floptle_core::CelestialBody>() {
+        if cb.atmo_height <= 0.0 {
+            continue;
+        }
+        let wp = floptle_core::world_transform(world, e).translation;
+        let rel = wp - cam_world;
+        let frac = (rel.length() - cb.body_radius) / cb.atmo_height;
+        if frac > 1.0 || best.as_ref().is_some_and(|(f, ..)| frac >= *f) {
+            continue;
+        }
+        let r = rel.as_vec3();
+        best = Some((
+            frac,
+            [
+                cb.atmo_color[0],
+                cb.atmo_color[1],
+                cb.atmo_color[2],
+                cb.atmo_density.clamp(0.0, 1.0),
+            ],
+            [r.x, r.y, r.z, cb.body_radius as f32],
+            [cb.atmo_height as f32, 0.0, 0.0, 0.0],
+        ));
+    }
+    best.map(|(_, a, b, c)| (a, b, c))
+        .unwrap_or(([0.0; 4], [0.0, 0.0, 0.0, 1.0], [0.0; 4]))
+}
+
 /// The Lighting node's shadow knobs as the raymarch-globals uniform vec4s
 /// (`shadow_params` / `shadow_tint` / `shadow_extra`). Softness 0..1 maps to the
 /// penumbra sharpness `k` on a log ramp (0 → 64 razor-hard, 1 → 2 dreamy-soft) so

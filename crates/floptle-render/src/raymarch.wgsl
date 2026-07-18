@@ -46,14 +46,49 @@ fn flsl_sky(dir: vec3<f32>, t: f32) -> vec3<f32> {
 }
 //[flsl-sky-custom-end]
 
+// The dominant body's atmosphere composited over a base sky color (S8): the
+// deeper the camera sits inside the atmosphere the more the body's sky color
+// takes over, thicker toward the horizon than the zenith, lit/dimmed by where
+// the sun is (day → night), with a soft sun glow scattered through it. In
+// space (density 0 or far above the atmosphere) this is a no-op — the star's
+// disc there is the Sun node itself.
+fn apply_atmosphere(base: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    let density = G.atmo_color.w;
+    let height = G.atmo_params.x;
+    if (density < 0.001 || height < 0.001) {
+        return base;
+    }
+    let rd = normalize(dir);
+    // Camera altitude inside the shell (camera sits at the origin).
+    let alt = length(G.atmo_body.xyz) - G.atmo_body.w;
+    let depth = clamp(1.0 - alt / height, 0.0, 1.0);
+    if (depth <= 0.0) {
+        return base;
+    }
+    let zenith = normalize(-G.atmo_body.xyz);
+    let mu = dot(rd, zenith);
+    // Optical thickness: full at the horizon, thinner straight up.
+    let thick = depth * mix(1.0, 0.3, clamp(mu, 0.0, 1.0));
+    let sun = sun_dir_at(vec3<f32>(0.0));
+    // Day/night: how high the sun stands over the camera's horizon.
+    let daylight = clamp(dot(zenith, sun) * 1.6 + 0.35, 0.03, 1.0);
+    let sky = G.atmo_color.rgb * daylight;
+    let a = clamp(thick * density, 0.0, 1.0);
+    var out = mix(base, sky, a);
+    // Scattered sun glow (only through atmosphere — space keeps the mesh sun).
+    let sd = max(dot(rd, sun), 0.0);
+    out += G.light_color.rgb * (pow(sd, 180.0) * 1.4 + pow(sd, 10.0) * 0.12) * a * daylight;
+    return out;
+}
+
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
     // A Sky shader (sky_meta.x = 1) overrides everything: it computes the environment color
     // per ray direction. `flsl_sky` is the spliced procedural sky (a stub otherwise).
     if (G.sky_meta.x > 0.5) {
-        return flsl_sky(normalize(dir), G.params.x);
+        return apply_atmosphere(flsl_sky(normalize(dir), G.params.x), dir);
     }
     if (G.sky_params.x < 0.5) {
-        return G.bg.rgb;
+        return apply_atmosphere(G.bg.rgb, dir);
     }
     // Rotate the ray into the skybox's local frame (inverse rotation, as 3 columns).
     let r = mat3x3<f32>(G.sky_rot0.xyz, G.sky_rot1.xyz, G.sky_rot2.xyz);
@@ -61,7 +96,7 @@ fn sky_color(dir: vec3<f32>) -> vec3<f32> {
     let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5; // longitude → [0,1]
     let v = acos(clamp(d.y, -1.0, 1.0)) / PI;   // latitude  → [0,1] (top→bottom)
     let texel = textureSampleLevel(sky_tex, terrain_samp, vec2<f32>(u, v), 0.0).rgb;
-    return texel * G.sky_tint.rgb;
+    return apply_atmosphere(texel * G.sky_tint.rgb, dir);
 }
 
 // Accumulated diffuse from the point lights at camera-relative position `p` with

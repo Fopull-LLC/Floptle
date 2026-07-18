@@ -41,6 +41,9 @@
                 lan: 0.0,
                 arg_pe: 0.0,
                 m0: 0.0,
+                atmo_color: (0.45, 0.6, 0.85),
+                atmo_height: 100.0,
+                atmo_density: 0.8,
             )),
         ),
         (
