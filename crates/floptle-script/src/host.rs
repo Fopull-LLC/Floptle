@@ -1102,6 +1102,12 @@ impl ScriptHost {
     /// node handle. The world is re-mirrored first (the node didn't exist at the
     /// last sync) and the callback's writes are flushed straight back — so
     /// `spawn("bullet", p, function(b) b.vx = 40 end)` lands the same frame.
+    /// The FULL write flush runs (not just transforms): a `createNode` callback
+    /// configures its node with the construction API (`setTerrain`/`setCelestial`/
+    /// `setPrimitive`/…), and those are RichSet-queued — in the play loop the next
+    /// pass's flush would catch them a tick late, but an EDITOR ACTION drain has
+    /// no next pass, and the components simply never landed (the "generated field
+    /// … but no node carries it" bug: generator bodies stayed Matter::Empty).
     pub fn call_spawn_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
         self.sync_scene(world);
         let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
@@ -1110,7 +1116,7 @@ impl ScriptHost {
             self.record_error("spawn", format!("spawn callback: {err}"));
         }
         let _ = self.lua.remove_registry_value(cb);
-        self.flush_scene(world);
+        self.flush_writes(world);
     }
 
     /// Call `func(node)` on every script instance attached to entity `eid` whose

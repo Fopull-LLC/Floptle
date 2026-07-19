@@ -692,6 +692,22 @@ end
         assert_eq!(creates.len(), 1);
         assert_eq!(creates[0].name, "Child");
         assert_eq!(creates[0].parent, Some(e.index()));
+        // Mimic the editor's drain (apply_spawn_batch): spawn the node, then run
+        // the callback — its construction writes must land IMMEDIATELY (the drain
+        // is the last flush an editor action gets; a transform-only flush here
+        // left generator planets as Matter::Empty and their generated terrain
+        // fields orphaned — "generated field … but no node carries it").
+        let mut creates = creates;
+        let child = world.spawn();
+        world.insert(child, Transform::IDENTITY);
+        world.insert(child, floptle_core::Name(creates[0].name.clone()));
+        world.insert(child, Matter::Empty);
+        let cb = creates.remove(0).cb.expect("create carried its callback");
+        host.call_create_callback(&mut world, cb, child.index());
+        match world.get::<Matter>(child) {
+            Some(Matter::Terrain { id }) => assert_eq!(*id, 3),
+            other => panic!("createNode callback's setTerrain(3) did not land: {other:?}"),
+        }
         let gens = host.take_terrain_generates();
         assert_eq!(gens.len(), 1);
         assert_eq!(gens[0].0, 3);
