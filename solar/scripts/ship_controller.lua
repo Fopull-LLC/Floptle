@@ -738,10 +738,16 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
     -- Walk the CURRENT patched conic to the node time, CROSSING any SOI between
     -- now and then, so the node's state (position, velocity, and which body it
     -- orbits) is the true one — not a single two-body arc around the start.
+    -- `mnv.t0` is an ABSOLUTE sim-time instant; the LEAD (seconds until the burn)
+    -- is `t0 − now`, which counts down ON ITS OWN as you coast — so the node stays
+    -- PINNED to its point on the orbit while you close on it. (It used to store a
+    -- fixed lead-from-now, so the walk always advanced the same span from an
+    -- ever-advancing start → the node marched forever ahead and you never reached it.)
+    local lead = math.max(0, mnv.t0 - space.time())
     local swvx0, swvy0, swvz0 = node.vx + db.vx, node.vy + db.vy, node.vz + db.vz
-    local nsteps = math.max(8, math.ceil(mnv.t / (span / segs)))
+    local nsteps = math.max(8, math.ceil(lead / (span / segs)))
     local ns = patched_state_at(bodies, pidx, node.x, node.y, node.z,
-      swvx0, swvy0, swvz0, dbi, mnv.t, nsteps)
+      swvx0, swvy0, swvz0, dbi, lead, nsteps)
     local ndb = ns.anchor -- the body the node orbits (may DIFFER from the start db!)
     local nrx, nry, nrz = ns.rx, ns.ry, ns.rz
     local nvx, nvy, nvz = ns.rvx, ns.rvy, ns.rvz
@@ -769,7 +775,7 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       mspan = (yp and yp * 1.2) or 20000.0
     end
     local mrpts, manch, menc =
-      walk_trajectory(bodies, pidx, ns.wx, ns.wy, ns.wz, mwvx, mwvy, mwvz, ndb, mnv.t, mspan, segs)
+      walk_trajectory(bodies, pidx, ns.wx, ns.wy, ns.wz, mwvx, mwvy, mwvz, ndb, lead, mspan, segs)
     local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
     -- Cache the burn's WORLD direction so the SAS "node" hold can point at it in
     -- flight (where recompute doesn't run).
@@ -778,7 +784,7 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       rpts = mrpts, anch = manch, enc = menc,
       m_anchor = ndb, m_rx = nrx, m_ry = nry, m_rz = nrz, -- node marker (its body's frame)
       bx = bx, by = by, bz = bz,
-      dv = dv, t0 = mnv.t, step = mspan / segs,
+      dv = dv, t0 = lead, step = mspan / segs,
     }
   else
     traj_mnv = nil
@@ -949,7 +955,11 @@ local function update_map3d(node, dt)
     local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, bodies)
     if pk_k then hover_x, hover_y, hover_z = px, py, pz end
     if pk_t and input.button(0) then
-      if mnv then mnv.t = pk_t else mnv = { t = pk_t, pro = 0.0, nor = 0.0, rad = 0.0 } end
+      -- Store the node as an ABSOLUTE instant (now + the clicked point's lead) so it
+      -- stays fixed on the orbit as you coast toward it instead of running ahead.
+      local t0 = space.time() + pk_t
+      if mnv then mnv.t0, mnv.burned = t0, 0.0
+      else mnv = { t0 = t0, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 } end
     end
 
     -- N still works as a keyboard fallback (create at a lead / clear).
@@ -958,16 +968,23 @@ local function update_map3d(node, dt)
         mnv = nil
       else
         local lead = (oe and oe.period and oe.period * 0.25) or 60.0
-        mnv = { t = lead, pro = 0.0, nor = 0.0, rad = 0.0 }
+        mnv = { t0 = space.time() + lead, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 }
       end
     end
     if mnv then
       -- ←/→ fine-tune the node time; W/S/A/D/Q/E tune the ΔV; X zeroes it.
       local tref = (oe and oe.period) or 600.0
       local horizon = (oe and oe.period and oe.period * 1.5) or (tref * 6)
-      if input.key("left") then mnv.t = mnv.t - tref * 0.15 * dt end
-      if input.key("right") then mnv.t = mnv.t + tref * 0.15 * dt end
-      mnv.t = math.max(1.0, math.min(mnv.t, horizon))
+      local sliding = input.key("left") or input.key("right")
+      if input.key("left") then mnv.t0 = mnv.t0 - tref * 0.15 * dt end
+      if input.key("right") then mnv.t0 = mnv.t0 + tref * 0.15 * dt end
+      -- Clamp ONLY while actively sliding (keep the handle ahead of you and inside
+      -- the horizon) — never during the passive countdown, so the lead can fall to
+      -- 0 and past as you coast up to the node.
+      if sliding then
+        local now = space.time()
+        mnv.t0 = math.max(now + 1.0, math.min(mnv.t0, now + horizon))
+      end
       if input.key("w") then mnv.pro = mnv.pro + dvrate * dt end
       if input.key("s") then mnv.pro = mnv.pro - dvrate * dt end
       if input.key("d") then mnv.rad = mnv.rad + dvrate * dt end
@@ -1057,9 +1074,10 @@ local function update_map3d(node, dt)
     -- Maneuver node + encounter readout.
     if mnv then
       local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+      local lead = mnv.t0 - space.time()
       lines[#lines + 1] = string.format(
-        "NODE  T-%.0fs  ΔV %.1f   pro %+.1f · rad %+.1f · nor %+.1f",
-        mnv.t, dv, mnv.pro, mnv.rad, mnv.nor)
+        "NODE  T%s%.0fs  ΔV %.1f   pro %+.1f · rad %+.1f · nor %+.1f",
+        lead >= 0 and "-" or "+", math.abs(lead), dv, mnv.pro, mnv.rad, mnv.nor)
       if traj_mnv and #traj_mnv.enc > 0 then
         local e = traj_mnv.enc[1]
         local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "exit")
@@ -1479,6 +1497,24 @@ function fixedUpdate(node, dt)
   end
   set_flame(node, throttle > 0.02, throttle)
 
+  -- ---- maneuver-node burn tracking ---------------------------------------
+  -- Tally the ΔV actually applied ALONG the burn direction while you're in the
+  -- burn window and pointing at the node, so the HUD can count "ΔV left" down to
+  -- zero (KSP's shrinking node). Reset well before the window so every approach
+  -- starts from the full planned ΔV. `mnv.bwx/y/z` is the node's (fixed, inertial)
+  -- burn direction cached by the map; `acc`/`mass` are this tick's thrust state.
+  if mnv and mnv.bwx then
+    local lead = mnv.t0 - space.time()
+    local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+    local burn_dt = mass > 0 and dv / (params.max_thrust / mass) or 0
+    if lead > burn_dt * 0.5 + 3.0 then
+      mnv.burned = 0.0
+    elseif throttle > 0.02 then
+      local align = math.max(0, nx * mnv.bwx + ny * mnv.bwy + nz * mnv.bwz)
+      mnv.burned = (mnv.burned or 0) + acc * align * dt
+    end
+  end
+
   -- ---- write the node's orientation (nose = +Y, fwd = −Z) -----------------
   local yaw2 = math.atan2(-fx, -fz)
   local pit2 = math.asin(math.max(-1, math.min(1, fy)))
@@ -1538,6 +1574,34 @@ function fixedUpdate(node, dt)
           o.body, o.periapsis - b.radius, o.apoapsis - b.radius, o.period)
       elseif o then
         lines[#lines + 1] = string.format("ESCAPE [%s]  pe %+.0f", o.body, o.periapsis - b.radius)
+      end
+    end
+    -- Maneuver-node readout in FLIGHT: time-to-node (counts down), planned ΔV, the
+    -- estimated burn duration, and when to light the engine — start early so the
+    -- burn straddles the node — then a live "BURN NOW — ΔV left" as you execute.
+    if mnv then
+      local lead = mnv.t0 - space.time()
+      local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+      local mass2 = params.mass - params.fuel_mass * (1.0 - fuel / params.fuel)
+      local a_full = mass2 > 0 and params.max_thrust / mass2 or 0
+      local burn_dt = a_full > 1e-4 and dv / a_full or 0
+      local rem = math.max(0, dv - (mnv.burned or 0))
+      local rem_dt = a_full > 1e-4 and rem / a_full or 0
+      lines[#lines + 1] = string.format("NODE  T%s%.0fs   ΔV %.1f   burn ~%.1fs",
+        lead >= 0 and "-" or "+", math.abs(lead), dv, burn_dt)
+      if dv < 0.05 then
+        lines[#lines + 1] = "  open map (M) to set ΔV · then SAS ⟶ NODE to aim"
+      else
+        local start_in = lead - burn_dt * 0.5
+        if rem <= 0.05 then
+          lines[#lines + 1] = "  ✔ burn complete — X zeroes ΔV · N clears the node"
+        elseif start_in > 0.5 then
+          lines[#lines + 1] = string.format("  hold SAS ⟶ NODE · start burn in %.0fs", start_in)
+        elseif lead > -burn_dt then
+          lines[#lines + 1] = string.format("  ▶▶ BURN NOW — ΔV %.1f left (~%.1fs)", rem, rem_dt)
+        else
+          lines[#lines + 1] = "  ⚠ node passed — N clears it (or replan on the map)"
+        end
       end
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
