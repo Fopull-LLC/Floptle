@@ -370,20 +370,6 @@
             )),
         ),
         (
-            name: "Gravity",
-            transform: (
-                translation: (0.0, 0.0, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.0, 1.0, 1.0),
-            ),
-            matter: GravityVolume(
-                radial: false,
-                strength: 0.0,
-                radius: 20.0,
-            ),
-            scripts: [],
-        ),
-        (
             name: "Map",
             transform: (
                 translation: (0.0, 0.0, 0.0),

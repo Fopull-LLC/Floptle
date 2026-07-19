@@ -139,8 +139,15 @@ impl Editor {
             for (eid, pos) in sim.body_positions() {
                 let mut dom: Option<(usize, f64)> = None; // (index, soi)
                 for (i, sb) in sys.bodies.iter().enumerate() {
-                    let center = DVec3::from(bodies[i].pos);
-                    if (pos - center).length() <= sb.soi
+                    // Containment against the OLD center: `pos` is the body's
+                    // PRE-tick position while `bodies[i].pos` already moved by
+                    // this tick's rails delta. Testing the new center strands
+                    // a body when its planet jumps (worst on the FIRST tick,
+                    // where authored scene positions can differ from the rails
+                    // by the whole inclination offset — the planet teleports
+                    // out from under the spawn and leaves the crew in space).
+                    let old_center = DVec3::from(bodies[i].pos) - deltas[i];
+                    if (pos - old_center).length() <= sb.soi
                         && dom.is_none_or(|(_, s)| sb.soi < s)
                     {
                         dom = Some((i, sb.soi));

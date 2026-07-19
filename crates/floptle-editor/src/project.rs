@@ -246,10 +246,28 @@ impl Editor {
         };
         let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
         let path = self.project_root.join("scenes").join(format!("{name}.ron"));
+        // A starter Down gravity node so bodies fall without setup — part of
+        // the NEW-scene template only (never healed back in on load): gravity
+        // volumes are optional, and deleting this one sticks. Space scenes
+        // with celestial bodies simply don't want it. (Parsed from RON so
+        // every serde field default — visible, cast_shadow… — applies.)
+        let gravity: floptle_scene::NodeDoc = ron::from_str(
+            r#"(
+                name: "Gravity",
+                transform: (
+                    translation: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                matter: GravityVolume(radial: false, strength: 10.0, radius: 20.0),
+                scripts: [],
+            )"#,
+        )
+        .expect("gravity node template");
         let doc = floptle_scene::SceneDoc {
             name: name.clone(),
             lighting: floptle_scene::LightDoc::default(),
-            nodes: vec![default_camera_node()],
+            nodes: vec![default_camera_node(), gravity],
         };
         if let Err(e) = floptle_scene::save(&doc, &path) {
             eprintln!("  new scene failed: {e}");

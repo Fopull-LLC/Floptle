@@ -39,7 +39,7 @@
                 body_radius: 653.5,
                 soi: 0.0,
                 a: 0.0, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 0.0,
-                luminosity: 85.7,
+                luminosity: 26.0,
                 star_color: (0.72, 0.82, 1.00),
             )),
         ),
@@ -58,9 +58,9 @@
             celestial: Some((
                 mu: 157533.4,
                 body_radius: 184.7,
-                soi: 0.0,
+                soi: 1421.6,
                 parent: "Athosil",
-                a: 4738.8, e: 0.030, i: 0.052, lan: 0.0, arg_pe: 0.0, m0: 4.718,
+                a: 4738.8, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 4.718,
                 atmo_color: (0.47, 0.75, 0.85),
                 atmo_height: 58.6,
                 atmo_density: 0.67,
@@ -82,7 +82,7 @@
             celestial: Some((
                 mu: 389835.9,
                 body_radius: 227.5,
-                soi: 0.0,
+                soi: 2730.0,
                 parent: "Athosil",
                 a: 10522.2, e: 0.036, i: 0.013, lan: 0.0, arg_pe: 0.0, m0: 3.045,
                 atmo_color: (0.90, 0.67, 0.40),
@@ -106,7 +106,7 @@
             celestial: Some((
                 mu: 243049.5,
                 body_radius: 172.8,
-                soi: 0.0,
+                soi: 2763.7,
                 parent: "Athosil",
                 a: 22595.9, e: 0.021, i: 0.077, lan: 0.0, arg_pe: 0.0, m0: 0.223,
                 atmo_color: (0.80, 0.60, 0.40),
@@ -130,7 +130,7 @@
             celestial: Some((
                 mu: 208992.8,
                 body_radius: 218.0,
-                soi: 0.0,
+                soi: 5557.4,
                 parent: "Athosil",
                 a: 48265.7, e: 0.037, i: 0.116, lan: 0.0, arg_pe: 0.0, m0: 2.984,
                 atmo_color: (0.90, 0.74, 0.40),
@@ -379,7 +379,7 @@
         (
             name: "Ship",
             transform: (
-                translation: (48.0, 185.8, -4738.7),
+                translation: (48.0, 191.8, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.6, 2.4, 1.6),
             ),
@@ -423,7 +423,7 @@
                 asset: "vfx/Flame",
                 play_on_start: false,
             )),
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             name: "Landing Cam",
@@ -438,7 +438,7 @@
                 target: "landing",
             ),
             scripts: [],
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             name: "Ship HUD",
@@ -466,7 +466,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: TopLeft,
@@ -494,7 +494,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -515,7 +515,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -540,7 +540,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -565,7 +565,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -593,7 +593,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -621,7 +621,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: BottomRight,
@@ -645,7 +645,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(18),
             ui: Some((
                 place: Pin(
                     anchor: Bottom,
@@ -676,7 +676,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             name: "Leg B",
@@ -690,7 +690,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             name: "Leg C",
@@ -704,7 +704,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             name: "Leg D",
@@ -718,7 +718,7 @@
                 color: (0.38, 0.4, 0.46),
             ),
             scripts: [],
-            parent: Some(12),
+            parent: Some(15),
         ),
         (
             // Game-side procgen tooling: select this node and press the

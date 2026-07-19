@@ -204,16 +204,21 @@ function generate(node)
 
   -- The star: class → color + brightness; µ sets the year lengths.
   local classes = {
-    { { 0.72, 0.82, 1.0 }, 90 }, -- blue-white
-    { { 1.0, 0.97, 0.9 }, 55 },  -- white
-    { { 1.0, 0.92, 0.6 }, 40 },  -- yellow
-    { { 1.0, 0.72, 0.42 }, 26 }, -- orange
-    { { 1.0, 0.5, 0.34 }, 15 },  -- red dwarf
+    { { 0.72, 0.82, 1.0 }, 90, 1 }, -- blue-white
+    { { 1.0, 0.97, 0.9 }, 55, 2 },  -- white
+    { { 1.0, 0.92, 0.6 }, 40, 3 },  -- yellow
+    { { 1.0, 0.72, 0.42 }, 26, 4 }, -- orange
+    { { 1.0, 0.5, 0.34 }, 15, 5 },  -- red dwarf
   }
   local cls = r:pick(classes)
   local starName = rollName(r, taken)
   local starMu = r:range(4e7, 1.1e8)
-  local starLum = cls[2] * r:range(0.8, 1.3) * p.starScale
+  -- Brightness is set for ~1x irradiance AT THE FIRST PLANET (irradiance =
+  -- lum*1e6/d^2; overbright washes the whole sky white through bloom). The
+  -- class nudges it: blue-white runs hot, red dwarfs dim.
+  local a1 = p.minOrbit * r:range(0.9, 1.3)
+  local classHeat = ({ 1.25, 1.1, 1.0, 0.85, 0.7 })[cls[3]]
+  local starLum = (a1 * a1 / 1e6) * r:range(0.95, 1.25) * classHeat * p.starScale
   local starR = r:range(650, 1000)
   createNode(starName, function(star)
     star:setPrimitive("Sphere", cls[1])
@@ -230,7 +235,7 @@ function generate(node)
   local planetKinds = { "canyon", "dune", "ice", "lava", "crystal" }
   local moonKinds = { "barren", "frost", "crystal", "ice" }
   local nPlanets = (p.planets > 0) and math.min(p.planets, 4) or (2 + r:int(0, 2))
-  local a = p.minOrbit * r:range(0.9, 1.3)
+  local a = a1
   local id = 1
   local firstPos, firstR, firstRelief = nil, 0, 0
   local lastKind = nil
@@ -250,15 +255,25 @@ function generate(node)
     local pos = { a * math.cos(m0), 0, a * math.sin(m0) }
     local opts, atmoHue = archetype(r, kind, radius, p.caveScale)
     opts.seed = r:int(1, 1e9)
+    local bodyR = radius + math.max(radius * 0.035, 4)
+    local laplace = a * (mu / starMu) ^ 0.4
     local cel = {
-      mu = mu, bodyRadius = radius + math.max(radius * 0.035, 4), soi = 0,
-      parent = starName, a = a, e = r:range(0, 0.06), i = r:range(0, 0.14), m0 = m0,
+      mu = mu, bodyRadius = bodyR,
+      soi = math.min(math.max(laplace, bodyR * 12), a * 0.3),
+      parent = starName,
+      a = a,
+      -- The SPAWN planet flies a flat circle: the authored crew positions are
+      -- computed from a circular t=0 orbit, and any e/i offset snaps the
+      -- planet away from them on the first rails tick.
+      e = (pi == 1) and 0 or r:range(0, 0.06),
+      i = (pi == 1) and 0 or r:range(0, 0.14),
+      m0 = m0,
     }
     if atmoHue and r:next() < p.atmoChance then
       cel.atmoColor = hsv(atmoHue, 0.5, 0.85)
       cel.atmoHeight = radius * r:range(0.25, 0.45)
-      cel.atmoDensity = r:range(0.5, 0.95)
-      cel.clouds = math.max(0, r:range(-0.2, 0.8))
+      cel.atmoDensity = r:range(0.5, 0.85)
+      cel.clouds = math.max(0, r:range(-0.25, 0.65))
     end
     makeBody(name, id, kind, radius, pos, cel, opts)
     print(string.format("  %s — %s, r %.0f, g %.1f, orbit %.0f", name, kind, radius, g, a))
@@ -266,7 +281,7 @@ function generate(node)
     id = id + 1
 
     -- Moons: up to two, orbits inside half the planet's SOI.
-    local soi = a * (mu / starMu) ^ 0.4
+    local soi = cel.soi
     local ma = radius * r:range(5, 7)
     for _ = 1, 2 do
       if r:next() < p.moonChance and ma < soi * 0.45 then
