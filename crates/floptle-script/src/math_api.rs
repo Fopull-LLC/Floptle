@@ -317,14 +317,22 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         )?,
     )?;
 
-    // rng(seed) — a deterministic random stream: same seed, same sequence, every
-    // machine. r:next() [0,1), r:range(a,b), r:int(a,b) inclusive, r:pick(list).
-    // (`math.random` stays for throwaway randomness; THIS is for gameplay that
-    // must reproduce — loot, procgen scatter, anything a server might replay.)
+    // rng([seed]) — a deterministic random stream: same seed, same sequence,
+    // every machine. r:next() [0,1), r:range(a,b), r:int(a,b) inclusive,
+    // r:pick(list). NO seed = seeded from the clock — a fresh stream every
+    // call (procgen "surprise me" rolls); print/store r.seed to reproduce.
+    // (`math.random` stays for throwaway randomness; THIS is for gameplay
+    // that must reproduce — loot, procgen, anything a server might replay.)
     lua.globals().set(
         "rng",
-        lua.create_function(|lua, seed: f64| {
-            let state = std::cell::RefCell::new(floptle_core::noise::Rng::new(seed as u32));
+        lua.create_function(|lua, seed: Option<f64>| {
+            let seed = seed.map(|s| s as u32).unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
+                    .unwrap_or(1)
+            });
+            let state = std::cell::RefCell::new(floptle_core::noise::Rng::new(seed));
             let t = lua.create_table()?;
             {
                 let s = std::rc::Rc::new(state);
@@ -360,6 +368,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     })?,
                 )?;
             }
+            // The actual seed in play — store/print it to reproduce a roll
+            // made with the no-seed form.
+            t.set("seed", seed)?;
             Ok(t)
         })?,
     )?;

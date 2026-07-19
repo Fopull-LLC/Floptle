@@ -180,10 +180,50 @@ impl Editor {
     /// subtree + physics). Runs inside the play loop only — edit-time placement
     /// goes through [`Self::instantiate_prefab`].
     pub(crate) fn apply_script_spawns(&mut self) {
-        let spawns = self.script_host.take_spawn_requests();
+        // Bounded cascade: a spawn/create CALLBACK may itself create more
+        // nodes (a generator building a hierarchy) — keep draining until the
+        // queues go quiet so nested requests land the same drain.
+        for _pass in 0..8 {
+            let spawns = self.script_host.take_spawn_requests();
+            let creates = self.script_host.take_create_requests();
+            if spawns.is_empty() && creates.is_empty() {
+                break;
+            }
+            self.apply_spawn_batch(spawns, creates);
+        }
         let destroys = self.script_host.take_destroy_requests();
-        if spawns.is_empty() && destroys.is_empty() {
+        if destroys.is_empty() {
             return;
+        }
+        self.apply_destroys(destroys);
+    }
+
+    fn apply_spawn_batch(
+        &mut self,
+        spawns: Vec<floptle_script::SpawnRequest>,
+        creates: Vec<floptle_script::CreateRequest>,
+    ) {
+        // `createNode(name [, parent] [, fn])` — a plain Empty node; the
+        // callback configures it (setTerrain/setCelestial/setPrimitive/
+        // setMaterial + transform writes) right after it exists.
+        for req in creates {
+            let e = self.world.spawn();
+            self.world.insert(e, floptle_core::transform::Transform::IDENTITY);
+            self.world.insert(e, floptle_core::Name(req.name));
+            self.world.insert(e, floptle_core::Matter::Empty);
+            if let Some(pid) = req.parent {
+                let pe = self
+                    .world
+                    .query::<floptle_core::Matter>()
+                    .map(|(pe, _)| pe)
+                    .find(|pe| pe.index() == pid);
+                if let Some(pe) = pe {
+                    self.world.insert(e, floptle_core::Parent(pe));
+                }
+            }
+            if let Some(cb) = req.cb {
+                self.script_host.call_create_callback(&mut self.world, cb, e.index());
+            }
         }
         for req in spawns {
             let Some(path) = self.resolve_prefab_request(&req.prefab) else {
@@ -229,9 +269,9 @@ impl Editor {
                 self.script_host.call_spawn_callback(&mut self.world, cb, root.index());
             }
         }
-        if destroys.is_empty() {
-            return;
-        }
+    }
+
+    fn apply_destroys(&mut self, destroys: Vec<u32>) {
         let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
             std::collections::HashMap::new();
         for (e, p) in self.world.query::<floptle_core::Parent>() {

@@ -2147,6 +2147,32 @@ impl EditorTabViewer<'_> {
                                         );
                                     });
                                 });
+                                // Editor-action buttons the script declares
+                                // (`--@editorButton Label fn`): clicking runs
+                                // fn(node) against the OPEN scene — Lua editor
+                                // tooling (generators, batch fixups).
+                                let actions = crate::script_actions::script_editor_buttons(
+                                    self.project_root,
+                                    &inst.kind,
+                                );
+                                if !actions.is_empty() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        for (label, func) in actions {
+                                            if ui
+                                                .button(format!("▶ {label}"))
+                                                .on_hover_text(format!(
+                                                    "runs {func}(node) from {}.lua on this node, \
+                                                     editing the open scene",
+                                                    inst.kind
+                                                ))
+                                                .clicked()
+                                            {
+                                                cmd.run_editor_action =
+                                                    Some((e, inst.kind.clone(), func));
+                                            }
+                                        }
+                                    });
+                                }
                                 for (k, v) in inst.params.iter_mut() {
                                     cmd.inspector_changed |= ui
                                         .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))

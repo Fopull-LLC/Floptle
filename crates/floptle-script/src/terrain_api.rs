@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use floptle_core::math::Vec3;
-use mlua::Lua;
+use mlua::{Lua, Table};
 
 /// One queued terrain write, in WORLD coordinates (scripts speak world; the editor
 /// converts into each terrain's local frame when applying).
@@ -46,6 +46,7 @@ const MAX_OPS_PER_FRAME: usize = 64;
 pub(crate) fn install_terrain_api(
     lua: &Lua,
     ops: Rc<RefCell<Vec<TerrainOp>>>,
+    generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
 ) {
@@ -155,6 +156,137 @@ pub(crate) fn install_terrain_api(
             Ok(())
         }) {
             let _ = t.set("paintTexture", f);
+        }
+    }
+
+    // terrain.generatePlanet(id, opts) — REPLACE terrain volume `id`'s whole
+    // field with a generated planet (floptle_field::procgen::PlanetFill; runs
+    // on an editor background thread — heavyweight, seconds per body). Every
+    // knob is optional; layer paints are {slot=…, color={r,g,b}}:
+    //   terrain.generatePlanet(2, { seed=41, radius=180, relief=9,
+    //     bumpFreq=4.5, caveDepth=60, coreR=12, corePaint={slot=6,color={1,.8,.6}},
+    //     craters=12, craterMin=0.12, craterMax=0.26, craterDust={slot=11,color=…},
+    //     surfaceA={slot=1,color=…}, surfaceB={slot=2,color=…},
+    //     patchBias=0.45, patchThr=0.08,
+    //     subsoil={slot=3,color=…}, subsoilDepth=2.4,
+    //     strata={slot=4,color=…}, strataDepth=9,
+    //     deep={slot=5,color=…},
+    //     pockets={slot=7,color=…,threshold=0.46,minDepth=6},
+    //     seam={slot=6,color=…,minDepth=20,center=0.32,width=0.045},
+    //     iceCaps={lat=0.75,slot=12,color=…} })
+    {
+        let q = generates.clone();
+        let logs2 = logs.clone();
+        if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
+            use floptle_field::procgen::{GlowPockets, LayerPaint, PlanetFill, SeamSpec};
+            let mut fill = PlanetFill::default();
+            if let Some(t) = &opts {
+                let gf = |k: &str| t.raw_get::<Option<f64>>(k).ok().flatten();
+                let gc = |v: &Table| -> Option<[f32; 3]> {
+                    let c: Table = v.raw_get::<Option<Table>>("color").ok().flatten()?;
+                    Some([
+                        c.raw_get::<Option<f64>>(1).ok().flatten().unwrap_or(1.0) as f32,
+                        c.raw_get::<Option<f64>>(2).ok().flatten().unwrap_or(1.0) as f32,
+                        c.raw_get::<Option<f64>>(3).ok().flatten().unwrap_or(1.0) as f32,
+                    ])
+                };
+                let gp = |k: &str, cur: LayerPaint| -> LayerPaint {
+                    match t.raw_get::<Option<Table>>(k).ok().flatten() {
+                        Some(v) => LayerPaint {
+                            slot: v
+                                .raw_get::<Option<u32>>("slot")
+                                .ok()
+                                .flatten()
+                                .map(|s| s as u8)
+                                .unwrap_or(cur.slot),
+                            color: gc(&v).unwrap_or(cur.color),
+                        },
+                        None => cur,
+                    }
+                };
+                if let Some(v) = gf("seed") { fill.seed = v as u32; }
+                if let Some(v) = gf("radius") { fill.radius = v as f32; }
+                if let Some(v) = gf("voxel") { fill.voxel = v as f32; }
+                if let Some(v) = gf("relief") { fill.relief = v as f32; }
+                if let Some(v) = gf("bumpFreq") { fill.bump_freq = v as f32; }
+                if let Some(v) = gf("caveDepth") { fill.cave_depth = v as f32; }
+                if let Some(v) = gf("coreR") { fill.core_r = v as f32; }
+                if let Some(v) = gf("craters") { fill.craters = v as u32; }
+                if let Some(v) = gf("craterMin") { fill.crater_min = v as f32; }
+                if let Some(v) = gf("craterMax") { fill.crater_max = v as f32; }
+                if let Some(v) = gf("patchBias") { fill.patch_bias = v as f32; }
+                if let Some(v) = gf("patchThr") { fill.patch_thr = v as f32; }
+                if let Some(v) = gf("subsoilDepth") { fill.subsoil_depth = v as f32; }
+                if let Some(v) = gf("strataDepth") { fill.strata_depth = v as f32; }
+                fill.core_paint = gp("corePaint", fill.core_paint);
+                fill.crater_dust = gp("craterDust", fill.crater_dust);
+                fill.surface_a = gp("surfaceA", fill.surface_a);
+                fill.surface_b = gp("surfaceB", fill.surface_b);
+                fill.subsoil = gp("subsoil", fill.subsoil);
+                fill.strata = gp("strata", fill.strata);
+                fill.deep = gp("deep", fill.deep);
+                if let Some(v) = t.raw_get::<Option<Table>>("pockets").ok().flatten() {
+                    fill.pockets = Some(GlowPockets {
+                        paint: LayerPaint {
+                            slot: v.raw_get::<Option<u32>>("slot").ok().flatten().unwrap_or(7)
+                                as u8,
+                            color: gc(&v).unwrap_or([0.72, 0.65, 0.85]),
+                        },
+                        threshold: v
+                            .raw_get::<Option<f64>>("threshold")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0.46) as f32,
+                        min_depth: v
+                            .raw_get::<Option<f64>>("minDepth")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(6.0) as f32,
+                    });
+                }
+                if let Some(v) = t.raw_get::<Option<Table>>("seam").ok().flatten() {
+                    fill.seam = Some(SeamSpec {
+                        paint: LayerPaint {
+                            slot: v.raw_get::<Option<u32>>("slot").ok().flatten().unwrap_or(6)
+                                as u8,
+                            color: gc(&v).unwrap_or([0.95, 0.85, 0.72]),
+                        },
+                        min_depth: v
+                            .raw_get::<Option<f64>>("minDepth")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(20.0) as f32,
+                        center: v.raw_get::<Option<f64>>("center").ok().flatten().unwrap_or(0.32)
+                            as f32,
+                        width: v.raw_get::<Option<f64>>("width").ok().flatten().unwrap_or(0.045)
+                            as f32,
+                    });
+                }
+                if let Some(v) = t.raw_get::<Option<Table>>("iceCaps").ok().flatten() {
+                    fill.ice_caps = Some((
+                        v.raw_get::<Option<f64>>("lat").ok().flatten().unwrap_or(0.75) as f32,
+                        LayerPaint {
+                            slot: v.raw_get::<Option<u32>>("slot").ok().flatten().unwrap_or(12)
+                                as u8,
+                            color: gc(&v).unwrap_or([0.85, 0.92, 0.98]),
+                        },
+                    ));
+                }
+            }
+            let mut q = q.borrow_mut();
+            if q.len() >= 16 {
+                logs2.borrow_mut().push(crate::ScriptLog {
+                    level: crate::LogLevel::Warn,
+                    msg: "terrain.generatePlanet: too many generations queued (16 max)"
+                        .into(),
+                    source: None,
+                });
+                return Ok(());
+            }
+            q.push((id, fill));
+            Ok(())
+        }) {
+            let _ = t.set("generatePlanet", f);
         }
     }
 

@@ -194,6 +194,13 @@ pub struct ScriptHost {
     /// Terrain edits queued by `terrain.sculpt/dig/paint(...)` this frame, drained by
     /// the editor after the script pass (applied to the authority field + sim copy).
     terrain_ops: Rc<RefCell<Vec<terrain_api::TerrainOp>>>,
+    /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
+    /// generations the editor runs on a background thread.
+    terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
+    /// `createNode(...)` requests, drained with the spawn queue.
+    create_requests: Rc<RefCell<Vec<CreateRequest>>>,
+    /// Construction-API component/matter writes (see [`RichSet`]).
+    rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
     /// The scene graph mirror the node handles read/write (synced each `run`).
     scene: Rc<RefCell<SceneMirror>>,
     /// Live per-(entity, script) environments, for script handles.
@@ -487,6 +494,36 @@ pub struct SpawnRequest {
     pub cb: Option<mlua::RegistryKey>,
 }
 
+/// A `createNode(name [, parent] [, fn])` request: a plain node (Empty matter)
+/// the editor's spawn drain creates; `cb` then receives the new node's handle
+/// — the construction hook for script-built content (editor actions, procgen).
+pub struct CreateRequest {
+    pub name: String,
+    pub parent: Option<u32>,
+    pub cb: Option<mlua::RegistryKey>,
+}
+
+/// One value in a rich component write (`node:setCelestial{...}` and friends):
+/// numbers, strings and 3-vectors all flow (the numeric `component_changes`
+/// mirror can't carry strings/colors).
+#[derive(Clone, Debug)]
+pub enum CompVal {
+    Num(f64),
+    Str(String),
+    Vec3([f64; 3]),
+}
+
+/// A queued construction-API write, applied in the host's flush: whole
+/// component field-sets (the component is inserted with defaults if the node
+/// lacks it) and Matter swaps.
+#[derive(Debug)]
+pub enum RichSet {
+    Celestial(Vec<(String, CompVal)>),
+    Material(Vec<(String, CompVal)>),
+    MatterTerrain(u32),
+    MatterPrimitive(String, [f64; 3]),
+}
+
 /// The interior-mutable state the Lua handle closures share with the host: the scene
 /// mirror, the physics body bridges, and the per-(entity, script) environments.
 #[derive(Clone)]
@@ -525,6 +562,9 @@ struct Shared {
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
+    /// Construction-API writes (`setCelestial`/`setMaterial`/`setTerrain`/
+    /// `setPrimitive`), applied in the flush.
+    rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
     /// Animator mirror (entity → layers/states), fed by the editor each frame.
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
     /// Animator commands queued by `node:animator()` handles this frame.
@@ -592,6 +632,68 @@ mod tests {
     use floptle_core::transform::Transform;
     use floptle_core::{Scripts, World};
     use std::io::Write;
+
+    /// The editor-action path end-to-end at the script layer: `call_action`
+    /// runs EXACTLY the named function (never `start`), the construction API
+    /// (`setCelestial`/`setMaterial`) lands on the world, and `createNode` +
+    /// `terrain.generatePlanet` sit queued for the editor to drain.
+    #[test]
+    fn editor_action_runs_one_function_and_queues_construction() {
+        let dir = std::env::temp_dir().join(format!("floptle-action-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "gen",
+            r#"
+--@editorButton Generate roll
+defaults = { size = 30 }
+function start(node) node.x = 999 end -- must NOT fire on an action
+function roll(node)
+  node:setCelestial{ mu = 5000, parent = "Sun", atmoColor = {0.2, 0.4, 0.9} }
+  node:setMaterial{ unlit = true, emissiveStrength = 2 }
+  createNode("Child", node, function(c) c:setTerrain(3) end)
+  terrain.generatePlanet(3, { radius = params.size, caveDepth = 0 })
+end
+"#,
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("Gen".into()));
+        world.insert(e, Matter::Empty);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "gen".into(),
+                enabled: true,
+                params: vec![("size".into(), 42.0)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        let ran = host.call_action(&mut world, &dir, e.index(), "gen", "roll");
+        assert!(ran, "action failed: {:?}", host.errors());
+        // start() must not have fired: the transform is untouched.
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 0.0);
+        let c = world.get::<floptle_core::CelestialBody>(e).expect("setCelestial inserted");
+        assert_eq!(c.mu, 5000.0);
+        assert_eq!(c.parent, "Sun");
+        assert!((c.atmo_color[2] - 0.9).abs() < 1e-5);
+        let m = world.get::<floptle_core::Material>(e).expect("setMaterial inserted");
+        assert!(m.unlit);
+        assert_eq!(m.emissive_strength, 2.0);
+        let creates = host.take_create_requests();
+        assert_eq!(creates.len(), 1);
+        assert_eq!(creates[0].name, "Child");
+        assert_eq!(creates[0].parent, Some(e.index()));
+        let gens = host.take_terrain_generates();
+        assert_eq!(gens.len(), 1);
+        assert_eq!(gens[0].0, 3);
+        // Inspector-tuned params reach the action (42 overrides the default 30).
+        assert_eq!(gens[0].1.radius, 42.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn write_script(dir: &Path, name: &str, body: &str) {
         let mut f = std::fs::File::create(dir.join(format!("{name}.lua"))).unwrap();

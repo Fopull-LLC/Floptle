@@ -15,6 +15,7 @@ floptle-core = { path = "../floptle-core" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-physics = { path = "../floptle-physics" }
+floptle-field = { path = "../floptle-field" }
 glam = { workspace = true }
 mlua = { version = "0.10", features = ["luajit", "vendored"] }
 floptle-net = { path = "../floptle-net" }
