@@ -856,4 +856,24 @@ mod tests {
         assert!(!batches.is_empty(), "preview must produce a batch");
         assert_eq!(batches[0].texture, Some(TexId(7)), "path must resolve to the registered id");
     }
+
+    // Regression guard for the solar demo's ship VFX: the real Flame + Explosion
+    // effects must resolve out of the project registry AND actually emit. If this
+    // ever fails, the plume/explosion "disappeared" bug is in load/registration —
+    // if it PASSES (as it does), a runtime absence is scene/script/anchor, not data.
+    #[test]
+    fn solar_demo_ship_effects_resolve_and_emit() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar");
+        if !root.join("vfx").join("Flame.vfx.ron").exists() {
+            return; // demo project not present in this checkout — skip
+        }
+        let mut sys = VfxSystem::default();
+        sys.rescan(&root);
+        for (key, tag) in [("vfx/Flame", "throttle plume"), ("Explosion", "crash burst")] {
+            let fx = sys.effect(key).unwrap_or_else(|| panic!("{tag}: '{key}' must resolve"));
+            let mut inst = EffectInstance::new(fx, 1);
+            inst.simulate_to(0.4, VFX_GRAVITY);
+            assert!(inst.alive() > 0, "{tag}: '{key}' resolved but emitted nothing");
+        }
+    }
 }

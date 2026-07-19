@@ -10,6 +10,7 @@ shader navball {
   uniform up: vec3 = vec3(0, 0, -1)
   uniform nose: vec3 = vec3(0, 1, 0)
   uniform prograde: vec3 = vec3(0, 0, 0)
+  uniform sasTarget: vec3 = vec3(0, 0, 0)
   uniform sky: color = #3E7EC2
   uniform ground: color = #7A4A26
 
@@ -35,7 +36,12 @@ shader navball {
   let north = smoothstep(0.994, 0.998, dot(d, vec3(0, 0, 1)))
   let pgd = smoothstep(0.992, 0.997, dot(d, prograde))
   let rgd = smoothstep(0.992, 0.997, -dot(d, prograde))
-  let marked = lined + vec3(0.2, 0.9, 1) * north + vec3(1, 0.85, 0.2) * pgd + vec3(1, 0.3, 0.2) * rgd
+  // SAS hold target: a green RING reticle (hollow, so it reads as an autopilot
+  // aim point, not another prograde dot). Hidden when sasTarget is zero.
+  let sd = dot(d, sasTarget)
+  let sast = smoothstep(0.984, 0.990, sd) - smoothstep(0.994, 0.997, sd)
+  let marked = lined + vec3(0.2, 0.9, 1) * north + vec3(1, 0.85, 0.2) * pgd
+    + vec3(1, 0.3, 0.2) * rgd + vec3(0.3, 1, 0.5) * sast
 
   let chx = (1 - smoothstep(0.004, 0.012, abs(q.x))) * step(abs(q.y), 0.17)
   let chy = (1 - smoothstep(0.004, 0.012, abs(q.y))) * step(abs(q.x), 0.17)

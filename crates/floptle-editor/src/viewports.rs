@@ -409,6 +409,21 @@ impl Editor {
             }
         };
         let aspect = w.max(1) as f32 / h.max(1) as f32;
+        // Feed the map's world→screen picker for the DOCKED game tab: its rect in
+        // FULL-WINDOW physical pixels (game_rect is logical → ×ppp), matching the
+        // cursor space `input.mouse()` reports. Fullscreen feeds from render_frame.
+        if let Some(r) = self.game_rect {
+            let vp = cam.view_proj(aspect);
+            self.script_host.set_view(floptle_script::ViewInfo {
+                view_proj: vp.to_cols_array(),
+                cam_world: [cam.world_position.x, cam.world_position.y, cam.world_position.z],
+                vp_x: r.min.x * ppp,
+                vp_y: r.min.y * ppp,
+                vp_w: r.width() * ppp,
+                vp_h: r.height() * ppp,
+                valid: true,
+            });
+        }
         let Some((cv, dv)) =
             self.game_vp.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
         else {

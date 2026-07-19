@@ -46,6 +46,131 @@ fn flsl_sky(dir: vec3<f32>, t: f32) -> vec3<f32> {
 }
 //[flsl-sky-custom-end]
 
+// ---- Deep-space background (the built-in flat-bg fallback) -------------------
+// A procedural star vault — sparse crisp stars, a faint milky-way dust band, and
+// a hint of colored nebula over a near-black void. Everything is anchored in the
+// STABLE galactic frame (driven by `dir` directly, never view-space), so the sky
+// holds still as the camera rotates. `sky_color` wraps the result in
+// `atmo_composite`, which is what makes it context-aware: on a surface the
+// atmosphere washes the stars out, from orbit you get a limb halo AND stars, and
+// in deep space (no shell hit) the full starfield shows over the void. Noise
+// helpers (`hash31`, `cloud_fbm`) and `sun_dir_at` come from field.wgsl, which is
+// concatenated onto this module.
+
+// A vec3 hash (Dave Hoskins) → three independent randoms in [0,1) from a cell id.
+fn hash33(p3in: vec3<f32>) -> vec3<f32> {
+    var p3 = fract(p3in * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yxx) * p3.zyx);
+}
+
+// One octave of point stars. Each cell of the galactic-frame grid holds at most
+// one star, placed at a hashed sub-cell position and CULLED by a per-cell random
+// so the field stays sparse. Coloring/brightness/twinkle all key off the cell
+// that OWNS each star (looped over the 3x3x3 neighbourhood), so there is no seam
+// where a star straddles a cell boundary. The star is a SOFT round core (a
+// smoothstep on distance), which anti-aliases it and keeps a stable minimum
+// angular size — no sub-pixel shimmer under the retro down-res path.
+fn star_octave(dir: vec3<f32>, scale: f32, thresh: f32, size: f32, twk: f32, t: f32) -> vec3<f32> {
+    let p = dir * scale;
+    let ip = floor(p);
+    let fp = fract(p);
+    var acc = vec3<f32>(0.0);
+    for (var z = -1; z <= 1; z = z + 1) {
+        for (var y = -1; y <= 1; y = y + 1) {
+            for (var x = -1; x <= 1; x = x + 1) {
+                let g = vec3<f32>(f32(x), f32(y), f32(z));
+                let cell = ip + g;
+                let h = hash33(cell);
+                if (h.x < thresh) {
+                    continue; // most cells are empty void
+                }
+                let d = length(g + h - fp);       // distance to this cell's star
+                let core = 1.0 - smoothstep(size * 0.35, size, d);
+                // Magnitude distribution: a few bright, many faint.
+                let mag = 0.15 + 0.85 * h.y * h.y;
+                // Gentle per-star twinkle (never dims below ~0.6, off when twk=0).
+                let tw = 1.0 - twk * 0.4 * (0.5 + 0.5 * sin(t * (0.6 + h.z * 2.0) + h.x * 43.0));
+                let col = mix(vec3<f32>(1.0, 0.86, 0.72), vec3<f32>(0.78, 0.85, 1.0), h.z);
+                acc += col * (core * mag * tw);
+            }
+        }
+    }
+    return acc;
+}
+
+// Two octaves: sparse bright twinkling stars + a denser faint dusting.
+fn starfield(dir: vec3<f32>, t: f32) -> vec3<f32> {
+    var s = star_octave(dir, 34.0, 0.88, 0.16, 1.0, t);
+    s += star_octave(dir, 71.0, 0.85, 0.15, 0.0, t) * 0.4;
+    return s;
+}
+
+// A faint domain-warped nebula — just a HINT of color in the densest cores,
+// mostly invisible so the void stays black.
+fn nebula(dir: vec3<f32>) -> vec3<f32> {
+    let w = vec3<f32>(
+        cloud_fbm(dir * 1.8 + vec3<f32>(11.3, 5.1, 7.7)),
+        cloud_fbm(dir * 1.8 + vec3<f32>(27.2, 13.9, 3.4)),
+        cloud_fbm(dir * 1.8 + vec3<f32>(41.6, 21.5, 9.8)),
+    );
+    let n = cloud_fbm(dir * 2.4 + w * 1.4);
+    let m = smoothstep(0.62, 1.0, n); // only the densest cores register
+    let tint = mix(vec3<f32>(0.16, 0.06, 0.24), vec3<f32>(0.05, 0.14, 0.22),
+        cloud_fbm(dir * 1.1 + vec3<f32>(5.0)));
+    return tint * (m * 0.22);
+}
+
+// The milky-way band: a TIGHT exp() brightness ridge around a FIXED galactic-pole
+// axis, broken into wisps by a dust fbm with real dark gaps so it reads as a
+// subtle ribbon rather than a broad fog.
+fn milkyway(dir: vec3<f32>) -> vec3<f32> {
+    let pole = normalize(vec3<f32>(0.32, 0.86, -0.40));
+    let off = dot(dir, pole);
+    let band = exp(-off * off * 55.0);           // ~±14° ribbon
+    let d = cloud_fbm(dir * 6.0);
+    let wisp = smoothstep(0.4, 0.78, d);         // dark gaps between wisps
+    let col = mix(vec3<f32>(0.18, 0.22, 0.34), vec3<f32>(0.42, 0.36, 0.44), d);
+    return col * (band * wisp * 0.34);
+}
+
+// The full deep-space environment along `dir`: a near-black void tinted by the
+// scene background, plus milky way + nebula + stars, plus a DIM glint toward the
+// dominant star (kept dim: `atmo_composite` adds its own bright sun glow wherever
+// a shell is actually hit, so this only fills in the airless-space case).
+fn deep_space(dir: vec3<f32>) -> vec3<f32> {
+    let rd = normalize(dir);
+    let t = G.params.x;
+    // Near-flat void with a whisper of vertical gradient (keeps a non-space flat
+    // bg essentially its authored color, just darker toward the nadir).
+    let void_col = G.bg.rgb * (0.82 + 0.18 * smoothstep(-1.0, 1.0, rd.y));
+    // Fade the celestial layers as the camera sinks into a thick DAYTIME shell so
+    // stars don't bleed through a bright sky (atmo_composite handles most of it).
+    // Airless bodies (no shell) and the night side keep their stars.
+    var fade = 1.0;
+    if (G.atmo_meta.x >= 1.0) {
+        let H = G.atmo_params[0].x;
+        let dens = G.atmo_color[0].w;
+        if (H > 0.001 && dens > 0.001) {
+            let alt = length(G.atmo_body[0].xyz) - G.atmo_body[0].w;
+            let depth = clamp(1.0 - alt / H, 0.0, 1.0); // 0 above the shell, 1 at surface
+            let zen = normalize(-G.atmo_body[0].xyz);
+            let day = smoothstep(-0.1, 0.35, dot(zen, sun_dir_at(vec3<f32>(0.0))));
+            fade = 1.0 - depth * dens * day * 0.95;
+        }
+    }
+    // Only SPACE scenes (one with a real star casting light) get the star vault;
+    // a non-space flat-bg scene keeps its plain `G.bg` background as before.
+    let space = step(0.5, G.star_meta.x);
+    var col = void_col;
+    col += (milkyway(rd) + nebula(rd) + starfield(rd, t)) * fade * space;
+    // Dim glint toward the dominant star, tinted by its color.
+    let scol = G.star_color[0].rgb;
+    let sd = max(dot(rd, sun_dir_at(vec3<f32>(0.0))), 0.0);
+    col += scol * (pow(sd, 220.0) * 0.5) * fade * space;
+    return col;
+}
+
 fn sky_color(dir: vec3<f32>) -> vec3<f32> {
     // A Sky shader (sky_meta.x = 1) overrides everything: it computes the environment color
     // per ray direction. `flsl_sky` is the spliced procedural sky (a stub otherwise).
@@ -53,7 +178,9 @@ fn sky_color(dir: vec3<f32>) -> vec3<f32> {
         return atmo_composite(flsl_sky(normalize(dir), G.params.x), dir, 1e9, true);
     }
     if (G.sky_params.x < 0.5) {
-        return atmo_composite(G.bg.rgb, dir, 1e9, true);
+        // The built-in deep-space vault (stars + milky way + nebula over the
+        // G.bg void), kept dynamic by the atmosphere overlay that wraps it.
+        return atmo_composite(deep_space(dir), dir, 1e9, true);
     }
     // Rotate the ray into the skybox's local frame (inverse rotation, as 3 columns).
     let r = mat3x3<f32>(G.sky_rot0.xyz, G.sky_rot1.xyz, G.sky_rot2.xyz);

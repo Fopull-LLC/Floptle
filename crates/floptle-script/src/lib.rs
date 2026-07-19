@@ -77,6 +77,7 @@ mod save_api;
 mod sched_api;
 mod space_api;
 mod terrain_api;
+mod view_api;
 
 pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
@@ -86,6 +87,7 @@ pub use api::{apply_component_field, apply_component_field_str, mirror_component
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
+pub use view_api::ViewInfo;
 
 /// Severity of a captured script log line (the engine Console colors by this).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +243,9 @@ pub struct ScriptHost {
     sched: Rc<RefCell<sched_api::SchedState>>,
     /// This tick's celestial snapshot (`space.*` reads it; the editor feeds it).
     space_info: Rc<RefCell<space_api::SpaceInfo>>,
+    /// This frame's active game camera + viewport (`camera.worldToScreen` reads
+    /// it; the editor feeds it every frame). Powers map click-on-line picking.
+    view_info: Rc<RefCell<view_api::ViewInfo>>,
     /// A pending `space.warp(m)` request the editor drains + applies.
     warp_request: Rc<RefCell<Option<f64>>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:

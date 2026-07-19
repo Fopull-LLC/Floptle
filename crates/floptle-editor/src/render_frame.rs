@@ -335,6 +335,21 @@ impl Editor {
             }
         };
         let view_proj = cam.view_proj(aspect);
+        // Feed the map's world→screen picker (`camera.worldToScreen`) when the
+        // FULLSCREEN game view owns the whole surface — its rect matches the
+        // full-window cursor space `input.mouse()` reports. A DOCKED game tab
+        // feeds its own sub-rect from update_game_viewport instead.
+        if game_view {
+            self.script_host.set_view(floptle_script::ViewInfo {
+                view_proj: view_proj.to_cols_array(),
+                cam_world: [cam.world_position.x, cam.world_position.y, cam.world_position.z],
+                vp_x: 0.0,
+                vp_y: 0.0,
+                vp_w: gpu.config.width as f32,
+                vp_h: gpu.config.height as f32,
+                valid: true,
+            });
+        }
 
         // Camera frustum + point-light gizmos so they're visible/placeable (hidden in
         // the game view, where you're seeing the game, not the editor overlays).
