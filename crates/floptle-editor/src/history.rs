@@ -85,6 +85,7 @@ impl Editor {
         // Undo during Play restores geometry the sim never saw — mirror it.
         self.mirror_terrain_chunks_to_sim(e, &coords);
         self.terrain_chunks_dirty.entry(e).or_default().extend(coords);
+        self.terrain_disk_dirty.insert(e); // an eviction must save this field first
         self.terrain_gpu_dirty = true; // full atlas re-upload (proxy box may have moved)
         Some(inverse)
     }

@@ -212,6 +212,27 @@ impl Editor {
                     }
                     if let Some((_, k)) = self.space_coast.get(&eid) {
                         let (r2, v2) = k.pos_vel(cb[i].1.mu, t);
+                        // G1 residency: warp crosses the 80-radii terrain-load
+                        // lead in milliseconds — closing on a body whose field is
+                        // still COLD drops to realtime so the background stream
+                        // gets its seconds (the residency driver kicks the load
+                        // as the camera arrives). Re-warp once it's resident.
+                        if self.terrain_cold.contains_key(&cb[i].0)
+                            && r2.length() < cb[i].1.body_radius * 60.0
+                        {
+                            self.space_warp = 1.0;
+                            self.space_coast.remove(&eid);
+                            self.console.push(
+                                floptle_script::LogLevel::Debug,
+                                format!(
+                                    "time-warp dropped to 1× — streaming {}'s terrain in \
+                                     (re-warp in a moment)",
+                                    names[i]
+                                ),
+                                None,
+                            );
+                            continue;
+                        }
                         // Surface proximity KILLS warp (the KSP rule): a conic
                         // whose next sample dips near the ground would teleport
                         // the ship into rock at 1000×. Drop to realtime and let

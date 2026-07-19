@@ -272,6 +272,80 @@ impl Editor {
             .collect()
     }
 
+    /// G1 residency, Play start: synchronously load every COLD celestial terrain
+    /// within its load radius of any RigidBody node or the camera — collision
+    /// must exist before the first tick (a background load would leave the spawn
+    /// planet intangible for a second).
+    pub(crate) fn force_load_play_terrains(&mut self) {
+        let mut anchors: Vec<floptle_core::math::DVec3> = self
+            .world
+            .query::<floptle_core::RigidBody>()
+            .map(|(e, _)| floptle_core::world_transform(&self.world, e).translation)
+            .collect();
+        anchors.push(self.camera.position);
+        let need: Vec<(Entity, u32)> = self
+            .terrain_cold
+            .iter()
+            .filter_map(|(&e, cold)| {
+                let cb = self.world.get::<floptle_core::CelestialBody>(e)?;
+                let p = floptle_core::world_transform(&self.world, e).translation;
+                let reach = cb.body_radius.max(1.0) * 80.0; // RESIDENT_LOAD_RADII
+                anchors
+                    .iter()
+                    .any(|a| (*a - p).length() < reach)
+                    .then_some((e, cold.id))
+            })
+            .collect();
+        for (e, id) in need {
+            if self.load_terrain_blocking(e, id) {
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("⛰ terrain id {id} loaded for Play (spawn-adjacent body)"),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// G1 residency, Stop: drop terrains that streamed in during Play back to
+    /// cold — nothing saves (their disk file is the untouched pre-Play state).
+    pub(crate) fn drop_play_loaded_terrains(&mut self) {
+        let dropped: Vec<Entity> = self.play_loaded_terrains.drain().collect();
+        for e in dropped {
+            if !self.world.is_alive(e) || !self.terrains.contains_key(&e) {
+                continue;
+            }
+            let Some(floptle_core::Matter::Terrain { id }) =
+                self.world.get::<floptle_core::Matter>(e).cloned()
+            else {
+                continue;
+            };
+            let color = self
+                .terrain_render
+                .get(&e)
+                .and_then(|r| r.impostor_color)
+                .unwrap_or([0.75, 0.75, 0.78]);
+            self.terrains.remove(&e);
+            self.terrain_disk_dirty.remove(&e); // in-Play digs are not edits
+            let render = self.terrain_render.entry(e).or_default();
+            // The session may have flown right up to this body — free its live
+            // chunk meshes (unlike an eviction, which only fires far away where
+            // impostor mode already emptied them).
+            if let Some(raster) = self.raster.as_mut() {
+                for (_, (mid, _)) in render.slots.drain() {
+                    raster.free_dynamic(mid);
+                }
+            }
+            render.pending.clear();
+            render.empty.clear();
+            render.impostor = true;
+            render.impostor_color = Some(color);
+            self.terrain_cold
+                .insert(e, crate::terrain_edit::ColdTerrain { id, color });
+            self.terrain_gpu_dirty = true;
+        }
+    }
+
     /// Enter/leave play mode. Play snapshots the authored scene and runs scripts;
     /// Stop restores the authored scene so script-driven changes aren't persisted.
     /// Drop every animator runtime + the Animating tab's entity bindings —
@@ -374,6 +448,12 @@ impl Editor {
                 self.terrain_textures_dirty = true;
                 self.terrain_gpu_dirty = !self.terrains.is_empty();
             }
+            // G1 residency: terrains that streamed IN during Play were cold at
+            // Play start (not in the snapshot above) — drop them back to cold so
+            // Play can't leak residency or persist in-Play digs on them. Their
+            // on-disk field is untouched (nothing saves during Play), so cold +
+            // disk file IS the pre-Play state.
+            self.drop_play_loaded_terrains();
         } else {
             // Scripts run from what's on DISK — flush unsaved IDE edits first so
             // Play always tests the code you're looking at.
@@ -424,6 +504,11 @@ impl Editor {
             self.tick_buttons_pressed = [false; 3];
             self.tick_mouse_delta = (0.0, 0.0);
             self.tick_scroll = 0.0;
+            // G1 residency: any COLD celestial near a dynamic body (or the camera)
+            // must be resident BEFORE the sim builds — the spawn planet needs its
+            // collider on the very first tick. Synchronous by design; typically one
+            // body, a second or two, once per Play.
+            self.force_load_play_terrains();
             // Build the physics sim from the scene: RigidBody nodes + every terrain
             // volume (its own anchored SDF collider, native resolution) + the gravity
             // field from GravityVolume nodes + static colliders — all under the

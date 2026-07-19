@@ -100,6 +100,27 @@ const LOD_RINGS: [i32; 3] = [4, 10, 24];
 /// a handful of pixels).
 const IMPOSTOR_RADII: f64 = 60.0;
 
+/// G1 RESIDENCY (docs/galaxy-streaming-proposal.md): a COLD celestial terrain's
+/// field starts loading (background) when the camera comes inside this many body
+/// radii — outside the impostor flip at 60, so the field is always resident
+/// before its meshes could possibly draw. Evict sits farther out again, so
+/// load/evict can never thrash and every transition happens while the body is
+/// an impostor (visually invisible).
+const RESIDENT_LOAD_RADII: f64 = 80.0;
+/// A RESIDENT celestial terrain beyond this many body radii is evicted: saved to
+/// disk first when its field changed (edit mode), then dropped to [`ColdTerrain`].
+const RESIDENT_EVICT_RADII: f64 = 110.0;
+/// Emergency: something is INSIDE this many radii of a still-cold body (teleport,
+/// summon, warp overshoot) — load synchronously, a hitch beats falling through.
+pub(crate) const RESIDENT_SYNC_RADII: f64 = 5.0;
+
+/// A celestial terrain with no field in RAM (G1 residency). The body still
+/// orbits on rails and draws as its impostor sphere from the cached color.
+pub(crate) struct ColdTerrain {
+    pub id: u32,
+    pub color: [f32; 3],
+}
+
 /// The body's average surface color for its impostor sphere: 26 rays from
 /// outside toward the center, averaging the voxel color where each first hits.
 /// Field-space — celestial terrain fields are authored centered on the origin.
@@ -267,7 +288,13 @@ impl Editor {
             return;
         };
         // Drop render meshes for terrains that no longer exist (deleted nodes).
-        let live: Vec<Entity> = self.terrains.keys().copied().collect();
+        // COLD terrains count as live: their render entry IS the impostor sphere.
+        let live: Vec<Entity> = self
+            .terrains
+            .keys()
+            .chain(self.terrain_cold.keys())
+            .copied()
+            .collect();
         self.terrain_render.retain(|e, r| {
             if live.contains(e) {
                 return true;
@@ -278,6 +305,11 @@ impl Editor {
             false
         });
         self.terrain_chunks_dirty.retain(|e, _| live.contains(e));
+        // A destroyed node's cold entry goes too (a generator replacing a system).
+        {
+            let world = &self.world;
+            self.terrain_cold.retain(|e, _| world.is_alive(*e));
+        }
 
         // ---- 1: land finished worker meshes (stale results drop silently) ----
         if let Some(w) = self.terrain_worker.as_mut() {
@@ -1026,6 +1058,7 @@ impl Editor {
             _ => (e, mn, mx, geom),
         });
         self.terrain_chunks_dirty.entry(e).or_default().extend(touched);
+        self.terrain_disk_dirty.insert(e); // an eviction must save this field first
     }
 
     /// End-of-stroke bookkeeping (mouse-up): if the stroke pushed the field past its
@@ -1104,6 +1137,217 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
     }
 
+    /// The tiny residency sidecar next to a terrain's `.cfield`: the impostor
+    /// color ("r g b", linear floats), so a COLD body can draw its sphere
+    /// without ever touching the multi-MB field.
+    pub(crate) fn terrain_meta_path_id(&self, id: u32) -> PathBuf {
+        self.project_root.join("terrain").join(format!("{}.{id}.meta", self.scene_name))
+    }
+
+    fn write_terrain_meta(&self, id: u32, color: [f32; 3]) {
+        let p = self.terrain_meta_path_id(id);
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, format!("{} {} {}", color[0], color[1], color[2]));
+    }
+
+    fn read_terrain_meta(&self, id: u32) -> Option<[f32; 3]> {
+        let text = std::fs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
+        let mut it = text.split_whitespace().map(|s| s.parse::<f32>());
+        match (it.next(), it.next(), it.next()) {
+            (Some(Ok(r)), Some(Ok(g)), Some(Ok(b))) => Some([r, g, b]),
+            _ => None,
+        }
+    }
+
+    // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
+
+    /// Per-frame residency driver: land finished background loads, kick loads for
+    /// cold bodies the camera is approaching, evict residents it left behind.
+    /// Runs OUTSIDE the render borrows (it may rebuild the sim on a mid-Play
+    /// arrival) — called right before `sync_terrain_meshes` each frame.
+    pub(crate) fn update_terrain_residency(&mut self, cam_world: DVec3) {
+        // 1. Land finished loads (parse + shadow proxy both happened on the thread).
+        let mut landed: Vec<(Entity, EditorTerrain)> = Vec::new();
+        self.terrain_load_jobs.retain(|(e, rx)| match rx.try_recv() {
+            Ok(Some(t)) => {
+                landed.push((*e, t));
+                false
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Read/parse failed — leave the body cold; it stays an impostor.
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+        });
+        for (e, t) in landed {
+            if self.world.is_alive(e) && self.terrain_cold.contains_key(&e) {
+                self.finish_terrain_load(e, t);
+            }
+        }
+
+        // 2. Kick background loads for cold bodies inside the load radius (plus a
+        //    blocking emergency load if something is practically ON one).
+        let mut to_sync: Vec<(Entity, u32)> = Vec::new();
+        let mut to_load: Vec<(Entity, u32)> = Vec::new();
+        for (&e, cold) in &self.terrain_cold {
+            let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) else { continue };
+            // Heal the impostor render entry — it IS the body's visual while cold
+            // (covers any path that dropped it, e.g. a scene-switch edge).
+            let render = self.terrain_render.entry(e).or_default();
+            if !render.impostor {
+                render.impostor = true;
+                render.impostor_color = Some(cold.color);
+            }
+            let r = cb.body_radius.max(1.0);
+            let d = (floptle_core::world_transform(&self.world, e).translation - cam_world)
+                .length();
+            if d < r * RESIDENT_SYNC_RADII {
+                to_sync.push((e, cold.id));
+            } else if d < r * RESIDENT_LOAD_RADII {
+                to_load.push((e, cold.id));
+            }
+        }
+        for (e, id) in to_sync {
+            self.load_terrain_blocking(e, id);
+        }
+        for (e, id) in to_load {
+            self.kick_terrain_load(e, id);
+        }
+
+        // 3. Evict residents the camera has left far behind (celestials only —
+        //    flat level terrains have no meaningful radius and stay resident).
+        let mut to_evict: Vec<(Entity, u32)> = Vec::new();
+        for &e in self.terrains.keys() {
+            let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) else { continue };
+            let Some(Matter::Terrain { id }) = self.world.get::<Matter>(e) else { continue };
+            let r = cb.body_radius.max(1.0);
+            let d = (floptle_core::world_transform(&self.world, e).translation - cam_world)
+                .length();
+            if d > r * RESIDENT_EVICT_RADII {
+                to_evict.push((e, *id));
+            }
+        }
+        for (e, id) in to_evict {
+            self.evict_terrain_to_cold(e, id);
+        }
+    }
+
+    /// Spawn a background read+parse+shadow-proxy job for a cold terrain (capped
+    /// at 2 in flight; duplicates are no-ops).
+    fn kick_terrain_load(&mut self, e: Entity, id: u32) {
+        if self.terrain_load_jobs.iter().any(|(je, _)| *je == e)
+            || self.terrain_load_jobs.len() >= 2
+        {
+            return;
+        }
+        let path = self.terrain_field_path_id(id);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let t = std::fs::read(&path)
+                .ok()
+                .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
+                .map(EditorTerrain::new);
+            let _ = tx.send(t);
+        });
+        self.terrain_load_jobs.push((e, rx));
+    }
+
+    /// Blocking load — Play start (the spawn planet needs collision before the
+    /// first tick) and the emergency inside `RESIDENT_SYNC_RADII`.
+    pub(crate) fn load_terrain_blocking(&mut self, e: Entity, id: u32) -> bool {
+        let Some(t) = std::fs::read(self.terrain_field_path_id(id))
+            .ok()
+            .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
+            .map(EditorTerrain::new)
+        else {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("terrain id {id}: cold field failed to load — body stays an impostor"),
+                None,
+            );
+            self.terrain_cold.remove(&e); // don't retry every frame
+            return false;
+        };
+        self.terrain_load_jobs.retain(|(je, _)| *je != e); // a background job is now stale
+        self.finish_terrain_load(e, t);
+        true
+    }
+
+    /// A field arrived (background or blocking): make it resident. During Play the
+    /// sim rebuilds so the body's collider exists — the established mid-Play path.
+    fn finish_terrain_load(&mut self, e: Entity, t: EditorTerrain) {
+        self.terrain_cold.remove(&e);
+        self.terrains.insert(e, t);
+        self.terrain_gpu_dirty = true;
+        // The render entry stays in impostor mode; the streaming loop flips it by
+        // distance (still beyond 60 r at load time, so nothing pops).
+        if self.playing {
+            self.play_loaded_terrains.insert(e);
+            self.rebuild_sim();
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                "⛰ terrain streamed in — collision live".into(),
+                None,
+            );
+        }
+    }
+
+    /// Drop a far resident to cold: save the field first if it changed (edit
+    /// mode — a dug cave 110 radii away is never lost), cache the impostor
+    /// color in the `.meta` sidecar, keep the render entry as a pure impostor.
+    /// During Play nothing saves (Stop reverts terrain anyway).
+    fn evict_terrain_to_cold(&mut self, e: Entity, id: u32) {
+        // Beyond the evict radius the body has been an impostor for a while, so
+        // its GPU slots are already free — if not (a hysteresis edge), wait.
+        if self
+            .terrain_render
+            .get(&e)
+            .is_some_and(|r| !r.slots.is_empty() || !r.pending.is_empty())
+        {
+            return;
+        }
+        let Some(t) = self.terrains.get(&e) else { return };
+        let color = self
+            .terrain_render
+            .get(&e)
+            .and_then(|r| r.impostor_color)
+            .unwrap_or_else(|| {
+                let r = self
+                    .world
+                    .get::<floptle_core::CelestialBody>(e)
+                    .map(|c| c.body_radius as f32)
+                    .unwrap_or(50.0);
+                impostor_surface_color(&t.field, r)
+            });
+        if !self.playing {
+            if self.terrain_disk_dirty.contains(&e) {
+                let path = self.terrain_field_path_id(id);
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if std::fs::write(&path, t.field.to_bytes()).is_err() {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("terrain id {id}: eviction save FAILED — keeping it resident"),
+                        None,
+                    );
+                    return; // never drop unsaved edits
+                }
+                self.terrain_disk_dirty.remove(&e);
+            }
+            self.write_terrain_meta(id, color);
+        }
+        self.terrains.remove(&e);
+        self.play_loaded_terrains.remove(&e);
+        let render = self.terrain_render.entry(e).or_default();
+        render.impostor = true;
+        render.impostor_color = Some(color);
+        self.terrain_cold.insert(e, ColdTerrain { id, color });
+        self.terrain_gpu_dirty = true; // shadow atlas re-lays out without it
+    }
+
     /// The legacy single-terrain field path (migrated to the id-keyed name on load).
     pub(crate) fn legacy_terrain_field_path(&self) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.tfield", self.scene_name))
@@ -1115,6 +1359,10 @@ impl Editor {
     /// is set.
     pub(crate) fn adopt_terrain(&mut self) {
         self.terrains.clear();
+        self.terrain_cold.clear();
+        self.terrain_disk_dirty.clear();
+        self.terrain_load_jobs.clear();
+        self.play_loaded_terrains.clear();
         self.active_terrain = None;
         self.terrain_slots.clear();
         let nodes: Vec<(Entity, u32)> = self
@@ -1129,6 +1377,22 @@ impl Editor {
         let single = nodes.len() == 1;
         for (e, id) in nodes {
             max_id = max_id.max(id);
+            // G1 RESIDENCY: a celestial body with a field file + meta sidecar
+            // starts COLD — no field read at all. The per-frame residency driver
+            // streams in whatever the camera is actually near (scene open gets
+            // FASTER as systems get bigger). Bodies without a meta yet (pre-G1
+            // scenes) load eagerly below, cache their color, and can go cold
+            // from then on. Non-celestial terrains are always resident.
+            if self.world.get::<floptle_core::CelestialBody>(e).is_some()
+                && self.terrain_field_path_id(id).exists()
+                && let Some(color) = self.read_terrain_meta(id)
+            {
+                let render = self.terrain_render.entry(e).or_default();
+                render.impostor = true;
+                render.impostor_color = Some(color);
+                self.terrain_cold.insert(e, ColdTerrain { id, color });
+                continue;
+            }
             let dense_migration = || {
                 std::fs::read(self.terrain_tfield_path_id(id))
                     .ok()
@@ -1169,6 +1433,16 @@ impl Editor {
                     );
                     f
                 });
+            // Self-heal the residency sidecar: an eagerly-loaded celestial (pre-G1
+            // scene, no `.meta` yet) computes its impostor color once now, so it
+            // can go cold on every later load/evict.
+            if let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e)
+                && self.read_terrain_meta(id).is_none()
+                && self.terrain_field_path_id(id).exists()
+            {
+                let color = impostor_surface_color(&field, cb.body_radius as f32);
+                self.write_terrain_meta(id, color);
+            }
             self.terrains.insert(e, EditorTerrain::new(field));
         }
         self.next_terrain_id = max_id + 1;
@@ -1176,7 +1450,8 @@ impl Editor {
         // Restore the texture palette so painted-texture slots map to images again.
         // A slot line may end in `|glow` — that slot's texture is self-lit (the
         // cave-visibility channel); the marker rides the sidecar, not the path.
-        if !self.terrains.is_empty()
+        // (COLD terrains count — their fields still splat this palette on load.)
+        if (!self.terrains.is_empty() || !self.terrain_cold.is_empty())
             && let Ok(text) = std::fs::read_to_string(self.terrain_palette_path()) {
                 let slots = floptle_render::TERRAIN_SLOTS as usize;
                 let mut glow = 0u32;

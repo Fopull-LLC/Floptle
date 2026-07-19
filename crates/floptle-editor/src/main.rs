@@ -1413,6 +1413,21 @@ struct Editor {
     /// remesh queue a brush dab (or undo swap) feeds. Drained every frame by
     /// `sync_terrain_meshes`.
     terrain_chunks_dirty: HashMap<Entity, Vec<[i32; 3]>>,
+    /// G1 RESIDENCY (galaxy streaming): celestial terrains whose field is NOT in
+    /// RAM — the body still orbits and draws as its impostor sphere (color from
+    /// the `.meta` sidecar), it just costs nothing. Loaded in the background when
+    /// the camera comes inside `RESIDENT_LOAD_RADII` body radii; residents beyond
+    /// `RESIDENT_EVICT_RADII` are saved (edit mode) and dropped back here.
+    terrain_cold: HashMap<Entity, crate::terrain_edit::ColdTerrain>,
+    /// Terrains whose FIELD changed since the last disk write (brush/script/undo) —
+    /// what an eviction must save before dropping. Scene save clears it.
+    terrain_disk_dirty: std::collections::HashSet<Entity>,
+    /// In-flight background field loads: (entity, receiver of the parsed terrain —
+    /// `None` = read/parse failed). The shadow proxy derives on the thread too.
+    terrain_load_jobs: Vec<(Entity, std::sync::mpsc::Receiver<Option<crate::terrain_edit::EditorTerrain>>)>,
+    /// Terrains that went RESIDENT during Play (cold at Play start): Stop drops
+    /// them back to cold so Play can't leak residency or in-Play digs on them.
+    play_loaded_terrains: std::collections::HashSet<Entity>,
     /// The background remesh worker (P4) — spawned lazily on first terrain use.
     terrain_worker: Option<crate::terrain_edit::TerrainWorker>,
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a
