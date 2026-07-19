@@ -1621,6 +1621,23 @@ if o then print(o.body, o.periapsis, o.apoapsis, o.period) end
 body **center** (subtract `radius` for altitude). Bodies should be **top-level
 nodes** — rails write world positions.
 
+```lua
+-- Where a state vector will be dt seconds from now, on its two-body conic:
+local px, py, pz, vx, vy, vz =
+  space.propagate(rx, ry, rz, sx, sy, sz, body.mu, dt)
+```
+
+`space.propagate` is the primitive for **planning** — maneuver nodes and
+patched-conic **SOI-encounter** finding are built from it (both live in the
+demo's `ship_controller.lua`, not the engine). It converts the `(pos, vel)` you
+give into an orbit and evaluates it at `+dt` seconds, exactly and drift-free
+(elliptic OR hyperbolic). The state is in **whatever frame you pass** — to walk a
+ship's future path you propagate it relative to its attractor, then add where
+that attractor itself has moved (`space.bodies()` velocities are world-frame, so
+each body's own conic comes from its state minus its parent's). Chain those and
+you can march a trajectory across SOI changes — leave a planet, coast in the
+star's frame, fall into the next planet's SOI — the whole KSP transfer picture.
+
 **Velocity frames.** A dynamic node's `vx/vy/vz` are measured in its dominant
 celestial's carried frame (the SOI you're inside moves, and you move with it) —
 so pass them to `space.elements` as-is, and never subtract the dominant body's

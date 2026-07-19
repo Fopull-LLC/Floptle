@@ -31,6 +31,11 @@
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
+---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
+---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor.
+---@field setMaterial fun(self: Node, t: table) Construction API: set (and create if absent) the node's Material. Fields: color/emissive/specular/rim {r,g,b}, emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>").
+---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
+---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive ("Cube"/"Sphere"/"Capsule"/"Plane") with an optional {r,g,b} color.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
@@ -116,6 +121,7 @@
 ---@field isPlaying fun(self: ParticleSystemHandle): boolean Is an instance emitting/ageing right now?
 ---@field alive fun(self: ParticleSystemHandle): number Live particle count across the effect's tracks.
 ---@field asset fun(self: ParticleSystemHandle): string|nil The effect asset key this node references.
+---@field setIntensity fun(self: ParticleSystemHandle, i: number) Live emission scale 0..4 (1 = authored): multiplies rates/burst counts and shades particle size — drive an engine plume with the throttle.
 
 ---A node's Audio Source, controlled from a script via `node:sound()`.
 ---@class AudioSourceHandle
@@ -201,6 +207,22 @@ function log(msg) end
 ---@param z number
 function spawnEffect(key, x, y, z) end
 
+---The runtime 3D line layer. Immediate mode: a segment lives ONE frame — call
+---it every `lateUpdate` (preferred: it runs in the camera pass, so lines land
+---the same frame as the camera that framed them) or `update`/`fixedUpdate`
+---while you want the line on screen. Drawn OVER the scene (never occluded —
+---KSP-style orbit lines read through planets). This is what the map draws its
+---conics with.
+draw = {}
+
+---Queue one world-space line segment for this frame.
+---e.g. `draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)`
+---@param x1 number @param y1 number @param z1 number
+---@param x2 number @param y2 number @param z2 number
+---@param r number 0..1 @param g number 0..1 @param b number 0..1
+---@param a? number alpha, default 1
+function draw.line(x1, y1, z1, x2, y2, z2, r, g, b, a) end
+
 ---Spawn a PREFAB instance (make one by dragging a node into the Assets panel).
 ---`"bullet"` finds `prefabs/bullet.prefab.ron`; subfolder names and full
 ---paths work too. `pos` places the first root (a vec3/table/node); `fn(root)`
@@ -218,6 +240,16 @@ function spawn(prefab, pos, fn) end
 ---(server authority — use `net.despawn` on the server).
 ---@param target Node The node (or node handle) to remove.
 function destroy(target) end
+
+---Create a PLAIN node (Empty matter, identity transform) — the construction
+---hook for script-built content (procgen, editor actions). The callback gets
+---the new node's handle: combine with setTerrain / setCelestial /
+---setPrimitive / setMaterial + transform writes to build anything.
+---`createNode("Oria", function(n) n:setTerrain(2); n.x = 500 end)`
+---@param name string
+---@param parent? Node Parent node (nested creates inside callbacks are fine).
+---@param fn? fun(n: Node) Configure the freshly created node.
+function createNode(name, parent, fn) end
 
 ---Runs once when play begins (optional).
 ---@param node Node
@@ -639,6 +671,20 @@ function terrain.paint(x, y, z, radius, r, g, b, strength) end
 ---@param radius number
 ---@param slot number
 function terrain.paintTexture(x, y, z, radius, slot) end
+
+---REPLACE terrain volume `id`'s whole field with a generated planet — the
+---engine's generic heavy procgen primitive (sphere ± noise relief, caves with
+---galleries + chambers, solid molten core, impact craters, layered materials).
+---Runs on an editor background thread (seconds per body; Console shows
+---progress). Every knob optional; layer paints are {slot=…, color={r,g,b}}:
+---radius, voxel, relief, bumpFreq, caveDepth, coreR, corePaint, craters,
+---craterMin, craterMax, craterDust, surfaceA, surfaceB, patchBias, patchThr,
+---subsoil, subsoilDepth, strata, strataDepth, deep,
+---pockets {slot,color,threshold,minDepth}, seam {slot,color,minDepth,center,width},
+---iceCaps {lat,slot,color}, seed.
+---@param id number The terrain id (a node with that Terrain id shows the result).
+---@param opts? table
+function terrain.generatePlanet(id, opts) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
@@ -682,8 +728,9 @@ function math.fbm(x, y, z, octaves, seed) end
 ---@field int fun(self: Rng, a: number, b: number): integer Uniform integer in [a, b] inclusive.
 ---@field pick fun(self: Rng, list: any[]): any A uniform element of `list` (nil if empty).
 
----Make a deterministic random stream from a seed.
----@param seed number
+---Make a deterministic random stream. NO seed = seeded from the clock (a
+---fresh roll every call) — read `r.seed` to reproduce it later.
+---@param seed? number
 ---@return Rng
 function rng(seed) end
 
@@ -786,6 +833,20 @@ function space.dominant(x, y, z) end
 function space.gravity(x, y, z) end
 ---The orbit (conic) a craft at position+velocity is on around its dominant
 ---body: { body, a, e, periapsis, apoapsis?, period? } — apoapsis/period absent
----on an escape trajectory. Distances from the body CENTER.
+---on an escape trajectory. Distances from the body CENTER. Pass `node.vx/vy/vz`
+---straight through: a body's velocity is ALREADY measured in its dominant
+---celestial's frame (do NOT subtract the body's world velocity).
 ---@return table|nil
 function space.elements(x, y, z, vx, vy, vz) end
+---Propagate a state vector along its two-body conic about a point mass `mu`:
+---returns the position AND velocity `px,py,pz, vx,vy,vz` exactly `dt` seconds
+---later (elliptic OR hyperbolic — no integration drift). The primitive maneuver
+---nodes and patched-conic encounter-finding are built from: the state is in
+---whatever frame you pass, so compose parent frames yourself (add the
+---attractor's own motion for a moon-of-a-planet). Degenerate input passes
+---through unchanged.
+---@param px number @param py number @param pz number
+---@param vx number @param vy number @param vz number
+---@param mu number @param dt number
+---@return number, number, number, number, number, number
+function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
