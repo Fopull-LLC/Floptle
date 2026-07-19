@@ -1465,16 +1465,12 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         world.insert(sky, Matter::default_skybox());
     }
 
-    // Every scene has gravity out of the box: if the doc has no GravityVolume node at
-    // all, spawn a default normal-game "Down" volume (strength 10) so bodies fall
-    // without any setup. A scene that already defines its own gravity (a planet's
-    // Radial well, or a custom-tuned Down volume) is left alone.
-    if !doc.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })) {
-        let gravity = world.spawn();
-        world.insert(gravity, Name("Gravity".into()));
-        world.insert(gravity, Transform::IDENTITY);
-        world.insert(gravity, Matter::GravityVolume { mode: GravityMode::Down, strength: 10.0, radius: 20.0 });
-    }
+    // Gravity volumes are OPTIONAL — deleting one STICKS. (Load used to
+    // self-heal a strength-10 uniform-Down volume into any scene without one,
+    // which silently injected a world −Y pull into celestial scenes — uniform
+    // −Y pumps orbit energy and flings things off planets. New scenes get
+    // their starter Gravity node from the editor's new-scene template
+    // instead; a space scene simply has none.)
 
     // Every scene carries a PostProcess node — post-processing is tuned per scene,
     // not per project. If the doc predates the node, spawn the default chain (AO on,
@@ -1806,20 +1802,19 @@ mod tests {
         let mut world = World::new();
         spawn_into(&doc, &mut world);
         // 4 matter nodes (cube, blob, lamp, eye) + an auto-spawned Skybox + an
-        // auto-spawned GravityVolume + an auto-spawned PostProcess node + the
-        // mandatory Lighting node.
-        assert_eq!(world.len(), 8);
+        // auto-spawned PostProcess node + the mandatory Lighting node. NO
+        // auto gravity: gravity volumes are optional (deleting one sticks).
+        assert_eq!(world.len(), 7);
         let snap = to_doc("demo", &world);
-        // The 4 authored matter nodes plus the auto-added Skybox + GravityVolume +
-        // PostProcess nodes.
-        assert_eq!(snap.nodes.len(), 7);
+        // The 4 authored matter nodes plus the auto-added Skybox + PostProcess.
+        assert_eq!(snap.nodes.len(), 6);
         assert!(
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::Skybox { .. })),
             "a default Skybox node should be present"
         );
         assert!(
-            snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })),
-            "a default GravityVolume node should be present"
+            !snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::GravityVolume { .. })),
+            "gravity must NOT be auto-injected (optional; deletion sticks)"
         );
         assert!(
             snap.nodes.iter().any(|n| matches!(n.matter, MatterDoc::PostProcess { .. })),
