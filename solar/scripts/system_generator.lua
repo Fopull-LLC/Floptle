@@ -230,7 +230,10 @@ function generate(node)
 
   local planetKinds = { "canyon", "dune", "ice", "lava", "crystal" }
   local moonKinds = { "barren", "frost", "crystal", "ice" }
-  local nPlanets = (p.planets > 0) and math.min(p.planets, 4) or (2 + r:int(0, 2))
+  -- Cap 8: with G1 terrain residency (docs/galaxy-streaming-proposal.md) only
+  -- the bodies near the camera hold RAM/GPU — the cap is now generation time
+  -- and disk, not memory. Each body still pre-generates its field (~4-10 s).
+  local nPlanets = (p.planets > 0) and math.min(p.planets, 8) or (2 + r:int(0, 2))
   local a = a1
   local id = 1
   local firstPos, firstR, firstRelief = nil, 0, 0

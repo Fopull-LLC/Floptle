@@ -793,6 +793,7 @@ impl Editor {
                 _ => None,
             })
             .collect();
+        let mut saved_ids: Vec<u32> = Vec::new();
         for (id, bytes) in terrain_writes {
             if let Err(e) = std::fs::write(self.terrain_field_path_id(id), bytes) {
                 self.console.push(
@@ -800,16 +801,27 @@ impl Editor {
                     format!("💾 save terrain {id} failed: {e}"),
                     None,
                 );
+            } else {
+                saved_ids.push(id);
             }
         }
+        // G1 residency: a written field is no longer disk-dirty (an eviction can
+        // drop it without re-saving). Flags for FAILED writes stay set — eviction
+        // must never discard unsaved edits.
+        let world = &self.world;
+        self.terrain_disk_dirty.retain(|e| {
+            !matches!(world.get::<Matter>(*e),
+                Some(Matter::Terrain { id }) if saved_ids.contains(id))
+        });
         // Vertex paint: per-vertex arrays live beside the scene for the same reason
         // terrain fields do — they have no business in a .ron.
         self.save_paint();
         self.save_tex_paint();
         // The texture PALETTE (which image fills each painted slot) is editor state,
         // not in the field — persist it so painted textures survive a reload. Glowing
-        // slots keep their `|glow` marker (see adopt_terrain's load).
-        if !self.terrains.is_empty() {
+        // slots keep their `|glow` marker (see adopt_terrain's load). Cold terrains
+        // count: their fields still splat this palette when they stream back in.
+        if !self.terrains.is_empty() || !self.terrain_cold.is_empty() {
             let palette: Vec<String> = self
                 .terrain_textures
                 .iter()
