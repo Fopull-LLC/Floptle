@@ -62,8 +62,10 @@ fuel = 100.0
 -- SAS autopilot (KSP hold modes). "off" = free (rates persist), "stability" =
 -- damp rotation to zero, and the pointing modes auto-rotate the nose to that
 -- direction with the rate controller. T toggles off/stability; number keys pick
--- a mode in flight (1..8). `sas_last` remembers the mode T re-enables.
-local sas_mode = "stability"
+-- a mode in flight (1..8). `sas_last` remembers the mode T re-enables. sas_mode
+-- is a PUBLISHED global so the HUD's SAS buttons (sas_button.lua) can read the
+-- active mode (highlight) and call setSAS() to change it.
+sas_mode = "stability"
 local sas_last = "stability"
 -- Time-warp ladder (KSP-style steps) + a short HUD notice when a step is denied.
 local warp_steps = { 1, 5, 10, 50, 100, 1000, 10000 }
@@ -531,11 +533,19 @@ end
 -- world-space polyline and the SOI-change / impact events found along it. This
 -- is what turns "pretty orbit lines" into "you encounter Draol in 3m12s".
 local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0, span, segs)
-  local pts = { wx, wy, wz }
-  local enc = {}
+  -- Points are stored RELATIVE TO their attractor + the attractor index, NOT in
+  -- absolute world space. Drawn at attractor.LIVE + rel, so the whole path lives
+  -- in the dominant body's REST FRAME (the KSP map): your orbit is a static
+  -- ellipse around the planet's CURRENT position, not smeared along the planet's
+  -- own orbit into wherever it will be in 180 s. That smear is what flung the
+  -- node way out across the system.
+  local rpts, anch, enc = {}, {}, {}
   local step = span / segs
   local tt = t0
-  local start_states = all_body_states(bodies, pidx, tt) -- states at step START
+  local start_states = all_body_states(bodies, pidx, tt)
+  local s0 = start_states[cur]
+  rpts[1], rpts[2], rpts[3] = wx - s0.x, wy - s0.y, wz - s0.z
+  anch[1] = cur
   for _ = 1, segs do
     -- Ship relative to the current attractor at the START of this step.
     local cs = start_states[cur]
@@ -548,16 +558,18 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
     local ec = es[cur]
     wx, wy, wz = ec.x + nrx, ec.y + nry, ec.z + nrz
     wvx, wvy, wvz = ec.vx + nrvx, ec.vy + nrvy, ec.vz + nrvz
-    pts[#pts + 1] = wx
-    pts[#pts + 1] = wy
-    pts[#pts + 1] = wz
+    -- store REL to the current attractor (nr* IS wx-ec.x) + which body it is
+    rpts[#rpts + 1] = nrx
+    rpts[#rpts + 1] = nry
+    rpts[#rpts + 1] = nrz
+    anch[#anch + 1] = cur
     -- Capture a child SOI we've fallen into (deeper body wins).
     for j, o in ipairs(bodies) do
       if pidx[j] == cur and o.soi > 0 then
         local d = es[j]
         local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
         if dx * dx + dy * dy + dz * dz < o.soi * o.soi then
-          enc[#enc + 1] = { t = tt, name = o.name, x = wx, y = wy, z = wz, kind = "enter" }
+          enc[#enc + 1] = { t = tt, name = o.name, anchor = j, rx = dx, ry = dy, rz = dz, kind = "enter" }
           cur = j
           break
         end
@@ -569,9 +581,7 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
       local d = es[cur]
       local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
       if dx * dx + dy * dy + dz * dz > bodies[cur].soi * bodies[cur].soi then
-        -- "exit <the body you're leaving>", not its parent (that read as
-        -- "exit Sol" while still orbiting a planet).
-        enc[#enc + 1] = { t = tt, name = bodies[cur].name, x = wx, y = wy, z = wz, kind = "exit" }
+        enc[#enc + 1] = { t = tt, name = bodies[cur].name, anchor = cur, rx = dx, ry = dy, rz = dz, kind = "exit" }
         cur = pc
       end
     end
@@ -580,49 +590,54 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
     local d = es[cur]
     local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
     if dx * dx + dy * dy + dz * dz < sb.radius * sb.radius then
-      enc[#enc + 1] = { t = tt, name = sb.name, x = wx, y = wy, z = wz, kind = "impact" }
+      enc[#enc + 1] = { t = tt, name = sb.name, anchor = cur, rx = dx, ry = dy, rz = dz, kind = "impact" }
       break
     end
     start_states = es -- this step's END is the next step's START
   end
-  return pts, enc
+  return rpts, anch, enc
 end
 
--- Draw a cached world polyline (flat {x,y,z,x,y,z,...}) shifted by a live anchor
--- offset (ox,oy,oz) — see traj_offset: the points are cached at compute time.
-local function draw_polyline(pts, ox, oy, oz, r, g, b, a)
-  for i = 1, #pts - 5, 3 do
-    draw.line(pts[i] + ox, pts[i + 1] + oy, pts[i + 2] + oz,
-      pts[i + 3] + ox, pts[i + 4] + oy, pts[i + 5] + oz, r, g, b, a)
+-- A stored (anchor, rel) → its LIVE world position (attractor's current pos + rel).
+local function rel_world(bodies, anchor, rx, ry, rz)
+  local b = bodies[anchor]
+  if not b then return nil end
+  return b.x + rx, b.y + ry, b.z + rz
+end
+
+-- Draw a rest-frame polyline: each point rides its own anchor body's live pos.
+local function draw_rel_polyline(rpts, anch, bodies, r, g, b, a)
+  local n = math.floor(#rpts / 3)
+  local px, py, pz, has = 0, 0, 0, false
+  for k = 0, n - 1 do
+    local wx, wy, wz = rel_world(bodies, anch[k + 1], rpts[k * 3 + 1], rpts[k * 3 + 2], rpts[k * 3 + 3])
+    if wx then
+      if has then draw.line(px, py, pz, wx, wy, wz, r, g, b, a) end
+      px, py, pz, has = wx, wy, wz, true
+    else
+      has = false
+    end
   end
 end
 
--- How far a cached trajectory's ANCHOR body has moved since the walk was
--- computed (added to every cached point at draw time). This is what keeps the
--- node + path glued to a fast-moving planet between the 8 Hz recomputes.
-local function traj_offset(traj)
-  if not traj or not traj.anchor then return 0, 0, 0 end
-  local b = space.body(traj.anchor)
-  if not b then return 0, 0, 0 end
-  return b.x - traj.a0x, b.y - traj.a0y, b.z - traj.a0z
-end
-
 -- The trajectory point nearest the cursor in SCREEN space (KSP click-on-line).
--- Returns index k (0-based), its live world position, and its time-from-now, or
--- nil if nothing is within the pixel threshold / the camera isn't feeding.
-local function pick_traj_point(traj, ox, oy, oz)
+-- Projects each rest-frame point at its anchor's LIVE position (so you click the
+-- orbit you SEE). Returns index k (0-based), the live world point, and its
+-- time-from-now, or nil if nothing is within the pixel threshold / no camera.
+local function pick_traj_point(traj, bodies)
   if not traj or not camera or not camera.exists() then return nil end
   local mx, my = input.mouse()
-  local n = math.floor(#traj.pts / 3)
+  local n = math.floor(#traj.rpts / 3)
   local bk, bd, bx, by, bz
   for k = 0, n - 1 do
-    local px = traj.pts[k * 3 + 1] + ox
-    local py = traj.pts[k * 3 + 2] + oy
-    local pz = traj.pts[k * 3 + 3] + oz
-    local sx, sy, _, on = camera.worldToScreen(px, py, pz)
-    if on then
-      local d = (sx - mx) ^ 2 + (sy - my) ^ 2
-      if not bd or d < bd then bd, bk, bx, by, bz = d, k, px, py, pz end
+    local px, py, pz = rel_world(bodies, traj.anch[k + 1],
+      traj.rpts[k * 3 + 1], traj.rpts[k * 3 + 2], traj.rpts[k * 3 + 3])
+    if px then
+      local sx, sy, _, on = camera.worldToScreen(px, py, pz)
+      if on then
+        local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+        if not bd or d < bd then bd, bk, bx, by, bz = d, k, px, py, pz end
+      end
     end
   end
   if bd and bd < (24 * 24) then
@@ -668,18 +683,11 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
   end
   local segs = 140
 
-  local pts, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, 0.0, span, segs)
-  -- ANCHOR the cache to the dominant body: store its compute-time world position
-  -- so DRAW can add the LIVE delta each frame. Inside a planet's SOI the planet
-  -- itself moves ~130 u/s, so a world-space cache (refreshed only at 8 Hz) slid
-  -- ~20 units then snapped back every recompute — the "glitching all over"
-  -- Ty saw. Re-gluing to the live body kills it (the near-field is exact; the
-  -- far escape tail is off by <20u, invisible at map zoom). `step`/`t0` give each
-  -- point a TIME, which is what click-to-place reads to position the node.
-  traj_now = {
-    pts = pts, enc = enc, anchor = db.name,
-    a0x = db.x, a0y = db.y, a0z = db.z, t0 = 0.0, step = span / segs,
-  }
+  local rpts, anch, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, 0.0, span, segs)
+  -- Rest-frame cache: rpts are RELATIVE to per-point anchor bodies (anch), drawn
+  -- at each anchor's LIVE position. `step`/`t0` give each point a TIME, which is
+  -- what click-to-place reads to drop the node at the right spot on the orbit.
+  traj_now = { rpts = rpts, anch = anch, enc = enc, t0 = 0.0, step = span / segs }
 
   if mnv then
     -- State at the node on the CURRENT conic (relative to db, then to world).
@@ -694,7 +702,9 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
     local bvx = nvx + px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad
     local bvy = nvy + py * mnv.pro + hny * mnv.nor + rdy * mnv.rad
     local bvz = nvz + pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad
-    -- Node marker world position + the post-burn world state at node time.
+    -- Node marker = REST-FRAME point on the orbit (db.live + nr*), so it sits on
+    -- the drawn ellipse; the walk itself still seeds from the absolute world
+    -- state so the body propagation + SOI detection stay physically correct.
     local dbx, dby, dbz, dbvx, dbvy, dbvz = body_state_at(bodies, pidx, dbi, mnv.t)
     local mkx, mky, mkz = dbx + nrx, dby + nry, dbz + nrz
     local mwvx, mwvy, mwvz = dbvx + bvx, dbvy + bvy, dbvz + bvz
@@ -709,17 +719,16 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       local yp = body_period(bodies, pidx, dbi)
       mspan = (yp and yp * 1.2) or 20000.0
     end
-    local mpts, menc = walk_trajectory(bodies, pidx, mkx, mky, mkz, mwvx, mwvy, mwvz, dbi, mnv.t, mspan, segs)
-    -- Burn-direction stub (scaled to the drawn zoom for visibility).
+    local mrpts, manch, menc =
+      walk_trajectory(bodies, pidx, mkx, mky, mkz, mwvx, mwvy, mwvz, dbi, mnv.t, mspan, segs)
     local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
     traj_mnv = {
-      pts = mpts, enc = menc,
-      mx = mkx, my = mky, mz = mkz,
+      rpts = mrpts, anch = manch, enc = menc,
+      m_anchor = dbi, m_rx = nrx, m_ry = nry, m_rz = nrz, -- node marker (rest frame)
       bx = px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad,
       by = py * mnv.pro + hny * mnv.nor + rdy * mnv.rad,
       bz = pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad,
-      dv = dv, anchor = db.name,
-      a0x = db.x, a0y = db.y, a0z = db.z, t0 = mnv.t, step = mspan / segs,
+      dv = dv, t0 = mnv.t, step = mspan / segs,
     }
   else
     traj_mnv = nil
@@ -887,8 +896,7 @@ local function update_map3d(node, dt)
     -- drag to create/move the burn at that exact point (RMB is the camera, so LMB
     -- is free). Picks against the cached forward path, whose points carry a time —
     -- so the click lands the node at the right spot on the orbit.
-    local nox, noy, noz = traj_offset(traj_now)
-    local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, nox, noy, noz)
+    local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, bodies)
     if pk_k then hover_x, hover_y, hover_z = px, py, pz end
     if pk_t and input.button(0) then
       if mnv then mnv.t = pk_t else mnv = { t = pk_t, pro = 0.0, nor = 0.0, rad = 0.0 } end
@@ -927,43 +935,47 @@ local function update_map3d(node, dt)
     traj_now, traj_mnv = nil, nil
   end
 
-  -- Draw the cached walks (recomputed at ~8 Hz; drawn every frame, each shifted
-  -- by its anchor body's LIVE motion so the node/path stay glued to the planet).
+  -- Draw the cached walks in the dominant body's REST FRAME: every point rides
+  -- its anchor body's LIVE position, so the orbit is a static ellipse around the
+  -- planet where you SEE it, not smeared along the planet's own orbit.
+  local function enc_diamond(e, s, r, g, b)
+    local ex, ey, ez = rel_world(bodies, e.anchor, e.rx, e.ry, e.rz)
+    if ex then draw_diamond(ex, ey, ez, s, r, g, b) end
+  end
   if traj_now and map_show.markers then
-    local ox, oy, oz = traj_offset(traj_now)
     for _, e in ipairs(traj_now.enc) do
       if e.kind == "impact" then
-        draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.014, 1.0, 0.4, 0.3)
+        enc_diamond(e, map_zoom * 0.014, 1.0, 0.4, 0.3)
       else
-        draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.014, 0.4, 0.9, 1.0)
+        enc_diamond(e, map_zoom * 0.014, 0.4, 0.9, 1.0)
       end
     end
   end
-  -- The orbit point under the cursor (a soft ring), so you can see where a click
-  -- will drop the node.
+  -- The orbit point under the cursor (a soft ring) — where a click drops the node.
   if hover_x and not mnv then
     draw_diamond(hover_x, hover_y, hover_z, map_zoom * 0.012, 0.7, 0.95, 1.0)
   end
   if traj_mnv then
-    local ox, oy, oz = traj_offset(traj_mnv)
     if map_show.orbits then
-      draw_polyline(traj_mnv.pts, ox, oy, oz, 1.0, 0.55, 0.15, 0.95) -- post-burn (amber)
+      draw_rel_polyline(traj_mnv.rpts, traj_mnv.anch, bodies, 1.0, 0.55, 0.15, 0.95) -- post-burn (amber)
     end
-    local mx, my, mz = traj_mnv.mx + ox, traj_mnv.my + oy, traj_mnv.mz + oz
-    draw_diamond(mx, my, mz, map_zoom * 0.016, 1.0, 0.7, 0.2)
-    if traj_mnv.dv > 1e-4 then
-      local bnx, bny, bnz = norm(traj_mnv.bx, traj_mnv.by, traj_mnv.bz)
-      local bl = map_zoom * 0.06
-      draw.line(mx, my, mz, mx + bnx * bl, my + bny * bl, mz + bnz * bl, 1.0, 0.85, 0.3, 1.0)
+    local mx, my, mz = rel_world(bodies, traj_mnv.m_anchor, traj_mnv.m_rx, traj_mnv.m_ry, traj_mnv.m_rz)
+    if mx then
+      draw_diamond(mx, my, mz, map_zoom * 0.016, 1.0, 0.7, 0.2)
+      if traj_mnv.dv > 1e-4 then
+        local bnx, bny, bnz = norm(traj_mnv.bx, traj_mnv.by, traj_mnv.bz)
+        local bl = map_zoom * 0.06
+        draw.line(mx, my, mz, mx + bnx * bl, my + bny * bl, mz + bnz * bl, 1.0, 0.85, 0.3, 1.0)
+      end
     end
     if map_show.markers then
       for _, e in ipairs(traj_mnv.enc) do
         if e.kind == "enter" then
-          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 0.4, 1.0, 0.5)
+          enc_diamond(e, map_zoom * 0.018, 0.4, 1.0, 0.5)
         elseif e.kind == "impact" then
-          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 1.0, 0.4, 0.3)
+          enc_diamond(e, map_zoom * 0.018, 1.0, 0.4, 0.3)
         else
-          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 0.9, 0.9, 0.5)
+          enc_diamond(e, map_zoom * 0.018, 0.9, 0.9, 0.5)
         end
       end
     end
@@ -1071,6 +1083,14 @@ local SAS_LABEL = {
   normal = "NML", antinormal = "ANTI-NML", radialin = "RAD-IN",
   radialout = "RAD-OUT", node = "NODE",
 }
+
+-- Set the SAS mode. PUBLISHED (global) so the HUD buttons (sas_button.lua) call
+-- it: `findScript("ship_controller").setSAS("prograde")`. Remembers the last
+-- non-off mode so the T key can re-enable it.
+function setSAS(m)
+  sas_mode = m
+  if m ~= "off" then sas_last = m end
+end
 
 function fixedUpdate(node, dt)
   if not astronaut then astronaut = find("Astronaut") end
@@ -1465,7 +1485,7 @@ function fixedUpdate(node, dt)
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-8 hold(pro/ret/nml/rad/node)·B gear·./,warp·M map"
+      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·click SAS buttons (left) for hold modes·B gear·./,warp·M map"
     set_hud(node, table.concat(lines, "\n"))
   end
 
