@@ -136,14 +136,19 @@ fn main() {
             }
             // Crystal pockets: sparse fbm peaks anywhere below the topsoil. They
             // glow (palette slot 7), so a dig or a cave wall that cuts one open
-            // reads instantly even in the dark.
+            // reads instantly even in the dark. Threshold tuned HIGH — pockets
+            // are treasures; caves must read as lit-by-them, not made of them
+            // (Ty: "inside the planet is fullbright").
             let pocket = noise.fbm(p * 0.05 + Vec3::splat(17.3), 3);
-            if depth > 8.0 && pocket > 0.38 {
+            if depth > 8.0 && pocket > 0.46 {
                 return rgba(tint([0.72, 0.65, 0.85], vary), 7);
             }
-            // Deep cave zone: vein rock walls; magma seams (glowing) where their
-            // own noise field peaks — the cave "floor lighting".
-            if depth > 30.0 && noise.fbm(p * 0.035 + Vec3::splat(5.9), 3) > 0.12 {
+            // Deep cave zone: vein rock walls threaded by THIN magma filaments —
+            // a BAND of the seam field, not a threshold (a threshold floods
+            // whole chamber walls fullbright).
+            if depth > 30.0
+                && (noise.fbm(p * 0.035 + Vec3::splat(5.9), 3) - 0.32).abs() < 0.045
+            {
                 return rgba(tint([0.95, 0.85, 0.72], vary), 6);
             }
             if depth > 26.0 {
@@ -244,7 +249,7 @@ fn main() {
 
             // Buried crystal seams (glowing slot 8): the reason to dig the moon.
             let pocket = mnoise.fbm(p * 0.09 + Vec3::splat(7.7), 3);
-            if depth > 3.0 && pocket > 0.45 {
+            if depth > 3.0 && pocket > 0.5 {
                 return rgba(tint([0.68, 0.78, 0.95], vary), 8);
             }
             if depth > 2.5 {

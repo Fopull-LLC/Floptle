@@ -1385,12 +1385,15 @@ version = "0.0.0"
 dependencies = [
  "floptle-audio",
  "floptle-core",
+ "floptle-field",
  "floptle-input",
  "floptle-net",
  "floptle-physics",
  "floptle-ui",
  "glam",
  "mlua",
+ "ron",
+ "serde",
 ]
 
 [[package]]

@@ -405,6 +405,121 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
     }
 }
 
+/// Apply the construction-API writes (`RichSet`) queued this pass: whole
+/// component field-sets — the component is INSERTED with defaults when the
+/// node doesn't carry it — and Matter swaps. Unknown field names apply
+/// nothing (fail-soft, like the numeric component mirror).
+pub(crate) fn apply_rich_sets(
+    world: &mut World,
+    ents: &std::collections::HashMap<u32, Entity>,
+    sets: Vec<(u32, crate::RichSet)>,
+) {
+    use crate::{CompVal, RichSet};
+    let num = |v: &CompVal| match v {
+        CompVal::Num(n) => Some(*n),
+        _ => None,
+    };
+    let v3 = |v: &CompVal| match v {
+        CompVal::Vec3(a) => Some([a[0] as f32, a[1] as f32, a[2] as f32]),
+        _ => None,
+    };
+    for (eid, set) in sets {
+        let Some(&e) = ents.get(&eid) else { continue };
+        match set {
+            RichSet::Celestial(fields) => {
+                if world.get::<floptle_core::CelestialBody>(e).is_none() {
+                    world.insert(e, floptle_core::CelestialBody::default());
+                }
+                let Some(c) = world.get_mut::<floptle_core::CelestialBody>(e) else { continue };
+                for (k, v) in &fields {
+                    match k.as_str() {
+                        "mu" => c.mu = num(v).unwrap_or(c.mu),
+                        "bodyRadius" => c.body_radius = num(v).unwrap_or(c.body_radius),
+                        "soi" => c.soi = num(v).unwrap_or(c.soi),
+                        "parent" => {
+                            if let CompVal::Str(p) = v {
+                                c.parent = p.clone();
+                            }
+                        }
+                        "a" => c.a = num(v).unwrap_or(c.a),
+                        "e" => c.e = num(v).unwrap_or(c.e),
+                        "i" => c.i = num(v).unwrap_or(c.i),
+                        "lan" => c.lan = num(v).unwrap_or(c.lan),
+                        "argPe" => c.arg_pe = num(v).unwrap_or(c.arg_pe),
+                        "m0" => c.m0 = num(v).unwrap_or(c.m0),
+                        "atmoColor" => c.atmo_color = v3(v).unwrap_or(c.atmo_color),
+                        "atmoHeight" => c.atmo_height = num(v).unwrap_or(c.atmo_height),
+                        "atmoDensity" => {
+                            c.atmo_density = num(v).map(|n| n as f32).unwrap_or(c.atmo_density)
+                        }
+                        "clouds" => c.clouds = num(v).map(|n| n as f32).unwrap_or(c.clouds),
+                        "luminosity" => {
+                            c.luminosity = num(v).map(|n| n as f32).unwrap_or(c.luminosity)
+                        }
+                        "starColor" => c.star_color = v3(v).unwrap_or(c.star_color),
+                        _ => {}
+                    }
+                }
+            }
+            RichSet::Material(fields) => {
+                if world.get::<floptle_core::Material>(e).is_none() {
+                    world.insert(e, floptle_core::Material::default());
+                }
+                let Some(m) = world.get_mut::<floptle_core::Material>(e) else { continue };
+                for (k, v) in &fields {
+                    match k.as_str() {
+                        "color" => m.color = v3(v).unwrap_or(m.color),
+                        "emissive" => m.emissive = v3(v).unwrap_or(m.emissive),
+                        "emissiveStrength" => {
+                            m.emissive_strength =
+                                num(v).map(|n| n as f32).unwrap_or(m.emissive_strength)
+                        }
+                        "specular" => m.specular = v3(v).unwrap_or(m.specular),
+                        "shininess" => {
+                            m.shininess = num(v).map(|n| n as f32).unwrap_or(m.shininess)
+                        }
+                        "specularStrength" => {
+                            m.specular_strength =
+                                num(v).map(|n| n as f32).unwrap_or(m.specular_strength)
+                        }
+                        "rim" => m.rim = v3(v).unwrap_or(m.rim),
+                        "rimStrength" => {
+                            m.rim_strength = num(v).map(|n| n as f32).unwrap_or(m.rim_strength)
+                        }
+                        "unlit" => m.unlit = num(v).map(|n| n != 0.0).unwrap_or(m.unlit),
+                        "ambient" => m.ambient = num(v).map(|n| n as f32).unwrap_or(m.ambient),
+                        "alpha" => m.alpha = num(v).map(|n| n as f32).unwrap_or(m.alpha),
+                        "texture" => {
+                            if let CompVal::Str(t) = v {
+                                m.texture = (!t.is_empty()).then(|| t.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            RichSet::MatterTerrain(id) => {
+                world.insert(e, Matter::Terrain { id });
+            }
+            RichSet::MatterPrimitive(shape, color) => {
+                let shape = match shape.as_str() {
+                    "Sphere" | "sphere" => floptle_core::Shape::Sphere,
+                    "Capsule" | "capsule" => floptle_core::Shape::Capsule,
+                    "Plane" | "plane" => floptle_core::Shape::Plane,
+                    _ => floptle_core::Shape::Cube,
+                };
+                world.insert(
+                    e,
+                    Matter::Primitive {
+                        shape,
+                        color: [color[0] as f32, color[1] as f32, color[2] as f32],
+                    },
+                );
+            }
+        }
+    }
+}
+
 /// Apply a STRING-valued component field — the string counterpart of
 /// [`apply_component_field`], for path/text fields that a number can't express.
 /// The headline use is animating a UI image's texture (sprite frame-swapping);
@@ -1028,6 +1143,102 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 })
             })?,
         )?;
+    }
+    // ---- the construction API (editor actions / procgen scripts) ----------
+    // node:setCelestial{mu=..., bodyRadius=..., parent="Sun", atmoColor={r,g,b}, ...}
+    // node:setMaterial{color={..}, emissive={..}, emissiveStrength=2, unlit=true, texture="..."}
+    // node:setTerrain(id)   node:setPrimitive("Sphere" [, {r,g,b}])
+    // All queued as RichSet writes; the component is inserted (defaults) if
+    // the node doesn't have it. Field names are the Lua-facing camelCase.
+    {
+        let q = shared.rich_sets.clone();
+        // A 3-vector in ANY of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
+        fn triple_of(v: &Value) -> Option<[f64; 3]> {
+            if let Some(p) = crate::math_api::vec3_of(v) {
+                return Some([p.x, p.y, p.z]);
+            }
+            if let Value::Table(t) = v {
+                let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
+                let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
+                let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
+                return Some([a, b, c]);
+            }
+            None
+        }
+        let fields_of = |t: &Table| -> mlua::Result<Vec<(String, crate::CompVal)>> {
+            let mut out = Vec::new();
+            for pair in t.pairs::<String, Value>() {
+                let (k, v) = pair?;
+                let cv = match &v {
+                    Value::Number(n) => crate::CompVal::Num(*n),
+                    Value::Integer(n) => crate::CompVal::Num(*n as f64),
+                    Value::Boolean(b) => crate::CompVal::Num(if *b { 1.0 } else { 0.0 }),
+                    Value::String(st) => crate::CompVal::Str(st.to_string_lossy().to_string()),
+                    other => match triple_of(other) {
+                        Some(p) => crate::CompVal::Vec3(p),
+                        None => {
+                            return Err(mlua::Error::runtime(format!(
+                                "set*: field '{k}' must be a number, bool, string, vec3/{{x,y,z}} or {{r,g,b}}"
+                            )))
+                        }
+                    },
+                };
+                out.push((k, cv));
+            }
+            Ok(out)
+        };
+        {
+            let q = q.clone();
+            let fo = fields_of;
+            methods.set(
+                "setCelestial",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    q.borrow_mut().push((e, crate::RichSet::Celestial(fo(&t)?)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            let fo = fields_of;
+            methods.set(
+                "setMaterial",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    q.borrow_mut().push((e, crate::RichSet::Material(fo(&t)?)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            methods.set(
+                "setTerrain",
+                lua.create_function(move |_, (this, id): (Table, u32)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    q.borrow_mut().push((e, crate::RichSet::MatterTerrain(id)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            methods.set(
+                "setPrimitive",
+                lua.create_function(move |_, (this, shape, color): (Table, String, Value)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let c = match &color {
+                        Value::Nil => [0.8, 0.8, 0.8],
+                        other => triple_of(other).ok_or_else(|| {
+                            mlua::Error::runtime("setPrimitive(shape [, color]): bad color")
+                        })?,
+                    };
+                    q.borrow_mut().push((e, crate::RichSet::MatterPrimitive(shape, c)));
+                    Ok(())
+                })?,
+            )?;
+        }
     }
     // Tags: node:hasTag("enemy") → bool; node:addTag / node:removeTag edit the
     // list (dedup on add, no-op removes are fine). Reads see this frame's

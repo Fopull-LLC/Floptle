@@ -594,6 +594,35 @@ function fixedUpdate(node, dt)
   -- interpolated ones, which showed as constant back-and-forth jitter.
 
   if not piloting then
+    -- ---- summon the ship: L places it right in front of you (testing / a
+    -- lost ship). Un-wrecks, refuels, lands upright on its gear.
+    if input.pressed("l") and astronaut then
+      local dxs, dys, dzs = 0, 0, 1
+      if not cam_node then cam_node = find("Camera 1") end
+      if cam_node then
+        dxs, dys, dzs = norm(astronaut.x - cam_node.x, astronaut.y - cam_node.y,
+          astronaut.z - cam_node.z)
+      end
+      local d0 = space.dominant(astronaut.x, astronaut.y, astronaut.z)
+      local b0 = d0 and space.body(d0)
+      local ux, uy, uz = 0, 1, 0
+      if b0 then
+        ux, uy, uz = norm(astronaut.x - b0.x, astronaut.y - b0.y, astronaut.z - b0.z)
+      end
+      node.x = astronaut.x + dxs * 10 + ux * 4
+      node.y = astronaut.y + dys * 10 + uy * 4
+      node.z = astronaut.z + dzs * 10 + uz * 4
+      wrecked = false
+      reset_pose(node)
+      -- Ride the player's frame (matters when summoning in orbit/space).
+      node.vx, node.vy, node.vz = astronaut.vx, astronaut.vy, astronaut.vz
+      set_ship_visible(node, true)
+      legs_deployed, leg_anim = true, 1.0
+      animate_legs(0)
+      for _, d in ipairs(debris) do destroy(d) end
+      debris = {}
+      print("ship summoned")
+    end
     if not map_view then set_hud(node, nil) end
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return

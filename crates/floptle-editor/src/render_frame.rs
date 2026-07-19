@@ -1243,8 +1243,6 @@ impl Editor {
         let toast = &mut self.toast;
         let scene_dirty_now = self.scene_dirty;
         let new_terrain_cfg = &mut self.new_terrain_cfg;
-        let system_gen_cfg = &mut self.system_gen_cfg;
-        let system_gen_busy = self.system_gen_job.is_some();
         let pending_open_scene = &mut self.pending_open_scene;
         let vertex_brush = &mut self.vertex_brush;
         let terrain_brush = &mut self.terrain_brush;
@@ -2733,76 +2731,6 @@ impl Editor {
                     });
                 if !open || close {
                     *new_terrain_cfg = None;
-                }
-            }
-
-            // ---- 🪐 new solar system dialog ----
-            // Rolls a whole randomized star system (procgen) on a background
-            // thread; progress streams to the Console, the scene opens when done.
-            if let Some(cfg) = system_gen_cfg.as_mut() {
-                let mut open = true;
-                let mut close = false;
-                egui::Window::new("🪐 New Solar System")
-                    .open(&mut open)
-                    .resizable(false)
-                    .collapsible(false)
-                    .default_width(340.0)
-                    .show(ui.ctx(), |ui| {
-                        ui.label(
-                            "Roll a randomized star system — star class, planets, moons, \
-                             orbits, atmospheres, caves, cores, names: all from one seed.",
-                        );
-                        ui.horizontal(|ui| {
-                            ui.label("seed");
-                            ui.text_edit_singleline(&mut cfg.seed_text);
-                            if ui.button("🎲").on_hover_text("blank = a fresh random system every Generate").clicked() {
-                                cfg.seed_text.clear();
-                            }
-                        });
-                        ui.small("blank = random every time · a number reproduces that exact system");
-                        ui.horizontal(|ui| {
-                            ui.label("planets");
-                            egui::ComboBox::from_id_salt("sysgen_planets")
-                                .selected_text(if cfg.planets == 0 {
-                                    "random".to_string()
-                                } else {
-                                    cfg.planets.to_string()
-                                })
-                                .show_ui(ui, |ui| {
-                                    if ui.selectable_label(cfg.planets == 0, "random").clicked() {
-                                        cfg.planets = 0;
-                                    }
-                                    for n in 2..=4u32 {
-                                        if ui.selectable_label(cfg.planets == n, n.to_string()).clicked() {
-                                            cfg.planets = n;
-                                        }
-                                    }
-                                });
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("scene name");
-                            ui.text_edit_singleline(&mut cfg.scene);
-                        });
-                        ui.small("an existing scene + terrain files with this name are OVERWRITTEN");
-                        ui.separator();
-                        if system_gen_busy {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("generating — progress in the Console…");
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            if !system_gen_busy && ui.button("Generate").clicked() {
-                                cmd.start_system_gen = Some(cfg.clone());
-                                close = true;
-                            }
-                            if ui.button(if system_gen_busy { "Close" } else { "Cancel" }).clicked() {
-                                close = true;
-                            }
-                        });
-                    });
-                if !open || close {
-                    *system_gen_cfg = None;
                 }
             }
 
@@ -4842,15 +4770,11 @@ impl Editor {
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());
         }
-        if cmd.open_system_gen {
-            self.system_gen_cfg = Some(Default::default());
+        if let Some((e, kind, func)) = cmd.run_editor_action {
+            self.run_editor_action(e, &kind, &func);
         }
-        if let Some(cfg) = cmd.start_system_gen {
-            self.start_system_gen(cfg);
-        }
-        // Pump a running 🪐 generation every frame (progress → Console; the
-        // finished scene opens itself).
-        self.poll_system_gen();
+        // Adopt any finished background planet generations (editor actions).
+        self.poll_terrain_generates();
         if let Some(name) = cmd.new_scene {
             self.new_scene(&name);
         }

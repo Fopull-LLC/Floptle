@@ -755,6 +755,45 @@ impl ScriptHost {
                 let _ = lua.globals().set("spawn", f);
             }
         }
+        // `createNode(name [, parentNode] [, fn])` — queue a PLAIN node (Empty
+        // matter, identity transform). The driver creates it after this pass;
+        // the callback receives its handle — combine with `setTerrain`/
+        // `setCelestial`/`setPrimitive`/`setMaterial` to build content from
+        // script (the editor-action construction kit):
+        //   createNode("Oria", function(n) n:setTerrain(2); n.x = 500 end)
+        let create_requests: Rc<RefCell<Vec<crate::CreateRequest>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        {
+            let q = create_requests.clone();
+            if let Ok(f) = lua.create_function(
+                move |lua, (name, a, b): (String, Value, Value)| {
+                    let (mut parent, mut cb) = (None, None);
+                    for v in [a, b] {
+                        match v {
+                            Value::Nil => {}
+                            Value::Function(f) => cb = Some(lua.create_registry_value(f)?),
+                            Value::Table(t) => match t.raw_get::<Option<u32>>("__id")? {
+                                Some(id) => parent = Some(id),
+                                None => {
+                                    return Err(mlua::Error::runtime(
+                                        "createNode(name [, parent] [, fn]): parent must be a node handle",
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(mlua::Error::runtime(
+                                    "createNode(name [, parent] [, fn]): bad argument",
+                                ))
+                            }
+                        }
+                    }
+                    q.borrow_mut().push(crate::CreateRequest { name, parent, cb });
+                    Ok(())
+                },
+            ) {
+                let _ = lua.globals().set("createNode", f);
+            }
+        }
         // `destroy(node)` — queue a node (and its whole subtree) for removal.
         // Also available as `node:destroy()` (installed with the handle API).
         let destroy_queue: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
@@ -797,6 +836,7 @@ impl ScriptHost {
             layer_table: layer_table.clone(),
             ui_text_changes: Rc::new(RefCell::new(HashMap::new())),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
+            rich_sets: Rc::new(RefCell::new(Vec::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
             vfx_info: Rc::new(RefCell::new(HashMap::new())),
@@ -832,9 +872,12 @@ impl ScriptHost {
         // drains after the script pass; reads run against the lent colliders.
         let terrain_ops: Rc<RefCell<Vec<crate::terrain_api::TerrainOp>>> =
             Rc::new(RefCell::new(Vec::new()));
+        let terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>> =
+            Rc::new(RefCell::new(Vec::new()));
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
+            terrain_generates.clone(),
             colliders.clone(),
             logs.clone(),
         );
@@ -873,6 +916,9 @@ impl ScriptHost {
             hulls,
             sim_origin,
             terrain_ops,
+            terrain_generates,
+            create_requests,
+            rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
             model_changes: shared.model_changes.clone(),
@@ -1013,6 +1059,23 @@ impl ScriptHost {
         std::mem::take(&mut *self.spawn_requests.borrow_mut())
     }
 
+    /// Drain queued `createNode(...)` requests (see the spawn drain).
+    pub fn take_create_requests(&self) -> Vec<crate::CreateRequest> {
+        std::mem::take(&mut *self.create_requests.borrow_mut())
+    }
+
+    /// Drain queued `terrain.generatePlanet` requests — heavyweight; run them
+    /// on a background thread and adopt the fields when they arrive.
+    pub fn take_terrain_generates(&self) -> Vec<(u32, floptle_field::procgen::PlanetFill)> {
+        std::mem::take(&mut *self.terrain_generates.borrow_mut())
+    }
+
+    /// Invoke `cb` with a fresh handle for `eid` — the shared callback shape
+    /// used by both `spawn(...)` and `createNode(...)` drains.
+    pub fn call_create_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
+        self.call_spawn_callback(world, cb, eid);
+    }
+
     /// Drain this tick's `draw.line(...)` segments (immediate mode — the editor
     /// replaces its line list with each tick's drain, so an idle script clears).
     pub fn take_draw_lines(&self) -> Vec<crate::DrawLine> {
@@ -1070,6 +1133,78 @@ impl ScriptHost {
         if called {
             self.flush_scene(world);
         }
+    }
+
+    /// EDITOR ACTIONS (`--@editorButton`): run ONE named function of ONE
+    /// script on ONE node against the (edit-mode) world. Syncs the scene
+    /// mirror, builds the script's env if needed — WITHOUT firing `start()`
+    /// or any update pass — calls `func(node)`, and flushes every node/
+    /// component write back. The editor then drains the spawn / create /
+    /// terrain queues itself (that's where `createNode` and
+    /// `terrain.generatePlanet` land). Returns whether the function existed.
+    pub fn call_action(
+        &mut self,
+        world: &mut World,
+        scripts_dir: &Path,
+        eid: u32,
+        kind: &str,
+        func: &str,
+    ) -> bool {
+        self.sync_scene(world);
+        let Some(e) = self.scene.borrow().ents.get(&eid).copied() else {
+            self.record_error(kind, format!("{kind}: editor action target node #{eid} not found"));
+            return false;
+        };
+        if !self.ensure_instance(e, kind, scripts_dir) {
+            return false;
+        }
+        let key = (eid, kind.to_string());
+        let Some(inst) = self.instances.get(&key) else { return false };
+        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+        let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>(func) else {
+            self.record_error(kind, format!("{kind}: editor action '{func}' is not defined"));
+            return false;
+        };
+        // Seed `params` from the node's stored tunables (what the Inspector
+        // shows), exactly like a lifecycle tick would — an action without it
+        // would read stale defaults. Reference params resolve by name.
+        {
+            let (params, refs, strs) = world
+                .get::<Scripts>(e)
+                .and_then(|s| s.0.iter().find(|i| i.kind == kind))
+                .map(|i| (i.params.clone(), i.refs.clone(), i.strs.clone()))
+                .unwrap_or_default();
+            let resolved: Vec<(String, crate::env::ResolvedRef)> = {
+                use crate::env::{parse_ref_sentinel, ResolvedRef};
+                let s = self.scene.borrow();
+                let defaults = env.get::<Table>("defaults").ok();
+                refs.iter()
+                    .map(|(k, target)| {
+                        let id = (!target.is_empty())
+                            .then(|| s.by_name.get(target).copied())
+                            .flatten();
+                        let rk = defaults
+                            .as_ref()
+                            .and_then(|d| d.get::<String>(k.as_str()).ok())
+                            .and_then(|v| parse_ref_sentinel(&v));
+                        let r = match (rk, id) {
+                            (Some(crate::RefKind::Node), Some(id)) => ResolvedRef::Node(id),
+                            _ => ResolvedRef::None,
+                        };
+                        (k.clone(), r)
+                    })
+                    .collect()
+            };
+            if let Ok(t) = crate::env::params_table(&self.lua, &env, &params, &resolved, &strs) {
+                let _ = env.set("params", t);
+            }
+        }
+        let Ok(node) = new_node_handle(&self.lua, eid) else { return false };
+        if let Err(err) = f.call::<()>(node) {
+            self.record_error(kind, format!("{kind}: {func}: {err}"));
+        }
+        self.flush_writes(world);
+        true
     }
 
     /// Dispatch one collision/trigger event to every script on `eid` that
@@ -1655,6 +1790,16 @@ impl ScriptHost {
     fn flush_writes(&mut self, world: &mut World) {
         // Flush transforms that a handle wrote on OTHER nodes back to the ECS.
         self.flush_scene(world);
+        // Construction-API writes (setCelestial/setMaterial/setTerrain/
+        // setPrimitive) — before the numeric component mirror, so a component
+        // created here can be tweaked by getcomponent writes the same pass.
+        {
+            let sets = std::mem::take(&mut *self.rich_sets.borrow_mut());
+            if !sets.is_empty() {
+                let ents = self.scene.borrow().ents.clone();
+                crate::api::apply_rich_sets(world, &ents, sets);
+            }
+        }
         // Persist `params.X = ...` writes into the node's stored ScriptInst —
         // the next pass seeds from them (the write STICKS) and the Inspector
         // shows them live. Stop reverts them with the rest of the play state.

@@ -17,6 +17,7 @@
     nodes: [
         (
             name: "Athosil",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -44,6 +45,7 @@
         ),
         (
             name: "Umunquo",
+            tags: ["genbody"],
             transform: (
                 translation: (28.0, 0.0, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -67,6 +69,7 @@
         ),
         (
             name: "Oria",
+            tags: ["genbody"],
             transform: (
                 translation: (-10473.4, 0.0, 1012.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -90,6 +93,7 @@
         ),
         (
             name: "Pelexru",
+            tags: ["genbody"],
             transform: (
                 translation: (22038.3, 0.0, 4988.6),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -113,6 +117,7 @@
         ),
         (
             name: "Pelia",
+            tags: ["genbody"],
             transform: (
                 translation: (-47665.3, 0.0, 7588.9),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -136,6 +141,7 @@
         ),
         (
             name: "Draol",
+            tags: ["genbody"],
             transform: (
                 translation: (-47007.7, 0.0, 6320.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -155,6 +161,7 @@
         ),
         (
             name: "Umunquo Core",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -175,6 +182,7 @@
         ),
         (
             name: "Oria Core",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -195,6 +203,7 @@
         ),
         (
             name: "Pelexru Core",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -215,6 +224,7 @@
         ),
         (
             name: "Pelia Core",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -235,6 +245,7 @@
         ),
         (
             name: "Draol Core",
+            tags: ["genbody"],
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -708,6 +719,27 @@
             ),
             scripts: [],
             parent: Some(12),
+        ),
+        (
+            // Game-side procgen tooling: select this node and press the
+            // Inspector's ▶ Generate button to roll a whole new star system
+            // in place (see scripts/system_generator.lua — every knob is a
+            // param). Engine involvement: generic editor actions + the
+            // terrain.generatePlanet primitive, nothing solar-specific.
+            name: "System Generator",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "system_generator",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
         ),
     ],
 )

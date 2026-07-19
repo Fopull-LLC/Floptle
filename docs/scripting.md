@@ -494,6 +494,49 @@ crystal:setShaderParam("glow", 2.5)       -- float
 Each call is a GPU uniform write, never a recompile — per-tick driving is the
 intended use.
 
+### Editor actions & the construction API
+
+Scripts can be **editor tooling**, not just gameplay — the Unity
+editor-script analog. Declare a button:
+
+```lua
+--@editorButton Generate roll
+function roll(node)
+  -- runs in EDIT mode against the OPEN scene when clicked
+end
+```
+
+and the Inspector shows **▶ Generate** on that script component. Clicking
+runs exactly that function (never `start()`/`update`) with the node's
+Inspector-tuned `params`; everything it does — transform and component
+writes, `spawn`/`destroy`, and the construction API below — lands in the
+edited scene as one undo step. The solar demo's `system_generator.lua`
+(a "System Generator" node in the system scene) rebuilds its entire star
+system this way; the engine only provides the generic pieces.
+
+**Construction API** — build content from script, in actions or at runtime:
+
+```lua
+createNode("Oria", function(n)          -- a plain node (optional parent arg)
+  n:setTerrain(2)                       -- make it a terrain volume (id 2)
+  n:setCelestial{ mu = 5e5, parent = "Sun", a = 9000, atmoColor = {0.4,0.6,0.9} }
+  n.x, n.y, n.z = 9000, 0, 0
+  n.tags = { "genbody" }                -- tag your work so regenerating is safe
+  createNode("Oria Core", n, function(core)   -- nested creates are fine
+    core:setPrimitive("Sphere", {1, 0.5, 0.2})
+    core:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }
+  end)
+end)
+terrain.generatePlanet(2, { radius = 180, caveDepth = 60, seed = 41 })
+```
+
+`setCelestial` / `setMaterial` create the component when absent and take
+camelCase fields (colors as `{r,g,b}`). `terrain.generatePlanet` is the heavy
+generic primitive — a layered, cavernous, cratered sphere written into the
+terrain field on a background thread (every knob optional; see the IDE hover
+for the full list). `rng()` with no seed rolls a fresh stream from the clock
+(`r.seed` reproduces it).
+
 ### 3D lines (`draw.line`)
 
 Scripts can draw **world-space 3D lines** — the runtime line layer behind the
