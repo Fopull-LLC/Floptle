@@ -5,8 +5,10 @@
 //! non-root body node's translation from its Kepler elements (exact analytic
 //! orbits — stable at any warp), re-anchor their terrain colliders in the sim,
 //! rebuild gravity (the µ/r² centers moved), and feed the `space.*` snapshot to
-//! scripts. The ROOT body (empty `parent`) stays where the scene put it; every
-//! other body should be a TOP-LEVEL node (rails write world positions).
+//! scripts. The ROOT body (empty `parent`) stays where the scene put it. Bodies
+//! may live under a scene group (a generator's "<Star> System" folder): rails
+//! positions are computed in WORLD space and converted into the scene parent's
+//! frame before the local-translation write.
 
 use floptle_core::frames::{Body, Kepler, System};
 use floptle_core::{CelestialBody, Entity, Transform};
@@ -88,10 +90,16 @@ impl Editor {
             let wp = root_pos + sp;
             let old = floptle_core::world_transform(&self.world, *e).translation;
             deltas.push(wp - old);
-            if i != root
-                && let Some(tr) = self.world.get_mut::<Transform>(*e)
-            {
-                tr.translation = wp;
+            if i != root {
+                // `wp` is WORLD-space but `Transform.translation` is parent-local:
+                // a body under a scene group (generators build a "<Star> System"
+                // folder) must convert through the parent's frame, or the world
+                // position would be re-offset by the group. Top-level bodies
+                // write straight through (identity parent).
+                let local = world_to_parent_local(&self.world, *e, wp);
+                if let Some(tr) = self.world.get_mut::<Transform>(*e) {
+                    tr.translation = local;
+                }
             }
             // An orbiting planet's terrain collider must ride along.
             if self.terrains.contains_key(e)
@@ -238,5 +246,68 @@ impl Editor {
         if let Some(sim) = self.sim.as_mut() {
             sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
         }
+    }
+}
+
+/// Convert a WORLD position into `e`'s scene-parent-local frame — what a
+/// `Transform.translation` write on `e` must contain to land the node at `wp`.
+/// Top-level nodes pass through unchanged. This is what lets celestial bodies
+/// live under a scene group (a generator's "<Star> System" folder): rails
+/// computes world positions, the write converts through the parent.
+pub(crate) fn world_to_parent_local(
+    world: &floptle_core::World,
+    e: Entity,
+    wp: DVec3,
+) -> DVec3 {
+    match world.get::<floptle_core::Parent>(e).copied() {
+        Some(floptle_core::Parent(pe)) => {
+            let pw = floptle_core::world_transform(world, pe);
+            let s = pw.scale.as_dvec3().max(DVec3::splat(1e-9));
+            (pw.rotation.as_dquat().inverse() * (wp - pw.translation)) / s
+        }
+        None => wp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::math::{Quat, Vec3};
+    use floptle_core::{Parent, World};
+
+    /// The rails write must round-trip: writing the converted local translation
+    /// puts the node's WORLD transform exactly at the rails position, whatever
+    /// frame the scene parent (a generator's system group) sits in.
+    #[test]
+    fn rails_world_position_survives_a_scene_parent() {
+        let mut w = World::default();
+        let group = w.spawn();
+        // A group deliberately NOT at identity — offset, rotated, scaled.
+        w.insert(
+            group,
+            Transform {
+                translation: DVec3::new(100.0, -25.0, 7.0),
+                rotation: Quat::from_rotation_y(0.7),
+                scale: Vec3::splat(2.0),
+            },
+        );
+        let body = w.spawn();
+        w.insert(body, Transform::IDENTITY);
+        w.insert(body, Parent(group));
+
+        let rails_wp = DVec3::new(4839.0, 0.0, -1200.0);
+        let local = world_to_parent_local(&w, body, rails_wp);
+        w.get_mut::<Transform>(body).unwrap().translation = local;
+        let got = floptle_core::world_transform(&w, body).translation;
+        // Tolerance: rotation quats are f32 (ADR-0015 keeps only translation
+        // f64), so a rotated parent leaves f32-epsilon × lever-arm residue
+        // (~1e-7 × 5000 units). Millimeter-scale at system scale is exact
+        // for our purposes — and generator groups are identity anyway.
+        assert!((got - rails_wp).length() < 1e-3, "world pos drifted: {got:?}");
+
+        // Top-level nodes pass through untouched.
+        let top = w.spawn();
+        w.insert(top, Transform::IDENTITY);
+        assert_eq!(world_to_parent_local(&w, top, rails_wp), rails_wp);
     }
 }
