@@ -9,8 +9,10 @@
 --
 -- Every knob is a tweakable param below. seed 0 = a new system every click
 -- (the rolled seed prints to the Console — put it in the seed param to
--- reproduce). Generated nodes are tagged "genbody" so regenerating only
--- ever touches its own work.
+-- reproduce). Everything generated lives under ONE "<Star> System" group node
+-- (tagged "gensystem"; bodies inside also tagged "genbody"), so regenerating
+-- destroys the old system as a single subtree and never touches the rest of
+-- the scene — and you can hand-delete a whole system the same way.
 --
 --@editorButton Generate generate
 
@@ -168,25 +170,24 @@ local function archetype(r, kind, radius, caveScale)
   return o, atmoHue
 end
 
--- One body: node + celestial + core kernel + queued terrain fill.
-local function makeBody(name, id, kind, radius, pos, cel, opts)
-  createNode(name, function(n)
-    n:setTerrain(id)
-    n:setCelestial(cel)
-    n.x, n.y, n.z = pos[1], pos[2], pos[3]
+-- One body under the system group: node + celestial + core kernel. The heavy
+-- terrain fill is queued separately in generate() (it needs no node handle).
+local function makeBody(sys, b)
+  createNode(b.name, sys, function(n)
+    n:setTerrain(b.id)
+    n:setCelestial(b.cel)
+    n.x, n.y, n.z = b.pos[1], b.pos[2], b.pos[3]
     n.tags = { "genbody" }
-    local hot = (opts.corePaint and opts.corePaint.slot == 6)
+    local hot = (b.opts.corePaint and b.opts.corePaint.slot == 6)
     local cc = hot and { 1.0, 0.55, 0.25 } or { 0.55, 0.8, 1.0 }
     local ce = hot and { 1.0, 0.45, 0.15 } or { 0.4, 0.7, 1.0 }
-    createNode(name .. " Core", n, function(core)
+    createNode(b.name .. " Core", n, function(core)
       core:setPrimitive("Sphere", cc)
       core:setMaterial { color = cc, emissive = ce, emissiveStrength = 2.5, unlit = true }
-      core.scale = math.max(opts.coreR * 0.8, 4)
+      core.scale = math.max(b.opts.coreR * 0.8, 4)
       core.tags = { "genbody" }
     end)
   end)
-  opts.seed = opts.seed or id
-  terrain.generatePlanet(id, opts)
 end
 
 -- ---------------------------------------------------------------------------
@@ -196,9 +197,11 @@ function generate(node)
   local r = (p.seed > 0) and rng(p.seed) or rng()
   print(string.format("SYSTEM GENERATOR — seed %d (set the seed param to reproduce)", r.seed))
 
-  -- Clear our previous work (only nodes we tagged).
-  local old = findTagged("genbody")
-  for _, n in ipairs(old) do n:destroy() end
+  -- Clear our previous work: the whole system GROUP goes in one subtree
+  -- destroy (that's the point of generating into a clean hierarchy), plus any
+  -- stray top-level "genbody" nodes from the old flat format.
+  for _, n in ipairs(findTagged("gensystem")) do n:destroy() end
+  for _, n in ipairs(findTagged("genbody")) do n:destroy() end
 
   local taken = {}
 
@@ -220,17 +223,10 @@ function generate(node)
   local classHeat = ({ 1.25, 1.1, 1.0, 0.85, 0.7 })[cls[3]]
   local starLum = (a1 * a1 / 1e6) * r:range(0.95, 1.25) * classHeat * p.starScale
   local starR = r:range(650, 1000)
-  createNode(starName, function(star)
-    star:setPrimitive("Sphere", cls[1])
-    star:setMaterial { color = cls[1], emissive = cls[1], emissiveStrength = 2.0, unlit = true }
-    star:setCelestial {
-      mu = starMu, bodyRadius = starR * 0.85, soi = 0,
-      luminosity = starLum, starColor = cls[1],
-    }
-    star.x, star.y, star.z = 0, 0, 0
-    star.scale = starR
-    star.tags = { "genbody" }
-  end)
+  -- Bodies are ROLLED first (pure data, deterministic per seed) and BUILT after,
+  -- all under one "<Star> System" group node — so the scene stays organized and
+  -- the next generation removes the entire old system in one subtree destroy.
+  local specs = {}
 
   local planetKinds = { "canyon", "dune", "ice", "lava", "crystal" }
   local moonKinds = { "barren", "frost", "crystal", "ice" }
@@ -275,7 +271,8 @@ function generate(node)
       cel.atmoDensity = r:range(0.5, 0.85)
       cel.clouds = math.max(0, r:range(-0.25, 0.65))
     end
-    makeBody(name, id, kind, radius, pos, cel, opts)
+    specs[#specs + 1] = { name = name, id = id, pos = pos, cel = cel, opts = opts }
+    terrain.generatePlanet(id, opts)
     print(string.format("  %s — %s, r %.0f, g %.1f, orbit %.0f", name, kind, radius, g, a))
     if pi == 1 then firstPos, firstR, firstRelief = pos, radius, opts.relief end
     id = id + 1
@@ -294,10 +291,11 @@ function generate(node)
         local mpos = { pos[1] + ma * math.cos(mm0), 0, pos[3] + ma * math.sin(mm0) }
         local mopts = archetype(r, mkind, mr, p.caveScale)
         mopts.seed = r:int(1, 1e9)
-        makeBody(mname, id, mkind, mr, mpos, {
+        specs[#specs + 1] = { name = mname, id = id, pos = mpos, cel = {
           mu = mmu, bodyRadius = mr + math.max(mr * 0.035, 4), soi = 0,
           parent = name, a = ma, e = r:range(0, 0.04), i = r:range(0, 0.25), m0 = mm0,
-        }, mopts)
+        }, opts = mopts }
+        terrain.generatePlanet(id, mopts)
         print(string.format("    moon %s — %s, r %.0f, orbit %.0f", mname, mkind, mr, ma))
         id = id + 1
         ma = ma * r:range(1.8, 2.4)
@@ -306,6 +304,27 @@ function generate(node)
 
     a = a * p.spacing * r:range(0.85, 1.15)
   end
+
+  -- Build the hierarchy: ONE group node holds the star and every body, so the
+  -- Hierarchy panel reads as a single tidy system and regeneration (or a hand
+  -- delete of the group) cleans up everything at once. The group sits at the
+  -- origin with no rotation/scale — bodies' positions stay world numbers.
+  createNode(starName .. " System", function(sys)
+    sys.x, sys.y, sys.z = 0, 0, 0
+    sys.tags = { "gensystem" }
+    createNode(starName, sys, function(star)
+      star:setPrimitive("Sphere", cls[1])
+      star:setMaterial { color = cls[1], emissive = cls[1], emissiveStrength = 2.0, unlit = true }
+      star:setCelestial {
+        mu = starMu, bodyRadius = starR * 0.85, soi = 0,
+        luminosity = starLum, starColor = cls[1],
+      }
+      star.x, star.y, star.z = 0, 0, 0
+      star.scale = starR
+      star.tags = { "genbody" }
+    end)
+    for _, b in ipairs(specs) do makeBody(sys, b) end
+  end)
 
   -- Move the crew to the first planet's north pole (daylit side varies —
   -- summon the ship with L if it settles awkwardly).
