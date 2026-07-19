@@ -36,9 +36,11 @@ local target
 local pitch = nil
 -- The yaw reference direction, parallel-transported across the planet surface.
 local rx, ry, rz = 0.0, 0.0, -1.0
--- The camera's up, SLEW-LIMITED toward −gravity. Frozen while flying so an SOI
--- transfer (which flips −gravity discontinuously) can't snap or reorient the
--- view — see the up-slew below.
+-- The camera's up, SLEW-LIMITED toward −gravity. On foot it tracks fast (level
+-- horizon as you walk); while FLYING it tracks GENTLY, so it follows the planet's
+-- local vertical as you fly around the body (no more "upside-down on the far
+-- side") yet spreads the discontinuous −gravity flip at an SOI hand-off into an
+-- easy reorient instead of a jarring snap — see the up-slew below.
 local cup_x, cup_y, cup_z = nil, nil, nil
 
 local PITCH_LIMIT = math.pi * 0.5 - 0.08
@@ -103,13 +105,16 @@ function lateUpdate(node, dt)
     dux, duy, duz = norm(target.x, target.y, target.z)
     if dux == 0 and duy == 0 and duz == 0 then dux, duy, duz = 0, 1, 0 end
   end
-  -- Slew-limit the up so a gravity/SOI transfer can't SNAP the view: crossing an
-  -- SOI boundary flips −gravity to point at a different body. WHILE FLYING the up
-  -- is frozen entirely (KSP-style — the flight camera never reorients, so a
-  -- transfer changes nothing about how the camera sits); ON FOOT it tracks the
-  -- surface quickly so the horizon stays level as you walk around the planet.
+  -- Slew-limit the up so a gravity/SOI transfer can't SNAP the view. Crossing an
+  -- SOI boundary flips −gravity to point at a DIFFERENT body (the field is
+  -- patched-conic — only the dominant body pulls), a discontinuous jump. FLYING
+  -- uses a GENTLE rate: flying around a planet turns the local vertical only
+  -- slowly (the orbital rate), so the camera tracks it near-perfectly and never
+  -- ends up upside-down on the far side — but the instantaneous SOI flip is spread
+  -- over ~a second into a smooth reorient instead of a snap. ON FOOT it tracks
+  -- fast so the horizon stays level as you walk around the planet.
   if not cup_x then cup_x, cup_y, cup_z = dux, duy, duz end
-  local slew = piloting and 0.0 or 8.0
+  local slew = piloting and 1.5 or 8.0
   if slew > 0 then
     local cd = math.max(-1, math.min(1, dux * cup_x + duy * cup_y + duz * cup_z))
     local ang = math.acos(cd)

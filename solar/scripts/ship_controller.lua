@@ -1161,6 +1161,12 @@ function fixedUpdate(node, dt)
       piloting = true
       astronaut.visible = false
       set_navball(true)
+      -- Board in a STABILITY hold — never inherit a velocity-pointing mode into a
+      -- takeoff. On a vertical climb your velocity (in the planet's frame) points
+      -- radially OUT, so an inherited "retrograde" would aim the nose straight at
+      -- the core and fight you off the pad. You pick prograde/retrograde/etc. once
+      -- you're actually orbiting.
+      sas_mode, sas_last = "stability", "stability"
       spawn_t = math.max(spawn_t, time - params.grace + 0.75) -- brief settle grace
     end
   end
@@ -1369,11 +1375,17 @@ function fixedUpdate(node, dt)
     r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
   end
   local sasm_x, sasm_y, sasm_z -- the SAS aim point, for the navball marker
-  -- Debounce the flickery per-contact grounded flag. On the ground at low
-  -- throttle the ship uses the TOPPLE model (no free spinning); firing the
-  -- engine (throttle ≥ 0.15) or leaving the surface hands back to free flight.
-  if node.grounded then grounded_until = time + 0.15 end
-  local on_ground = throttle < 0.15 and (node.grounded or time < grounded_until)
+  -- Debounce the flickery per-contact grounded flag. A sphere hull resting on
+  -- voxel terrain (and a ship settled a hair INTO a slope — the pad sits the ship
+  -- slightly sunk) drops contact for a tick constantly; a generous latch keeps a
+  -- landed ship in the TOPPLE + parking-brake model instead of flipping to
+  -- free-flight SAS, which — in a velocity-pointing mode — would chase the noisy
+  -- pushout velocity and swing the nose at the core. On the ground at low throttle
+  -- the ship topples rather than free-spins; firing the engine (throttle ≥ 0.15)
+  -- or truly leaving the surface hands back to free flight.
+  if node.grounded then grounded_until = time + 0.35 end
+  local landed = node.grounded or time < grounded_until
+  local on_ground = throttle < 0.15 and landed
   if on_ground then
     avp, avy, avr = 0, 0, 0 -- no orbital rates leak onto the ground
     apply_topple(node, dt, p, y)
@@ -1455,9 +1467,10 @@ function fixedUpdate(node, dt)
     return
   end
   local spd = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
-  if node.grounded and throttle < 0.01 and spd < params.park_speed then
+  if landed and throttle < 0.01 and spd < params.park_speed then
     -- Parked: pin it still. Kills the low-speed grinding/sliding jitter a
-    -- sphere hull otherwise does on voxel terrain.
+    -- sphere hull otherwise does on voxel terrain (uses the debounced `landed`
+    -- so a flickery contact frame can't briefly un-pin and let it drift/rotate).
     node.vx, node.vy, node.vz = 0, 0, 0
   else
     node.vx = node.vx + nx * acc * dt
