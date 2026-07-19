@@ -899,6 +899,10 @@ impl ScriptHost {
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
         let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
+        // The `camera.*` world→screen API (map click-on-line picking).
+        let view_info: Rc<RefCell<crate::view_api::ViewInfo>> =
+            Rc::new(RefCell::new(crate::view_api::ViewInfo::default()));
+        crate::view_api::install_camera_api(&lua, view_info.clone());
 
         Self {
             lua,
@@ -934,6 +938,7 @@ impl ScriptHost {
             save_state,
             sched,
             space_info,
+            view_info,
             warp_request,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
@@ -1004,6 +1009,12 @@ impl ScriptHost {
     /// Feed this tick's celestial snapshot (`space.*` reads it — solar demo S2).
     pub fn set_space(&self, info: crate::space_api::SpaceInfo) {
         *self.space_info.borrow_mut() = info;
+    }
+
+    /// Feed this frame's active game camera + viewport (`camera.worldToScreen`
+    /// reads it). Fed every frame regardless of focus, so the map can pick.
+    pub fn set_view(&self, info: crate::view_api::ViewInfo) {
+        *self.view_info.borrow_mut() = info;
     }
 
     /// Drain a pending `space.warp(m)` request (the editor applies + clamps it).

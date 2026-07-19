@@ -458,6 +458,32 @@ function input.button(i) end
 ---@return boolean
 function input.clicked(i) end
 
+---The active game camera's projection — turn a world point into a screen pixel
+---(and back). The pixels are in the SAME space `input.mouse()` reports, so you
+---can hover/click 3D things you drew: sample a line into points, project each,
+---and keep the nearest to the cursor (that's how the map's click-on-orbit works).
+---@class Camera
+camera = {}
+---True once the editor is feeding a live game camera (false in the Scene view).
+---@return boolean
+function camera.exists() end
+---The game viewport size in pixels: `local w, h = camera.screenSize()`.
+---@return number, number
+function camera.screenSize() end
+---Project a world point to the game view: `sx, sy, depth, onscreen`. `onscreen`
+---is false for points behind the camera or outside the frustum — skip those.
+---@param x number
+---@param y number
+---@param z number
+---@return number, number, number, boolean
+function camera.worldToScreen(x, y, z) end
+---A world-space ray from a screen pixel: `ox,oy,oz, dx,dy,dz` (origin on the near
+---plane, unit direction into the scene). The inverse of `worldToScreen`.
+---@param sx number
+---@param sy number
+---@return number, number, number, number, number, number
+function camera.screenToRay(sx, sy) end
+
 ---Cast a ray against the world's colliders (terrain + meshes + primitives)
 ---AND every physics body (players, crates). Returns a hit table
 ---{x,y,z, nx,ny,nz, distance, node} or nil — `node` is the hit body's node
@@ -881,12 +907,13 @@ function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
 /// declaring the engine globals (so they aren't flagged undefined).
-pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
+pub(crate) const LUARC_JSON: &str = "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"camera\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n";
 
 /// Byte-exact PREVIOUS engine-generated `.luarc.json` versions: a project file
 /// matching one of these was never hand-edited, so it's safe to migrate to the
 /// current `LUARC_JSON` (a customized file is always left alone).
 const LUARC_JSON_OLD: &[&str] = &[
+    "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"space\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"after\", \"every\", \"tween\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"save\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",
     "{\n  \"runtime.version\": \"Lua 5.1\",\n  \"workspace.library\": [\".floptle/library\"],\n  \"diagnostics.globals\": [\"node\", \"params\", \"time\", \"dt\", \"defaults\", \"start\", \"update\", \"fixedUpdate\", \"lateUpdate\", \"log\", \"input\", \"raycast\", \"gizmo\", \"find\", \"findAll\", \"findScript\", \"findScriptInScene\", \"findScripts\", \"findTagged\", \"vec2\", \"vec3\", \"distance\", \"onCollisionEnter\", \"onCollisionStay\", \"onCollisionExit\", \"onTriggerEnter\", \"onTriggerStay\", \"onTriggerExit\", \"assets\", \"spawn\", \"createNode\", \"destroy\", \"spawnEffect\", \"draw\", \"scene\", \"terrain\", \"rng\", \"audio\", \"net\", \"synced\", \"replicated\", \"onRpc\"]\n}\n",

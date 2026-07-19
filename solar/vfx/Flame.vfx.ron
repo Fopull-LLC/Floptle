@@ -10,7 +10,11 @@
                 texture: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/textures/VFXTEX/Fire/3.png"),
             ),
             blend: Additive,
-            space: World,
+            // LOCAL space: the plume rides the ship's frame, so it stays on the
+            // nozzle while flying. World space anchored each particle to its
+            // emit point in absolute space — fine parked, but at orbital speed
+            // (~130 u/s) the ship outruns its own plume and it looks absent.
+            space: Local,
             clips: [
                 (
                     start: 0.0,

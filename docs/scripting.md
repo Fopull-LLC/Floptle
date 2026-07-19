@@ -209,6 +209,37 @@ A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with
 `input.mouse_delta()`. Stop always releases the lock.
 
+### The camera projection (`camera.*`)
+
+Turn a world point into a screen pixel (and back) against the **active game
+camera** — the pixels are in the same space `input.mouse()` reports, so you can
+hover and click 3-D things you drew:
+
+| call | returns |
+| --- | --- |
+| `camera.worldToScreen(x, y, z)` | `sx, sy, depth, onscreen` |
+| `camera.screenToRay(sx, sy)` | `ox,oy,oz, dx,dy,dz` (a world ray from a pixel) |
+| `camera.screenSize()` | `w, h` (game viewport, pixels) |
+| `camera.exists()` | `true` once a live game camera is being fed |
+
+`onscreen` is `false` for points behind the camera or outside the frustum — skip
+those. **Click-on-line picking** (how the solar map's maneuver nodes are placed):
+sample a drawn line into points, `worldToScreen` each, and keep the nearest to
+`input.mouse()` within a pixel threshold; create at that point on `input.clicked(0)`.
+
+```lua
+local mx, my = input.mouse()
+local best, bd
+for _, p in ipairs(orbit_points) do
+  local sx, sy, _, on = camera.worldToScreen(p.x, p.y, p.z)
+  if on then
+    local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+    if not bd or d < bd then best, bd = p, d end
+  end
+end
+if best and bd < 18 * 18 and input.clicked(0) then create_node_at(best) end
+```
+
 ### Raycasting
 
 `raycast(ox,oy,oz, dx,dy,dz, max [, ignore])` casts a ray against the world's

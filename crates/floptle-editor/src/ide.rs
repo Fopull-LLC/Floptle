@@ -2391,7 +2391,7 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
-    "after", "every", "tween", "space",
+    "after", "every", "tween", "space", "camera",
 ];
 
 /// The Docs page's API-reference groups, in display order.
@@ -2529,6 +2529,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.mouse_delta", insert: "input.mouse_delta(", doc: "local dx, dy = input.mouse_delta() — mouse movement since last frame." },
     ApiEntry { label: "input.button", insert: "input.button(", doc: "input.button(0) — true while a mouse button is held (0 left, 1 right, 2 middle)." },
     ApiEntry { label: "input.clicked", insert: "input.clicked(", doc: "input.clicked(0) — true only on the frame a mouse button goes down." },
+    ApiEntry { label: "camera.worldToScreen", insert: "camera.worldToScreen(", doc: "camera.worldToScreen(x,y,z) → sx, sy, depth, onscreen — project a world point into the game view (pixels in input.mouse()'s space). onscreen=false behind the camera / off-frustum. Sample a drawn line into points, project each, keep the nearest to the cursor = click-on-line picking (the map's maneuver nodes)." },
+    ApiEntry { label: "camera.screenToRay", insert: "camera.screenToRay(", doc: "camera.screenToRay(sx,sy) → ox,oy,oz, dx,dy,dz — a world ray from a screen pixel (inverse of worldToScreen)." },
+    ApiEntry { label: "camera.screenSize", insert: "camera.screenSize()", doc: "camera.screenSize() → w, h — the game viewport size in pixels. camera.exists() is true once a live game camera is being fed." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
     ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — pin the cursor to the window center and hide it (FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
     ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },

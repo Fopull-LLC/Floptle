@@ -7,7 +7,9 @@
 --   W/S      pitch (S pulls the nose UP)    A/D  yaw    Q/E  roll
 --            (hold = turn, release = stop)
 --   B        landing gear (legs retracted = fragile belly, crash at 6 m/s)
---   T        SAS toggle       G  (while wrecked) restore at the pad
+--   T        SAS on/off    1-8  hold mode: 1 stability · 2 prograde ·
+--            3 retrograde · 4 normal · 5 anti-nml · 6 radial-in · 7 radial-out ·
+--            8 node (auto-point at the burn). G  (wrecked) restore at the pad
 --
 -- Fuel is real: burning scales with throttle, the ship gets LIGHTER as the
 -- tank drains (thrust/mass — TWR climbs, watch the G limit near empty), an
@@ -57,7 +59,12 @@ wrecked = false
 throttle = 0.0
 fuel = 100.0
 
-local sas = true
+-- SAS autopilot (KSP hold modes). "off" = free (rates persist), "stability" =
+-- damp rotation to zero, and the pointing modes auto-rotate the nose to that
+-- direction with the rate controller. T toggles off/stability; number keys pick
+-- a mode in flight (1..8). `sas_last` remembers the mode T re-enables.
+local sas_mode = "stability"
+local sas_last = "stability"
 -- Time-warp ladder (KSP-style steps) + a short HUD notice when a step is denied.
 local warp_steps = { 1, 5, 10, 50, 100, 1000, 10000 }
 local warp_note, warp_note_t = nil, -10.0
@@ -65,6 +72,12 @@ local warp_note, warp_note_t = nil, -10.0
 local nx, ny, nz = 0.0, 1.0, 0.0
 local fx, fy, fz = 0.0, 0.0, -1.0
 local avp, avy, avr = 0.0, 0.0, 0.0 -- angular rates about right/nose/fwd
+-- Landed toppling (inverted pendulum on the gear footprint): a landed ship can't
+-- freely spin — pilot pitch/yaw LEAN it, and gravity either rights it (gear down =
+-- wide, stable) or tips it past balance into a topple (gear up = narrow). `tip_w`
+-- is the lean rate, `toppled` latches a committed fall, `grounded_until` debounces
+-- the flickery per-contact grounded flag so the model doesn't chatter.
+local tip_w, toppled, grounded_until = 0.0, false, -10.0
 local astronaut, flame, hud
 local hud_t = -10.0
 local pad_x, pad_y, pad_z
@@ -103,6 +116,7 @@ end
 local function reset_pose(node)
   node.vx, node.vy, node.vz = 0, 0, 0
   avp, avy, avr = 0, 0, 0
+  tip_w, toppled = 0.0, false
   throttle = 0.0
   fuel = params.fuel
   spawn_t = time
@@ -206,6 +220,64 @@ local function wreck_ship(node, x, y, z)
   set_ship_visible(node, false)
 end
 
+-- Landed attitude = an inverted pendulum on the gear footprint. The nose leans
+-- from local-up by `theta`; gravity torque about the footprint edge is RESTORING
+-- while the centre of mass sits over the base (tan θ < r/h) and RUNAWAY past it —
+-- so a WIDE base (gear down) self-rights and resists the pilot, a NARROW base
+-- (gear up) tips from a nudge. Pilot pitch/yaw push the lean; roll is ignored
+-- (no pirouetting on the legs). Rewrites the nose/fwd basis directly.
+local COM_H, FOOT_UP, FOOT_DOWN, TIP_DAMP, PUSH_GAIN = 2.0, 0.35, 1.7, 4.0, 1.5
+local function apply_topple(node, dt, p, y)
+  -- Local up: away from gravity (fallback: radial from the dominant body).
+  local gx, gy, gz = space.gravity(node.x, node.y, node.z)
+  local gl = math.sqrt(gx * gx + gy * gy + gz * gz)
+  local ux, uy, uz
+  if gl > 1e-4 then
+    ux, uy, uz = -gx / gl, -gy / gl, -gz / gl
+  else
+    local dd = space.dominant(node.x, node.y, node.z)
+    local b = dd and space.body(dd)
+    if b then ux, uy, uz = norm(node.x - b.x, node.y - b.y, node.z - b.z) else ux, uy, uz = 0, 1, 0 end
+    gl = 9.8
+  end
+  local theta = math.acos(math.max(-1, math.min(1, nx * ux + ny * uy + nz * uz)))
+  local r = FOOT_UP + (FOOT_DOWN - FOOT_UP) * leg_anim -- gear widens the base
+  local theta_tip = math.atan(r / COM_H)
+  -- Lean axis: perpendicular to up & nose. Near upright it's degenerate, so take
+  -- it from the pilot's push (pitch tips about ship-right, yaw about ship-fwd).
+  local rgx, rgy, rgz = cross(fx, fy, fz, nx, ny, nz) -- ship right
+  local lax, lay, laz = cross(ux, uy, uz, nx, ny, nz)
+  local ll = math.sqrt(lax * lax + lay * lay + laz * laz)
+  local pushmag = math.sqrt(p * p + y * y)
+  if ll < 1e-3 then
+    local dx, dy, dz = rgx * p + fx * y, rgy * p + fy * y, rgz * p + fz * y
+    local d2 = dx * ux + dy * uy + dz * uz
+    lax, lay, laz = norm(dx - ux * d2, dy - uy * d2, dz - uz * d2)
+    if lax == 0 and lay == 0 and laz == 0 then lax, lay, laz = norm(rgx, rgy, rgz) end
+  else
+    lax, lay, laz = lax / ll, lay / ll, laz / ll
+  end
+  -- Torque = gravity (signed by the balance) + the pilot's steady push.
+  local grav_alpha = (gl / COM_H) * (math.sin(theta) - (r / COM_H) * math.cos(theta))
+  tip_w = tip_w + (grav_alpha + PUSH_GAIN * pushmag) * dt
+  if not toppled and theta < theta_tip then
+    tip_w = tip_w - TIP_DAMP * tip_w * dt -- damp small wobbles back to upright
+  end
+  theta = math.max(0.0, theta + tip_w * dt)
+  if theta > theta_tip * 1.2 then toppled = true end
+  -- Rebuild the nose by leaning `up` about the lean axis; keep heading by
+  -- projecting the old fwd onto the plane perpendicular to the new nose.
+  nx, ny, nz = rot(ux, uy, uz, lax, lay, laz, theta)
+  local du = fx * nx + fy * ny + fz * nz
+  fx, fy, fz = norm(fx - nx * du, fy - ny * du, fz - nz * du)
+  if fx == 0 and fy == 0 and fz == 0 then fx, fy, fz = norm(cross(nx, ny, nz, ux, uy, uz)) end
+  -- A committed gear-UP topple that slams flat wrecks the ship (gear down = it
+  -- just lies over and survives — that's what the legs buy you).
+  if toppled and theta > 1.4 and leg_anim < 0.8 and time - spawn_t > params.grace then
+    wreck_ship(node, node.x, node.y, node.z)
+  end
+end
+
 -- The navball + the G5-style flight instruments flanking it (speed tape left,
 -- altitude tape right, heading readout above — the pilot's layout).
 local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg, landing_cam
@@ -237,7 +309,7 @@ end
 -- cross(Y, up) degenerates and the heading would swim with every position
 -- change (the pilot's "heading changes when I only pitch" report — the pad
 -- IS at the north pole). There we anchor east to world-Z instead.
-local function update_navball(node)
+local function update_navball(node, tgtx, tgty, tgtz)
   find_instruments()
   if not navball then return end
   local d = space.dominant(node.x, node.y, node.z)
@@ -267,6 +339,12 @@ local function update_navball(node)
     navball:setShaderParam("prograde", toH(node.vx / vl, node.vy / vl, node.vz / vl))
   else
     navball:setShaderParam("prograde", 0, 0, 0)
+  end
+  -- The SAS autopilot's aim point (green ring), or hidden when there's none.
+  if tgtx then
+    navball:setShaderParam("sasTarget", toH(tgtx, tgty, tgtz))
+  else
+    navball:setShaderParam("sasTarget", 0, 0, 0)
   end
   -- Compass heading of the nose's horizontal projection (0 = north, 90 = east).
   local he = nx * ex + ny * ey + nz * ez
@@ -491,7 +569,9 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
       local d = es[cur]
       local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
       if dx * dx + dy * dy + dz * dz > bodies[cur].soi * bodies[cur].soi then
-        enc[#enc + 1] = { t = tt, name = bodies[pc].name, x = wx, y = wy, z = wz, kind = "exit" }
+        -- "exit <the body you're leaving>", not its parent (that read as
+        -- "exit Sol" while still orbiting a planet).
+        enc[#enc + 1] = { t = tt, name = bodies[cur].name, x = wx, y = wy, z = wz, kind = "exit" }
         cur = pc
       end
     end
@@ -508,11 +588,47 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
   return pts, enc
 end
 
--- Draw a cached world polyline (flat {x,y,z,x,y,z,...}).
-local function draw_polyline(pts, r, g, b, a)
+-- Draw a cached world polyline (flat {x,y,z,x,y,z,...}) shifted by a live anchor
+-- offset (ox,oy,oz) — see traj_offset: the points are cached at compute time.
+local function draw_polyline(pts, ox, oy, oz, r, g, b, a)
   for i = 1, #pts - 5, 3 do
-    draw.line(pts[i], pts[i + 1], pts[i + 2], pts[i + 3], pts[i + 4], pts[i + 5], r, g, b, a)
+    draw.line(pts[i] + ox, pts[i + 1] + oy, pts[i + 2] + oz,
+      pts[i + 3] + ox, pts[i + 4] + oy, pts[i + 5] + oz, r, g, b, a)
   end
+end
+
+-- How far a cached trajectory's ANCHOR body has moved since the walk was
+-- computed (added to every cached point at draw time). This is what keeps the
+-- node + path glued to a fast-moving planet between the 8 Hz recomputes.
+local function traj_offset(traj)
+  if not traj or not traj.anchor then return 0, 0, 0 end
+  local b = space.body(traj.anchor)
+  if not b then return 0, 0, 0 end
+  return b.x - traj.a0x, b.y - traj.a0y, b.z - traj.a0z
+end
+
+-- The trajectory point nearest the cursor in SCREEN space (KSP click-on-line).
+-- Returns index k (0-based), its live world position, and its time-from-now, or
+-- nil if nothing is within the pixel threshold / the camera isn't feeding.
+local function pick_traj_point(traj, ox, oy, oz)
+  if not traj or not camera or not camera.exists() then return nil end
+  local mx, my = input.mouse()
+  local n = math.floor(#traj.pts / 3)
+  local bk, bd, bx, by, bz
+  for k = 0, n - 1 do
+    local px = traj.pts[k * 3 + 1] + ox
+    local py = traj.pts[k * 3 + 2] + oy
+    local pz = traj.pts[k * 3 + 3] + oz
+    local sx, sy, _, on = camera.worldToScreen(px, py, pz)
+    if on then
+      local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+      if not bd or d < bd then bd, bk, bx, by, bz = d, k, px, py, pz end
+    end
+  end
+  if bd and bd < (24 * 24) then
+    return bk, bx, by, bz, (traj.t0 or 0) + bk * (traj.step or 0)
+  end
+  return nil
 end
 
 -- A little 3D diamond marker (used for the node + encounter points).
@@ -553,7 +669,17 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
   local segs = 140
 
   local pts, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, 0.0, span, segs)
-  traj_now = { pts = pts, enc = enc }
+  -- ANCHOR the cache to the dominant body: store its compute-time world position
+  -- so DRAW can add the LIVE delta each frame. Inside a planet's SOI the planet
+  -- itself moves ~130 u/s, so a world-space cache (refreshed only at 8 Hz) slid
+  -- ~20 units then snapped back every recompute — the "glitching all over"
+  -- Ty saw. Re-gluing to the live body kills it (the near-field is exact; the
+  -- far escape tail is off by <20u, invisible at map zoom). `step`/`t0` give each
+  -- point a TIME, which is what click-to-place reads to position the node.
+  traj_now = {
+    pts = pts, enc = enc, anchor = db.name,
+    a0x = db.x, a0y = db.y, a0z = db.z, t0 = 0.0, step = span / segs,
+  }
 
   if mnv then
     -- State at the node on the CURRENT conic (relative to db, then to world).
@@ -592,7 +718,8 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       bx = px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad,
       by = py * mnv.pro + hny * mnv.nor + rdy * mnv.rad,
       bz = pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad,
-      dv = dv,
+      dv = dv, anchor = db.name,
+      a0x = db.x, a0y = db.y, a0z = db.z, t0 = mnv.t, step = mspan / segs,
     }
   else
     traj_mnv = nil
@@ -747,13 +874,27 @@ local function update_map3d(node, dt)
   -- Plan a burn and watch the resulting orbit — and where it drops you into
   -- another body's sphere of influence. Only while piloting a craft that has a
   -- real trajectory. The flight stick is frozen in the map (see fixedUpdate),
-  -- so WASD/QE re-purpose to tune the burn; ←/→ slide the node around the
-  -- orbit; N creates/clears it; X zeroes the ΔV.
+  -- so WASD/QE re-purpose to tune the burn. LEFT-CLICK the orbit line to place
+  -- the node (drag to move it); ←/→ fine-tune its time; N clears; X zeroes ΔV.
   local oe = db and space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
+  local hover_x, hover_y, hover_z -- the orbit point under the cursor (draw below)
   if piloting and db and not node.grounded then
     local pidx = parent_indices(bodies)
     local vref = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
     local dvrate = math.max(0.5, vref * 0.12)
+
+    -- CLICK-ON-ORBIT placement (KSP): hover the current-orbit line, LEFT-click or
+    -- drag to create/move the burn at that exact point (RMB is the camera, so LMB
+    -- is free). Picks against the cached forward path, whose points carry a time —
+    -- so the click lands the node at the right spot on the orbit.
+    local nox, noy, noz = traj_offset(traj_now)
+    local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, nox, noy, noz)
+    if pk_k then hover_x, hover_y, hover_z = px, py, pz end
+    if pk_t and input.button(0) then
+      if mnv then mnv.t = pk_t else mnv = { t = pk_t, pro = 0.0, nor = 0.0, rad = 0.0 } end
+    end
+
+    -- N still works as a keyboard fallback (create at a lead / clear).
     if input.pressed("n") then
       if mnv then
         mnv = nil
@@ -763,6 +904,7 @@ local function update_map3d(node, dt)
       end
     end
     if mnv then
+      -- ←/→ fine-tune the node time; W/S/A/D/Q/E tune the ΔV; X zeroes it.
       local tref = (oe and oe.period) or 600.0
       local horizon = (oe and oe.period and oe.period * 1.5) or (tref * 6)
       if input.key("left") then mnv.t = mnv.t - tref * 0.15 * dt end
@@ -785,36 +927,43 @@ local function update_map3d(node, dt)
     traj_now, traj_mnv = nil, nil
   end
 
-  -- Draw the cached walks (recomputed at ~8 Hz above; drawn every frame).
+  -- Draw the cached walks (recomputed at ~8 Hz; drawn every frame, each shifted
+  -- by its anchor body's LIVE motion so the node/path stay glued to the planet).
   if traj_now and map_show.markers then
+    local ox, oy, oz = traj_offset(traj_now)
     for _, e in ipairs(traj_now.enc) do
       if e.kind == "impact" then
-        draw_diamond(e.x, e.y, e.z, map_zoom * 0.014, 1.0, 0.4, 0.3)
+        draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.014, 1.0, 0.4, 0.3)
       else
-        draw_diamond(e.x, e.y, e.z, map_zoom * 0.014, 0.4, 0.9, 1.0)
+        draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.014, 0.4, 0.9, 1.0)
       end
     end
   end
+  -- The orbit point under the cursor (a soft ring), so you can see where a click
+  -- will drop the node.
+  if hover_x and not mnv then
+    draw_diamond(hover_x, hover_y, hover_z, map_zoom * 0.012, 0.7, 0.95, 1.0)
+  end
   if traj_mnv then
+    local ox, oy, oz = traj_offset(traj_mnv)
     if map_show.orbits then
-      draw_polyline(traj_mnv.pts, 1.0, 0.55, 0.15, 0.95) -- post-burn path (amber)
+      draw_polyline(traj_mnv.pts, ox, oy, oz, 1.0, 0.55, 0.15, 0.95) -- post-burn (amber)
     end
-    draw_diamond(traj_mnv.mx, traj_mnv.my, traj_mnv.mz, map_zoom * 0.016, 1.0, 0.7, 0.2)
+    local mx, my, mz = traj_mnv.mx + ox, traj_mnv.my + oy, traj_mnv.mz + oz
+    draw_diamond(mx, my, mz, map_zoom * 0.016, 1.0, 0.7, 0.2)
     if traj_mnv.dv > 1e-4 then
       local bnx, bny, bnz = norm(traj_mnv.bx, traj_mnv.by, traj_mnv.bz)
       local bl = map_zoom * 0.06
-      draw.line(traj_mnv.mx, traj_mnv.my, traj_mnv.mz,
-        traj_mnv.mx + bnx * bl, traj_mnv.my + bny * bl, traj_mnv.mz + bnz * bl,
-        1.0, 0.85, 0.3, 1.0)
+      draw.line(mx, my, mz, mx + bnx * bl, my + bny * bl, mz + bnz * bl, 1.0, 0.85, 0.3, 1.0)
     end
     if map_show.markers then
       for _, e in ipairs(traj_mnv.enc) do
         if e.kind == "enter" then
-          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 0.4, 1.0, 0.5)
+          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 0.4, 1.0, 0.5)
         elseif e.kind == "impact" then
-          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 1.0, 0.4, 0.3)
+          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 1.0, 0.4, 0.3)
         else
-          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 0.9, 0.9, 0.5)
+          draw_diamond(e.x + ox, e.y + oy, e.z + oz, map_zoom * 0.018, 0.9, 0.9, 0.5)
         end
       end
     end
@@ -854,14 +1003,14 @@ local function update_map3d(node, dt)
         local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "exit")
         lines[#lines + 1] = string.format("  ⇒ %s %s in %.0fs", verb, e.name, e.t)
       end
-      lines[#lines + 1] = "  W/S prograde · A/D radial · Q/E normal · ←/→ slide · X zero · N clear"
+      lines[#lines + 1] = "  LMB-drag on orbit moves it · W/S prograde · A/D radial · Q/E normal · X zero · N clear"
     elseif piloting and not node.grounded then
       if traj_now and #traj_now.enc > 0 then
         local e = traj_now.enc[1]
         local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "SOI exit")
-        lines[#lines + 1] = string.format("%s: %s in %.0fs   ·   N plan a maneuver", verb, e.name, e.t)
+        lines[#lines + 1] = string.format("%s: %s in %.0fs   ·   click the orbit to plan a burn", verb, e.name, e.t)
       else
-        lines[#lines + 1] = "N  plan a maneuver node"
+        lines[#lines + 1] = "Left-click your orbit line to plan a maneuver (or N)"
       end
     end
     lines[#lines + 1] = string.format(
@@ -872,6 +1021,56 @@ local function update_map3d(node, dt)
     set_hud(node, table.concat(lines, "\n"))
   end
 end
+
+-- The world-space direction the SAS autopilot should point the nose at, for the
+-- current mode — or nil if it's undefined (prograde/normal/radial need real
+-- motion; node needs a planned burn). Velocities are the dominant-body-frame
+-- values node.vx/vy/vz (= velocity RELATIVE to the attractor), which is exactly
+-- what prograde/normal/radial want; do NOT add the body's world velocity.
+local function sas_target_dir(node, db, mode)
+  if not db then return nil end
+  local vx, vy, vz = node.vx, node.vy, node.vz
+  local vl = math.sqrt(vx * vx + vy * vy + vz * vz)
+  if mode == "node" then
+    if not mnv then return nil end
+    local r0x, r0y, r0z = node.x - db.x, node.y - db.y, node.z - db.z
+    local nrx, nry, nrz, nvx, nvy, nvz =
+      space.propagate(r0x, r0y, r0z, vx, vy, vz, db.mu, mnv.t)
+    local ppx, ppy, ppz = norm(nvx, nvy, nvz)
+    local hhx, hhy, hhz = cross(nrx, nry, nrz, nvx, nvy, nvz)
+    local hnx, hny, hnz = norm(hhx, hhy, hhz)
+    local rrx, rry, rrz = cross(ppx, ppy, ppz, hnx, hny, hnz)
+    return norm(ppx * mnv.pro + hnx * mnv.nor + rrx * mnv.rad,
+      ppy * mnv.pro + hny * mnv.nor + rry * mnv.rad,
+      ppz * mnv.pro + hnz * mnv.nor + rrz * mnv.rad)
+  end
+  if vl < 2.0 then return nil end -- prograde/normal/radial are undefined at rest
+  local pgx, pgy, pgz = vx / vl, vy / vl, vz / vl
+  if mode == "prograde" then return pgx, pgy, pgz end
+  if mode == "retrograde" then return -pgx, -pgy, -pgz end
+  local hx, hy, hz = cross(node.x - db.x, node.y - db.y, node.z - db.z, vx, vy, vz)
+  local nmx, nmy, nmz = norm(hx, hy, hz)
+  if nmx == 0 and nmy == 0 and nmz == 0 then return nil end
+  if mode == "normal" then return nmx, nmy, nmz end
+  if mode == "antinormal" then return -nmx, -nmy, -nmz end
+  local rox, roy, roz = cross(pgx, pgy, pgz, nmx, nmy, nmz) -- radial out
+  if mode == "radialout" then return rox, roy, roz end
+  if mode == "radialin" then return -rox, -roy, -roz end
+  return nil
+end
+
+-- Map number keys → SAS modes (flight only; 1/2/3 are map toggles in map view).
+local SAS_KEYS = {
+  ["1"] = "stability", ["2"] = "prograde", ["3"] = "retrograde",
+  ["4"] = "normal", ["5"] = "antinormal", ["6"] = "radialin",
+  ["7"] = "radialout", ["8"] = "node",
+}
+-- Short labels for the HUD.
+local SAS_LABEL = {
+  off = "OFF", stability = "STAB", prograde = "PRO", retrograde = "RETRO",
+  normal = "NML", antinormal = "ANTI-NML", radialin = "RAD-IN",
+  radialout = "RAD-OUT", node = "NODE",
+}
 
 function fixedUpdate(node, dt)
   if not astronaut then astronaut = find("Astronaut") end
@@ -977,7 +1176,24 @@ function fixedUpdate(node, dt)
     return
   end
 
-  if input.pressed("t") then sas = not sas end
+  -- SAS: T toggles off / on (restoring the last hold mode); number keys pick a
+  -- hold mode in flight (guarded — 1/2/3 are the map's indicator toggles).
+  if input.pressed("t") then
+    if sas_mode == "off" then
+      sas_mode = sas_last
+    else
+      sas_last = sas_mode
+      sas_mode = "off"
+    end
+  end
+  if not map_view then
+    for k, m in pairs(SAS_KEYS) do
+      if input.pressed(k) then
+        sas_mode = m
+        sas_last = m
+      end
+    end
+  end
 
   -- ---- landing gear --------------------------------------------------------
   if input.pressed("b") then legs_deployed = not legs_deployed end
@@ -1088,30 +1304,81 @@ function fixedUpdate(node, dt)
     y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
     r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
   end
-  local step = params.rate_accel * dt
-  -- SAS off = rates persist when released (pure Newton, for the purists).
-  local hold = sas and 0 or nil
-  avp = toward(avp, p ~= 0 and p * params.max_rate or (hold or avp), step)
-  avy = toward(avy, y ~= 0 and y * params.max_rate or (hold or avy), step)
-  avr = toward(avr, r ~= 0 and r * params.max_rate or (hold or avr), step)
+  local sasm_x, sasm_y, sasm_z -- the SAS aim point, for the navball marker
+  -- Debounce the flickery per-contact grounded flag. On the ground at low
+  -- throttle the ship uses the TOPPLE model (no free spinning); firing the
+  -- engine (throttle ≥ 0.15) or leaving the surface hands back to free flight.
+  if node.grounded then grounded_until = time + 0.15 end
+  local on_ground = throttle < 0.15 and (node.grounded or time < grounded_until)
+  if on_ground then
+    avp, avy, avr = 0, 0, 0 -- no orbital rates leak onto the ground
+    apply_topple(node, dt, p, y)
+  else
+    tip_w, toppled = 0.0, false -- airborne: drop any lean state
+    local step = params.rate_accel * dt
+    -- Axis wiring (the pilot's fix): for a rocket whose long axis is `nose`,
+    -- PITCH tilts about `right`, YAW tilts the nose left/right about `fwd` (the
+    -- belly axis), and ROLL spins about `nose`. The autopilot decomposes its
+    -- desired world angular velocity onto this SAME basis, so it can't fight it.
+    local rx2, ry2, rz2 = cross(fx, fy, fz, nx, ny, nz) -- ship right
+    local manual = (p ~= 0 or y ~= 0 or r ~= 0)
+    local sas_on = sas_mode ~= "off"
+    local want_p, want_y, want_r
+    if manual then
+      -- Hands on the stick always win: touched axes command a rate, released
+      -- axes damp to 0 (SAS on) or coast (off).
+      local hold = sas_on and 0 or nil
+      want_p = p ~= 0 and p * params.max_rate or (hold or avp)
+      want_y = y ~= 0 and y * params.max_rate or (hold or avy)
+      want_r = r ~= 0 and r * params.max_rate or (hold or avr)
+    elseif sas_mode == "off" then
+      want_p, want_y, want_r = avp, avy, avr -- pure Newton: rates persist
+    elseif sas_mode == "stability" then
+      want_p, want_y, want_r = 0, 0, 0 -- damp rotation to zero
+    else
+      -- Pointing autopilot: rotate the nose toward the mode's target direction.
+      local dbf = space.body(space.dominant(node.x, node.y, node.z))
+      local tx, ty, tz = sas_target_dir(node, dbf, sas_mode)
+      if tx then
+        sasm_x, sasm_y, sasm_z = tx, ty, tz -- show it on the navball
+        local axx, axy, axz = cross(nx, ny, nz, tx, ty, tz)
+        local s = math.sqrt(axx * axx + axy * axy + axz * axz)
+        local c = nx * tx + ny * ty + nz * tz
+        if s > 1e-5 then
+          local theta = math.atan2(s, c)
+          -- KSP braking law: the highest rate that can still stop within
+          -- rate_accel before arrival → converges with no overshoot or hunting.
+          local rate = math.min(params.max_rate, math.sqrt(2 * params.rate_accel * theta))
+          local ox = (axx / s) * rate
+          local oy = (axy / s) * rate
+          local oz = (axz / s) * rate
+          want_p = ox * rx2 + oy * ry2 + oz * rz2
+          want_y = ox * fx + oy * fy + oz * fz
+          want_r = 0 -- pointing modes don't command roll; let it damp
+        else
+          want_p, want_y, want_r = 0, 0, 0 -- already aligned
+        end
+      else
+        want_p, want_y, want_r = 0, 0, 0 -- target undefined (at rest / no node)
+      end
+    end
+    avp = toward(avp, want_p, step)
+    avy = toward(avy, want_y, step)
+    avr = toward(avr, want_r, step)
 
-  -- Axis wiring (the pilot's fix): for a rocket whose long axis is `nose`,
-  -- PITCH tilts about `right`, YAW tilts the nose left/right about `fwd`
-  -- (the belly axis), and ROLL spins about `nose` itself. (These were
-  -- swapped — A/D used to spin the hull, which read as heading drift.)
-  local rx2, ry2, rz2 = cross(fx, fy, fz, nx, ny, nz) -- ship right
-  local wx = rx2 * avp + fx * avy + nx * avr
-  local wy = ry2 * avp + fy * avy + ny * avr
-  local wz = rz2 * avp + fz * avy + nz * avr
-  local wl = math.sqrt(wx * wx + wy * wy + wz * wz)
-  if wl > 1e-6 then
-    local ux2, uy2, uz2 = wx / wl, wy / wl, wz / wl
-    nx, ny, nz = rot(nx, ny, nz, ux2, uy2, uz2, wl * dt)
-    fx, fy, fz = rot(fx, fy, fz, ux2, uy2, uz2, wl * dt)
+    local wx = rx2 * avp + fx * avy + nx * avr
+    local wy = ry2 * avp + fy * avy + ny * avr
+    local wz = rz2 * avp + fz * avy + nz * avr
+    local wl = math.sqrt(wx * wx + wy * wy + wz * wz)
+    if wl > 1e-6 then
+      local ux2, uy2, uz2 = wx / wl, wy / wl, wz / wl
+      nx, ny, nz = rot(nx, ny, nz, ux2, uy2, uz2, wl * dt)
+      fx, fy, fz = rot(fx, fy, fz, ux2, uy2, uz2, wl * dt)
+    end
+    local dd = fx * nx + fy * ny + fz * nz
+    fx, fy, fz = norm(fx - nx * dd, fy - ny * dd, fz - nz * dd)
+    nx, ny, nz = norm(nx, ny, nz)
   end
-  local dd = fx * nx + fy * ny + fz * nz
-  fx, fy, fz = norm(fx - nx * dd, fy - ny * dd, fz - nz * dd)
-  nx, ny, nz = norm(nx, ny, nz)
 
   -- ---- thrust + parking brake --------------------------------------------
   -- The ship gets lighter as fuel burns; near-empty at full throttle can
@@ -1149,7 +1416,7 @@ function fixedUpdate(node, dt)
   local by = ay * cx2 - az * sx2
   node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
 
-  update_navball(node)
+  update_navball(node, sasm_x, sasm_y, sasm_z)
 
   -- ---- HUD (10 Hz; the map's info panel owns the text while it's open) ----
   if not map_view and time - hud_t >= 0.1 then
@@ -1160,7 +1427,7 @@ function fixedUpdate(node, dt)
     local bars = math.floor(throttle * 10 + 0.5)
     lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   GEAR %s%s",
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
-      sas and "ON " or "off",
+      SAS_LABEL[sas_mode] or "?",
       legs_deployed and "▼" or "▲",
       node.grounded and "   LANDED" or "")
     local fbars = math.floor(fuel / params.fuel * 10 + 0.5)
@@ -1198,7 +1465,7 @@ function fixedUpdate(node, dt)
     end
     if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
     lines[#lines + 1] =
-      "F exit · Shift/Ctrl thr · X cut · Z full · WASD/QE rotate · T SAS · B gear · ./, warp · M map (TAB focus)"
+      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-8 hold(pro/ret/nml/rad/node)·B gear·./,warp·M map"
     set_hud(node, table.concat(lines, "\n"))
   end
 
