@@ -36,6 +36,10 @@ local target
 local pitch = nil
 -- The yaw reference direction, parallel-transported across the planet surface.
 local rx, ry, rz = 0.0, 0.0, -1.0
+-- The camera's up, SLEW-LIMITED toward −gravity. Frozen while flying so an SOI
+-- transfer (which flips −gravity discontinuously) can't snap or reorient the
+-- view — see the up-slew below.
+local cup_x, cup_y, cup_z = nil, nil, nil
 
 local PITCH_LIMIT = math.pi * 0.5 - 0.08
 
@@ -92,13 +96,30 @@ function lateUpdate(node, dt)
   if params.distance > maxd then params.distance = maxd end
   if params.distance < mind then params.distance = mind end
 
-  -- Local up from the body (−gravity). Fallback: away from the origin (the
-  -- planet sits at 0,0,0) if the body state isn't available yet.
-  local ux, uy, uz = target.up_x, target.up_y, target.up_z
-  if not ux or (ux == 0 and uy == 0 and uz == 0) then
-    ux, uy, uz = norm(target.x, target.y, target.z)
-    if ux == 0 and uy == 0 and uz == 0 then ux, uy, uz = 0, 1, 0 end
+  -- Desired local up from the body (−gravity). Fallback: away from the origin
+  -- (the planet sits at 0,0,0) if the body state isn't available yet.
+  local dux, duy, duz = target.up_x, target.up_y, target.up_z
+  if not dux or (dux == 0 and duy == 0 and duz == 0) then
+    dux, duy, duz = norm(target.x, target.y, target.z)
+    if dux == 0 and duy == 0 and duz == 0 then dux, duy, duz = 0, 1, 0 end
   end
+  -- Slew-limit the up so a gravity/SOI transfer can't SNAP the view: crossing an
+  -- SOI boundary flips −gravity to point at a different body. WHILE FLYING the up
+  -- is frozen entirely (KSP-style — the flight camera never reorients, so a
+  -- transfer changes nothing about how the camera sits); ON FOOT it tracks the
+  -- surface quickly so the horizon stays level as you walk around the planet.
+  if not cup_x then cup_x, cup_y, cup_z = dux, duy, duz end
+  local slew = piloting and 0.0 or 8.0
+  if slew > 0 then
+    local cd = math.max(-1, math.min(1, dux * cup_x + duy * cup_y + duz * cup_z))
+    local ang = math.acos(cd)
+    if ang > 1e-4 then
+      local t = math.min(1, slew * dt / ang)
+      cup_x, cup_y, cup_z =
+        norm(cup_x + (dux - cup_x) * t, cup_y + (duy - cup_y) * t, cup_z + (duz - cup_z) * t)
+    end
+  end
+  local ux, uy, uz = cup_x, cup_y, cup_z
 
   -- Parallel-transport the yaw reference: project the previous reference onto
   -- the new tangent plane. Walking around the planet turns the frame WITH the
