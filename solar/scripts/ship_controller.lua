@@ -14,7 +14,11 @@
 -- empty tank means no thrust, and the pad refuels a parked ship. A wreck now
 -- actually falls apart: the hull vanishes into an explosion and a shower of
 -- tumbling debris bodies that rain back onto the terrain (G cleans them up).
---   M        map screen (orbit view; ↑/↓ zoom while open)
+--   M        map screen (orbit view; RMB-drag orbit, ↑/↓ zoom, TAB focus)
+--            N   plan a maneuver node — then W/S prograde, A/D radial,
+--                Q/E normal tune the burn, ←/→ slide it along the orbit, X
+--                zeroes it. The map projects the resulting orbit and marks
+--                where it drops you into another body's SOI (the encounter).
 --   . / ,    time-warp up / down (KSP rules: only while coasting or parked;
 --            any control input drops warp back to 1×; the engine snaps a
 --            coasting ship to exact Kepler rails, so high warp is drift-free
@@ -296,6 +300,19 @@ local map_offx, map_offy, map_offz = 0.0, 0.0, 0.0 -- CTRL-drag pan offset
 local map_show = { orbits = true, soi = true, markers = true }
 local cam_node
 
+-- Maneuver node (KSP planning): a single planned burn at `t` seconds ahead of
+-- now, split into prograde / normal / radial ΔV. Nil until you press N in the
+-- map. Editing it re-projects the resulting orbit and re-walks the patched
+-- conic for SOI encounters, all game-side on top of `space.propagate`.
+local mnv = nil -- { t, pro, nor, rad }
+-- The patched-conic walk is heavy (hundreds of two-body evals across SOI
+-- changes), so it's recomputed at ~8 Hz and the resulting world polyline +
+-- encounter markers are cached here and redrawn every frame (draw.line is
+-- immediate mode). `traj_now` = the path you're on; `traj_mnv` = the post-burn
+-- path (nil unless a node exists).
+local traj_t = -10.0
+local traj_now, traj_mnv = nil, nil
+
 -- Orbital-plane basis + conic from a relative state vector: returns
 -- has_orbit, p, ecc, ê1 (periapsis dir), ê2 (in-plane, motion side).
 local function orbit_basis(rx, ry, rz, vx, vy, vz, mu)
@@ -368,6 +385,218 @@ local function body_parent(bodies, i)
     end
   end
   return best
+end
+
+-- Parent INDEX of every body (the smallest SOI still containing it), so the
+-- walkers can climb/descend the hierarchy by index without re-searching.
+local function parent_indices(bodies)
+  local pidx = {}
+  for i, b in ipairs(bodies) do
+    local best, bs = nil, nil
+    for j, o in ipairs(bodies) do
+      if j ~= i then
+        local dx, dy, dz = b.x - o.x, b.y - o.y, b.z - o.z
+        local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+        local soi = o.soi < 0 and math.huge or o.soi
+        if d <= soi and (bs == nil or soi < bs) then best, bs = j, soi end
+      end
+    end
+    pidx[i] = best
+  end
+  return pidx
+end
+
+-- World position AND velocity of body `i` at `tt` seconds from now — walk the
+-- parent chain, propagating each link about its parent's µ and summing (a moon
+-- rides its planet rides the star). The root is fixed. Exact, drift-free.
+local function body_state_at(bodies, pidx, i, tt)
+  local pi = pidx[i]
+  local b = bodies[i]
+  if not pi then return b.x, b.y, b.z, 0, 0, 0 end
+  local px, py, pz, pvx, pvy, pvz = body_state_at(bodies, pidx, pi, tt)
+  local par = bodies[pi]
+  local rx, ry, rz, rvx, rvy, rvz = space.propagate(
+    b.x - par.x, b.y - par.y, b.z - par.z,
+    b.vx - par.vx, b.vy - par.vy, b.vz - par.vz, par.mu, tt)
+  return px + rx, py + ry, pz + rz, pvx + rvx, pvy + rvy, pvz + rvz
+end
+
+-- A body's own orbital period around its parent (vis-viva), or nil if unbound
+-- or a root. Sets the transfer timescale for an escape burn's walk.
+local function body_period(bodies, pidx, i)
+  local pi = pidx[i]
+  if not pi then return nil end
+  local b, par = bodies[i], bodies[pi]
+  local rx, ry, rz = b.x - par.x, b.y - par.y, b.z - par.z
+  local vx, vy, vz = b.vx - par.vx, b.vy - par.vy, b.vz - par.vz
+  local rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
+  local v2 = vx * vx + vy * vy + vz * vz
+  local a = 1.0 / (2.0 / rlen - v2 / par.mu)
+  if a <= 0 then return nil end
+  return 2 * math.pi * math.sqrt(a * a * a / par.mu)
+end
+
+-- Snapshot of every body's world state at `tt` seconds from now (one table so
+-- the walk touches each body's parent chain once per step, not per test).
+local function all_body_states(bodies, pidx, tt)
+  local s = {}
+  for i = 1, #bodies do
+    local x, y, z, vx, vy, vz = body_state_at(bodies, pidx, i, tt)
+    s[i] = { x = x, y = y, z = z, vx = vx, vy = vy, vz = vz }
+  end
+  return s
+end
+
+-- Walk a ship's future path as a real patched conic: advance the state within
+-- the current dominant body's frame, and when it leaves that SOI drop to the
+-- parent, or when it falls inside a child's SOI capture that child. Returns the
+-- world-space polyline and the SOI-change / impact events found along it. This
+-- is what turns "pretty orbit lines" into "you encounter Draol in 3m12s".
+local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0, span, segs)
+  local pts = { wx, wy, wz }
+  local enc = {}
+  local step = span / segs
+  local tt = t0
+  local start_states = all_body_states(bodies, pidx, tt) -- states at step START
+  for _ = 1, segs do
+    -- Ship relative to the current attractor at the START of this step.
+    local cs = start_states[cur]
+    local nrx, nry, nrz, nrvx, nrvy, nrvz = space.propagate(
+      wx - cs.x, wy - cs.y, wz - cs.z, wvx - cs.vx, wvy - cs.vy, wvz - cs.vz,
+      bodies[cur].mu, step)
+    tt = tt + step
+    -- One snapshot at the step END, reused for the recompose + every SOI test.
+    local es = all_body_states(bodies, pidx, tt)
+    local ec = es[cur]
+    wx, wy, wz = ec.x + nrx, ec.y + nry, ec.z + nrz
+    wvx, wvy, wvz = ec.vx + nrvx, ec.vy + nrvy, ec.vz + nrvz
+    pts[#pts + 1] = wx
+    pts[#pts + 1] = wy
+    pts[#pts + 1] = wz
+    -- Capture a child SOI we've fallen into (deeper body wins).
+    for j, o in ipairs(bodies) do
+      if pidx[j] == cur and o.soi > 0 then
+        local d = es[j]
+        local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
+        if dx * dx + dy * dy + dz * dz < o.soi * o.soi then
+          enc[#enc + 1] = { t = tt, name = o.name, x = wx, y = wy, z = wz, kind = "enter" }
+          cur = j
+          break
+        end
+      end
+    end
+    -- Or climb out of the current SOI into the parent's frame.
+    local pc = pidx[cur]
+    if pc and bodies[cur].soi > 0 then
+      local d = es[cur]
+      local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
+      if dx * dx + dy * dy + dz * dz > bodies[cur].soi * bodies[cur].soi then
+        enc[#enc + 1] = { t = tt, name = bodies[pc].name, x = wx, y = wy, z = wz, kind = "exit" }
+        cur = pc
+      end
+    end
+    -- Terrain impact ends the walk (the conic would dive underground).
+    local sb = bodies[cur]
+    local d = es[cur]
+    local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
+    if dx * dx + dy * dy + dz * dz < sb.radius * sb.radius then
+      enc[#enc + 1] = { t = tt, name = sb.name, x = wx, y = wy, z = wz, kind = "impact" }
+      break
+    end
+    start_states = es -- this step's END is the next step's START
+  end
+  return pts, enc
+end
+
+-- Draw a cached world polyline (flat {x,y,z,x,y,z,...}).
+local function draw_polyline(pts, r, g, b, a)
+  for i = 1, #pts - 5, 3 do
+    draw.line(pts[i], pts[i + 1], pts[i + 2], pts[i + 3], pts[i + 4], pts[i + 5], r, g, b, a)
+  end
+end
+
+-- A little 3D diamond marker (used for the node + encounter points).
+local function draw_diamond(x, y, z, s, r, g, b)
+  draw.line(x - s, y, z, x, y + s, z, r, g, b, 1)
+  draw.line(x, y + s, z, x + s, y, z, r, g, b, 1)
+  draw.line(x + s, y, z, x, y - s, z, r, g, b, 1)
+  draw.line(x, y - s, z, x - s, y, z, r, g, b, 1)
+  draw.line(x, y, z - s, x, y + s, z, r, g, b, 1)
+  draw.line(x, y + s, z, x, y, z + s, r, g, b, 1)
+  draw.line(x, y, z + s, x, y - s, z, r, g, b, 1)
+  draw.line(x, y - s, z, x, y, z - s, r, g, b, 1)
+end
+
+-- Recompute the maneuver-node projection + both trajectory walks (throttled).
+-- `db` is the ship's dominant body; `o` its current conic (space.elements).
+local function recompute_trajectories(node, db, bodies, pidx, o)
+  -- Find the dominant body's index for the walkers.
+  local dbi
+  for i, b in ipairs(bodies) do
+    if b.name == db.name then dbi = i break end
+  end
+  if not dbi then traj_now, traj_mnv = nil, nil return end
+
+  -- Ship WORLD state now: node.vx/vy/vz are in the dominant body's frame, so
+  -- world velocity adds the body's own world velocity.
+  local swx, swy, swz = node.x, node.y, node.z
+  local swvx, swvy, swvz = node.vx + db.vx, node.vy + db.vy, node.vz + db.vz
+
+  -- Timescale: your own year if bound, else the planet's year (transfer clock).
+  local span
+  if o and o.period then
+    span = o.period * 1.6
+  else
+    local yp = body_period(bodies, pidx, dbi)
+    span = (yp and yp * 1.2) or 20000.0
+  end
+  local segs = 140
+
+  local pts, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, 0.0, span, segs)
+  traj_now = { pts = pts, enc = enc }
+
+  if mnv then
+    -- State at the node on the CURRENT conic (relative to db, then to world).
+    local rx0, ry0, rz0 = node.x - db.x, node.y - db.y, node.z - db.z
+    local nrx, nry, nrz, nvx, nvy, nvz =
+      space.propagate(rx0, ry0, rz0, node.vx, node.vy, node.vz, db.mu, mnv.t)
+    -- Burn basis at the node: prograde / normal / radial-out.
+    local px, py, pz = norm(nvx, nvy, nvz)
+    local hx, hy, hz = cross(nrx, nry, nrz, nvx, nvy, nvz)
+    local hnx, hny, hnz = norm(hx, hy, hz)
+    local rdx, rdy, rdz = cross(px, py, pz, hnx, hny, hnz) -- radial out
+    local bvx = nvx + px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad
+    local bvy = nvy + py * mnv.pro + hny * mnv.nor + rdy * mnv.rad
+    local bvz = nvz + pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad
+    -- Node marker world position + the post-burn world state at node time.
+    local dbx, dby, dbz, dbvx, dbvy, dbvz = body_state_at(bodies, pidx, dbi, mnv.t)
+    local mkx, mky, mkz = dbx + nrx, dby + nry, dbz + nrz
+    local mwvx, mwvy, mwvz = dbvx + bvx, dbvy + bvy, dbvz + bvz
+    -- Post-burn timescale (the new orbit may be bound or an escape).
+    local v2 = bvx * bvx + bvy * bvy + bvz * bvz
+    local rlen = math.sqrt(nrx * nrx + nry * nry + nrz * nrz)
+    local a2 = 1.0 / (2.0 / rlen - v2 / db.mu)
+    local mspan
+    if a2 > 0 then
+      mspan = 2 * math.pi * math.sqrt(a2 * a2 * a2 / db.mu) * 1.6
+    else
+      local yp = body_period(bodies, pidx, dbi)
+      mspan = (yp and yp * 1.2) or 20000.0
+    end
+    local mpts, menc = walk_trajectory(bodies, pidx, mkx, mky, mkz, mwvx, mwvy, mwvz, dbi, mnv.t, mspan, segs)
+    -- Burn-direction stub (scaled to the drawn zoom for visibility).
+    local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+    traj_mnv = {
+      pts = mpts, enc = menc,
+      mx = mkx, my = mky, mz = mkz,
+      bx = px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad,
+      by = py * mnv.pro + hny * mnv.nor + rdy * mnv.rad,
+      bz = pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad,
+      dv = dv,
+    }
+  else
+    traj_mnv = nil
+  end
 end
 
 local function update_map3d(node, dt)
@@ -514,6 +743,83 @@ local function update_map3d(node, dt)
     draw_cross(node.x, node.y, node.z, map_zoom * 0.008, 0.6, 1.0, 0.7)
   end
 
+  -- ---- maneuver-node planning (KSP) --------------------------------------
+  -- Plan a burn and watch the resulting orbit — and where it drops you into
+  -- another body's sphere of influence. Only while piloting a craft that has a
+  -- real trajectory. The flight stick is frozen in the map (see fixedUpdate),
+  -- so WASD/QE re-purpose to tune the burn; ←/→ slide the node around the
+  -- orbit; N creates/clears it; X zeroes the ΔV.
+  local oe = db and space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
+  if piloting and db and not node.grounded then
+    local pidx = parent_indices(bodies)
+    local vref = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
+    local dvrate = math.max(0.5, vref * 0.12)
+    if input.pressed("n") then
+      if mnv then
+        mnv = nil
+      else
+        local lead = (oe and oe.period and oe.period * 0.25) or 60.0
+        mnv = { t = lead, pro = 0.0, nor = 0.0, rad = 0.0 }
+      end
+    end
+    if mnv then
+      local tref = (oe and oe.period) or 600.0
+      local horizon = (oe and oe.period and oe.period * 1.5) or (tref * 6)
+      if input.key("left") then mnv.t = mnv.t - tref * 0.15 * dt end
+      if input.key("right") then mnv.t = mnv.t + tref * 0.15 * dt end
+      mnv.t = math.max(1.0, math.min(mnv.t, horizon))
+      if input.key("w") then mnv.pro = mnv.pro + dvrate * dt end
+      if input.key("s") then mnv.pro = mnv.pro - dvrate * dt end
+      if input.key("d") then mnv.rad = mnv.rad + dvrate * dt end
+      if input.key("a") then mnv.rad = mnv.rad - dvrate * dt end
+      if input.key("q") then mnv.nor = mnv.nor + dvrate * dt end
+      if input.key("e") then mnv.nor = mnv.nor - dvrate * dt end
+      if input.pressed("x") then mnv.pro, mnv.nor, mnv.rad = 0, 0, 0 end
+    end
+    if time - traj_t >= 0.15 then
+      traj_t = time
+      recompute_trajectories(node, db, bodies, pidx, oe)
+    end
+  else
+    mnv = nil
+    traj_now, traj_mnv = nil, nil
+  end
+
+  -- Draw the cached walks (recomputed at ~8 Hz above; drawn every frame).
+  if traj_now and map_show.markers then
+    for _, e in ipairs(traj_now.enc) do
+      if e.kind == "impact" then
+        draw_diamond(e.x, e.y, e.z, map_zoom * 0.014, 1.0, 0.4, 0.3)
+      else
+        draw_diamond(e.x, e.y, e.z, map_zoom * 0.014, 0.4, 0.9, 1.0)
+      end
+    end
+  end
+  if traj_mnv then
+    if map_show.orbits then
+      draw_polyline(traj_mnv.pts, 1.0, 0.55, 0.15, 0.95) -- post-burn path (amber)
+    end
+    draw_diamond(traj_mnv.mx, traj_mnv.my, traj_mnv.mz, map_zoom * 0.016, 1.0, 0.7, 0.2)
+    if traj_mnv.dv > 1e-4 then
+      local bnx, bny, bnz = norm(traj_mnv.bx, traj_mnv.by, traj_mnv.bz)
+      local bl = map_zoom * 0.06
+      draw.line(traj_mnv.mx, traj_mnv.my, traj_mnv.mz,
+        traj_mnv.mx + bnx * bl, traj_mnv.my + bny * bl, traj_mnv.mz + bnz * bl,
+        1.0, 0.85, 0.3, 1.0)
+    end
+    if map_show.markers then
+      for _, e in ipairs(traj_mnv.enc) do
+        if e.kind == "enter" then
+          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 0.4, 1.0, 0.5)
+        elseif e.kind == "impact" then
+          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 1.0, 0.4, 0.3)
+        else
+          draw_diamond(e.x, e.y, e.z, map_zoom * 0.018, 0.9, 0.9, 0.5)
+        end
+      end
+    end
+  end
+
   -- Focused-body info panel (the flight HUD stands down while the map is open).
   if time - map_hud_t >= 0.1 then
     map_hud_t = time
@@ -535,6 +841,27 @@ local function update_map3d(node, dt)
       else
         lines[#lines + 1] = string.format("SHIP ESCAPE [%s]  pe %+.0f  e %.2f",
           o.body, o.p / (1 + o.ecc) - o.radius, o.ecc)
+      end
+    end
+    -- Maneuver node + encounter readout.
+    if mnv then
+      local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+      lines[#lines + 1] = string.format(
+        "NODE  T-%.0fs  ΔV %.1f   pro %+.1f · rad %+.1f · nor %+.1f",
+        mnv.t, dv, mnv.pro, mnv.rad, mnv.nor)
+      if traj_mnv and #traj_mnv.enc > 0 then
+        local e = traj_mnv.enc[1]
+        local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "exit")
+        lines[#lines + 1] = string.format("  ⇒ %s %s in %.0fs", verb, e.name, e.t)
+      end
+      lines[#lines + 1] = "  W/S prograde · A/D radial · Q/E normal · ←/→ slide · X zero · N clear"
+    elseif piloting and not node.grounded then
+      if traj_now and #traj_now.enc > 0 then
+        local e = traj_now.enc[1]
+        local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "SOI exit")
+        lines[#lines + 1] = string.format("%s: %s in %.0fs   ·   N plan a maneuver", verb, e.name, e.t)
+      else
+        lines[#lines + 1] = "N  plan a maneuver node"
       end
     end
     lines[#lines + 1] = string.format(
@@ -566,6 +893,7 @@ function fixedUpdate(node, dt)
       set_hud(node, nil)
       set_navball(false)
       map_view = false
+      mnv = nil -- drop any planned burn when you leave the seat
     elseif distance(astronaut, node) <= params.board_range then
       piloting = true
       astronaut.visible = false
@@ -630,6 +958,7 @@ function fixedUpdate(node, dt)
 
   -- ---- wreck & respawn ----------------------------------------------------
   if wrecked then
+    mnv = nil -- a wrecked ship has no trajectory to plan
     if space.warp() > 1.001 then space.warp(1) end -- a wreck flies realtime
     set_flame(node, false, 0)
     set_hud(node, "SHIP WRECKED — press G to restore at the pad, F to exit")
@@ -749,10 +1078,16 @@ function fixedUpdate(node, dt)
 
   -- ---- attitude: RATE-COMMANDED (the KSP feel) ----------------------------
   -- Stick convention (per Brody, the resident pilot): PULL BACK (S) pitches
-  -- the nose UP, push forward (W) pitches it DOWN.
-  local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
-  local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
-  local r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
+  -- the nose UP, push forward (W) pitches it DOWN. While the MAP is open the
+  -- stick is frozen — those same keys tune the maneuver node instead (you're
+  -- planning, not flying), which also kills the old "WASD rotates the ship in
+  -- the background of the map" quirk.
+  local p, y, r = 0, 0, 0
+  if not map_view then
+    p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
+    y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
+    r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
+  end
   local step = params.rate_accel * dt
   -- SAS off = rates persist when released (pure Newton, for the purists).
   local hold = sas and 0 or nil

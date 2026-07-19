@@ -179,5 +179,92 @@ pub(crate) fn install_space_api(
         }
     }
 
+    // space.propagate(px,py,pz, vx,vy,vz, mu, dt) → the state vector
+    // (px,py,pz, vx,vy,vz) advanced `dt` seconds on the two-body conic about a
+    // point mass `mu`. THE generic celestial-mechanics primitive the map's
+    // maneuver nodes + patched-conic encounter walk are built from (game-side,
+    // in Lua): convert a state to its orbit and evaluate it at any future time,
+    // exactly and stably — elliptic AND hyperbolic (the tested `frames::Kepler`,
+    // no per-step integration drift). The state is in whatever frame you pass;
+    // the caller composes parent frames (add the attractor's own motion).
+    // Degenerate inputs (µ ≤ 0, non-finite state/result) pass through unchanged.
+    {
+        if let Ok(f) = lua.create_function(
+            |_, (px, py, pz, vx, vy, vz, mu, dt): (f64, f64, f64, f64, f64, f64, f64, f64)| {
+                let r = DVec3::new(px, py, pz);
+                let v = DVec3::new(vx, vy, vz);
+                if !mu.is_finite() || mu <= 0.0 || !r.is_finite() || !v.is_finite() {
+                    return Ok((px, py, pz, vx, vy, vz));
+                }
+                let k = Kepler::from_state(r, v, mu, 0.0);
+                let (r2, v2) = k.pos_vel(mu, dt);
+                if !r2.is_finite() || !v2.is_finite() {
+                    return Ok((px, py, pz, vx, vy, vz));
+                }
+                Ok((r2.x, r2.y, r2.z, v2.x, v2.y, v2.z))
+            },
+        ) {
+            let _ = t.set("propagate", f);
+        }
+    }
+
     let _ = lua.globals().set("space", t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_lua() -> Lua {
+        let lua = Lua::new();
+        let info = Rc::new(RefCell::new(SpaceInfo::default()));
+        let warp = Rc::new(RefCell::new(None));
+        install_space_api(&lua, info, warp);
+        lua
+    }
+
+    #[test]
+    fn propagate_is_identity_at_zero_dt() {
+        let lua = test_lua();
+        let (x, y, z, vx, vy, vz): (f64, f64, f64, f64, f64, f64) = lua
+            .load("return space.propagate(100, 0, 0, 0, 0, 31.6, 1e5, 0)")
+            .eval()
+            .unwrap();
+        assert!((x - 100.0).abs() < 1e-9 && y.abs() < 1e-9 && z.abs() < 1e-9);
+        assert!(vx.abs() < 1e-9 && vy.abs() < 1e-9 && (vz - 31.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn propagate_a_full_period_returns_to_start() {
+        // Circular orbit in the XZ plane (engine is Y-up): r=100, mu=1e5.
+        // v_circ = sqrt(mu/r) = sqrt(1000); T = 2π·sqrt(r³/mu).
+        let r = 100.0_f64;
+        let mu = 1e5_f64;
+        let v = (mu / r).sqrt();
+        let period = std::f64::consts::TAU * (r * r * r / mu).sqrt();
+        let lua = test_lua();
+        let src = format!("return space.propagate(100, 0, 0, 0, 0, {v}, {mu}, {period})");
+        let (x, y, z, _vx, _vy, vz): (f64, f64, f64, f64, f64, f64) =
+            lua.load(&src).eval().unwrap();
+        // Back to the start after exactly one period (loose tol: transcendental).
+        assert!((x - 100.0).abs() < 1e-3, "x={x}");
+        assert!(y.abs() < 1e-3, "y={y}");
+        assert!(z.abs() < 1e-3, "z={z}");
+        assert!((vz - v).abs() < 1e-3, "vz={vz}");
+    }
+
+    #[test]
+    fn propagate_half_period_reaches_the_antipode() {
+        let r = 100.0_f64;
+        let mu = 1e5_f64;
+        let v = (mu / r).sqrt();
+        let half = std::f64::consts::PI * (r * r * r / mu).sqrt();
+        let lua = test_lua();
+        let src = format!("return space.propagate(100, 0, 0, 0, 0, {v}, {mu}, {half})");
+        let (x, _y, z, _vx, _vy, vz): (f64, f64, f64, f64, f64, f64) =
+            lua.load(&src).eval().unwrap();
+        assert!((x + 100.0).abs() < 1e-2, "x={x}"); // opposite side
+        assert!(z.abs() < 1e-2, "z={z}");
+        assert!((vz + v).abs() < 1e-2, "vz={vz}"); // reversed velocity
+    }
 }

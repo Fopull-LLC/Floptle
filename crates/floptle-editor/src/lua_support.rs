@@ -865,6 +865,18 @@ function space.gravity(x, y, z) end
 ---celestial's frame (do NOT subtract the body's world velocity).
 ---@return table|nil
 function space.elements(x, y, z, vx, vy, vz) end
+---Propagate a state vector along its two-body conic about a point mass `mu`:
+---returns the position AND velocity `px,py,pz, vx,vy,vz` exactly `dt` seconds
+---later (elliptic OR hyperbolic — no integration drift). The primitive maneuver
+---nodes and patched-conic encounter-finding are built from: the state is in
+---whatever frame you pass, so compose parent frames yourself (add the
+---attractor's own motion for a moon-of-a-planet). Degenerate input passes
+---through unchanged.
+---@param px number @param py number @param pz number
+---@param vx number @param vy number @param vz number
+---@param mu number @param dt number
+---@return number, number, number, number, number, number
+function space.propagate(px, py, pz, vx, vy, vz, mu, dt) end
 ";
 
 /// `.luarc.json` pointing the Lua language server at the annotation library and
