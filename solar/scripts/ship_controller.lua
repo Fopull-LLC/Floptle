@@ -598,6 +598,51 @@ local function walk_trajectory(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t0,
   return rpts, anch, enc
 end
 
+-- Walk the CURRENT patched conic forward to `t_target`, crossing every SOI in
+-- between, and return the ship's state THERE — the dominant body it's under plus
+-- its position AND velocity relative to that body (and the absolute world state).
+-- THIS is what makes a maneuver node placed BEYOND an SOI crossing land on the
+-- real path and apply its burn in the right frame: true across-SOI planning,
+-- not a single two-body arc around the starting planet.
+local function patched_state_at(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t_target, steps)
+  steps = math.max(1, steps)
+  local step = t_target / steps
+  local tt = 0.0
+  local start_states = all_body_states(bodies, pidx, tt)
+  for _ = 1, steps do
+    local cs = start_states[cur]
+    local nrx, nry, nrz, nrvx, nrvy, nrvz = space.propagate(
+      wx - cs.x, wy - cs.y, wz - cs.z, wvx - cs.vx, wvy - cs.vy, wvz - cs.vz,
+      bodies[cur].mu, step)
+    tt = tt + step
+    local es = all_body_states(bodies, pidx, tt)
+    local ec = es[cur]
+    wx, wy, wz = ec.x + nrx, ec.y + nry, ec.z + nrz
+    wvx, wvy, wvz = ec.vx + nrvx, ec.vy + nrvy, ec.vz + nrvz
+    for j, o in ipairs(bodies) do -- fall into a child SOI
+      if pidx[j] == cur and o.soi > 0 then
+        local d = es[j]
+        local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
+        if dx * dx + dy * dy + dz * dz < o.soi * o.soi then cur = j break end
+      end
+    end
+    local pc = pidx[cur] -- climb out to the parent
+    if pc and bodies[cur].soi > 0 then
+      local d = es[cur]
+      local dx, dy, dz = wx - d.x, wy - d.y, wz - d.z
+      if dx * dx + dy * dy + dz * dz > bodies[cur].soi * bodies[cur].soi then cur = pc end
+    end
+    start_states = es
+  end
+  local d = start_states[cur]
+  return {
+    anchor = cur, mu = bodies[cur].mu,
+    wx = wx, wy = wy, wz = wz, wvx = wvx, wvy = wvy, wvz = wvz,
+    rx = wx - d.x, ry = wy - d.y, rz = wz - d.z,
+    rvx = wvx - d.vx, rvy = wvy - d.vy, rvz = wvz - d.vz,
+  }
+end
+
 -- A stored (anchor, rel) → its LIVE world position (attractor's current pos + rel).
 local function rel_world(bodies, anchor, rx, ry, rz)
   local b = bodies[anchor]
@@ -690,44 +735,49 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
   traj_now = { rpts = rpts, anch = anch, enc = enc, t0 = 0.0, step = span / segs }
 
   if mnv then
-    -- State at the node on the CURRENT conic (relative to db, then to world).
-    local rx0, ry0, rz0 = node.x - db.x, node.y - db.y, node.z - db.z
-    local nrx, nry, nrz, nvx, nvy, nvz =
-      space.propagate(rx0, ry0, rz0, node.vx, node.vy, node.vz, db.mu, mnv.t)
-    -- Burn basis at the node: prograde / normal / radial-out.
+    -- Walk the CURRENT patched conic to the node time, CROSSING any SOI between
+    -- now and then, so the node's state (position, velocity, and which body it
+    -- orbits) is the true one — not a single two-body arc around the start.
+    local swvx0, swvy0, swvz0 = node.vx + db.vx, node.vy + db.vy, node.vz + db.vz
+    local nsteps = math.max(8, math.ceil(mnv.t / (span / segs)))
+    local ns = patched_state_at(bodies, pidx, node.x, node.y, node.z,
+      swvx0, swvy0, swvz0, dbi, mnv.t, nsteps)
+    local ndb = ns.anchor -- the body the node orbits (may DIFFER from the start db!)
+    local nrx, nry, nrz = ns.rx, ns.ry, ns.rz
+    local nvx, nvy, nvz = ns.rvx, ns.rvy, ns.rvz
+    -- Burn basis at the node, IN ITS dominant body's frame: prograde / normal /
+    -- radial-out (world axes — celestial frames only translate).
     local px, py, pz = norm(nvx, nvy, nvz)
-    local hx, hy, hz = cross(nrx, nry, nrz, nvx, nvy, nvz)
-    local hnx, hny, hnz = norm(hx, hy, hz)
-    local rdx, rdy, rdz = cross(px, py, pz, hnx, hny, hnz) -- radial out
-    local bvx = nvx + px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad
-    local bvy = nvy + py * mnv.pro + hny * mnv.nor + rdy * mnv.rad
-    local bvz = nvz + pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad
-    -- Node marker = REST-FRAME point on the orbit (db.live + nr*), so it sits on
-    -- the drawn ellipse; the walk itself still seeds from the absolute world
-    -- state so the body propagation + SOI detection stay physically correct.
-    local dbx, dby, dbz, dbvx, dbvy, dbvz = body_state_at(bodies, pidx, dbi, mnv.t)
-    local mkx, mky, mkz = dbx + nrx, dby + nry, dbz + nrz
-    local mwvx, mwvy, mwvz = dbvx + bvx, dbvy + bvy, dbvz + bvz
-    -- Post-burn timescale (the new orbit may be bound or an escape).
+    local hnx, hny, hnz = norm(cross(nrx, nry, nrz, nvx, nvy, nvz))
+    local rdx, rdy, rdz = cross(px, py, pz, hnx, hny, hnz)
+    local bx = px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad
+    local by = py * mnv.pro + hny * mnv.nor + rdy * mnv.rad
+    local bz = pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad
+    -- Post-burn seed: node WORLD position unchanged, WORLD velocity += the burn.
+    local mwvx, mwvy, mwvz = ns.wvx + bx, ns.wvy + by, ns.wvz + bz
+    -- Post-burn timescale about the node's body (bound → its year; escape → the
+    -- transfer clock).
+    local bvx, bvy, bvz = nvx + bx, nvy + by, nvz + bz
     local v2 = bvx * bvx + bvy * bvy + bvz * bvz
     local rlen = math.sqrt(nrx * nrx + nry * nry + nrz * nrz)
-    local a2 = 1.0 / (2.0 / rlen - v2 / db.mu)
+    local a2 = 1.0 / (2.0 / rlen - v2 / ns.mu)
     local mspan
     if a2 > 0 then
-      mspan = 2 * math.pi * math.sqrt(a2 * a2 * a2 / db.mu) * 1.6
+      mspan = 2 * math.pi * math.sqrt(a2 * a2 * a2 / ns.mu) * 1.6
     else
-      local yp = body_period(bodies, pidx, dbi)
+      local yp = body_period(bodies, pidx, ndb)
       mspan = (yp and yp * 1.2) or 20000.0
     end
     local mrpts, manch, menc =
-      walk_trajectory(bodies, pidx, mkx, mky, mkz, mwvx, mwvy, mwvz, dbi, mnv.t, mspan, segs)
+      walk_trajectory(bodies, pidx, ns.wx, ns.wy, ns.wz, mwvx, mwvy, mwvz, ndb, mnv.t, mspan, segs)
     local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
+    -- Cache the burn's WORLD direction so the SAS "node" hold can point at it in
+    -- flight (where recompute doesn't run).
+    if dv > 1e-4 then mnv.bwx, mnv.bwy, mnv.bwz = norm(bx, by, bz) else mnv.bwx = nil end
     traj_mnv = {
       rpts = mrpts, anch = manch, enc = menc,
-      m_anchor = dbi, m_rx = nrx, m_ry = nry, m_rz = nrz, -- node marker (rest frame)
-      bx = px * mnv.pro + hnx * mnv.nor + rdx * mnv.rad,
-      by = py * mnv.pro + hny * mnv.nor + rdy * mnv.rad,
-      bz = pz * mnv.pro + hnz * mnv.nor + rdz * mnv.rad,
+      m_anchor = ndb, m_rx = nrx, m_ry = nry, m_rz = nrz, -- node marker (its body's frame)
+      bx = bx, by = by, bz = bz,
       dv = dv, t0 = mnv.t, step = mspan / segs,
     }
   else
@@ -1044,17 +1094,11 @@ local function sas_target_dir(node, db, mode)
   local vx, vy, vz = node.vx, node.vy, node.vz
   local vl = math.sqrt(vx * vx + vy * vy + vz * vz)
   if mode == "node" then
-    if not mnv then return nil end
-    local r0x, r0y, r0z = node.x - db.x, node.y - db.y, node.z - db.z
-    local nrx, nry, nrz, nvx, nvy, nvz =
-      space.propagate(r0x, r0y, r0z, vx, vy, vz, db.mu, mnv.t)
-    local ppx, ppy, ppz = norm(nvx, nvy, nvz)
-    local hhx, hhy, hhz = cross(nrx, nry, nrz, nvx, nvy, nvz)
-    local hnx, hny, hnz = norm(hhx, hhy, hhz)
-    local rrx, rry, rrz = cross(ppx, ppy, ppz, hnx, hny, hnz)
-    return norm(ppx * mnv.pro + hnx * mnv.nor + rrx * mnv.rad,
-      ppy * mnv.pro + hny * mnv.nor + rry * mnv.rad,
-      ppz * mnv.pro + hnz * mnv.nor + rrz * mnv.rad)
+    -- The burn's WORLD direction, computed across SOI transitions and cached by
+    -- recompute_trajectories when you place/edit the node (recompute doesn't run
+    -- in flight; the burn direction at a fixed orbital point barely drifts).
+    if mnv and mnv.bwx then return mnv.bwx, mnv.bwy, mnv.bwz end
+    return nil
   end
   if vl < 2.0 then return nil end -- prograde/normal/radial are undefined at rest
   local pgx, pgy, pgz = vx / vl, vy / vl, vz / vl
