@@ -103,7 +103,9 @@ impl Editor {
         // `create_texture` — common with spritesheets. Downscale to fit and warn
         // rather than crash (UVs are normalized, so it still samples correctly).
         let max = self.gpu.as_ref()?.device.limits().max_texture_dimension_2d;
-        let mut data = floptle_assets::load_texture(Path::new(path))?;
+        // The registry stays keyed by the ref as WRITTEN; only the fs read resolves.
+        let file = self.resolve_asset_path(path);
+        let mut data = floptle_assets::load_texture(&file)?;
         if data.width > max || data.height > max {
             let s = max as f32 / data.width.max(data.height) as f32;
             let w = ((data.width as f32 * s).floor() as u32).max(1);
@@ -112,7 +114,7 @@ impl Editor {
                 "texture {path} is {}×{} — larger than the GPU limit {max}; downscaled to {w}×{h}",
                 data.width, data.height
             );
-            data = floptle_assets::load_texture_sized(Path::new(path), w, h)?;
+            data = floptle_assets::load_texture_sized(&file, w, h)?;
         }
         let (gpu, raster) = (self.gpu.as_ref()?, self.raster.as_mut()?);
         let id = raster.register_texture(gpu, &data, want.to_sampling());
@@ -181,12 +183,14 @@ impl Editor {
         if self.mesh_registry.contains_key(path) {
             return true;
         }
+        // The registry stays keyed by the ref as WRITTEN; only the fs read resolves.
+        let file = resolve_asset_path(&self.project_root, path);
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return false;
         };
         // Rigged path first: any glTF with animations keeps its node tree +
         // clips (parts stay node-local and get posed each frame).
-        match floptle_assets::import_rigged(std::path::Path::new(path)) {
+        match floptle_assets::import_rigged(&file) {
             Ok(Some(model)) => {
                 let parts = model
                     .parts
@@ -218,7 +222,7 @@ impl Editor {
             Ok(None) => {} // no animations — fall through to the static bake
             Err(e) => eprintln!("  rig import {path} failed ({e}); trying static"),
         }
-        match floptle_assets::gltf_import::import(std::path::Path::new(path)) {
+        match floptle_assets::gltf_import::import(&file) {
             Ok(model) => {
                 let parts = model
                     .parts
@@ -1059,13 +1063,35 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
 }
 
 /// See [`Editor::resolve_asset_path`] — free so it's unit-testable without an Editor.
+///
+/// Resolution order: absolute as-is → as-written relative to the CWD (the legacy
+/// repo-root workflow, where refs spell `assets/…`) → joined onto the project root
+/// (the canonical, portable form: `textures/…`) → the LEGACY-PREFIX RESCUE: a ref
+/// whose first component IS the project folder's name (`assets/textures/x.png`
+/// inside a project rooted at `…/assets`) gets that component stripped and re-joined.
+/// The rescue is what keeps old projects working when the editor is launched from
+/// anywhere but the project's parent dir — the Hub launches with an absolute root
+/// and the project dir as CWD, which broke every legacy ref ("everything
+/// dereferenced", 2026-07-20). Missing files fall back to the canonical join.
 pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
     if p.is_absolute() || p.exists() {
-        p
-    } else {
-        project_root.join(path)
+        return p;
     }
+    let joined = project_root.join(&p);
+    if joined.exists() {
+        return joined;
+    }
+    if let (Some(first), Some(root_name)) = (p.components().next(), project_root.file_name())
+        && first.as_os_str() == root_name
+    {
+        let stripped: PathBuf = p.components().skip(1).collect();
+        let rescued = project_root.join(stripped);
+        if rescued.exists() {
+            return rescued;
+        }
+    }
+    joined
 }
 
 /// An empty scene (just lighting) — used when a project is closed.
@@ -1253,6 +1279,34 @@ mod path_tests {
             PathBuf::from("assets/shaders/missing.flsl"),
         );
         std::env::set_current_dir(cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 2026-07-20 "everything dereferenced" bug: legacy refs spell the project
+    /// folder (`assets/textures/x.png`), which only ever resolved when the CWD was
+    /// the project's PARENT. Launched any other way (the Hub passes an absolute
+    /// root and sets CWD to the project dir), both the as-written and root-joined
+    /// forms miss — the rescue strips the matching first component and re-joins.
+    #[test]
+    fn legacy_root_prefixed_refs_resolve_under_any_cwd() {
+        let dir = std::env::temp_dir().join(format!("floptle-rescue-{}", std::process::id()));
+        let root = dir.join("assets");
+        std::fs::create_dir_all(root.join("textures")).unwrap();
+        std::fs::write(root.join("textures/t.png"), b"png").unwrap();
+
+        // Absolute root, CWD anywhere (never inside `dir`): the legacy ref rescues.
+        assert_eq!(
+            resolve_asset_path(&root, "assets/textures/t.png"),
+            root.join("textures/t.png"),
+        );
+        // The canonical project-relative form works the same way.
+        assert_eq!(resolve_asset_path(&root, "textures/t.png"), root.join("textures/t.png"));
+        // A ref whose first component only HAPPENS to match the root name but has
+        // no file behind it falls back to the canonical join (missing-file default).
+        assert_eq!(
+            resolve_asset_path(&root, "assets/textures/missing.png"),
+            root.join("assets/textures/missing.png"),
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

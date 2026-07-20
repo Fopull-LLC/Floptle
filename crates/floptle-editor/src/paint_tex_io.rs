@@ -25,6 +25,7 @@ const MAGIC: &[u8; 4] = b"FLTP";
 const VERSION: u16 = 2;
 
 /// One node's stored texture paint.
+#[derive(Clone)]
 pub(crate) struct StoredTexPaint {
     pub(crate) id: u32,
     pub(crate) parts: Vec<StoredTexPart>,
@@ -32,6 +33,7 @@ pub(crate) struct StoredTexPaint {
 
 /// One part: the atlas edge it was laid out for, the geometry hash it was painted against,
 /// and the PNG-encoded image.
+#[derive(Clone)]
 pub(crate) struct StoredTexPart {
     pub(crate) edge: u32,
     pub(crate) hash: u64,
@@ -120,8 +122,23 @@ impl Editor {
     }
 
     /// Write every texture-painted node's images beside the scene. Called from `save_scene`.
+    ///
+    /// Entries the last adopt could NOT apply (`paint_tex_orphans`) ride along
+    /// unchanged while a node still references them and they weren't repainted —
+    /// same data-loss guard as `save_paint`.
     pub(crate) fn save_tex_paint(&mut self) {
-        if self.paint_tex.is_empty() {
+        let referenced: std::collections::HashSet<u32> = self
+            .world
+            .query::<floptle_core::TexturePaint>()
+            .map(|(_, tp)| tp.id)
+            .collect();
+        let keep: Vec<StoredTexPaint> = self
+            .paint_tex_orphans
+            .iter()
+            .filter(|sp| referenced.contains(&sp.id) && !self.paint_tex.contains_key(&sp.id))
+            .cloned()
+            .collect();
+        if self.paint_tex.is_empty() && keep.is_empty() {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect paint.
             let _ = std::fs::remove_file(self.tex_paint_file_path());
             return;
@@ -158,6 +175,7 @@ impl Editor {
                 nodes.push(StoredTexPaint { id, parts });
             }
         }
+        nodes.extend(keep);
         let dir = self.project_root.join("paint");
         let _ = std::fs::create_dir_all(&dir);
         if let Err(e) = std::fs::write(self.tex_paint_file_path(), encode(&nodes)) {
@@ -180,6 +198,7 @@ impl Editor {
             return;
         }
         self.paint_tex.clear();
+        self.paint_tex_orphans.clear();
         let Ok(bytes) = std::fs::read(self.tex_paint_file_path()) else { return };
         let Some(stored) = decode(&bytes) else {
             self.console.push(
@@ -198,6 +217,9 @@ impl Editor {
             .query::<floptle_core::TexturePaint>()
             .map(|(e, tp)| (e, tp.id))
             .collect();
+        let referenced: std::collections::HashSet<u32> =
+            painted.iter().map(|&(_, id)| id).collect();
+        let mut applied: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (e, id) in painted {
             let Some(sp) = by_id.get(&id) else { continue }; // no saved image for this id
             let Some(key) = self.ensure_paint_mesh_pub(e) else { continue };
@@ -227,20 +249,31 @@ impl Editor {
                     break;
                 }
             }
-            if !ok {
-                // The mesh changed since it was painted (or the layout no longer matches):
-                // drop the paint rather than scramble it, and say so.
-                self.clear_texture_paint(e);
+            if ok {
+                applied.insert(id);
+            } else {
+                // The mesh changed since it was painted (or the layout no longer
+                // matches): show the node UNPAINTED rather than scrambled — but keep
+                // the saved entry on file (drop only the freshly-seeded atlas), so
+                // "restore the old model" actually brings the paint back. The next
+                // dab replaces it for real.
+                self.paint_tex.remove(&id);
                 self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
                         "🖌 '{key}' changed since it was texture-painted — that node's paint \
-                         was NOT restored (re-paint it, or restore the old model)"
+                         was NOT applied (re-paint it, or restore the old model)"
                     ),
                     None,
                 );
             }
         }
+        // Whatever a node still wants but couldn't take (mesh unloadable, guard
+        // refused) is preserved verbatim through the next save.
+        self.paint_tex_orphans = by_id
+            .into_values()
+            .filter(|sp| referenced.contains(&sp.id) && !applied.contains(&sp.id))
+            .collect();
     }
 }
 

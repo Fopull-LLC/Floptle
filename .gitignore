@@ -52,3 +52,7 @@ out.png
 
 # Player save slots (per-slot save stores + slot terrain caches) — runtime data.
 **/saves/
+
+# Crash-recovery autosaves + per-project runtime save dirs.
+**/.floptle/autosave/
+solar/save/

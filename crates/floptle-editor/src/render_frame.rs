@@ -3264,6 +3264,7 @@ impl Editor {
             // it here, before any sampler runs (this was half the "terrain textures are
             // always blurry" bug; the other half was the hardcoded Linear sampler).
             let settings = &self.texture_settings;
+            let root = &self.project_root;
             let layers: Vec<floptle_render::TextureData> = self
                 .terrain_textures
                 .iter()
@@ -3274,9 +3275,10 @@ impl Editor {
                         .unwrap_or_default()
                         .filter
                         == crate::assets::FilterMode::Pixelated;
+                    let file = crate::project::resolve_asset_path(root, p);
                     if !p.is_empty()
                         && let Some(t) =
-                            floptle_assets::load_texture_sized_filtered(Path::new(p), 256, 256, nearest)
+                            floptle_assets::load_texture_sized_filtered(&file, 256, 256, nearest)
                     {
                         return t;
                     }
@@ -3308,7 +3310,8 @@ impl Editor {
             _ => None,
         });
         if sky_tex_path != self.sky_texture_loaded {
-            let data = sky_tex_path.as_ref().and_then(|p| floptle_assets::load_texture(Path::new(p)));
+            let data =
+                sky_tex_path.as_ref().and_then(|p| floptle_assets::load_texture(&self.resolve_asset_path(p)));
             if let (Some(gpu), Some(raymarch)) = (self.gpu.as_ref(), self.raymarch.as_mut()) {
                 raymarch.set_sky_texture(gpu, data.as_ref());
             }

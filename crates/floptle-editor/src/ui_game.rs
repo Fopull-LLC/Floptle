@@ -106,11 +106,15 @@ impl Editor {
     /// Register a project font with the UI renderer (reads the file once; the
     /// renderer remembers parse failures and falls back to the embedded font).
     pub(crate) fn ensure_ui_font(&mut self, path: &str) {
-        let Some(uir) = self.ui_render.as_mut() else { return };
-        if path.is_empty() || uir.has_font(path) {
+        if path.is_empty() {
             return;
         }
-        let bytes = std::fs::read(std::path::Path::new(path)).unwrap_or_default();
+        let file = self.resolve_asset_path(path);
+        let Some(uir) = self.ui_render.as_mut() else { return };
+        if uir.has_font(path) {
+            return;
+        }
+        let bytes = std::fs::read(&file).unwrap_or_default();
         uir.ensure_font(path, &bytes);
     }
 
@@ -697,6 +701,7 @@ impl Editor {
         e: Entity,
         ui: &mut egui::Ui,
         asset_tree: &[crate::assets::AssetEntry],
+        project_root: &std::path::Path,
         texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
     ) -> bool {
         let mut changed = false;
@@ -964,6 +969,7 @@ impl Editor {
                 if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new(("ui_font_pick", e.index())),
+                    project_root,
                     &current,
                     Some("(default)"),
                     asset_tree,
@@ -994,6 +1000,7 @@ impl Editor {
                 if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new(("ui_tex_pick", e.index())),
+                    project_root,
                     &current,
                     Some("(none)"),
                     asset_tree,

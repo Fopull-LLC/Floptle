@@ -1287,7 +1287,11 @@ impl Editor {
             0.0,
             cfg.color,
         );
-        if let Some(slot) = self.ensure_texture_slot(&cfg.texture) {
+        // The dialog's dropdown hands over an asset-TREE path (spelled however the
+        // editor was launched) — normalize to the portable project-relative form
+        // before it lands in the palette file.
+        let tex = crate::assets::asset_rel_path(&cfg.texture, &self.project_root);
+        if let Some(slot) = self.ensure_texture_slot(&tex) {
             field.fill_texture(slot + 1);
         }
         let e = self.world.spawn();

@@ -245,11 +245,13 @@ pub(crate) struct MatEditResult {
 /// In-depth material property editors — shared by the Inspector's Material section
 /// and the floating Material Editor window. Edits `m` in place (so undo coalesces
 /// via `inspector_changed`); preset apply/save/remove come back as intents.
+#[allow(clippy::too_many_arguments)] // one widget, one call shape — a param struct would just rename the args
 pub(crate) fn material_props_ui(
     ui: &mut egui::Ui,
     m: &mut Material,
     presets: &[(String, floptle_scene::MaterialDoc)],
     asset_tree: &[crate::assets::AssetEntry],
+    project_root: &Path,
     name_buf: &mut String,
     flsl: &crate::shaders::FlslCache,
     sdf: &crate::shaders::SdfCache,
@@ -269,6 +271,7 @@ pub(crate) fn material_props_ui(
         if let Some(pick) = crate::ui_widgets::asset_picker(
             ui,
             egui::Id::new("mat_tex"),
+            project_root,
             if cur.is_empty() { "none" } else { &cur },
             Some("none"),
             asset_tree,
@@ -319,6 +322,7 @@ pub(crate) fn material_props_ui(
         if let Some(pick) = crate::ui_widgets::asset_picker(
             ui,
             egui::Id::new("mat_shader"),
+            project_root,
             &cur,
             Some("Built-in"),
             asset_tree,
@@ -362,6 +366,7 @@ pub(crate) fn material_props_ui(
                             if let Some(pick) = crate::ui_widgets::asset_picker(
                                 ui,
                                 egui::Id::new(("mat_shader_tex", i)),
+                                project_root,
                                 &cur,
                                 Some("none"),
                                 asset_tree,
@@ -925,6 +930,7 @@ impl EditorTabViewer<'_> {
                                     if let Some(Some(p)) = crate::ui_widgets::asset_picker(
                                         ui,
                                         egui::Id::new("mesh-model"),
+                                        self.project_root,
                                         &file_label(asset_path),
                                         None,
                                         tree,
@@ -1078,6 +1084,7 @@ impl EditorTabViewer<'_> {
                                     if let Some(pick) = crate::ui_widgets::asset_picker(
                                         ui,
                                         egui::Id::new("sky-shader"),
+                                        self.project_root,
                                         &slabel,
                                         None,
                                         self.asset_tree,
@@ -1155,6 +1162,7 @@ impl EditorTabViewer<'_> {
                                         if let Some(Some(p)) = crate::ui_widgets::asset_picker(
                                             ui,
                                             egui::Id::new("sky-tex"),
+                                            self.project_root,
                                             &if cur.is_empty() { "(pick a texture)".to_string() } else { label(&cur) },
                                             None,
                                             tree,
@@ -1374,7 +1382,7 @@ impl EditorTabViewer<'_> {
                     }
                     ui.indent("material_props", |ui| {
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -1484,6 +1492,7 @@ impl EditorTabViewer<'_> {
                                 if let Some(pick) = crate::ui_widgets::asset_picker(
                                     ui,
                                     egui::Id::new(("audio_clip_pick", e)),
+                                    self.project_root,
                                     sel,
                                     Some("(none)"),
                                     tree,
@@ -1881,7 +1890,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
-                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.texture_settings) {
+                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings) {
                         cmd.inspector_changed = true;
                     }
                 }
@@ -2619,7 +2628,7 @@ impl EditorTabViewer<'_> {
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);

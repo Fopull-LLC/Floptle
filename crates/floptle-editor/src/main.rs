@@ -1518,9 +1518,16 @@ struct Editor {
     paint_meshes: PaintMeshCache,
     /// paint id → its per-part blocks in the renderer's `vpaint` store.
     paint_data: std::collections::HashMap<u32, PaintBlocks>,
+    /// Saved vertex-paint entries the last `adopt_paint` could NOT apply (the node
+    /// exists but its mesh wasn't loadable, or the re-import guard refused) — carried
+    /// through saves untouched, so a session with broken asset resolution can never
+    /// destroy paint it couldn't even load.
+    paint_orphans: Vec<crate::paint_io::StoredPaint>,
     /// TEXTURE painting (the ▦ Texture brush target): per-node paint images + atlas meshes,
     /// keyed by the stable `TexturePaint` id so undo survives a World rebuild (see `paint_tex`).
     paint_tex: std::collections::HashMap<u32, crate::paint_tex::PaintTex>,
+    /// Texture-paint twin of `paint_orphans`: saved entries `adopt_tex_paint` couldn't apply.
+    paint_tex_orphans: Vec<crate::paint_tex_io::StoredTexPaint>,
     /// Bumped on EVERY vertex-paint mutation (dab, fill, clear, undo, reload). Texture-painted
     /// nodes mirror their vertex paint into atlas-ordered blocks; `sync_tex_paint_mirrors`
     /// compares this against each mirror's epoch to rebuild only when something changed.

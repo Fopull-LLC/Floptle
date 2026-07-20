@@ -24,6 +24,7 @@ const MAGIC: &[u8; 4] = b"FLVP";
 const VERSION: u16 = 1;
 
 /// One node's stored paint.
+#[derive(Clone)]
 pub(crate) struct StoredPaint {
     pub(crate) id: u32,
     /// Per part: the colors, and the geometry hash they were painted against.
@@ -139,10 +140,25 @@ impl Editor {
     }
 
     /// Write every painted node's colors beside the scene. Called from `save_scene`.
+    ///
+    /// Entries the last adopt could NOT apply (`paint_orphans` — mesh unloadable or
+    /// the re-import guard refused) are carried through UNCHANGED, as long as a node
+    /// still references their id and the user hasn't repainted it. Before this, one
+    /// save from a session with broken asset resolution silently destroyed every
+    /// unloaded node's paint (Ty's `assets` project lost ~90% of both paint files,
+    /// 2026-07-20).
     pub(crate) fn save_paint(&mut self) {
+        let referenced: std::collections::HashSet<u32> =
+            self.world.query::<floptle_core::VertexPaint>().map(|(_, vp)| vp.id).collect();
+        let keep: Vec<StoredPaint> = self
+            .paint_orphans
+            .iter()
+            .filter(|sp| referenced.contains(&sp.id) && !self.paint_data.contains_key(&sp.id))
+            .cloned()
+            .collect();
         let ids: Vec<(u32, PaintBlocks)> =
             self.paint_data.iter().map(|(&k, v)| (k, v.clone())).collect();
-        if ids.is_empty() {
+        if ids.is_empty() && keep.is_empty() {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect
             // paint on next load.
             let _ = std::fs::remove_file(self.paint_file_path());
@@ -170,6 +186,7 @@ impl Editor {
             }
             stored.push(StoredPaint { id, parts });
         }
+        stored.extend(keep);
         let dir = self.project_root.join("paint");
         let _ = std::fs::create_dir_all(&dir);
         if let Err(e) = std::fs::write(self.paint_file_path(), encode(&stored)) {
@@ -192,6 +209,7 @@ impl Editor {
             return;
         }
         self.paint_data.clear();
+        self.paint_orphans.clear();
         self.vpaint_epoch += 1; // blocks realloc — texture-paint mirrors must resync
         let Ok(bytes) = std::fs::read(self.paint_file_path()) else { return };
         let Some(stored) = decode(&bytes) else {
@@ -216,8 +234,16 @@ impl Editor {
             }
         }
 
+        let referenced: std::collections::HashSet<u32> =
+            painted.iter().map(|&(_, id)| id).collect();
         for sp in stored {
             let Some(key) = key_of.get(&sp.id).cloned() else {
+                if referenced.contains(&sp.id) {
+                    // A node still wants this paint but its mesh couldn't be loaded
+                    // (missing file, broken ref) — PRESERVE the stored entry so the
+                    // next save carries it forward instead of destroying it.
+                    self.paint_orphans.push(sp);
+                }
                 continue; // no node references this id any more — drop it
             };
             let mut blocks = PaintBlocks::default();
@@ -257,6 +283,11 @@ impl Editor {
             }
             if ok {
                 self.paint_data.insert(sp.id, blocks);
+            } else {
+                // The guard refused (mesh changed / alloc failed): keep the stored
+                // entry on file — "restore the old model" (the advice in the warning
+                // above) only works if a save can't wipe the paint meanwhile.
+                self.paint_orphans.push(sp);
             }
         }
     }
