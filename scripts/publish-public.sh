@@ -25,8 +25,11 @@ gh release create "$TAG" --repo "$PUBLIC" --title "$TAG" \
 gh release upload "$TAG" "$WORK"/* --clobber --repo "$PUBLIC"
 
 echo "updating the manifest release…"
-gh release create manifest --repo "$PUBLIC" --title "Release manifest" \
-  --notes "Always-latest version manifest for the Floptle Hub." 2>/dev/null || true
+gh release create manifest --repo "$PUBLIC" --title "Release manifest" --prerelease \
+  --notes "Machine-readable version manifest for the Floptle Hub — not a download page." 2>/dev/null || true
 gh release upload manifest "$WORK/releases.json" --clobber --repo "$PUBLIC"
+# Keep /releases/latest on the real bundles, never the manifest holder.
+gh release edit manifest --repo "$PUBLIC" --prerelease
+case "$TAG" in *-*) ;; *) gh release edit "$TAG" --repo "$PUBLIC" --latest;; esac
 
 echo "done: https://github.com/$PUBLIC/releases/tag/$TAG"
