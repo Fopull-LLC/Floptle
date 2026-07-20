@@ -130,6 +130,32 @@ pub(crate) fn install_save_api(
         }
     }
 
+    // save.deleteSlot(name) — delete a slot's store FILE from disk (save-slot
+    // management UIs: "delete this save"). Deleting the ACTIVE slot also wipes
+    // the in-memory store, so the slot is immediately reusable as a fresh save.
+    // Returns true if a file was actually removed. Terrain a game persisted per
+    // slot is its own directory — see terrain.deleteSaveDir.
+    {
+        let state = state.clone();
+        let root = root.clone();
+        if let Ok(f) = lua.create_function(move |_, name: String| {
+            if !valid_slot(&name) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "save.deleteSlot(\"{name}\"): slot names are letters/digits/-/_ (max 64)"
+                )));
+            }
+            let mut s = state.borrow_mut();
+            if name == s.slot {
+                s.store.clear();
+                s.loaded = true; // a fresh, empty store — nothing to lazily read back
+                s.dirty = false;
+            }
+            Ok(std::fs::remove_file(slot_path(&root.borrow(), &name)).is_ok())
+        }) {
+            let _ = t.set("deleteSlot", f);
+        }
+    }
+
     // save.slot([name]) — switch the active slot (flushing the old one first);
     // with no argument, returns the current slot's name.
     {

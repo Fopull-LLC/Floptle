@@ -756,11 +756,22 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
----Write every EDITED resident terrain field to the save slot NOW
----(`terrain.saveDir` must be set) — call at checkpoints and on exit-to-menu so
----the slot always reloads from fast files instead of regenerating. Streaming
----already flushes on its own when bodies stream out.
+---Checkpoint every EDITED resident terrain field to the save slot
+---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
+---encoding per frame plus a threaded write, deferred while a field is being
+---actively dug — so autosaves never stutter the game. Exit paths (Stop,
+---scene.load out of the slot) finish the writes synchronously, so a
+---checkpoint is never lost. Streaming also flushes when bodies stream out.
 function terrain.flush() end
+---Delete a save slot's persisted terrain directory from disk (pair with
+---`save.deleteSlot` in a \"delete this save\" UI). Narrow by design: the path
+---must be relative with no \"..\", must not be the ACTIVE `terrain.saveDir`
+---(clear it first), and only terrain files (.cfield/.tfield/.meta) in that one
+---directory are removed — the emptied directory (and an emptied parent) is
+---then tidied away. Returns the number of files removed.
+---@param path string e.g. \"saves/slot2/terrain\"
+---@return number
+function terrain.deleteSaveDir(path) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
@@ -836,6 +847,13 @@ function save.delete(key) end
 ---@param name? string
 ---@return string
 function save.slot(name) end
+---Delete a slot's store file from disk (\"delete this save\" UIs). Deleting
+---the ACTIVE slot also empties the in-memory store, so the slot is instantly
+---reusable as a fresh save. Per-slot terrain is a separate directory — pair
+---with `terrain.deleteSaveDir`. Returns true if a file was removed.
+---@param name string
+---@return boolean
+function save.deleteSlot(name) end
 ---Write the store to disk now (checkpoints). Returns false on an IO error
 ---(also surfaced in the Console).
 ---@return boolean

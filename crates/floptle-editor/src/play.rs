@@ -354,6 +354,10 @@ impl Editor {
     /// flushing to the save SLOT first when one is set (`terrain.saveDir`):
     /// that's player state, exactly what a slot is for (G2).
     pub(crate) fn drop_play_loaded_terrains(&mut self) {
+        // Exit-path guarantee: settle the background checkpoint and put every
+        // dirty field on disk in the slot BEFORE anything drops — the per-entity
+        // writes below then skip whatever this already saved.
+        self.flush_slot_terrains_sync();
         let dropped: Vec<Entity> = self.play_loaded_terrains.drain().collect();
         for e in dropped {
             if !self.world.is_alive(e) || !self.terrains.contains_key(&e) {

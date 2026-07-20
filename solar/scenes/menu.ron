@@ -264,8 +264,777 @@
                 ),
                 size: (Pct(1.0), Fixed(44.0)),
                 text: Some((
-                    text: "a galaxy is rolled the first time you enter a slot\nprogress and terrain edits save per slot",
+                    text: "an empty slot creates a new galaxy — pick its seed and parameters\nprogress and terrain edits save per slot · ✕ deletes a save from disk",
                     size: 12.0,
+                    color: (0.42, 0.52, 0.6, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "Del 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_delete",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (488.0, 160.0),
+                ),
+                size: (Fixed(52.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.55, 0.4, 0.4, 0.6),
+                )),
+                text: Some((
+                    text: "✕",
+                    size: 18.0,
+                    color: (0.9, 0.6, 0.6, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Del 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_delete",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (488.0, 236.0),
+                ),
+                size: (Fixed(52.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.55, 0.4, 0.4, 0.6),
+                )),
+                text: Some((
+                    text: "✕",
+                    size: 18.0,
+                    color: (0.9, 0.6, 0.6, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Del 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_delete",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (488.0, 312.0),
+                ),
+                size: (Fixed(52.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.55, 0.4, 0.4, 0.6),
+                )),
+                text: Some((
+                    text: "✕",
+                    size: 18.0,
+                    color: (0.9, 0.6, 0.6, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "NG Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_newsave",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            parent: Some(2),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(560.0), Fixed(470.0)),
+                shape: Some((
+                    fill: (0.04, 0.06, 0.09, 0.97),
+                    radius: 14.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.6, 0.75, 0.6),
+                )),
+                visible: false,
+            )),
+        ),
+        (
+            name: "NG Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 24.0),
+                ),
+                size: (Pct(1.0), Fixed(34.0)),
+                text: Some((
+                    text: "N E W   G A L A X Y",
+                    size: 26.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Slot Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 62.0),
+                ),
+                size: (Pct(1.0), Fixed(18.0)),
+                text: Some((
+                    text: "— creating save in slot 1 —",
+                    size: 13.0,
+                    color: (0.5, 0.62, 0.72, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Seed",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_ng_button",
+                    enabled: true,
+                    params: [],
+                    strs: [
+                        ("role", "seed"),
+                    ],
+                ),
+            ],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (80.0, 94.0),
+                ),
+                size: (Fixed(400.0), Fixed(42.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "SEED   random   (type digits)",
+                    size: 14.0,
+                    color: (0.78, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "NG Planets Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (40.0, 160.0),
+                ),
+                size: (Fixed(140.0), Fixed(18.0)),
+                text: Some((
+                    text: "planets",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Planets Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (190.0, 161.0),
+                ),
+                size: (Fixed(250.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 2.0,
+                    max: 8.0,
+                    value: 3.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Planets Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(18),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Planets Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (452.0, 160.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "3",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Moons Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (40.0, 210.0),
+                ),
+                size: (Fixed(140.0), Fixed(18.0)),
+                text: Some((
+                    text: "moon chance",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Moons Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (190.0, 211.0),
+                ),
+                size: (Fixed(250.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 0.0,
+                    max: 1.0,
+                    value: 0.6,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Moons Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(22),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Moons Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (452.0, 210.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "60%",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Atmo Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (40.0, 260.0),
+                ),
+                size: (Fixed(140.0), Fixed(18.0)),
+                text: Some((
+                    text: "atmospheres",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Atmo Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (190.0, 261.0),
+                ),
+                size: (Fixed(250.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 0.0,
+                    max: 1.0,
+                    value: 0.8,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Atmo Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(26),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Atmo Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (452.0, 260.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "80%",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Caves Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (40.0, 310.0),
+                ),
+                size: (Fixed(140.0), Fixed(18.0)),
+                text: Some((
+                    text: "cave scale",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Caves Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (190.0, 311.0),
+                ),
+                size: (Fixed(250.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 0.25,
+                    max: 2.0,
+                    value: 1.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Caves Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(30),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Caves Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (452.0, 310.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "×1.00",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Create",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_ng_button",
+                    enabled: true,
+                    params: [],
+                    strs: [
+                        ("role", "create"),
+                    ],
+                ),
+            ],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (80.0, 366.0),
+                ),
+                size: (Fixed(195.0), Fixed(48.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.45, 0.7, 0.5, 0.7),
+                )),
+                text: Some((
+                    text: "C R E A T E",
+                    size: 17.0,
+                    color: (0.7, 0.95, 0.78, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "NG Cancel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_ng_button",
+                    enabled: true,
+                    params: [],
+                    strs: [
+                        ("role", "cancel"),
+                    ],
+                ),
+            ],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (285.0, 366.0),
+                ),
+                size: (Fixed(195.0), Fixed(48.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "CANCEL",
+                    size: 17.0,
+                    color: (0.78, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "NG Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 424.0),
+                ),
+                size: (Pct(1.0), Fixed(34.0)),
+                text: Some((
+                    text: "type digits for a fixed seed · click the seed row to clear it\nthe galaxy always regenerates from these choices",
+                    size: 11.0,
                     color: (0.42, 0.52, 0.6, 1.0),
                     align: Center,
                     valign: Center,

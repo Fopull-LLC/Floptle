@@ -374,11 +374,17 @@ end
 
 -- Runtime entry for the GAME's save-slot flow (game_manager calls this through
 -- a script handle at the loading screen): regenerate the whole system from a
--- specific galaxy seed, using the script's defaults for every other knob.
--- Deterministic — the same seed always rebuilds the same galaxy.
-function regenerate(seed)
+-- specific galaxy seed. `opts` overrides any generator knob per save — the
+-- new-save panel's planets / moonChance / atmoChance / caveScale land here.
+-- Deterministic — the same seed + opts always rebuild the same galaxy.
+function regenerate(seed, opts)
   local p = {}
   for k, v in pairs(defaults) do p[k] = v end
+  if opts then
+    for k, v in pairs(opts) do
+      if v ~= nil then p[k] = v end
+    end
+  end
   p.seed = (seed and seed > 0) and seed or 0
   roll(p)
 end

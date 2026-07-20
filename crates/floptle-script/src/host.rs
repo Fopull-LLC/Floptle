@@ -889,6 +889,7 @@ impl ScriptHost {
                 save_dir: terrain_save_dir.clone(),
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
+                root: project_root.clone(),
             },
         );
         // The `save.*` persistent store (roadmap A2).

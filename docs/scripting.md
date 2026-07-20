@@ -591,8 +591,27 @@ there on stream-out — so digs persist per slot without ever touching the
 authored project. Pass `""` to clear; the slot resets when Play stops. Combine
 with the `save.*` store (which holds the galaxy seed + progress) for the full
 save-game loop: seed regenerates the untouched universe, the slot's terrain
-dir carries exactly the worlds the player changed. `terrain.flush()` writes
-every edited resident field to the slot NOW (checkpoints, exit-to-menu).
+dir carries exactly the worlds the player changed. `terrain.flush()`
+checkpoints every edited resident field to the slot — **in the background**:
+the field encodes a few chunks per frame and the file writes on a thread, and
+a field the player dug within the last couple of seconds waits for a quiet
+moment first, so an autosave loop never stutters the game. Exit paths (Stop,
+`scene.load` out of the slot) finish outstanding writes synchronously — a
+requested checkpoint is never lost. Call it freely on a timer.
+
+**Deleting a save** — pair the two stores:
+
+```lua
+save.deleteSlot("slot2")                      -- the key→value store file
+terrain.deleteSaveDir("saves/slot2/terrain")  -- that slot's persisted terrain
+```
+
+`save.deleteSlot` on the *active* slot also empties the in-memory store, so
+the slot is instantly reusable as a fresh save. `terrain.deleteSaveDir` is
+deliberately narrow — relative path, no `..`, never the active `saveDir`, and
+it only removes terrain files (`.cfield`/`.tfield`/`.meta`) from that one
+directory (tidying emptied directories after) — a save-management UI can call
+it without any chance of eating unrelated files.
 
 **The full player flow** (the solar demo implements this — `menu.ron` +
 `game_manager.lua` are the reference):

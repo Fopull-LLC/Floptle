@@ -1437,6 +1437,22 @@ struct Editor {
     /// the residency driver must not ALSO stream those bodies (the generation
     /// queue owns them until each fill lands).
     planet_gen_pending: std::collections::HashSet<u32>,
+    /// BACKGROUND CHECKPOINTS (`terrain.flush()`): dirty resident fields queue
+    /// here (entity + when queued) and drain one at a time through
+    /// `step_terrain_checkpoint` — a few chunks of encoding per frame, the file
+    /// write on a thread. The old synchronous flush froze the game ~1s per
+    /// autosave on a dug planet; the player must never feel a checkpoint.
+    terrain_flush_queue: Vec<(Entity, std::time::Instant)>,
+    /// The single in-flight checkpoint (encode → write). One at a time keeps
+    /// the frame cost flat and makes exit-path settling a single join.
+    terrain_save_job: Option<crate::terrain_edit::TerrainSaveJob>,
+    /// Per-terrain edit stamps: (monotonic edit counter, wall time of the last
+    /// edit). The counter detects a checkpoint that raced an edit (torn
+    /// snapshot → the field STAYS dirty); the wall time defers checkpoints on
+    /// fields being ACTIVELY dug — saves run in the quiet moments.
+    terrain_edit_stamps: HashMap<Entity, (u64, std::time::Instant)>,
+    /// Monotonic source for `terrain_edit_stamps` counters.
+    terrain_edit_clock: u64,
     /// The background remesh worker (P4) — spawned lazily on first terrain use.
     terrain_worker: Option<crate::terrain_edit::TerrainWorker>,
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a

@@ -96,9 +96,14 @@ function start(node)
     local _, el = ui_of(nm)
     if el then el.visible = true end
   end
-  -- Regenerate THIS slot's galaxy. Deterministic per seed; a fresh slot rolls
-  -- a new galaxy and remembers it.
-  gen.regenerate(seed)
+  -- Regenerate THIS slot's galaxy. Deterministic per seed + the parameters the
+  -- player picked when they created the save (nil = the generator's default).
+  gen.regenerate(seed, {
+    planets = save.get("g_planets"),
+    moonChance = save.get("g_moonchance"),
+    atmoChance = save.get("g_atmo"),
+    caveScale = save.get("g_caves"),
+  })
   if seed <= 0 then
     seed = gen.lastSeed
     save.set("g_seed", seed)

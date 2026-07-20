@@ -87,6 +87,9 @@ impl Editor {
         // (BEFORE the mesh sync so a landed field streams meshes this same frame;
         // outside the render borrows because a mid-Play arrival rebuilds the sim).
         self.update_terrain_residency(lod_cam);
+        // Background checkpoints (terrain.flush): a few chunks of encoding per
+        // frame + threaded writes — autosaves must never stutter the game.
+        self.step_terrain_checkpoint();
         self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
         self.sync_sky_texture();
         self.sync_sky_shader();
