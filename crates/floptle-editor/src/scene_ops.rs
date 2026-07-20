@@ -140,7 +140,9 @@ impl Editor {
         let audio = self.world.get::<floptle_audio::AudioSource>(e).cloned();
         let layer = self.world.get::<floptle_core::Layer>(e).map(|l| l.0.clone());
         let tags = self.world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
+        let terrain_gen = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         Some(NodeDoc {
+            terrain_gen,
             name,
             transform,
             matter: MatterDoc::from(matter),
@@ -244,6 +246,7 @@ impl Editor {
             pos = snap_dvec3(pos, self.grid.size as f64);
         }
         let node = NodeDoc {
+            terrain_gen: None,
             name: name.into(),
             transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
             matter,
@@ -290,6 +293,7 @@ impl Editor {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "mesh".into());
             let node = NodeDoc {
+                terrain_gen: None,
                 name,
                 transform: TransformDoc {
                     translation: [pos.x, pos.y, pos.z],

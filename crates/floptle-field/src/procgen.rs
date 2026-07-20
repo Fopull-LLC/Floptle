@@ -22,7 +22,7 @@ use crate::ChunkField;
 
 /// One material layer: a terrain palette slot (1-based) + an RGB tint
 /// (`albedo = texture × tint`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LayerPaint {
     pub slot: u8,
     pub color: [f32; 3],
@@ -31,7 +31,7 @@ pub struct LayerPaint {
 /// Sparse glowing pockets (crystal/ore): painted where a dedicated fbm field
 /// exceeds `threshold`, below `min_depth`. Use a palette GLOW slot to make
 /// them self-lit; higher thresholds = rarer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GlowPockets {
     pub paint: LayerPaint,
     pub threshold: f32,
@@ -41,7 +41,7 @@ pub struct GlowPockets {
 /// Thin vein seams (magma/ore filaments): painted where a seam noise field
 /// sits within `width` of `center` — a BAND, so seams read as veins running
 /// through the rock instead of flooding whole walls.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SeamSpec {
     pub paint: LayerPaint,
     pub min_depth: f32,
@@ -51,7 +51,11 @@ pub struct SeamSpec {
 
 /// Everything `generate_planet` needs — every field has a workable default,
 /// so callers (the Lua table) override only what they care about.
-#[derive(Clone, Debug)]
+/// Serializable: the RON form IS the on-node "genspec" that lets a body
+/// generate on-demand when first approached (G2 galaxy streaming) — new
+/// fields must keep serde defaults so old genspec strings stay loadable.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PlanetFill {
     pub seed: u32,
     pub radius: f32,

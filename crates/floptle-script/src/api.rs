@@ -501,6 +501,14 @@ pub(crate) fn apply_rich_sets(
             RichSet::MatterTerrain(id) => {
                 world.insert(e, Matter::Terrain { id });
             }
+            RichSet::TerrainGen(spec) => match spec {
+                Some(s) => {
+                    world.insert(e, floptle_core::TerrainGen(s));
+                }
+                None => {
+                    world.remove::<floptle_core::TerrainGen>(e);
+                }
+            },
             RichSet::MatterPrimitive(shape, color) => {
                 let shape = match shape.as_str() {
                     "Sphere" | "sphere" => floptle_core::Shape::Sphere,
@@ -1218,6 +1226,32 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 lua.create_function(move |_, (this, id): (Table, u32)| {
                     let e: u32 = this.raw_get("__id")?;
                     q.borrow_mut().push((e, crate::RichSet::MatterTerrain(id)));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            // node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the
+            // same opts table terrain.generatePlanet takes): the body's field
+            // generates from it, on a background thread, when something first
+            // approaches — no .cfield on disk, no up-front generation (G2 galaxy
+            // streaming; docs/galaxy-streaming-proposal.md). Player edits saved
+            // under terrain.saveDir take priority over regeneration. nil clears.
+            let q = q.clone();
+            methods.set(
+                "setTerrainGen",
+                lua.create_function(move |_, (this, opts): (Table, Option<Table>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let spec = match &opts {
+                        Some(t) => {
+                            let fill = crate::terrain_api::planet_fill_from_table(Some(t));
+                            Some(ron::to_string(&fill).map_err(|err| {
+                                mlua::Error::runtime(format!("setTerrainGen: {err}"))
+                            })?)
+                        }
+                        None => None,
+                    };
+                    q.borrow_mut().push((e, crate::RichSet::TerrainGen(spec)));
                     Ok(())
                 })?,
             )?;

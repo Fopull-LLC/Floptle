@@ -170,11 +170,17 @@ local function archetype(r, kind, radius, caveScale)
   return o, atmoHue
 end
 
--- One body under the system group: node + celestial + core kernel. The heavy
--- terrain fill is queued separately in generate() (it needs no node handle).
+-- One body under the system group: node + celestial + core kernel. The body
+-- carries its GENSPEC (setTerrainGen) instead of a pre-generated field: the
+-- engine generates its terrain in the background the first time you approach
+-- (deterministic per seed — G2 streaming), so a freshly rolled system is
+-- playable in seconds no matter how many worlds it has, and unvisited worlds
+-- cost nothing but a scene node. Only the SPAWN planet pre-generates (you're
+-- standing on it — see generate()).
 local function makeBody(sys, b)
   createNode(b.name, sys, function(n)
     n:setTerrain(b.id)
+    n:setTerrainGen(b.opts)
     n:setCelestial(b.cel)
     n.x, n.y, n.z = b.pos[1], b.pos[2], b.pos[3]
     n.tags = { "genbody" }
@@ -230,9 +236,10 @@ function generate(node)
 
   local planetKinds = { "canyon", "dune", "ice", "lava", "crystal" }
   local moonKinds = { "barren", "frost", "crystal", "ice" }
-  -- Cap 8: with G1 terrain residency (docs/galaxy-streaming-proposal.md) only
-  -- the bodies near the camera hold RAM/GPU — the cap is now generation time
-  -- and disk, not memory. Each body still pre-generates its field (~4-10 s).
+  -- Cap 8: with residency streaming + on-demand genspec generation
+  -- (docs/galaxy-streaming-proposal.md) only the bodies near the camera hold
+  -- RAM/GPU, and only the spawn planet generates up front — the cap is now
+  -- just orbital real estate.
   local nPlanets = (p.planets > 0) and math.min(p.planets, 8) or (2 + r:int(0, 2))
   local a = a1
   local id = 1
@@ -275,7 +282,9 @@ function generate(node)
       cel.clouds = math.max(0, r:range(-0.25, 0.65))
     end
     specs[#specs + 1] = { name = name, id = id, pos = pos, cel = cel, opts = opts }
-    terrain.generatePlanet(id, opts)
+    -- Only the SPAWN planet generates up front (the crew lands on it the moment
+    -- Play starts); everything else streams from its genspec on approach.
+    if pi == 1 then terrain.generatePlanet(id, opts) end
     print(string.format("  %s — %s, r %.0f, g %.1f, orbit %.0f", name, kind, radius, g, a))
     if pi == 1 then firstPos, firstR, firstRelief = pos, radius, opts.relief end
     id = id + 1
@@ -297,8 +306,7 @@ function generate(node)
         specs[#specs + 1] = { name = mname, id = id, pos = mpos, cel = {
           mu = mmu, bodyRadius = mr + math.max(mr * 0.035, 4), soi = 0,
           parent = name, a = ma, e = r:range(0, 0.04), i = r:range(0, 0.25), m0 = mm0,
-        }, opts = mopts }
-        terrain.generatePlanet(id, mopts)
+        }, opts = mopts } -- moons stream from their genspec too
         print(string.format("    moon %s — %s, r %.0f, orbit %.0f", mname, mkind, mr, ma))
         id = id + 1
         ma = ma * r:range(1.8, 2.4)
@@ -344,5 +352,5 @@ function generate(node)
     end
   end
 
-  print("bodies placed — terrain fills are generating in the background (Console shows progress). Save the scene when they land.")
+  print("bodies placed — the spawn planet is generating in the background (Console shows progress); every other world streams in from its genspec when you first approach it. Save the scene once the spawn planet lands.")
 end

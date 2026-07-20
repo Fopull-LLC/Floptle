@@ -1,0 +1,20 @@
+// A procedural day sky — assign it on the Skybox node (Inspector -> skybox -> shader).
+// A `stage sky` shader computes the environment color from `skyDir` (the world-space ray
+// direction), so it needs no texture: horizon-to-zenith gradient + a soft sun disc.
+shader proceduralSky {
+  stage sky
+  uniform horizon: color = #b8d0e8
+  uniform zenith: color = #24406a
+  uniform sunColor: color = #fff2cc
+  uniform sunDir: vec3 = vec3(0.5, 0.6, 0.3)
+  uniform sunSharp: float = 260 range(20, 800)
+
+  // Vertical gradient: 0 at the horizon, 1 at straight up.
+  let up = clamp(skyDir.y, 0.0, 1.0)
+  let grad = mix(horizon.rgb, zenith.rgb, up)
+  // A warm sun where the ray points at the sun; the exponent tightens the disc.
+  let sun = pow(clamp(dot(skyDir, normalize(sunDir)), 0.0, 1.0), sunSharp)
+  // Fade a touch of ground haze below the horizon so it isn't a hard cut.
+  let haze = clamp(-skyDir.y * 3.0, 0.0, 1.0)
+  output color = mix(grad + sunColor.rgb * sun, horizon.rgb * 0.7, haze)
+}

@@ -222,6 +222,7 @@ mod tests {
 
         // Spawn a runtime node and move it, BEFORE any client exists.
         let node = floptle_scene::NodeDoc {
+            terrain_gen: None,
             name: "arrow".into(),
             transform: floptle_scene::TransformDoc {
                 translation: [5.0, 1.0, 0.0],

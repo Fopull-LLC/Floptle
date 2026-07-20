@@ -1,0 +1,8 @@
+{
+    "assets/textures/UI/Hand/FP Hand-Sheet.png": (
+        filter: Pixelated,
+        wrap: Repeat,
+        sheet_cols: 21,
+        sheet_rows: 1,
+    ),
+}

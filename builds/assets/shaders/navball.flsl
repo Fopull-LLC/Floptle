@@ -1,0 +1,46 @@
+// The navball — KSP's attitude ball as a pure `stage ui` shader. The ship
+// script feeds the ship's basis EXPRESSED IN THE LOCAL HORIZON FRAME
+// (x = east, y = radial up, z = north) every tick via setShaderParam; each
+// pixel reconstructs its direction on the ball and colors it: ground/sky
+// hemispheres, pitch ladder, heading meridians, N marker, prograde (yellow)
+// and retrograde (red) markers, and a fixed orange crosshair for the nose.
+shader navball {
+  stage ui
+  uniform right: vec3 = vec3(1, 0, 0)
+  uniform up: vec3 = vec3(0, 0, -1)
+  uniform nose: vec3 = vec3(0, 1, 0)
+  uniform prograde: vec3 = vec3(0, 0, 0)
+  uniform sky: color = #3E7EC2
+  uniform ground: color = #7A4A26
+
+  let q = vec2(uv.x * 2 - 1, 1 - uv.y * 2)
+  let r2 = dot(q, q)
+  let inside = 1 - smoothstep(0.92, 1.0, sqrt(r2))
+  let zz = sqrt(saturate(1 - r2))
+  let d = normalize(right * q.x + up * q.y + nose * zz)
+
+  let sp = d.y
+  let base = mix(ground.rgb, sky.rgb, smoothstep(-0.015, 0.015, sp))
+  let l0 = 1 - smoothstep(0.0, 0.014, abs(sp))
+  let l30 = 1 - smoothstep(0.0, 0.01, abs(abs(sp) - 0.5))
+  let l60 = 1 - smoothstep(0.0, 0.01, abs(abs(sp) - 0.866))
+  let h = sqrt(saturate(d.x * d.x + d.z * d.z)) + 0.0001
+  let mx = d.x / h
+  let mz = d.z / h
+  let s4 = 4 * mx * mz * (mz * mz - mx * mx)
+  let mer = (1 - smoothstep(0.0, 0.08, abs(s4))) * saturate(h * 2 - 0.4)
+  let grid = saturate(l0 + l30 * 0.55 + l60 * 0.55 + mer * 0.3)
+  let lined = mix(base, vec3(0.95, 0.97, 1), grid * 0.8)
+
+  let north = smoothstep(0.994, 0.998, dot(d, vec3(0, 0, 1)))
+  let pgd = smoothstep(0.992, 0.997, dot(d, prograde))
+  let rgd = smoothstep(0.992, 0.997, -dot(d, prograde))
+  let marked = lined + vec3(0.2, 0.9, 1) * north + vec3(1, 0.85, 0.2) * pgd + vec3(1, 0.3, 0.2) * rgd
+
+  let chx = (1 - smoothstep(0.004, 0.012, abs(q.x))) * step(abs(q.y), 0.17)
+  let chy = (1 - smoothstep(0.004, 0.012, abs(q.y))) * step(abs(q.x), 0.17)
+  let composed = mix(marked, vec3(1, 0.55, 0.1), saturate(chx + chy) * 0.9)
+
+  let shade = 0.5 + 0.5 * zz
+  output color = vec4(composed * shade, inside * 0.96) * instanceColor
+}

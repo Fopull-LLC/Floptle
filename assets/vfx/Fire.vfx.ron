@@ -1,0 +1,43 @@
+(
+    name: "NewEffect2",
+    lifetime: 2.0,
+    playback: Looping,
+    end: Destroy,
+    tracks: [
+        (
+            name: "Fountain",
+            render: Mesh(
+                asset_path: "assets/models/_test/Greatscythe.glb",
+            ),
+            blend: Additive,
+            space: Local,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.32272726,
+                ),
+            ],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 1,
+                ),
+            ],
+            automation: [],
+            rate: 0.0,
+            shape: Edge(
+                length: 1.15,
+            ),
+            particle_lifetime: 3.0,
+            lifetime_jitter: 0.0,
+            velocity: Const(Vec3((0.0, 16.12, -1.2))),
+            size: Const(F32(3.85)),
+            rotation: Const(Vec3((90.0, 0.0, 0.0))),
+            angular_velocity: Const(Vec3((15.0, 0.0, 0.0))),
+            color: Const(Rgba((1.0, 1.0, 1.0, 1.0))),
+            gravity: 0.27,
+            drag: 0.0,
+        ),
+    ],
+    seed: 1,
+)

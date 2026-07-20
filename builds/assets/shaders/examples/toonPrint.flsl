@@ -1,0 +1,18 @@
+// Toon — the engine lights your texture (litSurface), then the lit result is
+// quantized into flat bands and the silhouette gets an ink edge. Works with
+// the node's own base texture: drop one on the Material as usual.
+shader toonPrint {
+  stage fragment
+  uniform bands: float = 4 range(2, 10)
+  uniform ink: float = 0.35 range(0, 1)
+  uniform tint: color = #FFFFFF
+
+  let albedo = baseTexture() * tint * instanceColor
+  let lit = litSurface(albedo.rgb)
+  let toon = posterize(lit, steps: bands)
+  let edge = pow(1 - saturate(dot(normal, viewDir)), 3)
+  let inked = mix(toon, toon * 0.15, step(1 - ink * 0.5, edge))
+
+  output color = vec4(inked, albedo.a)
+}
+//@layout { albedo: (-1596, 0), edge: (-912, 512), in.instanceColor: (-1824, 256), in.normal: (-1824, 468), in.viewDir: (-1824, 680), inked: (-456, 0), lit: (-1140, 0), out: (0, 0), toon: (-912, 0), u.bands: (-1140, 234), u.ink: (-1368, 256), u.tint: (-2052, 234) }

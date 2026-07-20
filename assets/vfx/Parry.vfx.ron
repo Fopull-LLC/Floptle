@@ -1,0 +1,330 @@
+(
+    name: "NewEffect1",
+    lifetime: 1.0,
+    playback: Looping,
+    end: Destroy,
+    tracks: [
+        (
+            name: "Fountain",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Shockwaves/37.png"),
+            ),
+            blend: Premultiplied,
+            orient: Vertical,
+            aspect: 2.0,
+            space: Local,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.4996573,
+                ),
+            ],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 2,
+                ),
+            ],
+            automation: [],
+            rate: 0.0,
+            shape: Sphere(
+                radius: 0.0,
+                shell: false,
+            ),
+            particle_lifetime: 0.2,
+            lifetime_jitter: 0.0,
+            velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            size: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: F32(0.6),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: F32(1.0),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
+            angular_velocity: Range(Vec3((0.0, 0.0, -0.1)), Vec3((0.0, 0.0, 0.1))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 1.0, 1.0, 0.5272727)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.62375,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 0.0,
+        ),
+        (
+            name: "Track 2",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Shockwaves/8.png"),
+            ),
+            blend: Additive,
+            space: Local,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.13636364,
+                ),
+            ],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 2,
+                ),
+            ],
+            automation: [],
+            rate: 0.0,
+            shape: Cone(
+                angle: 25.0,
+                radius: 0.1,
+            ),
+            particle_lifetime: 1.0,
+            lifetime_jitter: 0.4,
+            velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            size: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: F32(0.712374),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.05,
+                        v: F32(0.75979805),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.12142857,
+                        v: F32(0.8258922),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.2642857,
+                        v: F32(0.87635154),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: F32(0.93825245),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            rotation: Range(Vec3((0.0, 0.0, -180.0)), Vec3((0.0, 0.0, 180.0))),
+            angular_velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 1.0, 1.0, 1.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.35,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 0.0,
+        ),
+        (
+            name: "Track 3",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Shockwaves/40.png"),
+            ),
+            blend: Additive,
+            space: Local,
+            clips: [
+                (
+                    start: 0.000000007450581,
+                    end: 0.10500004,
+                ),
+            ],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 10,
+                ),
+            ],
+            automation: [],
+            rate: 0.0,
+            shape: Sphere(
+                radius: 0.0,
+                shell: false,
+            ),
+            particle_lifetime: 0.25,
+            lifetime_jitter: 0.4,
+            velocity: Const(Vec3((0.0, 3.0, 0.0))),
+            size: Const(F32(0.035)),
+            rotation: Const(Vec3((0.0, 0.0, 0.0))),
+            angular_velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 1.0, 1.0, 1.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.5928571,
+                        v: Rgba((0.89568347, 0.89568347, 0.89568347, 0.875)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.8357143,
+                        v: Rgba((0.7437372, 0.7437372, 0.7437372, 0.6328125)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.99285716,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.033,
+            drag: 0.0,
+        ),
+        (
+            name: "Track 4",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Flare/19.png"),
+            ),
+            blend: Additive,
+            space: Local,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.07539411,
+                ),
+            ],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 1,
+                ),
+            ],
+            automation: [],
+            rate: 0.0,
+            shape: Point,
+            particle_lifetime: 0.45,
+            lifetime_jitter: 0.4,
+            velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            size: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: F32(0.11654663),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.15081117,
+                        v: F32(1.573511),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.27548173,
+                        v: F32(2.212233),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.43433616,
+                        v: F32(2.1086411),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: F32(-0.24970713),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            rotation: Const(Vec3((0.0, 0.0, 0.0))),
+            angular_velocity: Const(Vec3((0.0, 0.0, 5.0))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.0035714286,
+                        v: Rgba((1.0, 1.0, 1.0, 0.2890625)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 0.0,
+        ),
+    ],
+    seed: 1,
+)

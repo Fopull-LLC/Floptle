@@ -10,3 +10,4 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+serde = { workspace = true } # PlanetFill genspec round-trip (G2 on-demand generation)

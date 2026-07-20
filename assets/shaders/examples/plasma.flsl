@@ -1,0 +1,18 @@
+// Plasma — the classic start. Space is melted by a drifting warp, noise
+// fills it with bands, a palette colors them, posterize gives the retro edge.
+// Every `uniform` below becomes a live knob in the Inspector.
+shader plasma {
+  stage fragment
+  uniform speed: float = 0.15 range(0, 2)
+  uniform swirl: float = 3 range(0.5, 10)
+  uniform steps: float = 7 range(2, 16)
+  uniform tint: color = #FFFFFF
+
+  let warped = domainWarp(uv, scale: swirl, time: time * speed, strength: 1.2)
+  let bands = fbm(warped, octaves: 5)
+  let glow = palette(bands + time * speed * 0.3, "sunset")
+  let inked = posterize(glow, steps: steps)
+
+  output color = vec4(inked, 1) * tint * instanceColor
+}
+//@layout { warped: (-912, 40), bands: (-684, 40), glow: (-456, 40), inked: (-228, 40), out: (0, 60) }

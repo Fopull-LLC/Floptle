@@ -1,0 +1,18 @@
+// Force field — an additive energy shell: cellular "plates" (worley noise)
+// crawl over the surface, a pulse rolls down it, and the fresnel rim keeps
+// the middle glassy. Try it on a sphere around something worth protecting.
+shader forceField {
+  stage fragment
+  blend additive
+  uniform fieldColor: color = #7B5CFF
+  uniform cells: float = 5 range(1, 20)
+  uniform pulse: float = 1.2 range(0, 4)
+
+  let rim = pow(1 - saturate(dot(normal, viewDir)), 1.5)
+  let web = 1 - worley(uv * cells + vec2(0, time * 0.4))
+  let wave = 0.5 + 0.5 * sin(time * pulse * 3 - uv.y * 4)
+  let energy = rim * 1.2 + web * web * 0.6 * wave
+
+  output color = vec4(fieldColor.rgb * energy, 0.6)
+}
+//@layout { rim: (-684, 0), web: (-684, 140), wave: (-684, 280), energy: (-342, 120), out: (0, 140) }

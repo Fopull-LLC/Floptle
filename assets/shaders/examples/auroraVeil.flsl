@@ -1,0 +1,28 @@
+// Aurora veil — curtains of light where a warped fbm crosses zero (the
+// pow(1 - |noise|) ridge trick), swaying sideways, shimmering along their
+// height, and ramping green → violet with altitude. Stars keep the dark
+// parts of the sky alive.
+shader auroraVeil {
+  stage sky
+  uniform low: color = #37FF9E
+  uniform high: color = #7C4DFF
+  uniform night: color = #060B18
+  uniform intensity: float = 1.3 range(0, 3)
+  uniform sway: float = 1 range(0, 4)
+
+  let up = saturate(skyDir.y)
+  let base = mix(night.rgb * 2, night.rgb * 0.55, up)
+  let rnd = valueNoise(floor(skyDir * 30) + 0.5)
+  let stars = (1 - smoothstep(0.02, 0.08, worley(skyDir * 30))) * step(0.68, rnd) * (0.5 + 0.5 * sin(time * 1.5 + rnd * 25))
+  let across = vec2(skyDir.x, skyDir.z) * 2.1
+  let waved = domainWarp(across + vec2(time * 0.03 * sway, 0), scale: 1.3, time: time * 0.06 * sway, strength: 1.7)
+  let ridge = fbm(waved, octaves: 4)
+  let curtain = pow(saturate(1 - abs(ridge) * 2.9), 4)
+  let shimmer = 0.7 + 0.3 * sin(skyDir.y * 34 - time * 2.2 * sway + ridge * 9)
+  let heights = smoothstep(0.02, 0.16, up) * (1 - smoothstep(0.34, 0.62, up))
+  let ramp = mix(low.rgb, high.rgb, saturate((up - 0.02) * 3))
+  let glow = ramp * curtain * shimmer * heights * intensity * 1.5
+  let sky = base + stars * vec3(0.8, 0.9, 1) + glow + low.rgb * pow(1 - up, 6) * curtain * 0.12
+  output color = mix(sky, night.rgb * 0.7, saturate(-skyDir.y * 3))
+}
+//@layout { across: (-3876, 0), base: (-1140, 0), curtain: (-2052, 790), glow: (-912, 256), heights: (-1596, 1280), in.skyDir: (-4560, 0), in.time: (-4560, 212), out: (0, 0), ramp: (-2052, 512), ridge: (-3192, 490), rnd: (-2736, 0), shimmer: (-1824, 1170), sky: (-456, 0), stars: (-1368, 512), u.high: (-2508, 914), u.intensity: (-1368, 1024), u.low: (-2508, 768), u.night: (-1824, 0), u.sway: (-4332, 768), up: (-2964, 0), waved: (-3420, 256) }

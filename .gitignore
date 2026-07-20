@@ -40,3 +40,12 @@ assets/models/_test/
 assets/.cache/
 *.blend1
 out.png
+
+# Terrain fields are STREAMING DATA, not source (docs/galaxy-streaming-proposal.md):
+# bodies carry a genspec in the scene and (re)generate deterministically on
+# approach; player edits persist in game SAVE SLOTS (terrain.saveDir), and the
+# editor's local project files stay on disk — none of it belongs in git history
+# (a single field can exceed GitHub's 100 MB hard limit).
+*.cfield
+*.tfield
+**/terrain/*.meta

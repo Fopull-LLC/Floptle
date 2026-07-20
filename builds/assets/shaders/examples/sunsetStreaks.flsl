@@ -1,0 +1,26 @@
+// Sunset streaks — a three-stop dusk gradient with long cirrus ribbons
+// scrolling past a low sun. The streak look is just noise squashed hard in
+// one axis (features get long in the other), lit warm on the sun's side of
+// the sky and left as dark cutouts opposite it.
+shader sunsetStreaks {
+  stage sky
+  uniform glow: color = #FFA43C
+  uniform band: color = #C74B57
+  uniform dusk: color = #2B1B4E
+  uniform sunDir: vec3 = vec3(0.9, 0.1, 0.15)
+  uniform streaks: float = 0.85 range(0, 1)
+  uniform scroll: float = 1 range(0, 4)
+
+  let up = saturate(skyDir.y)
+  let base = mix(mix(glow.rgb, band.rgb, smoothstep(0.0, 0.3, up)), dusk.rgb, smoothstep(0.12, 0.7, up))
+  let sun = normalize(sunDir)
+  let toSun = saturate(dot(skyDir, sun))
+  let sp = skyDir.xz / (max(skyDir.y, 0.0) + 0.28)
+  let ribbons = fbm(vec2(sp.x * 1.5 + time * 0.03 * scroll, sp.y * 6.5), octaves: 4) * 0.5 + 0.5
+  let mask = smoothstep(0.48, 0.86, ribbons) * streaks * smoothstep(0.015, 0.12, skyDir.y) * (1 - smoothstep(0.35, 0.75, up))
+  let cirrus = mix(dusk.rgb * 0.85, glow.rgb * 1.3, pow(toSun, 2))
+  let disc = pow(toSun, 1200) * 1.6 + pow(toSun, 10) * 0.3
+  let sky = mix(base, cirrus, mask) + vec3(1, 0.8, 0.55) * disc
+  output color = mix(sky, dusk.rgb * 0.5, saturate(-skyDir.y * 4))
+}
+//@layout { base: (-912, 0), cirrus: (-912, 278), disc: (-912, 812), in.skyDir: (-4332, 0), in.time: (-3420, 256), mask: (-912, 556), out: (0, 0), ribbons: (-1824, 512), sky: (-456, 0), sp: (-3420, 0), sun: (-2052, 0), toSun: (-1596, 672), u.band: (-1596, 146), u.dusk: (-1596, 526), u.glow: (-1596, 0), u.scroll: (-3192, 512), u.streaks: (-1596, 1184), u.sunDir: (-2280, 0), up: (-1596, 292) }

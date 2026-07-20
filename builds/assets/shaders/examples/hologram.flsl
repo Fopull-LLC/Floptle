@@ -1,0 +1,17 @@
+// Hologram — an additive ghost: fresnel rim (bright at grazing angles),
+// rolling scanlines over the mesh's UVs, and a nervous flicker.
+shader hologram {
+  stage fragment
+  blend additive
+  uniform glowColor: color = #46C8FF
+  uniform scanlines: float = 24 range(4, 120)
+  uniform flicker: float = 0.15 range(0, 1)
+
+  let rim = pow(1 - saturate(dot(normal, viewDir)), 2)
+  let scan = 0.6 + 0.4 * sin(uv.y * scanlines * 6.2832 + time * 3)
+  let blink = 1 - flicker * (0.5 + 0.5 * sin(time * 17) * sin(time * 5.3))
+  let body = glowColor.rgb * (rim * 1.4 + 0.25) * scan * blink
+
+  output color = vec4(body, 0.8) * instanceColor
+}
+//@layout { blink: (-912, 256), body: (-684, 0), in.instanceColor: (-456, 256), in.normal: (-2736, 0), in.time: (-2508, 658), in.uv: (-2736, 424), in.viewDir: (-2736, 212), out: (0, 0), rim: (-1824, 0), scan: (-1140, 256), u.flicker: (-1368, 768), u.glowColor: (-1596, 0), u.scanlines: (-2508, 512) }

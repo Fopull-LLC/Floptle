@@ -874,12 +874,16 @@ impl ScriptHost {
             Rc::new(RefCell::new(Vec::new()));
         let terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>> =
             Rc::new(RefCell::new(Vec::new()));
+        // Save-slot terrain persistence (G2): the game sets terrain.saveDir(path)
+        // and the residency streamer prefers/writes player-edited fields there.
+        let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
             terrain_generates.clone(),
             colliders.clone(),
             logs.clone(),
+            terrain_save_dir.clone(),
         );
         // The `save.*` persistent store (roadmap A2).
         let save_state: Rc<RefCell<crate::save_api::SaveState>> =
@@ -921,6 +925,7 @@ impl ScriptHost {
             sim_origin,
             terrain_ops,
             terrain_generates,
+            terrain_save_dir,
             create_requests,
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
@@ -1079,6 +1084,18 @@ impl ScriptHost {
     /// on a background thread and adopt the fields when they arrive.
     pub fn take_terrain_generates(&self) -> Vec<(u32, floptle_field::procgen::PlanetFill)> {
         std::mem::take(&mut *self.terrain_generates.borrow_mut())
+    }
+
+    /// The game's save-slot terrain directory (`terrain.saveDir(path)`), or None
+    /// when unset (editor-authoring mode — fields live in the project). Read by
+    /// the residency streamer every load/evict.
+    pub fn terrain_save_dir(&self) -> Option<String> {
+        self.terrain_save_dir.borrow().clone()
+    }
+
+    /// Reset the save-slot terrain dir (Play stop — a slot never outlives its run).
+    pub fn clear_terrain_save_dir(&self) {
+        *self.terrain_save_dir.borrow_mut() = None;
     }
 
     /// Invoke `cb` with a fresh handle for `eid` — the shared callback shape

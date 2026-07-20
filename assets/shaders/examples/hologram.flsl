@@ -1,0 +1,18 @@
+shader hologram {
+  stage fragment
+  blend additive
+  uniform glowColor: color = #46C8FF
+  uniform scanlines: float = 24 range(4, 120)
+  uniform flicker: float = 0.15 range(0, 1)
+
+  let blink = 1 - flicker * (0.5 + 0.5 * sin(time * 17) * sin(time * 5.3))
+  let dot1 = dot(normal, viewDir)
+  let rim = pow(1 - saturate(dot1), 2)
+  let part1 = uv.y
+  let scan = 0.6 + 0.4 * sin(part1 * scanlines * 6.2832 + time * 3)
+  let body = glowColor.rgb * (rim * 1.4 + 0.25) * scan * blink
+  let mixdown1 = vec4(body, 0.8) * instanceColor
+
+  output color = mixdown1
+}
+//@layout { blink: (-684, 280), body: (-369, 187), dot1: (-2557, -145), in.instanceColor: (-235, 118), in.time: (-2513, 314), in.uv: (-2745, 139), mixdown1: (-142, -37), out: (0, 120), part1: (-2489, 33), rim: (-684, 0), scan: (-684, 140), u.scanlines: (-2504, 129) }

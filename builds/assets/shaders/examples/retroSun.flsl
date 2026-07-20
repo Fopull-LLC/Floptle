@@ -1,0 +1,31 @@
+// Retro sun — the synthwave poster: a posterized dusk, a giant striped sun
+// (the stripes scroll down it, and the gaps widen toward the horizon), and a
+// neon grid floor rolling toward you forever. Pure skyDir math, no texture.
+shader retroSun {
+  stage sky
+  uniform top: color = #1B0637
+  uniform bandColor: color = #FF2E97
+  uniform sunTop: color = #FFD319
+  uniform sunLow: color = #FF2E97
+  uniform grid: color = #2DE2E6
+  uniform sunDir: vec3 = vec3(0, 0.16, 1)
+  uniform scroll: float = 1 range(0, 4)
+
+  let up = saturate(skyDir.y)
+  let base = posterize(mix(bandColor.rgb * 0.5, top.rgb, smoothstep(0.0, 0.55, up)), steps: 7)
+  let sun = normalize(sunDir)
+  let d = distance(skyDir, sun)
+  let disc = 1 - smoothstep(0.235, 0.245, d)
+  let slice = step(mix(-1.2, 0.85, saturate((sun.y - skyDir.y) * 4 + 0.12)), sin((skyDir.y - sun.y) * 110 + time * 2.5 * scroll))
+  let sunBody = mix(sunLow.rgb, sunTop.rgb, saturate((skyDir.y - sun.y) * 3.5 + 0.55))
+  let glowAmt = pow(saturate(1 - d * 1.4), 3) * 0.55
+  let below = saturate(-skyDir.y * 50)
+  let gp = skyDir.xz / min(skyDir.y, -0.02) * 3 + vec2(0, time * 1.2 * scroll)
+  let lineX = smoothstep(0.9, 0.985, abs(fract(gp.x) * 2 - 1))
+  let lineZ = smoothstep(0.9, 0.985, abs(fract(gp.y) * 2 - 1))
+  let gfade = smoothstep(0.03, 0.3, -skyDir.y)
+  let floorCol = top.rgb * 0.35 + grid.rgb * max(lineX, lineZ) * gfade + bandColor.rgb * pow(1 - gfade, 8) * 0.6
+  let skyCol = mix(base + bandColor.rgb * glowAmt, sunBody, disc * slice)
+  output color = mix(skyCol, floorCol, below)
+}
+//@layout { base: (-912, 0), below: (-456, 534), d: (-2280, 0), disc: (-912, 1258), floorCol: (-456, 278), gfade: (-1596, 2596), glowAmt: (-1140, 534), gp: (-2964, 0), in.skyDir: (-4104, 0), in.time: (-3876, 0), lineX: (-1596, 2040), lineZ: (-1596, 2318), out: (0, 0), skyCol: (-456, 0), slice: (-912, 1514), sun: (-2508, 0), sunBody: (-684, 256), u.bandColor: (-1824, 0), u.grid: (-1596, 1894), u.scroll: (-3648, 0), u.sunDir: (-2736, 0), u.sunLow: (-1140, 790), u.sunTop: (-1140, 936), u.top: (-1596, 256), up: (-1596, 402) }

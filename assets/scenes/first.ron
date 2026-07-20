@@ -820,12 +820,12 @@
         (
             name: "Terrain 1",
             transform: (
-                translation: (0.0, -7.653502464294434, 0.0),
+                translation: (0.0, -1.5106836821518144, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Terrain(
-                id: 7,
+                id: 8,
             ),
             scripts: [],
         ),

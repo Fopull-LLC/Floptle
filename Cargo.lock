@@ -1232,6 +1232,7 @@ name = "floptle-field"
 version = "0.0.0"
 dependencies = [
  "floptle-core",
+ "serde",
 ]
 
 [[package]]

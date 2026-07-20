@@ -199,6 +199,10 @@ pub struct ScriptHost {
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
+    /// `terrain.saveDir(path)` — the game's save-slot directory for player-
+    /// edited terrain fields (G2). The residency streamer prefers fields here
+    /// over project files / genspec regeneration, and writes evictions here.
+    terrain_save_dir: Rc<RefCell<Option<String>>>,
     /// `createNode(...)` requests, drained with the spawn queue.
     create_requests: Rc<RefCell<Vec<CreateRequest>>>,
     /// Construction-API component/matter writes (see [`RichSet`]).
@@ -527,6 +531,9 @@ pub enum RichSet {
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
     MatterPrimitive(String, [f64; 3]),
+    /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
+    /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
+    TerrainGen(Option<String>),
 }
 
 /// The interior-mutable state the Lua handle closures share with the host: the scene
@@ -656,7 +663,10 @@ function start(node) node.x = 999 end -- must NOT fire on an action
 function roll(node)
   node:setCelestial{ mu = 5000, parent = "Sun", atmoColor = {0.2, 0.4, 0.9} }
   node:setMaterial{ unlit = true, emissiveStrength = 2 }
-  createNode("Child", node, function(c) c:setTerrain(3) end)
+  createNode("Child", node, function(c)
+    c:setTerrain(3)
+    c:setTerrainGen{ radius = params.size, caveDepth = 12, seed = 99 }
+  end)
   terrain.generatePlanet(3, { radius = params.size, caveDepth = 0 })
 end
 "#,
@@ -708,6 +718,17 @@ end
             Some(Matter::Terrain { id }) => assert_eq!(*id, 3),
             other => panic!("createNode callback's setTerrain(3) did not land: {other:?}"),
         }
+        // setTerrainGen: the genspec lands as a RON PlanetFill that parses back
+        // (the G2 on-demand generation contract — the streamer regenerates the
+        // body from exactly this string).
+        let spec = world
+            .get::<floptle_core::TerrainGen>(child)
+            .expect("setTerrainGen inserted the genspec");
+        let fill: floptle_field::procgen::PlanetFill =
+            ron::from_str(&spec.0).expect("genspec parses back to a PlanetFill");
+        assert_eq!(fill.radius, 42.0); // Inspector-tuned param reached the spec
+        assert_eq!(fill.cave_depth, 12.0);
+        assert_eq!(fill.seed, 99);
         let gens = host.take_terrain_generates();
         assert_eq!(gens.len(), 1);
         assert_eq!(gens[0].0, 3);

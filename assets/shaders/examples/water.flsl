@@ -1,0 +1,21 @@
+shader water {
+  stage fragment
+  blend alpha
+  uniform shallowColor: color = #3EC6C8
+  uniform deepColor: color = #14395C
+  uniform speed: float = 0.6 range(0, 6)
+  uniform waveScale: float = 4 range(0.5, 333)
+  uniform foam: float = 0.5 range(0, 5)
+  uniform clarity: float = 0.75 range(0.2, 1)
+
+  let flow = uv * waveScale + vec2(time * speed * 0.13, time * speed * 0.11)
+  let waves = fbm(domainWarp(flow, scale: 1.5, time: time * speed * 0.2), octaves: 4) * 0.5 + 0.5
+  let crest = smoothstep(0.62, 0.95, waves)
+  let facing = pow(1 - saturate(dot(normal, viewDir)), 2)
+  let body = mix(deepColor.rgb, shallowColor.rgb, facing * 0.6 + waves * 0.3)
+  let shore = 1 - saturate(fieldDistance(worldPos) / 0)
+  let lit = litSurface(body + crest * 0.35 + shore * shore * 0.9)
+
+  output color = vec4(lit, clarity + facing * (1 - clarity)) * instanceColor
+}
+//@layout { body: (-456, 150), crest: (-456, 0), facing: (-684, 150), flow: (-912, 0), lit: (-228, 120), out: (0, 120), shore: (-684, 300), waves: (-684, 0) }

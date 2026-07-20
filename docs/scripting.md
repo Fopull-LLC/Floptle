@@ -568,6 +568,31 @@ terrain field on a background thread (every knob optional; see the IDE hover
 for the full list). `rng()` with no seed rolls a fresh stream from the clock
 (`r.seed` reproduces it).
 
+**Streaming worlds (galaxy scale)** — instead of pre-generating every body,
+attach the *recipe* and let the engine generate it when someone actually goes
+there (`docs/galaxy-streaming-proposal.md`):
+
+```lua
+n:setTerrain(2)
+n:setTerrainGen{ radius = 180, caveDepth = 60, seed = 41 }  -- same opts table
+```
+
+A body with a genspec needs **no terrain file at all**: its field generates on
+a background thread the first time anything approaches (deterministic per
+seed), streams in chunk meshes as it lands, and streams back out — saving any
+edits first — when you leave. A freshly rolled system is playable in seconds
+however many worlds it has; unvisited worlds cost one scene node. Far bodies
+always render as their correctly-colored impostor sphere, so nothing pops.
+
+**Save slots** — `terrain.saveDir("saves/slot1/terrain")` points terrain
+persistence at the player's save slot: streaming loads fields from there first
+(before the project file or the genspec) and writes player-edited fields back
+there on stream-out — so digs persist per slot without ever touching the
+authored project. Pass `""` to clear; the slot resets when Play stops. Combine
+with the `save.*` store (which holds the galaxy seed + progress) for the full
+save-game loop: seed regenerates the untouched universe, the slot's terrain
+dir carries exactly the worlds the player changed.
+
 ### 3D lines (`draw.line`)
 
 Scripts can draw **world-space 3D lines** — the runtime line layer behind the

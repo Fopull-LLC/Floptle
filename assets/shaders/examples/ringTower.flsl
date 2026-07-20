@@ -1,0 +1,19 @@
+// Ring tower — repeat() tiles space vertically, so ONE torus becomes an
+// endless stack; intersecting with a sphere keeps it inside the node's
+// bounds. Move/rotate/scale the Field Shape node like anything else.
+shader ringTower {
+  stage sdf
+  uniform spacing: float = 0.55 range(0.2, 2)
+  uniform major: float = 0.6 range(0.1, 1.5)
+  uniform minor: float = 0.12 range(0.02, 0.5)
+
+  let stack = repeat(worldPos, vec3(0, spacing, 0))
+  let rings = torus(stack, major: major, minor: minor)
+  let bound = sphere(worldPos, radius: 1)
+  let solid = opIntersect(rings, bound)
+  let stripes = fract(worldPos.y / spacing + 0.5)
+
+  output sdf = solid
+  output color = mix(vec3(0.9, 0.6, 0.2), vec3(0.3, 0.2, 0.5), stripes)
+}
+//@layout { stack: (-684, 0), rings: (-456, 0), bound: (-456, 140), solid: (-228, 60), stripes: (-456, 280), out: (0, 100) }

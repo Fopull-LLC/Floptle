@@ -1,0 +1,13 @@
+shader myShader {
+  stage fragment
+  uniform tint: color = #FFFFFF
+  uniform glow: float = 0 range(0, 4)
+  uniform amount1: float = 0.5 range(0, 1)
+  uniform amount2: float = 0.5 range(0, 1)
+
+  let base = baseTexture() * tint * instanceColor
+  let lit = litSurface(base.rgb)
+
+  output color = vec4(lit + base.rgb * glow, base.a)
+}
+//@layout { u.amount1: (-1523, 91), u.amount2: (-1933, -69) }

@@ -35,13 +35,28 @@
                 color: (1.0, 0.92, 0.6),
                 emissive: (1.0, 0.85, 0.45),
                 emissive_strength: 2.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 16.0,
+                specular_strength: 0.0,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
                 unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
             )),
             celestial: Some((
                 mu: 450000000.0,
                 body_radius: 600.0,
                 soi: 0.0,
-                a: 0.0, e: 0.0, i: 0.0, lan: 0.0, arg_pe: 0.0, m0: 0.0,
+                a: 0.0,
+                e: 0.0,
+                i: 0.0,
+                lan: 0.0,
+                arg_pe: 0.0,
+                m0: 0.0,
+                atmo_height: 0.0,
+                atmo_density: 1.0,
+                clouds: 0.0,
                 luminosity: 640.0,
                 star_color: (1.0, 0.97, 0.9),
             )),
@@ -72,6 +87,8 @@
                 atmo_height: 100.0,
                 atmo_density: 0.8,
                 clouds: 0.5,
+                luminosity: 0.0,
+                star_color: (1.0, 0.97, 0.9),
             )),
         ),
         (
@@ -96,6 +113,11 @@
                 lan: 0.0,
                 arg_pe: 0.0,
                 m0: 0.8,
+                atmo_height: 0.0,
+                atmo_density: 1.0,
+                clouds: 0.0,
+                luminosity: 0.0,
+                star_color: (1.0, 0.97, 0.9),
             )),
         ),
         (
@@ -106,7 +128,7 @@
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: Skybox(
-                color: (1.0, 1.0, 1.0),
+                color: (0.0, 0.0, 0.0),
                 size: 4000.0,
                 tint: (0.004, 0.005, 0.012),
                 shader: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/shaders/examples/nebulaDream.flsl"),
@@ -232,9 +254,6 @@
             scripts: [],
         ),
         (
-            // The planet's molten heart: a glowing ball inside the solid core
-            // the cave generator guards (dig down and you FIND something).
-            // Parented to the Planetoid so it rides the rails orbit.
             name: "Planetoid Core",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -250,7 +269,14 @@
                 color: (1.0, 0.55, 0.25),
                 emissive: (1.0, 0.45, 0.15),
                 emissive_strength: 2.5,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 16.0,
+                specular_strength: 0.0,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
                 unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
             )),
             parent: Some(1),
         ),
@@ -464,8 +490,8 @@
                 size: (Fixed(52.0), Fixed(180.0)),
                 shader: "shaders/tape.flsl",
                 shader_params: {
-                    "side": (0.0, 0.0, 0.0, 0.0),
                     "accent": (0.45, 0.95, 0.6, 1.0),
+                    "side": (0.0, 0.0, 0.0, 0.0),
                 },
                 visible: false,
                 opacity: 0.95,
@@ -489,8 +515,8 @@
                 size: (Fixed(52.0), Fixed(180.0)),
                 shader: "shaders/tape.flsl",
                 shader_params: {
-                    "side": (1.0, 0.0, 0.0, 0.0),
                     "accent": (1.0, 0.75, 0.3, 1.0),
+                    "side": (1.0, 0.0, 0.0, 0.0),
                 },
                 visible: false,
                 opacity: 0.95,
@@ -581,9 +607,6 @@
             )),
         ),
         (
-            // A1 dogfood: the belly landing camera — renders straight down
-            // through the ship's floor into the live "rt:landing" texture the
-            // Landing Screen HUD element displays. Wide FOV for the flare.
             name: "Landing Cam",
             transform: (
                 translation: (0.0, -1.1, 0.0),
@@ -617,14 +640,15 @@
                 image: Some((
                     texture: "rt:landing",
                     tint: (1.0, 1.0, 1.0, 1.0),
+                    cols: 1,
+                    rows: 1,
+                    cell: 0,
                 )),
                 visible: false,
                 opacity: 0.95,
             )),
         ),
         (
-            // Pebble's core kernel — same deal as the Planetoid Core, in the
-            // moon's crystal blue.
             name: "Pebble Core",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -640,7 +664,14 @@
                 color: (0.55, 0.8, 1.0),
                 emissive: (0.4, 0.7, 1.0),
                 emissive_strength: 2.5,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 16.0,
+                specular_strength: 0.0,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
                 unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
             )),
             parent: Some(2),
         ),
@@ -655,9 +686,18 @@
             scripts: [],
             parent: Some(11),
             ui: Some((
-                place: Pin(anchor: Left, offset: (14.0, 0.0)),
+                place: Pin(
+                    anchor: Left,
+                    offset: (14.0, 0.0),
+                ),
                 size: (Fit, Fit),
-                stack: Some((dir: Column, gap: 4.0, pad: 0.0, align: Center, justify: Start)),
+                stack: Some((
+                    dir: Column,
+                    gap: 4.0,
+                    pad: 0.0,
+                    align: Center,
+                    justify: Start,
+                )),
                 visible: true,
                 opacity: 0.96,
             )),
@@ -674,17 +714,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "off")],
+                    params: [],
+                    strs: [
+                        ("mode", "off"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "OFF",
@@ -711,17 +757,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "stability")],
+                    params: [],
+                    strs: [
+                        ("mode", "stability"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "STAB",
@@ -748,17 +800,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "prograde")],
+                    params: [],
+                    strs: [
+                        ("mode", "prograde"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "PRO",
@@ -785,17 +843,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "retrograde")],
+                    params: [],
+                    strs: [
+                        ("mode", "retrograde"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "RET",
@@ -822,17 +886,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "normal")],
+                    params: [],
+                    strs: [
+                        ("mode", "normal"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "NML",
@@ -859,17 +929,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "antinormal")],
+                    params: [],
+                    strs: [
+                        ("mode", "antinormal"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "ANML",
@@ -896,17 +972,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "radialin")],
+                    params: [],
+                    strs: [
+                        ("mode", "radialin"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "R-IN",
@@ -933,17 +1015,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "radialout")],
+                    params: [],
+                    strs: [
+                        ("mode", "radialout"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "R-OUT",
@@ -970,17 +1058,23 @@
                 (
                     kind: "sas_button",
                     enabled: true,
-                    strs: [("mode", "node")],
+                    params: [],
+                    strs: [
+                        ("mode", "node"),
+                    ],
                 ),
             ],
             parent: Some(27),
             ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
                 size: (Fixed(60.0), Fixed(22.0)),
                 shape: Some((
-                    fill: (0.10, 0.14, 0.18, 0.82),
+                    fill: (0.1, 0.14, 0.18, 0.82),
                     radius: 4.0,
                     border: 1.0,
-                    border_color: (0.40, 0.55, 0.65, 0.6),
+                    border_color: (0.4, 0.55, 0.65, 0.6),
                 )),
                 text: Some((
                     text: "NODE",

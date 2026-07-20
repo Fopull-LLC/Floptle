@@ -1,0 +1,20 @@
+(
+    default_fade: 0.25,
+    layers: [
+        (
+            name: "Base",
+            weight: 1.0,
+            states: [
+                (
+                    name: "Idle",
+                    clip: "animations/Idle",
+                    speed: 0.42,
+                    looped: true,
+                    pos: (333.0, 63.0),
+                ),
+            ],
+            default_state: Some("Idle"),
+            transitions: [],
+        ),
+    ],
+)

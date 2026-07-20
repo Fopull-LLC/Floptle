@@ -87,6 +87,11 @@ pub struct NodeDoc {
     /// editor's store keyed by this stable id, exactly like `paint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tex_paint: Option<u32>,
+    /// On-demand terrain genspec (RON `PlanetFill`) — this Terrain node's field
+    /// generates from it when first approached instead of loading a `.cfield`.
+    /// See [`floptle_core::TerrainGen`] (G2 galaxy streaming).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain_gen: Option<String>,
     /// The "collidable" switch: a static collider auto-shaped from this node's geometry
     /// (no dynamic rigidbody needed). See [`floptle_core::Collidable`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1385,6 +1390,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(id) = node.tex_paint {
         world.insert(e, floptle_core::TexturePaint { id });
     }
+    if let Some(spec) = &node.terrain_gen {
+        world.insert(e, floptle_core::TerrainGen(spec.clone()));
+    }
     if node.trigger {
         world.insert(e, floptle_core::Trigger);
     }
@@ -1517,6 +1525,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let paint = world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
         let tex_paint = world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
+        let terrain_gen = world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         let trigger = world.get::<floptle_core::Trigger>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
@@ -1547,6 +1556,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             mesh_collider,
             paint,
             tex_paint,
+            terrain_gen,
             collidable,
             trigger,
             visible,
@@ -1638,6 +1648,8 @@ mod tests {
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,
                     tex_paint: None,
+                    // exercise the genspec round-trip (G2 on-demand terrain)
+                    terrain_gen: Some("(seed:99,radius:42.0)".into()),
                     collidable: true,    // exercise the collidable round-trip
                     trigger: true,       // exercise the trigger round-trip
                     visible: false,      // exercise the visible round-trip
@@ -1704,6 +1716,7 @@ mod tests {
                     tags: vec!["enemy".into(), "boss".into()], // exercise the tags round-trip
                 },
                 NodeDoc {
+                    terrain_gen: None,
                     name: "blob".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
@@ -1733,6 +1746,7 @@ mod tests {
                     tags: Vec::new(),
                 },
                 NodeDoc {
+                    terrain_gen: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 },
@@ -1759,6 +1773,7 @@ mod tests {
                     tags: Vec::new(),
                 },
                 NodeDoc {
+                    terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX },
