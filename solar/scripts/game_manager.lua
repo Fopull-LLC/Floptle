@@ -98,7 +98,11 @@ function start(node)
   end
   -- Regenerate THIS slot's galaxy. Deterministic per seed + the parameters the
   -- player picked when they created the save (nil = the generator's default).
+  -- A save that has checkpointed before (g_played) skips the spawn planet's
+  -- eager regeneration: its terrain streams back from the slot's saved field,
+  -- so digs survive; a brand-new save generates it first — and alone.
   gen.regenerate(seed, {
+    pregen = save.get("g_played") == nil,
     planets = save.get("g_planets"),
     moonChance = save.get("g_moonchance"),
     atmoChance = save.get("g_atmo"),

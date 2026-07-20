@@ -287,9 +287,13 @@ local function roll(p)
       cel.clouds = math.max(0, r:range(-0.25, 0.65))
     end
     specs[#specs + 1] = { name = name, id = id, pos = pos, cel = cel, opts = opts }
-    -- Only the SPAWN planet generates up front (the crew lands on it the moment
-    -- Play starts); everything else streams from its genspec on approach.
-    if pi == 1 then terrain.generatePlanet(id, opts) end
+    -- Only the SPAWN planet generates up front, and it generates ALONE: while
+    -- its fill runs, the engine starts no other generation (the batch owns the
+    -- queue), so the player's world is always the FIRST one finished. Every
+    -- other body streams from its genspec on approach. A RESUMED save skips
+    -- even this (pregen=false): the spawn planet streams back from the slot's
+    -- saved field instead, so the player's digs survive the reload.
+    if pi == 1 and p.pregen ~= false then terrain.generatePlanet(id, opts) end
     print(string.format("  %s — %s, r %.0f, g %.1f, orbit %.0f", name, kind, radius, g, a))
     if pi == 1 then firstPos, firstR, firstRelief, firstName = pos, radius, opts.relief, name end
     id = id + 1

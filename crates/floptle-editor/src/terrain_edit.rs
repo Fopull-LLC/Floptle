@@ -1787,7 +1787,19 @@ impl Editor {
         {
             return;
         }
-        let sources = self.resolve_terrain_source(e, id);
+        let mut sources = self.resolve_terrain_source(e, id);
+        // A running `terrain.generatePlanet` batch OWNS generation: while the
+        // game's spawn planet (or any explicit fill) is being built, residency
+        // must not start MORE generations behind it — the player is standing
+        // on (or waiting for) the batch's world, and every competing generate
+        // steals its cores. Fast file loads stay allowed; genspec-only bodies
+        // simply stay cold impostors and re-kick once the batch lands.
+        if self.planet_gen_job.is_some() || !self.planet_gen_pending.is_empty() {
+            sources.retain(|s| matches!(s, TerrainSource::File(_)));
+            if sources.is_empty() {
+                return; // no console line: this retries every frame until then
+            }
+        }
         if sources.is_empty() {
             // Nothing to load from at all (no file, no genspec): stop trying.
             self.terrain_cold.remove(&e);

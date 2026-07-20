@@ -91,6 +91,11 @@ function press(role)
     seed_str = "" -- click the seed row to clear back to random
     seed_label()
   elseif role == "create" then
+    -- A NEW galaxy must never inherit terrain files from whatever lived in
+    -- this slot before (same terrain ids, different worlds — a stale file
+    -- would stream in as the "wrong planet"). The saveDir isn't active in the
+    -- menu scene, so the wipe is allowed here.
+    terrain.deleteSaveDir("saves/slot" .. slot_n .. "/terrain")
     save.slot("slot" .. slot_n)
     local v = {}
     for _, p in ipairs(PARAMS) do v[p.save] = value_of(p) end
