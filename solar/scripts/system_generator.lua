@@ -198,9 +198,14 @@ end
 
 -- ---------------------------------------------------------------------------
 
-function generate(node)
-  local p = params
+-- Published after every roll (game_manager reads these to place the player and
+-- gate its loading screen on the spawn planet's terrain).
+lastSeed, lastSpawnBody, lastSpawnRadius = 0, nil, 0
+lastSpawnX, lastSpawnY, lastSpawnZ = 0, 0, 0
+
+local function roll(p)
   local r = (p.seed > 0) and rng(p.seed) or rng()
+  lastSeed = r.seed
   print(string.format("SYSTEM GENERATOR — seed %d (set the seed param to reproduce)", r.seed))
 
   -- Clear our previous work: the whole system GROUP goes in one subtree
@@ -243,7 +248,7 @@ function generate(node)
   local nPlanets = (p.planets > 0) and math.min(p.planets, 8) or (2 + r:int(0, 2))
   local a = a1
   local id = 1
-  local firstPos, firstR, firstRelief = nil, 0, 0
+  local firstPos, firstR, firstRelief, firstName = nil, 0, 0, nil
   local lastKind = nil
   print(string.format("star %s: lum %.0f — %d planet(s)", starName, starLum, nPlanets))
 
@@ -286,7 +291,7 @@ function generate(node)
     -- Play starts); everything else streams from its genspec on approach.
     if pi == 1 then terrain.generatePlanet(id, opts) end
     print(string.format("  %s — %s, r %.0f, g %.1f, orbit %.0f", name, kind, radius, g, a))
-    if pi == 1 then firstPos, firstR, firstRelief = pos, radius, opts.relief end
+    if pi == 1 then firstPos, firstR, firstRelief, firstName = pos, radius, opts.relief, name end
     id = id + 1
 
     -- Moons: up to two, orbits inside half the planet's SOI.
@@ -337,6 +342,13 @@ function generate(node)
     for _, b in ipairs(specs) do makeBody(sys, b) end
   end)
 
+  -- Publish the spawn world (game_manager places the player + gates its
+  -- loading screen on this planet's terrain).
+  if firstPos then
+    lastSpawnBody, lastSpawnRadius = firstName, firstR + firstRelief
+    lastSpawnX, lastSpawnY, lastSpawnZ = firstPos[1], firstPos[2], firstPos[3]
+  end
+
   -- Move the crew to the first planet's north pole (daylit side varies —
   -- summon the ship with L if it settles awkwardly).
   if firstPos then
@@ -353,4 +365,20 @@ function generate(node)
   end
 
   print("bodies placed — the spawn planet is generating in the background (Console shows progress); every other world streams in from its genspec when you first approach it. Save the scene once the spawn planet lands.")
+end
+
+-- ▶ Generate (the Inspector button): roll with the node's tuned params.
+function generate(node)
+  roll(params)
+end
+
+-- Runtime entry for the GAME's save-slot flow (game_manager calls this through
+-- a script handle at the loading screen): regenerate the whole system from a
+-- specific galaxy seed, using the script's defaults for every other knob.
+-- Deterministic — the same seed always rebuilds the same galaxy.
+function regenerate(seed)
+  local p = {}
+  for k, v in pairs(defaults) do p[k] = v end
+  p.seed = (seed and seed > 0) and seed or 0
+  roll(p)
 end

@@ -591,7 +591,32 @@ there on stream-out — so digs persist per slot without ever touching the
 authored project. Pass `""` to clear; the slot resets when Play stops. Combine
 with the `save.*` store (which holds the galaxy seed + progress) for the full
 save-game loop: seed regenerates the untouched universe, the slot's terrain
-dir carries exactly the worlds the player changed.
+dir carries exactly the worlds the player changed. `terrain.flush()` writes
+every edited resident field to the slot NOW (checkpoints, exit-to-menu).
+
+**The full player flow** (the solar demo implements this — `menu.ron` +
+`game_manager.lua` are the reference):
+
+```
+main menu (menu.ron)          the game scene (system.ron)
+  slot buttons ──save.slot──▶  game_manager.start():
+                                terrain.saveDir("saves/<slot>/terrain")
+                                seed = save.get("g_seed") or roll-and-store
+                                show loading overlay
+                                generator.regenerate(seed)   -- deterministic
+                               game_manager.update():
+                                hold the player above the spawn planet until
+                                terrain.query(surface) answers → place them
+                                (saved position if any), hide the overlay
+                               ☰ MENU button → saveGame() → scene.load("menu")
+```
+
+The active `save.slot(...)` persists across `scene.load`, so the slot IS the
+scene-to-scene handoff. Positions save RELATIVE to the dominant body (absolute
+coordinates go stale when orbital phases restart) — restore places you at the
+body's live position + offset. `terrain.generatePlanet` works at runtime too:
+fills queue to the background generator and adopt with live collision, which
+is what lets a loading screen rebuild a whole galaxy mid-session.
 
 ### 3D lines (`draw.line`)
 
