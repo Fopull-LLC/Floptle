@@ -203,6 +203,11 @@ pub struct ScriptHost {
     /// edited terrain fields (G2). The residency streamer prefers fields here
     /// over project files / genspec regeneration, and writes evictions here.
     terrain_save_dir: Rc<RefCell<Option<String>>>,
+    /// `terrain.warm(name)` requests this frame (immediate mode, drained per
+    /// frame): body NAMES whose terrain should be resident regardless of any
+    /// gameplay anchor's distance — the map warms its focused planet while
+    /// open. A warmed body loads if cold and never evicts.
+    terrain_warm: Rc<RefCell<Vec<String>>>,
     /// `createNode(...)` requests, drained with the spawn queue.
     create_requests: Rc<RefCell<Vec<CreateRequest>>>,
     /// Construction-API component/matter writes (see [`RichSet`]).

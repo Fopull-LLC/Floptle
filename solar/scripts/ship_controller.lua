@@ -806,6 +806,13 @@ local function update_map3d(node, dt)
   if input.pressed("2") then map_show.soi = not map_show.soi end
   if input.pressed("3") then map_show.markers = not map_show.markers end
 
+  -- Focusing a body (TAB) streams ITS real terrain in (terrain.warm — loads it
+  -- if cold, keeps it resident while focused, however far the ship is). Every
+  -- other far world stays a cheap impostor sphere; the planet under the SHIP is
+  -- kept loaded by the ship's own physical presence, never by this camera.
+  if map_focus > 1 and bodies[map_focus - 1] then
+    terrain.warm(bodies[map_focus - 1].name)
+  end
   local focus, fname, fradius
   if map_focus == 1 then
     if piloting or not astronaut then

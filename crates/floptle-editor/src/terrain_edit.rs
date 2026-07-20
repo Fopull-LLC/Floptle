@@ -1194,11 +1194,46 @@ impl Editor {
 
     // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
 
-    /// Per-frame residency driver: land finished background loads, kick loads for
-    /// cold bodies the camera is approaching, evict residents it left behind.
+    /// Per-frame residency driver: land finished background loads, kick loads
+    /// for cold bodies something is approaching, evict residents left behind.
+    ///
+    /// RESIDENCY IS GAMEPLAY-BASED, NOT CAMERA-BASED. During Play the anchors
+    /// are the world positions of every dynamic body (ship, astronaut, debris)
+    /// plus any bodies the game explicitly warmed (`terrain.warm` — the map's
+    /// focused planet); the camera doesn't count — opening the map and zooming
+    /// across the system must NEVER unload the planet you're standing on (that
+    /// evicted the ground under Ty's feet and dropped him through the world).
+    /// In edit mode the editor camera IS your presence, so it anchors there.
+    /// The IMPOSTOR flip stays camera-based — that's visual LOD (screen size),
+    /// a different question from which fields are in RAM.
+    ///
     /// Runs OUTSIDE the render borrows (it may rebuild the sim on a mid-Play
-    /// arrival) — called right before `sync_terrain_meshes` each frame.
+    /// arrival/eviction) — called right before `sync_terrain_meshes` each frame.
     pub(crate) fn update_terrain_residency(&mut self, cam_world: DVec3) {
+        // Gameplay anchors + this frame's warm requests (immediate mode — the
+        // map re-warms its focus every frame while open).
+        let anchors: Vec<DVec3> = if self.playing {
+            self.world
+                .query::<floptle_core::RigidBody>()
+                .map(|(e, _)| floptle_core::world_transform(&self.world, e).translation)
+                .collect()
+        } else {
+            vec![cam_world]
+        };
+        if anchors.is_empty() {
+            return; // a playing scene with no dynamic bodies: leave residency as-is
+        }
+        let warm_names = self.script_host.take_terrain_warm();
+        let warm: std::collections::HashSet<Entity> = if warm_names.is_empty() {
+            Default::default()
+        } else {
+            self.world
+                .query::<floptle_core::Name>()
+                .filter(|(_, n)| warm_names.contains(&n.0))
+                .map(|(e, _)| e)
+                .collect()
+        };
+        let near = |p: DVec3, reach: f64| anchors.iter().any(|a| (*a - p).length() < reach);
         // 1. Land finished loads (parse + shadow proxy both happened on the thread).
         let mut landed: Vec<(Entity, EditorTerrain)> = Vec::new();
         self.terrain_load_jobs.retain(|(e, rx)| match rx.try_recv() {
@@ -1218,8 +1253,9 @@ impl Editor {
             }
         }
 
-        // 2. Kick background loads for cold bodies inside the load radius (plus a
-        //    blocking emergency load if something is practically ON one).
+        // 2. Kick background loads for cold bodies inside an anchor's load radius
+        //    or explicitly warmed (the map's focused planet loads however far it
+        //    is), plus a blocking emergency load if a body is practically ON one.
         let mut to_sync: Vec<(Entity, u32)> = Vec::new();
         let mut to_load: Vec<(Entity, u32)> = Vec::new();
         for (&e, cold) in &self.terrain_cold {
@@ -1232,11 +1268,10 @@ impl Editor {
                 render.impostor_color = Some(cold.color);
             }
             let r = cb.body_radius.max(1.0);
-            let d = (floptle_core::world_transform(&self.world, e).translation - cam_world)
-                .length();
-            if d < r * RESIDENT_SYNC_RADII {
+            let p = floptle_core::world_transform(&self.world, e).translation;
+            if near(p, r * RESIDENT_SYNC_RADII) {
                 to_sync.push((e, cold.id));
-            } else if d < r * RESIDENT_LOAD_RADII {
+            } else if warm.contains(&e) || near(p, r * RESIDENT_LOAD_RADII) {
                 to_load.push((e, cold.id));
             }
         }
@@ -1247,16 +1282,19 @@ impl Editor {
             self.kick_terrain_load(e, id);
         }
 
-        // 3. Evict residents the camera has left far behind (celestials only —
+        // 3. Evict residents EVERY anchor has left far behind (celestials only —
         //    flat level terrains have no meaningful radius and stay resident).
+        //    Warmed bodies are exempt however far away they are.
         let mut to_evict: Vec<(Entity, u32)> = Vec::new();
         for &e in self.terrains.keys() {
+            if warm.contains(&e) {
+                continue;
+            }
             let Some(cb) = self.world.get::<floptle_core::CelestialBody>(e) else { continue };
             let Some(Matter::Terrain { id }) = self.world.get::<Matter>(e) else { continue };
             let r = cb.body_radius.max(1.0);
-            let d = (floptle_core::world_transform(&self.world, e).translation - cam_world)
-                .length();
-            if d > r * RESIDENT_EVICT_RADII {
+            let p = floptle_core::world_transform(&self.world, e).translation;
+            if !near(p, r * RESIDENT_EVICT_RADII) {
                 to_evict.push((e, *id));
             }
         }
@@ -1410,6 +1448,12 @@ impl Editor {
         render.impostor_color = Some(color);
         self.terrain_cold.insert(e, ColdTerrain { id, color });
         self.terrain_gpu_dirty = true; // shadow atlas re-lays out without it
+        // Mid-Play the sim still holds this body's collider, and with the field
+        // gone nothing re-anchors it — a FROZEN collider drifting away from its
+        // orbiting planet. Rebuild without it (symmetric with the load path).
+        if self.playing {
+            self.rebuild_sim();
+        }
     }
 
     /// The legacy single-terrain field path (migrated to the id-keyed name on load).

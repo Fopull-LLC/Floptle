@@ -50,8 +50,27 @@ pub(crate) fn install_terrain_api(
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
     save_dir: Rc<RefCell<Option<String>>>,
+    warm: Rc<RefCell<Vec<String>>>,
 ) {
     let Ok(t) = lua.create_table() else { return };
+
+    // terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame
+    // regardless of where the ship/player physically is: it loads if cold and
+    // never streams out. Immediate mode (call it every frame while you care) —
+    // the map calls it for its TAB-focused planet so focusing a far world
+    // streams its real terrain in while everything else stays a cheap sphere.
+    {
+        let w = warm.clone();
+        if let Ok(f) = lua.create_function(move |_, name: String| {
+            let mut w = w.borrow_mut();
+            if w.len() < 32 && !w.contains(&name) {
+                w.push(name);
+            }
+            Ok(())
+        }) {
+            let _ = t.set("warm", f);
+        }
+    }
 
     // terrain.saveDir(path) / terrain.saveDir() — set (or read) the game's
     // SAVE-SLOT directory for player-edited terrain (relative to the project
