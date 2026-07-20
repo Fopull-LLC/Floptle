@@ -129,6 +129,14 @@ enum TerrainSource {
     Generate(String),
 }
 
+/// One in-flight background terrain load/generation (G1/G2 streaming).
+pub(crate) struct TerrainLoadJob {
+    pub e: Entity,
+    pub name: String,
+    pub started: std::time::Instant,
+    pub rx: std::sync::mpsc::Receiver<Option<EditorTerrain>>,
+}
+
 /// Run one load/generate to completion — file read+parse or full procgen, plus
 /// the shadow-proxy derivation. Called on background threads (and blockingly at
 /// Play start / the emergency radius). None = unreadable file / bad genspec.
@@ -1234,23 +1242,49 @@ impl Editor {
                 .collect()
         };
         let near = |p: DVec3, reach: f64| anchors.iter().any(|a| (*a - p).length() < reach);
-        // 1. Land finished loads (parse + shadow proxy both happened on the thread).
-        let mut landed: Vec<(Entity, EditorTerrain)> = Vec::new();
-        self.terrain_load_jobs.retain(|(e, rx)| match rx.try_recv() {
+        // 1. Land finished loads (parse/generate + shadow proxy all happened on
+        //    the thread). Failures are LOUD and final: a body whose stream died
+        //    (bad genspec, unreadable file, a panicked generation = disconnected
+        //    channel) leaves the cold set entirely — silent retry-forever was
+        //    exactly the "I focused it and it never appeared" bug.
+        let mut landed: Vec<(Entity, EditorTerrain, String, f64)> = Vec::new();
+        let mut failed: Vec<(Entity, String)> = Vec::new();
+        self.terrain_load_jobs.retain(|job| match job.rx.try_recv() {
             Ok(Some(t)) => {
-                landed.push((*e, t));
+                landed.push((
+                    job.e,
+                    t,
+                    job.name.clone(),
+                    job.started.elapsed().as_secs_f64(),
+                ));
                 false
             }
             Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                // Read/parse failed — leave the body cold; it stays an impostor.
+                failed.push((job.e, job.name.clone()));
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
         });
-        for (e, t) in landed {
+        for (e, t, name, secs) in landed {
             if self.world.is_alive(e) && self.terrain_cold.contains_key(&e) {
                 self.finish_terrain_load(e, t);
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("⛰ {name} terrain ready ({secs:.1}s)"),
+                    None,
+                );
             }
+        }
+        for (e, name) in failed {
+            self.terrain_cold.remove(&e); // impostor forever; never retry-loop
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!(
+                    "⛰ {name} terrain FAILED to stream (bad genspec, unreadable field, \
+                     or the generation crashed) — the body stays an impostor"
+                ),
+                None,
+            );
         }
 
         // 2. Kick background loads for cold bodies inside an anchor's load radius
@@ -1269,7 +1303,10 @@ impl Editor {
             }
             let r = cb.body_radius.max(1.0);
             let p = floptle_core::world_transform(&self.world, e).translation;
-            if near(p, r * RESIDENT_SYNC_RADII) {
+            // The blocking emergency load is for mid-play surprises (teleports,
+            // summons) — during the Play-start HOLD the same bodies stream in
+            // the background instead (the run is paused; nothing can fall).
+            if !self.play_stream_hold && near(p, r * RESIDENT_SYNC_RADII) {
                 to_sync.push((e, cold.id));
             } else if warm.contains(&e) || near(p, r * RESIDENT_LOAD_RADII) {
                 to_load.push((e, cold.id));
@@ -1300,6 +1337,29 @@ impl Editor {
         }
         for (e, id) in to_evict {
             self.evict_terrain_to_cold(e, id);
+        }
+
+        // 4. Release the Play-start streaming hold once nothing REQUIRED (a cold
+        //    body someone is standing on) remains — the game starts itself the
+        //    moment the ground exists. Keeps re-kicking until then (the 2-job cap
+        //    frees up as loads land; failures drop out of the cold set above, so
+        //    a dead stream can't hold Play hostage).
+        if self.play_stream_hold && self.playing {
+            let need = self.required_cold_terrains();
+            if need.is_empty() {
+                self.play_stream_hold = false;
+                self.paused = false;
+                self.toast = Some(("▶  World ready".into(), 2.0));
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    "▶ world streamed in — play resumed".into(),
+                    None,
+                );
+            } else {
+                for (e, id) in need {
+                    self.kick_terrain_load(e, id);
+                }
+            }
         }
     }
 
@@ -1337,18 +1397,47 @@ impl Editor {
     /// flight; duplicates are no-ops). Reads + parses a file, or generates the
     /// whole planet from its genspec — either way the shadow proxy derives on
     /// the thread too, so the main thread never hitches (Ty's no-stutter rule).
-    fn kick_terrain_load(&mut self, e: Entity, id: u32) {
-        if self.terrain_load_jobs.iter().any(|(je, _)| *je == e)
+    pub(crate) fn kick_terrain_load(&mut self, e: Entity, id: u32) {
+        if self.terrain_load_jobs.iter().any(|j| j.e == e)
             || self.terrain_load_jobs.len() >= 2
         {
             return;
         }
-        let Some(src) = self.resolve_terrain_source(e, id) else { return };
+        let Some(src) = self.resolve_terrain_source(e, id) else {
+            // Nothing to load from at all (no file, no genspec): stop trying.
+            self.terrain_cold.remove(&e);
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("⛰ terrain id {id}: no field file and no genspec — impostor only"),
+                None,
+            );
+            return;
+        };
+        let name = self
+            .world
+            .get::<floptle_core::Name>(e)
+            .map(|n| n.0.clone())
+            .unwrap_or_else(|| format!("terrain {id}"));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            match &src {
+                TerrainSource::File(_) => format!("⛰ streaming {name} in (field file)…"),
+                TerrainSource::Generate(_) => {
+                    format!("⛰ streaming {name} in (generating from its genspec)…")
+                }
+            },
+            None,
+        );
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(load_terrain_from(src));
         });
-        self.terrain_load_jobs.push((e, rx));
+        self.terrain_load_jobs.push(TerrainLoadJob {
+            e,
+            name,
+            started: std::time::Instant::now(),
+            rx,
+        });
     }
 
     /// Blocking load — Play start (the body you spawn ON needs collision before
@@ -1363,7 +1452,7 @@ impl Editor {
             self.terrain_cold.remove(&e); // don't retry every frame
             return false;
         };
-        self.terrain_load_jobs.retain(|(je, _)| *je != e); // a background job is now stale
+        self.terrain_load_jobs.retain(|j| j.e != e); // a background job is now stale
         self.finish_terrain_load(e, t);
         true
     }
@@ -1794,5 +1883,48 @@ mod tests {
             );
             assert!(v.is_finite() && v >= 0.25, "voxel {v} out of range for {size:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::*;
+
+    /// The FULL genspec streaming pipeline, headless: a PlanetFill serialized
+    /// exactly like `node:setTerrainGen` does (ron::to_string) must round-trip
+    /// through `load_terrain_from(Generate(..))` into a real, non-empty terrain
+    /// — this is the contract behind "focus a planet on the map and its terrain
+    /// streams in". A tiny radius keeps the test fast.
+    #[test]
+    fn genspec_streams_into_a_real_terrain() {
+        let fill = floptle_field::procgen::PlanetFill {
+            radius: 20.0,
+            voxel: 1.5,
+            relief: 2.0,
+            cave_depth: 6.0,
+            core_r: 3.0,
+            seed: 1234,
+            ..Default::default()
+        };
+        let spec = ron::to_string(&fill).expect("genspec serializes");
+        let color = genspec_impostor_color(&spec).expect("impostor color from genspec");
+        assert_eq!(color, fill.surface_a.color);
+        let t = load_terrain_from(TerrainSource::Generate(spec))
+            .expect("genspec generates a terrain");
+        assert!(t.field.data_chunks() > 0, "generated field is empty");
+        // The surface is really there: a ray from outside hits near the radius.
+        let hit = t
+            .field
+            .raycast(Vec3::new(0.0, 40.0, 0.0), Vec3::new(0.0, -1.0, 0.0), 80.0)
+            .expect("ray from space hits the generated surface");
+        assert!(
+            (hit.y - fill.radius).abs() < fill.relief + 3.0,
+            "surface at {} vs radius {}",
+            hit.y,
+            fill.radius
+        );
+        // A garbled genspec fails CLEANLY (None → the loud-failure path), never panics.
+        assert!(load_terrain_from(TerrainSource::Generate("(not ron".into())).is_none());
+        assert!(genspec_impostor_color("(not ron").is_none());
     }
 }

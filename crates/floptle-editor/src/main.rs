@@ -1422,12 +1422,17 @@ struct Editor {
     /// Terrains whose FIELD changed since the last disk write (brush/script/undo) —
     /// what an eviction must save before dropping. Scene save clears it.
     terrain_disk_dirty: std::collections::HashSet<Entity>,
-    /// In-flight background field loads: (entity, receiver of the parsed terrain —
-    /// `None` = read/parse failed). The shadow proxy derives on the thread too.
-    terrain_load_jobs: Vec<(Entity, std::sync::mpsc::Receiver<Option<crate::terrain_edit::EditorTerrain>>)>,
+    /// In-flight background field loads/generations (entity + body name + start
+    /// time + result channel). The shadow proxy derives on the thread too.
+    terrain_load_jobs: Vec<crate::terrain_edit::TerrainLoadJob>,
     /// Terrains that went RESIDENT during Play (cold at Play start): Stop drops
-    /// them back to cold so Play can't leak residency or in-Play digs on them.
+    /// the play-DUG ones back to cold (revert) and keeps clean ones resident.
     play_loaded_terrains: std::collections::HashSet<Entity>,
+    /// Play is HELD (auto-paused) while the terrain under the player streams in
+    /// — the game must never start with the spawn planet intangible. Set at
+    /// Play start when a required body is still cold; released (auto-unpause)
+    /// by the residency driver the moment nothing required is left cold.
+    play_stream_hold: bool,
     /// The background remesh worker (P4) — spawned lazily on first terrain use.
     terrain_worker: Option<crate::terrain_edit::TerrainWorker>,
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a

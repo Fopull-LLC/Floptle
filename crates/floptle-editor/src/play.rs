@@ -272,21 +272,17 @@ impl Editor {
             .collect()
     }
 
-    /// G1 residency, Play start: synchronously load any COLD celestial terrain a
-    /// dynamic body is practically ON (within `RESIDENT_SYNC_RADII` body radii)
-    /// — collision must exist before the first tick. Deliberately TIGHT: bodies
-    /// merely nearby (a moon a few radii out) stream in the background instead,
-    /// showing their impostor meanwhile — Play start must not stack blocking
-    /// generations (the no-stutter rule).
-    pub(crate) fn force_load_play_terrains(&mut self) {
-        let mut anchors: Vec<floptle_core::math::DVec3> = self
+    /// The cold celestials the game cannot start without: any body a dynamic
+    /// node (the player, the ship) is practically ON — within
+    /// `RESIDENT_SYNC_RADII` body radii. Falling through one of these is the
+    /// bug class this exists to kill.
+    pub(crate) fn required_cold_terrains(&self) -> Vec<(Entity, u32)> {
+        let anchors: Vec<floptle_core::math::DVec3> = self
             .world
             .query::<floptle_core::RigidBody>()
             .map(|(e, _)| floptle_core::world_transform(&self.world, e).translation)
             .collect();
-        anchors.push(self.camera.position);
-        let need: Vec<(Entity, u32)> = self
-            .terrain_cold
+        self.terrain_cold
             .iter()
             .filter_map(|(&e, cold)| {
                 let cb = self.world.get::<floptle_core::CelestialBody>(e)?;
@@ -298,27 +294,48 @@ impl Editor {
                     .any(|a| (*a - p).length() < reach)
                     .then_some((e, cold.id))
             })
-            .collect();
-        for (e, id) in need {
-            if self.load_terrain_blocking(e, id) {
-                self.console.push(
-                    floptle_script::LogLevel::Debug,
-                    format!("⛰ terrain id {id} loaded for Play (spawn-adjacent body)"),
-                    None,
-                );
-            }
-        }
+            .collect()
     }
 
-    /// G1 residency, Stop: drop terrains that streamed in during Play back to
-    /// cold. The project file is never touched — but a field DUG during Play
-    /// with a save SLOT set (`terrain.saveDir`) flushes to the slot first:
+    /// G1/G2 residency, Play start: if the terrain under the player is still
+    /// cold, HOLD the run (auto-pause) and stream it in the BACKGROUND — the
+    /// game must not start until the ground exists, and it must not freeze the
+    /// UI loading it either (the no-stutter rule). The residency driver
+    /// releases the hold the moment nothing required is left cold.
+    pub(crate) fn begin_play_terrain_hold(&mut self) {
+        let need = self.required_cold_terrains();
+        if need.is_empty() {
+            return;
+        }
+        for (e, id) in need {
+            self.kick_terrain_load(e, id);
+        }
+        self.play_stream_hold = true;
+        self.paused = true;
+        self.toast = Some(("⏳  Streaming world in…".into(), 60.0));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            "⏳ play held — streaming the terrain under the player (starts automatically)"
+                .into(),
+            None,
+        );
+    }
+
+    /// G1 residency, Stop: terrains that streamed in during Play hand over to
+    /// NORMAL edit-mode residency — an UNTOUCHED field simply stays resident
+    /// (its RAM copy equals its disk source; dropping it only to re-stream it
+    /// where the editor camera sits made Stop flicker and hitch). Only a field
+    /// DUG during Play reverts to cold (Play changes are never kept) — after
+    /// flushing to the save SLOT first when one is set (`terrain.saveDir`):
     /// that's player state, exactly what a slot is for (G2).
     pub(crate) fn drop_play_loaded_terrains(&mut self) {
         let dropped: Vec<Entity> = self.play_loaded_terrains.drain().collect();
         for e in dropped {
             if !self.world.is_alive(e) || !self.terrains.contains_key(&e) {
                 continue;
+            }
+            if !self.terrain_disk_dirty.contains(&e) {
+                continue; // clean: keep it resident, normal residency owns it now
             }
             let Some(floptle_core::Matter::Terrain { id }) =
                 self.world.get::<floptle_core::Matter>(e).cloned()
@@ -410,6 +427,7 @@ impl Editor {
         if self.playing {
             self.playing = false;
             self.paused = false;
+            self.play_stream_hold = false;
             // Make the revert EXPLICIT — "where did my tweaks go" is a classic
             // lost-work surprise: Play-mode changes are a simulation, not edits.
             self.console.push(
@@ -527,11 +545,11 @@ impl Editor {
             self.tick_buttons_pressed = [false; 3];
             self.tick_mouse_delta = (0.0, 0.0);
             self.tick_scroll = 0.0;
-            // G1 residency: any COLD celestial near a dynamic body (or the camera)
-            // must be resident BEFORE the sim builds — the spawn planet needs its
-            // collider on the very first tick. Synchronous by design; typically one
-            // body, a second or two, once per Play.
-            self.force_load_play_terrains();
+            // G1/G2 residency: if the terrain under the player is still cold,
+            // the run HOLDS (auto-paused) while it streams in the background —
+            // the game never starts on an intangible planet, and the UI never
+            // freezes loading one. Released by the residency driver.
+            self.begin_play_terrain_hold();
             // Build the physics sim from the scene: RigidBody nodes + every terrain
             // volume (its own anchored SDF collider, native resolution) + the gravity
             // field from GravityVolume nodes + static colliders — all under the
