@@ -381,6 +381,7 @@ impl Editor {
     /// nearest-first under the in-flight cap. Called right after `sync_terrain_gpu`
     /// keeps the shadow atlas fed.
     pub(crate) fn sync_terrain_meshes(&mut self, full_rebuild: bool, cam_world: DVec3) {
+        self.terrain_scan_frame = self.terrain_scan_frame.wrapping_add(1);
         if self.terrain_worker.is_none() && !self.terrains.is_empty() {
             self.terrain_worker = Some(TerrainWorker::spawn());
         }
@@ -536,6 +537,18 @@ impl Editor {
             // (fresh loads, chunks a dig just created, structural re-plans) stream in
             // by distance. LOD migration for RESIDENT chunks rides the same queue
             // (hysteresis inside lod_for).
+            //
+            // THROTTLED: this walks EVERY chunk of the field (a big planet has
+            // tens of thousands), so each terrain scans on a 4-frame rotation —
+            // a 3-frame queueing delay is invisible next to worker latency,
+            // and the per-frame cost of huge worlds drops 4×. Structural
+            // re-plans scan immediately (their bookkeeping was just reset);
+            // dirty chunks never wait (handled above, outside this scan).
+            if !structural
+                && !(self.terrain_scan_frame.wrapping_add(e.index() as u64)).is_multiple_of(4)
+            {
+                continue;
+            }
             for coord in terrain.field.chunk_coords() {
                 match render.slots.get(&coord) {
                     None => {
@@ -608,15 +621,59 @@ impl Editor {
 /// `push_mesh_instances`: the render loop has already borrowed `self.raster` mutably out
 /// of `self`, so no `&self` method may run there. `base_mat` is computed before that borrow
 /// (`terrain_material`), and `raster` is passed for `dyn_paint_base` (the per-chunk color).
+#[allow(clippy::too_many_arguments)] // the render loop's borrow split forces a free fn
 pub(crate) fn push_terrain_instances(
     terrain_render: &HashMap<Entity, TerrainRender>,
+    terrains: &HashMap<Entity, EditorTerrain>,
     world: &floptle_core::World,
     raster: &floptle_render::Raster,
     base_mat: &MaterialParams,
     cam_world: DVec3,
+    view_proj: Mat4,
     sphere_mesh: MeshId,
     instances: &mut Vec<(MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw)>,
 ) {
+    // Frustum planes (Gribb–Hartmann) in CAMERA-RELATIVE space — the same
+    // space the instance matrices are built in (ADR-0015). Chunks cull per
+    // bounding sphere: a big planet close up otherwise submits THOUSANDS of
+    // draws for chunks behind the camera and below the horizon.
+    let m = view_proj.transpose();
+    let frustum: [Vec4; 6] = [
+        m.w_axis + m.x_axis, // left
+        m.w_axis - m.x_axis, // right
+        m.w_axis + m.y_axis, // bottom
+        m.w_axis - m.y_axis, // top
+        m.w_axis + m.z_axis, // near
+        m.w_axis - m.z_axis, // far
+    ];
+    let in_frustum = |p: Vec3, r: f32| {
+        frustum.iter().all(|pl| {
+            let n = Vec3::new(pl.x, pl.y, pl.z);
+            let len = n.length().max(1e-6);
+            (n.dot(p) + pl.w) / len > -r
+        })
+    };
+    // Occluder-sphere test: is the chunk (center p, radius rc, camera-relative)
+    // fully hidden behind a solid ball (center c, radius big_r) the camera sits
+    // outside of? Exact point-behind-sphere against a CONSERVATIVELY shrunk
+    // ball (R − rc) — a chunk that peeks past the limb never culls.
+    let occluded = |p: Vec3, rc: f32, c: Vec3, big_r: f32| -> bool {
+        let r_eff = big_r - rc;
+        if r_eff <= 0.0 || c.length_squared() <= big_r * big_r {
+            return false; // occluder too small, or camera inside it (caves)
+        }
+        let vlen = p.length().max(1e-6);
+        let dir = p / vlen;
+        let tc = c.dot(dir); // sphere center's depth along the chunk ray
+        if tc <= 0.0 {
+            return false; // occluder behind the camera relative to this ray
+        }
+        let d2 = c.length_squared() - tc * tc;
+        if d2 >= r_eff * r_eff {
+            return false; // ray misses the shrunk ball
+        }
+        vlen > tc + (r_eff * r_eff - d2).sqrt() // chunk past the FAR surface
+    };
     for (&e, render) in terrain_render {
         // Far-body impostor: one shaded sphere at the body's position. The
         // positional star lights it with the correct terminator; beyond real
@@ -643,14 +700,38 @@ pub(crate) fn push_terrain_instances(
             continue;
         }
         let wt = floptle_core::world_transform(world, e);
+        let scale = wt.scale.x.max(1e-6);
+        let rot = wt.rotation.normalize();
+        let rel = (wt.translation - cam_world).as_vec3();
         // The node's FULL placement: rotation + uniform scale finally apply to
         // terrain (physics converts through the same frame — see ChunkTerrain).
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::splat(wt.scale.x.max(1e-6)),
-            wt.rotation.normalize(),
-            (wt.translation - cam_world).as_vec3(),
-        );
-        for &(mid, _) in render.slots.values() {
+        let model = Mat4::from_scale_rotation_translation(Vec3::splat(scale), rot, rel);
+        // Per-chunk culling geometry: chunk edge in world units, bounding-sphere
+        // radius padded for skirts, and the body's occluder ball when declared.
+        let chunk_units = terrains
+            .get(&e)
+            .map(|t| floptle_field::CHUNK as f32 * t.field.voxel())
+            .unwrap_or(0.0)
+            * scale;
+        let chunk_r = chunk_units * 0.95; // half-diagonal (0.866) + skirt pad
+        let occ_r = world
+            .get::<floptle_core::CelestialBody>(e)
+            .map(|cb| cb.occluder_radius as f32 * scale)
+            .unwrap_or(0.0);
+        for (coord, &(mid, _)) in &render.slots {
+            if chunk_units > 0.0 {
+                let local = Vec3::new(
+                    (coord[0] as f32 + 0.5) * chunk_units / scale,
+                    (coord[1] as f32 + 0.5) * chunk_units / scale,
+                    (coord[2] as f32 + 0.5) * chunk_units / scale,
+                );
+                let center = rel + rot * (local * scale);
+                if !in_frustum(center, chunk_r)
+                    || (occ_r > 0.0 && occluded(center, chunk_r, rel, occ_r))
+                {
+                    continue;
+                }
+            }
             let mut mp = *base_mat;
             mp.terrain_paint_base = raster.dyn_paint_base(mid);
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample

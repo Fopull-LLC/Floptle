@@ -115,6 +115,17 @@ impl Editor {
                 self.input_buttons_pressed[i] = true;
                 self.tick_buttons_pressed[i] = true;
             }
+            // Game-UI edges bank as EVENTS, not sampled state: at a low frame
+            // rate a quick click's press AND release land inside one frame's
+            // event batch, and a sampled edge (down && !was) misses it — the
+            // player "can't click" buttons exactly when the game struggles.
+            if i == 0 {
+                if pressed {
+                    self.ui_lmb_pressed_evt = true;
+                } else {
+                    self.ui_lmb_released_evt = true;
+                }
+            }
             self.input_buttons[i] = pressed;
         }
     }

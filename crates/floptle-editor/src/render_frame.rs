@@ -950,10 +950,12 @@ impl Editor {
         // faceting / grazing-shadow stripes the raymarched terrain had.
         crate::terrain_edit::push_terrain_instances(
             &self.terrain_render,
+            &self.terrains,
             &self.world,
             raster,
             &terrain_base_mat,
             cam.world_position,
+            view_proj,
             self.mesh_ids[floptle_core::Shape::Sphere as usize],
             &mut instances,
         );
@@ -5106,10 +5108,12 @@ impl Editor {
         if let Some(raster) = self.raster.as_ref() {
             crate::terrain_edit::push_terrain_instances(
                 &self.terrain_render,
+                &self.terrains,
                 &self.world,
                 raster,
                 &terrain_mat,
                 cam.world_position,
+                view_proj,
                 self.mesh_ids[floptle_core::Shape::Sphere as usize],
                 &mut instances,
             );

@@ -271,6 +271,10 @@ local function roll(p)
     local cel = {
       mu = mu, bodyRadius = bodyR,
       soi = math.min(math.max(laplace, bodyR * 12), a * 0.3),
+      -- Renderer occlusion: the ball below the deepest cave is guaranteed
+      -- solid, so chunks fully behind it skip their draw calls (the far side
+      -- of a planet costs nothing). Conservative: relief + caves subtracted.
+      occluderRadius = math.max((radius - opts.relief - opts.caveDepth) * 0.95, 0),
       parent = starName,
       a = a,
       -- The SPAWN planet flies a flat circle: the authored crew positions are
@@ -314,6 +318,7 @@ local function roll(p)
         mopts.seed = r:int(1, 1e9)
         specs[#specs + 1] = { name = mname, id = id, pos = mpos, cel = {
           mu = mmu, bodyRadius = mr + math.max(mr * 0.035, 4), soi = 0,
+          occluderRadius = math.max((mr - mopts.relief - mopts.caveDepth) * 0.95, 0),
           parent = name, a = ma, e = r:range(0, 0.04), i = r:range(0, 0.25), m0 = mm0,
         }, opts = mopts } -- moons stream from their genspec too
         print(string.format("    moon %s — %s, r %.0f, orbit %.0f", mname, mkind, mr, ma))
