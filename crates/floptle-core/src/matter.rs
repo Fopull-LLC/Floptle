@@ -148,6 +148,12 @@ pub struct CelestialBody {
     pub luminosity: f32,
     /// The star's light color (only meaningful with `luminosity > 0`).
     pub star_color: [f32; 3],
+    /// OCCLUSION CULLING: radius of a solid sphere at this body's center that
+    /// geometry is guaranteed never to pierce (a planet's core below its
+    /// deepest cave). When > 0, the renderer skips terrain chunks fully hidden
+    /// behind it — the far side of a planet stops costing draw calls. 0 = off.
+    /// Conservative by contract: set it BELOW anything diggable/carvable.
+    pub occluder_radius: f64,
 }
 
 impl Default for CelestialBody {
@@ -169,6 +175,7 @@ impl Default for CelestialBody {
             clouds: 0.0,
             luminosity: 0.0,
             star_color: [1.0, 0.97, 0.9],
+            occluder_radius: 0.0,
         }
     }
 }

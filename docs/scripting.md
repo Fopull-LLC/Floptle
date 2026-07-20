@@ -561,6 +561,12 @@ end)
 terrain.generatePlanet(2, { radius = 180, caveDepth = 60, seed = 41 })
 ```
 
+`setCelestial` also takes `occluderRadius` — occlusion culling for solid
+bodies: the radius of a ball at the node's center that geometry never pierces
+(a planet's core below its deepest cave). Terrain chunks fully hidden behind
+it skip their draw calls, so the far side of a planet costs nothing. Keep it
+conservative — below anything diggable — and `0` (the default) turns it off.
+
 `setCelestial` / `setMaterial` create the component when absent and take
 camelCase fields (colors as `{r,g,b}`). `terrain.generatePlanet` is the heavy
 generic primitive — a layered, cavernous, cratered sphere written into the

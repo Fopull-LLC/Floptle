@@ -314,11 +314,19 @@ impl Editor {
     pub(crate) fn ui_interact(&mut self) {
         self.ui_events.clear();
         let down = self.input_buttons[0];
-        let (pressed_edge, released_edge) = (down && !self.ui_lmb_was, !down && self.ui_lmb_was);
+        // Edges come from banked EVENTS (never missed, even when a whole click
+        // fits inside one slow frame) OR the sampled state transition.
+        let pressed_edge = std::mem::take(&mut self.ui_lmb_pressed_evt) || (down && !self.ui_lmb_was);
+        let released_edge =
+            std::mem::take(&mut self.ui_lmb_released_evt) || (!down && self.ui_lmb_was);
         self.ui_lmb_was = down;
         if !self.playing {
             self.ui_hover = None;
             self.ui_active = None;
+            // Don't let edit-mode clicks bank up and fire as phantom presses
+            // on the first playing frame.
+            self.ui_lmb_pressed_evt = false;
+            self.ui_lmb_released_evt = false;
             return;
         }
         let pointer = self.ui_pointer();

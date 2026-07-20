@@ -1373,6 +1373,11 @@ struct Editor {
     ui_active: Option<u32>,
     /// Last frame's LMB, for press/release edges in the UI interact pass.
     ui_lmb_was: bool,
+    /// Event-banked left-button edges for the game-UI pass: set by the raw
+    /// mouse events, consumed once per `ui_interact`. Sampled edges alone miss
+    /// a click whose press and release fit inside one slow frame.
+    ui_lmb_pressed_evt: bool,
+    ui_lmb_released_evt: bool,
     /// UI hook events detected this frame, dispatched after the script run.
     ui_events: Vec<(u32, &'static str)>,
     /// Last frame's `cmd.ui_hot`: the cursor sat on a Scene-view UI overlay
@@ -1458,6 +1463,10 @@ struct Editor {
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a
     /// stale result from a previous world can never land on a reused entity id.
     terrain_epoch: u64,
+    /// Frame counter staggering the per-terrain full-chunk coverage scan (a big
+    /// planet has tens of thousands of chunks — each terrain scans every 4th
+    /// frame, offset by its entity index).
+    terrain_scan_frame: u64,
     /// Shadow-occluder bakes for static collider MESHES (Collidable / MeshCollider,
     /// no RigidBody): each level mesh is baked once into an unsigned distance
     /// volume (`bake_occluder`) and uploaded into the SAME 3D atlas as the

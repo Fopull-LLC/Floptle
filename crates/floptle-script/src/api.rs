@@ -467,6 +467,9 @@ pub(crate) fn apply_rich_sets(
                             c.luminosity = num(v).map(|n| n as f32).unwrap_or(c.luminosity)
                         }
                         "starColor" => c.star_color = v3(v).unwrap_or(c.star_color),
+                        "occluderRadius" => {
+                            c.occluder_radius = num(v).unwrap_or(c.occluder_radius)
+                        }
                         _ => {}
                     }
                 }

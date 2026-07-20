@@ -237,6 +237,28 @@ struct DynSlot {
     tpaint_cap: u32,
 }
 
+/// Group draw items by key in ONE pass, preserving first-appearance order
+/// (transparent draw order and bucket determinism both ride on it). Every
+/// draw-list bucketization must use this: chunk-meshed terrain hands the
+/// raster THOUSANDS of unique mesh ids per frame, and any scan-per-key
+/// grouping goes quadratic in them.
+fn group_by_key<K: Eq + std::hash::Hash + Copy, T: Copy>(
+    items: impl Iterator<Item = (K, T)>,
+) -> Vec<(K, Vec<T>)> {
+    let mut index: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
+    let mut groups: Vec<(K, Vec<T>)> = Vec::new();
+    for (k, v) in items {
+        match index.get(&k) {
+            Some(&i) => groups[i].1.push(v),
+            None => {
+                index.insert(k, groups.len());
+                groups.push((k, vec![v]));
+            }
+        }
+    }
+    groups
+}
+
 /// The capacity a dynamic slot gets for a mesh of `n` elements: 1.5× headroom, floored
 /// at 1024 and rounded to a power of two. The rounding matters as much as the headroom:
 /// the free-lists are keyed by exact capacity, so collapsing thousands of chunk sizes
@@ -1755,17 +1777,12 @@ impl Raster {
 
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let mut buckets: Vec<(usize, u32, u32)> = Vec::new();
-        for mesh_idx in 0..self.meshes.len() {
+        for (mesh_idx, members) in
+            group_by_key(instances.iter().map(|(id, raw)| (id.0 as usize, *raw)))
+        {
             let start = raws.len() as u32;
-            for (id, raw) in instances {
-                if id.0 as usize == mesh_idx {
-                    raws.push(*raw);
-                }
-            }
-            let count = raws.len() as u32 - start;
-            if count > 0 {
-                buckets.push((mesh_idx, start, count));
-            }
+            raws.extend_from_slice(&members);
+            buckets.push((mesh_idx, start, members.len() as u32));
         }
         self.ensure_instances(gpu, raws.len().max(1) as u32);
         if !raws.is_empty() {
@@ -1860,35 +1877,26 @@ impl Raster {
         // None uses the mesh's own base-color texture. Opaque and transparent draws are
         // bucketed separately (and packed contiguously into one instance buffer) so the
         // transparent ones can render last, blended, in a second pass.
+        //
+        // Grouping MUST be hash-based O(N): thousands of terrain chunk meshes
+        // each carry a unique MeshId, and the old scan-per-key version went
+        // quadratic in them — tens of milliseconds of tuple comparisons per
+        // frame on a big planet (the 60→10 fps collapse on approach).
         const OPAQUE_CUTOFF: f32 = 0.999;
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let bucketize =
             |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
-                let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
-                let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
-                for (id, tex, raw) in instances {
-                    if (raw.color[3] >= OPAQUE_CUTOFF) != want_opaque {
-                        continue;
-                    }
-                    let k = (id.0 as usize, tex.map(|t| t.0));
-                    if !keys.contains(&k) {
-                        keys.push(k);
-                    }
-                }
-                for (mesh_idx, tex_key) in keys {
+                let groups = group_by_key(
+                    instances
+                        .iter()
+                        .filter(|(_, _, raw)| (raw.color[3] >= OPAQUE_CUTOFF) == want_opaque)
+                        .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
+                );
+                let mut buckets = Vec::with_capacity(groups.len());
+                for ((mesh_idx, tex_key), members) in groups {
                     let start = raws.len() as u32;
-                    for (id, tex, raw) in instances {
-                        if (raw.color[3] >= OPAQUE_CUTOFF) != want_opaque {
-                            continue;
-                        }
-                        if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
-                            raws.push(*raw);
-                        }
-                    }
-                    let count = raws.len() as u32 - start;
-                    if count > 0 {
-                        buckets.push((mesh_idx, tex_key, start, count));
-                    }
+                    raws.extend_from_slice(&members);
+                    buckets.push((mesh_idx, tex_key, start, members.len() as u32));
                 }
                 buckets
             };
@@ -1900,31 +1908,23 @@ impl Raster {
         let flsl_bucketize = |want_opaque: bool,
                               raws: &mut Vec<InstanceRaw>|
          -> Vec<(usize, Option<u32>, u32, u32, u32)> {
-            let mut buckets = Vec::new();
-            let mut keys: Vec<(usize, Option<u32>, u32)> = Vec::new();
-            for (id, tex, bind, _) in flsl {
-                let Some(b) = self.flsl_bindings.get(bind.0 as usize) else { continue };
-                let Some(sh) = self.flsl_shaders.get(b.shader.0 as usize) else { continue };
-                if sh.opaque != want_opaque {
-                    continue;
-                }
-                let k = (id.0 as usize, tex.map(|t| t.0), bind.0);
-                if !keys.contains(&k) {
-                    keys.push(k);
-                }
-            }
-            for (mesh_idx, tex_key, bind_id) in keys {
+            let groups = group_by_key(
+                flsl.iter()
+                    .filter(|(_, _, bind, _)| {
+                        self.flsl_bindings
+                            .get(bind.0 as usize)
+                            .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
+                            .is_some_and(|sh| sh.opaque == want_opaque)
+                    })
+                    .map(|(id, tex, bind, raw)| {
+                        ((id.0 as usize, tex.map(|t| t.0), bind.0), *raw)
+                    }),
+            );
+            let mut buckets = Vec::with_capacity(groups.len());
+            for ((mesh_idx, tex_key, bind_id), members) in groups {
                 let start = raws.len() as u32;
-                for (id, tex, bind, raw) in flsl {
-                    if id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key && bind.0 == bind_id
-                    {
-                        raws.push(*raw);
-                    }
-                }
-                let count = raws.len() as u32 - start;
-                if count > 0 {
-                    buckets.push((mesh_idx, tex_key, bind_id, start, count));
-                }
+                raws.extend_from_slice(&members);
+                buckets.push((mesh_idx, tex_key, bind_id, start, members.len() as u32));
             }
             buckets
         };
@@ -2069,7 +2069,7 @@ impl Raster {
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).
         // Opaque-SHADER flsl draws join in — their phase comes from the shader,
-        // not the instance alpha.
+        // not the instance alpha. Hash-grouped O(N) — see `group_by_key`.
         const OPAQUE_CUTOFF: f32 = 0.999;
         let flsl_opaque = |bind: &FlslBindingId| {
             self.flsl_bindings
@@ -2077,44 +2077,23 @@ impl Raster {
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
                 .is_some_and(|s| s.opaque)
         };
+        let groups = group_by_key(
+            instances
+                .iter()
+                .filter(|(_, _, raw)| raw.color[3] >= OPAQUE_CUTOFF)
+                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
+                .chain(
+                    flsl.iter()
+                        .filter(|(_, _, bind, _)| flsl_opaque(bind))
+                        .map(|(id, tex, _, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
+                ),
+        );
         let mut raws: Vec<InstanceRaw> = Vec::new();
         let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
-        let mut keys: Vec<(usize, Option<u32>)> = Vec::new();
-        for (id, tex, raw) in instances {
-            if raw.color[3] >= OPAQUE_CUTOFF {
-                let k = (id.0 as usize, tex.map(|t| t.0));
-                if !keys.contains(&k) {
-                    keys.push(k);
-                }
-            }
-        }
-        for (id, tex, bind, _) in flsl {
-            if flsl_opaque(bind) {
-                let k = (id.0 as usize, tex.map(|t| t.0));
-                if !keys.contains(&k) {
-                    keys.push(k);
-                }
-            }
-        }
-        for (mesh_idx, tex_key) in keys {
+        for ((mesh_idx, tex_key), members) in groups {
             let start = raws.len() as u32;
-            for (id, tex, raw) in instances {
-                if raw.color[3] >= OPAQUE_CUTOFF
-                    && id.0 as usize == mesh_idx
-                    && tex.map(|t| t.0) == tex_key
-                {
-                    raws.push(*raw);
-                }
-            }
-            for (id, tex, bind, raw) in flsl {
-                if flsl_opaque(bind) && id.0 as usize == mesh_idx && tex.map(|t| t.0) == tex_key {
-                    raws.push(*raw);
-                }
-            }
-            let count = raws.len() as u32 - start;
-            if count > 0 {
-                buckets.push((mesh_idx, tex_key, start, count));
-            }
+            raws.extend_from_slice(&members);
+            buckets.push((mesh_idx, tex_key, start, members.len() as u32));
         }
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
@@ -2292,5 +2271,31 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
                 as f32,
         ],
         tile: m.tile,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_by_key;
+
+    /// The draw-list grouping contract: first-appearance bucket order (draw
+    /// order determinism + transparent layering ride on it), members in input
+    /// order — and O(N) by construction, because thousands of unique terrain
+    /// chunk MeshIds hit this every frame (the scan-per-key version it
+    /// replaced went quadratic and collapsed frame rate near big planets).
+    #[test]
+    fn group_by_key_preserves_first_appearance_order() {
+        let items = [(7u32, 'a'), (3, 'b'), (7, 'c'), (9, 'd'), (3, 'e')];
+        let groups = group_by_key(items.iter().copied());
+        assert_eq!(
+            groups,
+            vec![(7, vec!['a', 'c']), (3, vec!['b', 'e']), (9, vec!['d'])]
+        );
+        // Unique-key flood (the terrain-chunk shape): every key its own bucket,
+        // order intact. 20k keys must be instant — a scan-per-key version isn't.
+        let many: Vec<(u32, u32)> = (0..20_000).map(|i| (i, i)).collect();
+        let g = group_by_key(many.iter().copied());
+        assert_eq!(g.len(), 20_000);
+        assert_eq!(g[19_999], (19_999, vec![19_999]));
     }
 }

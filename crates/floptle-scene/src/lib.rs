@@ -398,6 +398,9 @@ pub struct CelestialBodyDoc {
     pub luminosity: f32,
     #[serde(default = "default_star_color")]
     pub star_color: [f32; 3],
+    /// Occlusion culling: solid-core radius geometry never pierces (0 = off).
+    #[serde(default)]
+    pub occluder_radius: f64,
 }
 
 fn default_star_color() -> [f32; 3] {
@@ -434,6 +437,7 @@ impl CelestialBodyDoc {
             clouds: self.clouds,
             luminosity: self.luminosity,
             star_color: self.star_color,
+            occluder_radius: self.occluder_radius,
         }
     }
     pub fn from_body(b: &floptle_core::CelestialBody) -> Self {
@@ -454,6 +458,7 @@ impl CelestialBodyDoc {
             clouds: b.clouds,
             luminosity: b.luminosity,
             star_color: b.star_color,
+            occluder_radius: b.occluder_radius,
         }
     }
 }
@@ -1644,6 +1649,7 @@ mod tests {
                         clouds: 0.35,
                         luminosity: 12.0, // exercise the star round-trip
                         star_color: [1.0, 0.9, 0.8],
+                        occluder_radius: 48.0, // exercise the occluder round-trip
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
                     paint: None,
