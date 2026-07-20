@@ -28,6 +28,16 @@ local function seed_label()
   end
 end
 
+-- The two panels sit centered in the same layer: exactly ONE is ever visible.
+-- Hiding a panel's root prunes its whole subtree from layout + hit-testing,
+-- so the swap is a clean page turn, never an overlay.
+local function show(panel_open)
+  local _, ng = ui_of("NG Panel")
+  if ng then ng.visible = panel_open end
+  local _, main = ui_of("Menu Panel")
+  if main then main.visible = not panel_open end
+end
+
 function openFor(n)
   slot_n = n
   seed_str = ""
@@ -35,14 +45,12 @@ function openFor(n)
   local lbl = find("NG Slot Label")
   if lbl then lbl.text = string.format("— creating save in slot %d —", n) end
   seed_label()
-  local _, el = ui_of("NG Panel")
-  if el then el.visible = true end
+  show(true)
 end
 
 local function close()
   open = false
-  local _, el = ui_of("NG Panel")
-  if el then el.visible = false end
+  show(false)
 end
 
 local function slider(name)
