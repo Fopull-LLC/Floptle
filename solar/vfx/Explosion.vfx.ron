@@ -35,9 +35,27 @@
             angular_velocity: Range(Vec3((0.0, 0.0, -3.0)), Vec3((0.0, 0.0, 3.0))),
             color: Curve((
                 keys: [
-                    (t: 0.0, v: Rgba((1.0, 0.9, 0.5, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 0.35, v: Rgba((1.0, 0.5, 0.12, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: Rgba((0.55, 0.1, 0.02, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 0.9, 0.5, 1.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.35,
+                        v: Rgba((1.0, 0.5, 0.12, 1.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.55, 0.1, 0.02, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),
@@ -75,8 +93,20 @@
             angular_velocity: Range(Vec3((0.0, 0.0, -1.2)), Vec3((0.0, 0.0, 1.2))),
             color: Curve((
                 keys: [
-                    (t: 0.0, v: Rgba((0.32, 0.3, 0.29, 0.85)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: Rgba((0.18, 0.17, 0.17, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: Rgba((0.32, 0.3, 0.29, 0.85)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.18, 0.17, 0.17, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),
@@ -108,8 +138,20 @@
             velocity: Const(Vec3((0.0, 0.0, 0.0))),
             size: Curve((
                 keys: [
-                    (t: 0.0, v: F32(1.0), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: F32(11.0), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: F32(1.0),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: F32(11.0),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),
@@ -117,8 +159,20 @@
             angular_velocity: Const(Vec3((0.0, 0.0, 0.0))),
             color: Curve((
                 keys: [
-                    (t: 0.0, v: Rgba((1.0, 0.8, 0.5, 0.9)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: Rgba((1.0, 0.6, 0.3, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 0.8, 0.5, 0.9)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((1.0, 0.6, 0.3, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),

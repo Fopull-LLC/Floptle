@@ -59,6 +59,7 @@
                 clouds: 0.0,
                 luminosity: 640.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
         ),
         (
@@ -89,6 +90,7 @@
                 clouds: 0.5,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
         ),
         (
@@ -118,6 +120,7 @@
                 clouds: 0.0,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
         ),
         (
