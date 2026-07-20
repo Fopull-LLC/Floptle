@@ -1,21 +1,49 @@
 -- NEW GALAXY panel (attached to the "NG Panel" node): shown when the player
--- clicks an EMPTY save slot. They pick the generation parameters on draggable
--- sliders (planet count, moon chance, atmosphere chance, cave scale), type a
--- galaxy seed on the keyboard (digits; backspace erases; blank = random), and
--- CREATE stores everything in the fresh slot and enters the game —
--- game_manager reads the parameters back and hands them to the generator, so
--- the same save always regenerates the same galaxy. The panel's buttons carry
--- menu_ng_button, which routes their clicks here (press(role)).
+-- clicks an EMPTY save slot. Every system-generator knob is exposed on a
+-- draggable slider inside the "NG Params" SCROLL VIEW (wheel to reach them
+-- all), plus a galaxy seed typed on the keyboard (digits; backspace erases;
+-- blank = random). CREATE stores the whole parameter set in the fresh slot
+-- and enters the game — game_manager reads it back and hands it to the
+-- generator, so the same save always regenerates the same galaxy. The
+-- panel's buttons carry menu_ng_button, which routes clicks here (press).
 
 open = false -- published: menu_slot opens the panel, buttons check it
 
-local panel
+-- One row per generator knob: the scroll-view node names, the slot key it
+-- saves under, the generator opt it overrides, and how its value reads.
+local PARAMS = {
+  { node = "NG Planets",  save = "g_planets",    opt = "planets",    fmt = "int" },
+  { node = "NG Moons",    save = "g_moonchance", opt = "moonChance", fmt = "pct" },
+  { node = "NG Atmo",     save = "g_atmo",       opt = "atmoChance", fmt = "pct" },
+  { node = "NG Caves",    save = "g_caves",      opt = "caveScale",  fmt = "x" },
+  { node = "NG MinOrbit", save = "g_minorbit",   opt = "minOrbit",   fmt = "int" },
+  { node = "NG Spacing",  save = "g_spacing",    opt = "spacing",    fmt = "x" },
+  { node = "NG RadMin",   save = "g_radmin",     opt = "radiusMin",  fmt = "int" },
+  { node = "NG RadMax",   save = "g_radmax",     opt = "radiusMax",  fmt = "int" },
+  { node = "NG GravMin",  save = "g_gravmin",    opt = "gravityMin", fmt = "g" },
+  { node = "NG GravMax",  save = "g_gravmax",    opt = "gravityMax", fmt = "g" },
+  { node = "NG Star",     save = "g_star",       opt = "starScale",  fmt = "x" },
+}
+
 local slot_n = 1
 local seed_str = ""
 
 local function ui_of(name)
   local n = find(name)
   return n, n and n:getcomponent("UiElement")
+end
+
+local function slider_of(p)
+  local n = find(p.node .. " Track")
+  local s = n and n:getcomponent("UiSlider")
+  return s and s.value
+end
+
+local function value_of(p)
+  local v = slider_of(p)
+  if not v then return nil end
+  if p.fmt == "int" then v = math.floor(v + 0.5) end
+  return v
 end
 
 local function seed_label()
@@ -45,18 +73,14 @@ function openFor(n)
   local lbl = find("NG Slot Label")
   if lbl then lbl.text = string.format("— creating save in slot %d —", n) end
   seed_label()
+  local _, sc = ui_of("NG Params")
+  if sc then sc.scrollY = 0 end
   show(true)
 end
 
 local function close()
   open = false
   show(false)
-end
-
-local function slider(name)
-  local n = find(name)
-  local s = n and n:getcomponent("UiSlider")
-  return s and s.value
 end
 
 -- Button router (menu_ng_button forwards its role here).
@@ -67,12 +91,16 @@ function press(role)
     seed_str = "" -- click the seed row to clear back to random
     seed_label()
   elseif role == "create" then
-    local name = "slot" .. slot_n
-    save.slot(name)
-    save.set("g_planets", math.floor((slider("NG Planets Track") or 3) + 0.5))
-    save.set("g_moonchance", slider("NG Moons Track") or 0.6)
-    save.set("g_atmo", slider("NG Atmo Track") or 0.8)
-    save.set("g_caves", slider("NG Caves Track") or 1.0)
+    save.slot("slot" .. slot_n)
+    local v = {}
+    for _, p in ipairs(PARAMS) do v[p.save] = value_of(p) end
+    -- A min above its max would corrupt the generator's ranges — the max wins
+    -- up to the min (silently: the sliders still show what was dragged).
+    if v.g_radmax and v.g_radmin and v.g_radmax < v.g_radmin then v.g_radmax = v.g_radmin end
+    if v.g_gravmax and v.g_gravmin and v.g_gravmax < v.g_gravmin then v.g_gravmax = v.g_gravmin end
+    for _, p in ipairs(PARAMS) do
+      if v[p.save] then save.set(p.save, v[p.save]) end
+    end
     if #seed_str > 0 then save.set("g_seed", tonumber(seed_str)) end
     scene.load("system")
   end
@@ -93,16 +121,19 @@ function update(node, dt)
     seed_label()
   end
   -- Live value readouts beside each slider.
-  local p = slider("NG Planets Track")
-  local pv = find("NG Planets Val")
-  if p and pv then pv.text = string.format("%d", math.floor(p + 0.5)) end
-  local m = slider("NG Moons Track")
-  local mv = find("NG Moons Val")
-  if m and mv then mv.text = string.format("%d%%", math.floor(m * 100 + 0.5)) end
-  local a = slider("NG Atmo Track")
-  local av = find("NG Atmo Val")
-  if a and av then av.text = string.format("%d%%", math.floor(a * 100 + 0.5)) end
-  local c = slider("NG Caves Track")
-  local cv = find("NG Caves Val")
-  if c and cv then cv.text = string.format("×%.2f", c) end
+  for _, p in ipairs(PARAMS) do
+    local v = slider_of(p)
+    local out = find(p.node .. " Val")
+    if v and out then
+      if p.fmt == "int" then
+        out.text = string.format("%d", math.floor(v + 0.5))
+      elseif p.fmt == "pct" then
+        out.text = string.format("%d%%", math.floor(v * 100 + 0.5))
+      elseif p.fmt == "g" then
+        out.text = string.format("%.1f", v)
+      else -- "x"
+        out.text = string.format("×%.2f", v)
+      end
+    end
+  end
 end

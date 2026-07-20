@@ -57,6 +57,7 @@ pub(crate) enum AddUi {
     Image,
     Slider,
     Button,
+    Scroll,
 }
 
 /// Resolve a layer's mask pairs `(mask id, target id)` in scene order: every
@@ -326,9 +327,16 @@ impl Editor {
         // screen-space (pointer px / scale) and world-space (camera ray → panel
         // plane) hit-test through one uniform `contains`: (id, rect, pointer
         // design-units or None if off-panel, slider spec).
-        // (id, rect design-units, pointer in design-units or None if off-panel, slider).
-        type InteractItem = (u32, [f32; 4], Option<[f32; 2]>, Option<SliderSpec>);
+        // (id, rect design-units, pointer in design-units or None if off-panel,
+        //  slider, scroll-clip rect if inside a scroll view).
+        type InteractItem =
+            (u32, [f32; 4], Option<[f32; 2]>, Option<SliderSpec>, Option<[f32; 4]>);
         let mut items: Vec<InteractItem> = Vec::new();
+        // The topmost scroll view under the pointer this frame → (entity id,
+        // clamped new offset). Applied after the borrows drop; consumes the
+        // wheel so gameplay zoom never fights a menu scroll.
+        let wheel = self.input_scroll;
+        let mut wheel_target: Option<(u32, f32)> = None;
         if let Some((ptr_px, viewport)) = pointer
             && viewport[0] > 1.0
             && viewport[1] > 1.0
@@ -433,24 +441,59 @@ impl Editor {
                     for r in roots {
                         specs(r, &mut spec_of);
                     }
+                    let in_rect = |r: &[f32; 4], p: &[f32; 2]| {
+                        p[0] >= r[0] && p[1] >= r[1] && p[0] <= r[0] + r[2] && p[1] <= r[1] + r[3]
+                    };
+                    // Elements inside a scroll view hit-test through its clip:
+                    // a row scrolled out of the view must not hover or click.
+                    let clips = floptle_ui::scroll_clips(roots, &placed);
                     for pl in &placed {
                         let Some(spec) = spec_of.get(&pl.id) else { continue };
+                        let clip = clips.get(&pl.id).map(|c| c.rect);
                         let slider = spec.slider.filter(|s| s.interact);
                         if spec.button || slider.is_some() {
-                            items.push((pl.id, pl.rect, ptr_design, slider));
+                            items.push((pl.id, pl.rect, ptr_design, slider, clip));
+                        }
+                        // Wheel over a scroll view (respecting its own clip if
+                        // nested): later layers/elements are on top, so the
+                        // LAST match wins.
+                        if wheel != 0.0
+                            && let Some(sc) = spec.scroll
+                            && ptr_design.is_some_and(|p| {
+                                in_rect(&pl.rect, &p)
+                                    && clip.is_none_or(|c| in_rect(&c, &p))
+                            })
+                        {
+                            let max = floptle_ui::scroll_max(roots, &placed, pl.id);
+                            let next = (sc.offset - wheel * sc.speed).clamp(0.0, max);
+                            wheel_target = Some((pl.id, next));
                         }
                     }
                 }
             }
         }
+        if let Some((id, next)) = wheel_target {
+            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == id);
+            if let Some(e) = ent
+                && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
+                && let Some(sc) = &mut spec.scroll
+            {
+                sc.offset = next;
+            }
+            self.input_scroll = 0.0;
+            self.tick_scroll = 0.0;
+        }
         let contains = |r: &[f32; 4], p: &[f32; 2]| {
             p[0] >= r[0] && p[1] >= r[1] && p[0] <= r[0] + r[2] && p[1] <= r[1] + r[3]
         };
-        // Topmost interactive element under the pointer (per-item design pointer).
+        // Topmost interactive element under the pointer (per-item design
+        // pointer), honoring scroll clips.
         let hover = items
             .iter()
             .rev()
-            .find(|(_, rect, pd, _)| pd.is_some_and(|p| contains(rect, &p)))
+            .find(|(_, rect, pd, _, clip)| {
+                pd.is_some_and(|p| contains(rect, &p) && clip.is_none_or(|c| contains(&c, &p)))
+            })
             .map(|(id, ..)| *id);
         if hover != self.ui_hover {
             if let Some(old) = self.ui_hover {
@@ -470,7 +513,7 @@ impl Editor {
         // already in the panel's design units (screen or world) from gathering.
         if down
             && self.ui_active.is_some()
-            && let Some((id, rect, Some(pd), Some(s))) = items
+            && let Some((id, rect, Some(pd), Some(s), _)) = items
                 .iter()
                 .find(|(id, ..)| Some(*id) == self.ui_active)
                 .copied()
@@ -568,6 +611,21 @@ impl Editor {
                         ..Default::default()
                     }),
                     slider: Some(SliderSpec::default()),
+                    ..Default::default()
+                }),
+            ),
+            AddUi::Scroll => (
+                "Scroll View",
+                None,
+                Some(ElementSpec {
+                    place: Place::Free { pos: [40.0, 40.0] },
+                    size: [Size::Fixed(280.0), Size::Fixed(200.0)],
+                    shape: Some(ShapeSpec {
+                        fill: [0.1, 0.1, 0.12, 0.85],
+                        radius: 8.0,
+                        ..Default::default()
+                    }),
+                    scroll: Some(floptle_ui::ScrollSpec::default()),
                     ..Default::default()
                 }),
             ),
@@ -1082,6 +1140,27 @@ impl Editor {
                     .on_hover_text(
                         "fill scales with the parent slider's value; handle rides its                          position — its authored size is the full-value size",
                     );
+            });
+        }
+        // --- scroll view (children shift by the wheel + clip to this rect) ---
+        let mut has = spec.scroll.is_some();
+        if ui
+            .checkbox(&mut has, "scroll view")
+            .on_hover_text(
+                "children keep their authored layout but scroll vertically with the                  wheel (clipped to this element's rect) — put more content inside                  than fits and it just works; scripts read/write UiElement.scrollY",
+            )
+            .changed()
+        {
+            spec.scroll = has.then(floptle_ui::ScrollSpec::default);
+            c = true;
+        }
+        if let Some(sc) = &mut spec.scroll {
+            ui.horizontal(|ui| {
+                ui.label("wheel speed");
+                c |= ui
+                    .add(egui::DragValue::new(&mut sc.speed).range(4.0..=400.0))
+                    .on_hover_text("design units per wheel notch")
+                    .changed();
             });
         }
         // --- mask (clip other elements to this element's rounded rect) ---

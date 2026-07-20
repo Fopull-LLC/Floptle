@@ -320,6 +320,31 @@ pub struct MaskSpec {
     pub targets: Vec<String>,
 }
 
+/// A vertical SCROLL VIEW: children keep their authored layout but shift up by
+/// `offset` and clip to this element's rounded rect (an implicit mask over its
+/// own subtree — draw AND hit-testing). The wheel drives `offset` while the
+/// pointer is anywhere inside the view, clamped so the content can never
+/// scroll fully out; scripts read/write it as `UiElement.scrollY`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ScrollSpec {
+    /// Current scroll position in design units (0 = top of the content).
+    #[serde(default)]
+    pub offset: f32,
+    /// Design units per wheel notch.
+    #[serde(default = "default_scroll_speed")]
+    pub speed: f32,
+}
+
+fn default_scroll_speed() -> f32 {
+    48.0
+}
+
+impl Default for ScrollSpec {
+    fn default() -> Self {
+        ScrollSpec { offset: 0.0, speed: default_scroll_speed() }
+    }
+}
+
 /// A UI element — the ONE node kind. What it looks like is whichever visual
 /// specs are present (shape, then image, then text — that's the draw order);
 /// how it sits is `place` + `size`; whether it arranges children is `stack`.
@@ -347,6 +372,9 @@ pub struct ElementSpec {
     /// Clip the named target elements (+ subtrees) to this element's rect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mask: Option<MaskSpec>,
+    /// Vertical scroll view: children shift by the offset and clip to this rect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scroll: Option<ScrollSpec>,
     /// Custom `.flsl` face (a `stage ui` shader, project-relative path): the
     /// element's rect is drawn by that shader — procedural instruments
     /// (navballs, gauges, radar). Draws between shape and image.
@@ -387,6 +415,7 @@ impl Default for ElementSpec {
             slider: None,
             part: None,
             mask: None,
+            scroll: None,
             shader: String::new(),
             shader_params: std::collections::BTreeMap::new(),
             button: false,
@@ -592,7 +621,11 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
     if visible.is_empty() {
         return;
     }
-    let (px, py, pw, ph) = (rect[0], rect[1], rect[2], rect[3]);
+    // A scroll view's children lay out exactly as authored, then the whole
+    // content shifts up by the scroll offset (clipping happens in draw_list /
+    // hit-testing via the implicit self-mask).
+    let scroll_y = n.spec.scroll.map(|s| s.offset.max(0.0)).unwrap_or(0.0);
+    let (px, py, pw, ph) = (rect[0], rect[1] - scroll_y, rect[2], rect[3]);
     if let Some(s) = n.spec.stack {
         let (main, cross) = axes(s.dir);
         let inner_pos = [px + s.pad, py + s.pad];
@@ -730,6 +763,78 @@ pub struct DrawList {
     pub texts: Vec<TextRun>,
 }
 
+/// The implicit clips scroll views impose: every scroll element clips its own
+/// placed subtree to its rect (first/outermost claim wins, same rule as
+/// masks). Shared by [`draw_list`] and pointer hit-testing — an element
+/// scrolled out of view must neither draw nor click.
+pub fn scroll_clips(
+    roots: &[Node],
+    placed: &[Placed],
+) -> std::collections::HashMap<u32, Clip> {
+    fn collect<'a>(n: &'a Node, m: &mut std::collections::HashMap<u32, &'a Node>) {
+        m.insert(n.id, n);
+        for c in &n.children {
+            collect(c, m);
+        }
+    }
+    let mut nodes = std::collections::HashMap::new();
+    for r in roots {
+        collect(r, &mut nodes);
+    }
+    let mut out: std::collections::HashMap<u32, Clip> = std::collections::HashMap::new();
+    // Painter's order = parents before children, so an outer scroll claims a
+    // nested scroll's content before the inner one can.
+    for p in placed {
+        let Some(n) = nodes.get(&p.id) else { continue };
+        if n.spec.scroll.is_none() {
+            continue;
+        }
+        let radius = n.spec.shape.map(|s| s.radius).unwrap_or(0.0);
+        let clip = Clip { rect: p.rect, radius };
+        let mut stack: Vec<u32> = n.children.iter().map(|c| c.id).collect();
+        while let Some(id) = stack.pop() {
+            out.entry(id).or_insert(clip);
+            if let Some(c) = nodes.get(&id) {
+                stack.extend(c.children.iter().map(|k| k.id));
+            }
+        }
+    }
+    out
+}
+
+/// How far a scroll view can scroll: `max(0, content height − view height)`,
+/// where content height is the placed subtree's bottommost edge measured in
+/// content space (offset-independent). The input driver clamps
+/// [`ScrollSpec::offset`] to this every frame, so content can never be
+/// scrolled fully away — and a view whose content fits doesn't scroll at all.
+pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> f32 {
+    fn find(roots: &[Node], id: u32) -> Option<&Node> {
+        for n in roots {
+            if n.id == id {
+                return Some(n);
+            }
+            if let Some(f) = find(&n.children, id) {
+                return Some(f);
+            }
+        }
+        None
+    }
+    let Some(n) = find(roots, scroll_id) else { return 0.0 };
+    let offset = n.spec.scroll.map(|s| s.offset.max(0.0)).unwrap_or(0.0);
+    let rects: std::collections::HashMap<u32, [f32; 4]> =
+        placed.iter().map(|p| (p.id, p.rect)).collect();
+    let Some(&view) = rects.get(&scroll_id) else { return 0.0 };
+    let mut bottom = view[1] - offset; // content top
+    let mut stack: Vec<&Node> = n.children.iter().collect();
+    while let Some(c) = stack.pop() {
+        if let Some(r) = rects.get(&c.id) {
+            bottom = bottom.max(r[1] + r[3]);
+        }
+        stack.extend(c.children.iter());
+    }
+    ((bottom + offset) - view[1] - view[3]).max(0.0)
+}
+
 /// Build the draw list for solved elements. `roots`/`placed` must come from
 /// the same [`solve`] call (painter's order is reused).
 ///
@@ -751,8 +856,9 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
     }
     let rects: std::collections::HashMap<u32, [f32; 4]> =
         placed.iter().map(|p| (p.id, p.rect)).collect();
-    // Resolve masks: element id → the clip it draws under (first claim wins).
-    let mut clip_of: std::collections::HashMap<u32, Clip> = std::collections::HashMap::new();
+    // Scroll views clip their own subtree first (innermost intent), then
+    // explicit masks claim whatever is left (first claim wins).
+    let mut clip_of = scroll_clips(roots, placed);
     for (mask_id, target_id) in masks {
         let Some(&rect) = rects.get(mask_id) else { continue };
         let radius = nodes
@@ -865,6 +971,61 @@ mod tests {
 
     fn rect_of(placed: &[Placed], id: u32) -> [f32; 4] {
         placed.iter().find(|p| p.id == id).unwrap().rect
+    }
+
+    /// The scroll-view contract in one place: children shift up by the offset,
+    /// the view clips its subtree (draw AND hit-test share `scroll_clips`),
+    /// and `scroll_max` is exactly content-height − view-height (and 0 when
+    /// the content fits — a fitting view must never scroll).
+    #[test]
+    fn scroll_view_shifts_clips_and_clamps() {
+        let row = |y: f32| {
+            el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, y] },
+                    size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                    shape: Some(ShapeSpec::default()),
+                    ..Default::default()
+                },
+                vec![],
+            )
+        };
+        let rows = [row(0.0), row(50.0), row(100.0), row(150.0)];
+        let (r0, r3) = (rows[0].id, rows[3].id);
+        let view = el(
+            ElementSpec {
+                place: Place::Free { pos: [10.0, 20.0] },
+                size: [Size::Fixed(120.0), Size::Fixed(100.0)],
+                scroll: Some(ScrollSpec { offset: 30.0, speed: 48.0 }),
+                ..Default::default()
+            },
+            rows.into(),
+        );
+        let roots = [view];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        // Children shift up by the offset from their authored spots.
+        assert_eq!(rect_of(&placed, r0)[1], 20.0 - 30.0);
+        assert_eq!(rect_of(&placed, r3)[1], 20.0 + 150.0 - 30.0);
+        // Every child clips to the view's rect.
+        let clips = scroll_clips(&roots, &placed);
+        assert_eq!(clips.get(&r0).map(|c| c.rect), Some([10.0, 20.0, 120.0, 100.0]));
+        assert_eq!(clips.get(&r3).map(|c| c.rect), Some([10.0, 20.0, 120.0, 100.0]));
+        assert!(!clips.contains_key(&roots[0].id), "the view itself is not clipped");
+        // Content is 190 tall in a 100-tall view → 90 of travel, at ANY offset.
+        assert_eq!(scroll_max(&roots, &placed, roots[0].id), 90.0);
+        // A view whose content fits has no travel.
+        let fits = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(120.0), Size::Fixed(300.0)],
+                scroll: Some(ScrollSpec::default()),
+                ..Default::default()
+            },
+            vec![row(0.0)],
+        );
+        let roots = [fits];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        assert_eq!(scroll_max(&roots, &placed, roots[0].id), 0.0);
     }
 
     #[test]

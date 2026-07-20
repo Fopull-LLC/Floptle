@@ -166,6 +166,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             ("Image", crate::ui_game::AddUi::Image, "any texture from your assets — the engine ships no UI art"),
             ("Slider", crate::ui_game::AddUi::Slider, "a value-driven bar (health, progress…): track + Fill + Handle parts you retexture and arrange freely"),
             ("Button", crate::ui_game::AddUi::Button, "a clickable element — its scripts get hoverStart/pressed/clicked hooks"),
+            ("Scroll View", crate::ui_game::AddUi::Scroll, "a wheel-scrollable viewport — put more content inside than fits and it clips + scrolls"),
         ] {
             if ui.button(label).on_hover_text(hover).clicked() {
                 cmd.add_ui = Some(what);
