@@ -7,16 +7,30 @@
 
 *Make games that look like they're from another dimension — without anyone else's restrictions.*
 
-— a [Fopull LLC](https://github.com/Fopull-LLC) project · private / pre-release —
+— a [Fopull LLC](https://github.com/Fopull-LLC) project · free & open source (MIT OR Apache-2.0) —
 
 </div>
 
 ---
 
-> ⚠️ **Status: planning + scaffold.** No engine code yet — this repo currently
-> holds the architecture, decisions, and design docs that define what Floptle
-> *will* be, plus a compiling Rust workspace skeleton. Start with
-> [`docs/VISION.md`](docs/VISION.md), then [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status: early but very real.** The editor, SDF/raymarch + mesh renderer,
+> chunked diggable terrain with galaxy-scale streaming, custom physics,
+> Lua scripting with an in-editor IDE, timeline particles, node-graph shaders
+> (`.flsl`), skeletal animation, spatial audio + mixer, game UI, and the
+> Floptle Hub launcher all work today — the bundled `solar/` demo is a
+> KSP-style playground: fly a ship between procedurally generated planets,
+> land, dig, and save per slot. Pre-1.0: expect sharp edges and breaking
+> changes between versions. Start with [`docs/VISION.md`](docs/VISION.md),
+> then [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Get started (players & game makers)
+
+Download the **Floptle Hub** for your platform from
+[**Floptle-releases**](https://github.com/Fopull-LLC/Floptle-releases/releases/latest)
+(`floptle-hub-…` archive), unpack, run. The Hub installs engine versions,
+notifies you when new ones ship, creates projects, and opens them in the
+editor — no toolchain needed. Building from source instead: see
+[Building](#building).
 
 ## What Floptle is
 
@@ -97,13 +111,23 @@ Floptle/
 
 ```bash
 # Requires the stable Rust toolchain (rust-toolchain.toml pins it).
-cargo build           # compiles the (currently stub) workspace
-cargo run -p floptle-editor   # prints the planning banner for now
+# Linux also needs windowing/GPU/audio dev headers, e.g. on Debian/Ubuntu:
+#   libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev
+#   libwayland-dev libgl1-mesa-dev libasound2-dev
+cargo run --release -p floptle-editor   # the editor
+cargo run --release -p floptle-hub      # the launcher / version manager
 ```
 
-## License & status
+## License
 
-Pre-release and **private**. Intended to become free & open-source (with a
-donations option) once it's ready and all temporary test assets are replaced.
-See [`docs/decisions/0009-license.md`](docs/decisions/0009-license.md) and
-[`docs/decisions/0010-temporary-assets.md`](docs/decisions/0010-temporary-assets.md).
+Free and open source, **dual-licensed under
+[MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)** — use either, at your
+option (the Rust-ecosystem norm). Permissive forever: the engine will never be
+relicensed out from under you; Fopull LLC's revenue comes from optional hosted
+services and donations, never license terms. The "Floptle" name and branding
+remain Fopull LLC trademarks. See
+[`docs/decisions/0009-license.md`](docs/decisions/0009-license.md).
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in Floptle by you shall be dual-licensed as above,
+without any additional terms or conditions.
