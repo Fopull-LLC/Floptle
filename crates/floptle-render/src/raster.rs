@@ -68,10 +68,13 @@ pub struct Globals {
     pub point_pos: [[f32; 4]; 16],
     /// Each point light's rgb = color × intensity (w unused).
     pub point_color: [[f32; 4]; 16],
-    /// Meshed-terrain splat params: x = per-slot NEAREST bitmask (bit i = palette slot i
-    /// wants nearest filtering), y = triplanar world scale, z/w unused. Mirrors the
-    /// raymarch's `terrain_tint.w` mask so meshed terrain filters textures identically.
+    /// Meshed-terrain splat params: y = triplanar world scale (x/z/w unused — the
+    /// per-slot bitmasks moved to `terrain_bits`, where 32 slots stay bit-exact;
+    /// f32 packing silently corrupts bits past 2^24).
     pub terrain_mask: [f32; 4],
+    /// Per-slot bitmasks, exact at 32 slots: x = NEAREST filtering, y = GLOW
+    /// (self-lit slots), z/w unused.
+    pub terrain_bits: [u32; 4],
 }
 
 impl Default for Globals {
@@ -85,6 +88,7 @@ impl Default for Globals {
             point_pos: [[0.0; 4]; 16],
             point_color: [[0.0; 4]; 16],
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            terrain_bits: [0; 4],
         }
     }
 }
@@ -640,9 +644,19 @@ impl Raster {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        let empty_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-empty-field-color"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
         let empty_field_samp = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let empty_field_bind = crate::raymarch::make_field_bind(
-            device, &field_layout, &empty_field_buf, &empty_dist, &empty_field_samp,
+            device, &field_layout, &empty_field_buf, &empty_dist, &empty_color, &empty_field_samp,
         );
 
         let instance_cap = 16;

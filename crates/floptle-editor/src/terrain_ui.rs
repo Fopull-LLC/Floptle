@@ -260,7 +260,12 @@ impl EditorTabViewer<'_> {
             ui.label("Texture palette");
             let mut tex_list = Vec::new();
             collect_texture_paths(asset_tree, &mut tex_list);
-            for (slot, tex) in terrain_textures.iter_mut().enumerate() {
+            // Show the ASSIGNED slots plus one empty "add" row — not all 32 at once.
+            // Slots keep their index forever (the painted terrain stores it), so a
+            // cleared middle slot stays visible until the trailing empties.
+            let last_used = terrain_textures.iter().rposition(|t| !t.is_empty());
+            let visible = (last_used.map_or(0, |i| i + 1) + 1).min(terrain_textures.len());
+            for (slot, tex) in terrain_textures.iter_mut().enumerate().take(visible) {
                 ui.horizontal(|ui| {
                     let sel = terrain_brush.tex_slot == slot as i32;
                     let label = if tex.is_empty() {
