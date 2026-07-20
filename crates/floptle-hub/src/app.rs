@@ -16,6 +16,7 @@ use std::sync::mpsc::Receiver;
 const COMPANY: &str = "Fopull LLC";
 const WEBSITE_URL: &str = "https://fopull.com/";
 const REPO_URL: &str = "https://github.com/Fopull-LLC/Floptle";
+const RELEASES_URL: &str = "https://github.com/Fopull-LLC/Floptle-releases/releases";
 const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 
 /// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
@@ -167,6 +168,9 @@ pub struct HubApp {
     /// new toast resets the timer without threading a clock through every set-site.
     toast_seen: Option<String>,
     toast_at: f64,
+    /// When the manifest was last fetched — the Hub re-checks every few hours
+    /// while it's open, so "a new version shipped" surfaces without a restart.
+    manifest_fetched_at: std::time::Instant,
     /// Signed-in fopull.com account (persisted in the OS keyring) + the running sign-in/refresh
     /// worker. Workers build their own [`auth::KeyringStore`] so keyring I/O stays off the UI
     /// thread; only the one-time startup load runs inline.
@@ -201,6 +205,7 @@ impl HubApp {
             toast: None,
             toast_seen: None,
             toast_at: 0.0,
+            manifest_fetched_at: std::time::Instant::now(),
             session,
             auth_job: None,
         };
@@ -503,9 +508,29 @@ impl HubApp {
         }
     }
 
+    /// The newest release on the user's channel that is strictly newer than
+    /// everything installed AND ships a bundle for this platform — what the
+    /// update banner offers. None while nothing is installed yet (the Installs
+    /// tab is the front door there, not a nag).
+    fn update_available(&self) -> Option<crate::releases::ReleaseInfo> {
+        let ManifestState::Loaded(m) = &self.manifest else { return None };
+        let newest_installed = self
+            .installs
+            .iter()
+            .map(|i| crate::releases::version_key(&i.version))
+            .max()?;
+        m.on_channel(&self.config.settings.channel)
+            .into_iter()
+            .find(|r| {
+                r.artifact_here().is_some()
+                    && crate::releases::version_key(&r.version) > newest_installed
+            })
+    }
+
     // ---- background jobs ---------------------------------------------------
 
     fn start_manifest_fetch(&mut self) {
+        self.manifest_fetched_at = std::time::Instant::now();
         let url = self.config.settings.manifest_url.clone();
         let token = self.token_opt().map(str::to_string);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -782,6 +807,15 @@ impl eframe::App for HubApp {
         self.poll_install();
         self.poll_proc();
         self.poll_auth(ctx);
+        // Long-running Hubs re-check for new releases every few hours, so the
+        // update banner appears without a restart (a failed check just keeps
+        // the last manifest; the next interval retries).
+        if !matches!(self.manifest, ManifestState::Loading(_))
+            && self.job.is_none()
+            && self.manifest_fetched_at.elapsed() > std::time::Duration::from_secs(4 * 60 * 60)
+        {
+            self.start_manifest_fetch();
+        }
         // Auto-expire a toast ~6s after it appears (detect a new message by its text, so
         // the ~10 set-sites don't each need a clock).
         let now = ctx.input(|i| i.time);
@@ -816,6 +850,54 @@ impl eframe::App for HubApp {
                 ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
             });
         });
+
+        // UPDATE BANNER: a new engine version on the user's channel, newer than
+        // anything installed, with a bundle for this platform. One click
+        // installs; ✖ mutes the banner for THAT version (anything newer brings
+        // it back). This is how users get notified of releases.
+        if let Some(r) = self.update_available()
+            && self.config.settings.dismissed_update.as_deref() != Some(r.version.as_str())
+        {
+            let mut act: Option<(bool, String)> = None; // (install?, version)
+            egui::Panel::top("update-banner").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_GREEN,
+                        format!("{} Floptle {} is available", ico::UPGRADE, r.version),
+                    );
+                    if !r.date.is_empty() {
+                        ui.small(&r.date);
+                    }
+                    if self.job.is_none()
+                        && ui.button(format!("{} Install now", ico::INSTALL)).clicked()
+                    {
+                        act = Some((true, r.version.clone()));
+                    }
+                    if !r.notes_url.is_empty() {
+                        ui.hyperlink_to("notes", &r.notes_url);
+                    }
+                    if ui
+                        .small_button(ico::CLOSE)
+                        .on_hover_text("hide until the next version")
+                        .clicked()
+                    {
+                        act = Some((false, r.version.clone()));
+                    }
+                });
+            });
+            match act {
+                Some((true, v)) => {
+                    if let Some(art) = r.artifact_here().cloned() {
+                        self.start_install(v, art);
+                    }
+                }
+                Some((false, v)) => {
+                    self.config.settings.dismissed_update = Some(v);
+                    self.save();
+                }
+                None => {}
+            }
+        }
 
         if let Some((msg, is_err)) = self.toast.clone() {
             let mut dismiss = false;
@@ -1272,6 +1354,10 @@ impl HubApp {
 
             ui.label(format!("{} Source code", ico::BOOK));
             ui.hyperlink_to(REPO_URL, REPO_URL);
+            ui.end_row();
+
+            ui.label(format!("{} Downloads", ico::INSTALLS));
+            ui.hyperlink_to(RELEASES_URL, RELEASES_URL);
             ui.end_row();
 
             ui.label(format!("{} Report an issue", ico::BUG));

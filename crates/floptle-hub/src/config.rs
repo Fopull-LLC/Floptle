@@ -4,10 +4,16 @@ use crate::registry::Project;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The manifest that lists installable engine versions. Points at a GitHub-Releases asset
-/// for now (private → the Hub adds an auth token); swappable to a public host later without
-/// code changes (docs/hub-proposal.md §3.4).
+/// The manifest that lists installable engine versions. Lives on the PUBLIC
+/// releases repo — anyone can fetch it and download bundles, no token needed
+/// (the engine source stays private; only distribution is public). Swappable
+/// to another host without code changes (docs/hub-proposal.md §3.4).
 pub const DEFAULT_MANIFEST_URL: &str =
+    "https://github.com/Fopull-LLC/Floptle-releases/releases/download/manifest/releases.json";
+
+/// The pre-public default — configs that still carry it migrate to
+/// [`DEFAULT_MANIFEST_URL`] on load (a hand-customized URL is left alone).
+const LEGACY_MANIFEST_URL: &str =
     "https://github.com/Fopull-LLC/Floptle/releases/download/manifest/releases.json";
 
 /// Resolved per-OS directories. `data` holds `versions/` (installed bundles) + `cache/`
@@ -73,6 +79,10 @@ pub struct Settings {
     /// dev instance to test the flow). The account token is only ever sent here.
     #[serde(default = "default_auth_base_url")]
     pub auth_base_url: String,
+    /// The newest version the user dismissed the update banner for — the
+    /// banner stays hidden for that version and reappears for anything newer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_update: Option<String>,
 }
 
 fn default_channel() -> String {
@@ -104,6 +114,7 @@ impl Default for Settings {
             manifest_url: default_manifest_url(),
             projects_dir: None,
             auth_base_url: default_auth_base_url(),
+            dismissed_update: None,
         }
     }
 }
@@ -121,10 +132,17 @@ impl HubConfig {
     /// Load `hub.json`, or a default if it's missing/corrupt (never fails — a fresh user
     /// just gets defaults).
     pub fn load(paths: &Paths) -> Self {
-        std::fs::read_to_string(paths.config_file())
+        let mut cfg: Self = std::fs::read_to_string(paths.config_file())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Distribution moved to the public releases repo: configs saved before
+        // that carry the old private-repo URL — migrate them (a URL the user
+        // customized to anything else is respected).
+        if cfg.settings.manifest_url == LEGACY_MANIFEST_URL {
+            cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
+        }
+        cfg
     }
 
     /// Persist `hub.json` (pretty-printed), creating the config dir if needed.
