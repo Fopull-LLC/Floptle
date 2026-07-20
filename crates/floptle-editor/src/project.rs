@@ -1002,6 +1002,7 @@ pub(crate) fn scene_files_in(project_root: &Path) -> Vec<String> {
             if p.is_dir() {
                 walk(&p, root, out);
             } else if p.extension().is_some_and(|x| x == "ron")
+                && !p.to_string_lossy().ends_with(floptle_scene::PREFAB_EXT)
                 && let Ok(rel) = p.strip_prefix(root)
             {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
