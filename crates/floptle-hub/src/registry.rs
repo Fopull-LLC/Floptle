@@ -64,13 +64,18 @@ pub fn editor_bin_name() -> &'static str {
     if cfg!(windows) { "floptle.exe" } else { "floptle" }
 }
 
-/// Scan `versions/` for installed bundles — one per subdirectory named by its version.
-/// Skips hidden/staging dirs (`.staging-*`) and stray non-version dirs (a real install's
-/// dir is version-named or carries a `version.json`). A genuinely-broken install (missing
-/// binary) is still listed so the UI can flag it and offer Uninstall. Sorted by
+/// Scan `versions/` for installed bundles. The VERSION comes from the bundle's
+/// own `version.json` when present — so a hand-unpacked archive counts as a
+/// real install whatever its folder is called (unpacking
+/// `floptle-0.1.3-linux-x86_64/` by hand used to register as an install named
+/// after the folder, which matched no release and read as "not installed").
+/// Version-named dirs without a `version.json` still count (legacy bundles).
+/// Skips hidden/staging dirs (`.staging-*`); duplicates of one version keep
+/// the first found. A broken install (missing binary) is still listed so the
+/// UI can flag it and offer Uninstall. Sorted by
 /// [`crate::releases::version_key`] so newest sorts last.
 pub fn scan_installs(versions_dir: &Path) -> Vec<Install> {
-    let mut out = Vec::new();
+    let mut out: Vec<Install> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(versions_dir) {
         for e in rd.flatten() {
             let path = e.path();
@@ -81,9 +86,19 @@ pub fn scan_installs(versions_dir: &Path) -> Vec<Install> {
             if name.starts_with('.') {
                 continue;
             }
+            let from_json = std::fs::read_to_string(path.join("version.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("version").and_then(|x| x.as_str()).map(String::from))
+                .filter(|v| !v.is_empty());
             let looks_versioned = name.chars().next().is_some_and(|c| c.is_ascii_digit());
-            if looks_versioned || path.join("version.json").is_file() {
-                out.push(Install { version: name, path });
+            let version = match (from_json, looks_versioned) {
+                (Some(v), _) => v,
+                (None, true) => name,
+                (None, false) => continue, // stray non-bundle dir
+            };
+            if !out.iter().any(|i| i.version == version) {
+                out.push(Install { version, path });
             }
         }
     }
@@ -107,6 +122,28 @@ mod tests {
         let versions: Vec<&str> = installs.iter().map(|i| i.version.as_str()).collect();
         // Semver-ish: 0.2 < 0.9 < 0.10 (NOT lexical, which would put 0.10 first).
         assert_eq!(versions, ["0.2.0", "0.9.0", "0.10.0"]);
+    }
+
+    /// A hand-unpacked archive (folder named after the archive, not the
+    /// version) registers under its version.json's version — Ty unpacked
+    /// `floptle-0.1.3-linux-x86_64/` manually and the Hub called it not
+    /// installed. Stray dirs stay ignored; duplicates keep the first.
+    #[test]
+    fn scan_reads_version_json_over_the_folder_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path().join("versions");
+        let hand = v.join("floptle-0.1.3-linux-x86_64");
+        std::fs::create_dir_all(&hand).unwrap();
+        std::fs::write(
+            hand.join("version.json"),
+            br#"{ "version": "0.1.3", "target": "linux-x86_64", "commit": "abc1234" }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(v.join("random-notes")).unwrap(); // no digits, no json
+        let installs = scan_installs(&v);
+        assert_eq!(installs.len(), 1);
+        assert_eq!(installs[0].version, "0.1.3");
+        assert_eq!(installs[0].path, hand);
     }
 
     #[test]
