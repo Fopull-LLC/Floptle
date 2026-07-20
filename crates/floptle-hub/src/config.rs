@@ -142,6 +142,14 @@ impl HubConfig {
         if cfg.settings.manifest_url == LEGACY_MANIFEST_URL {
             cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
         }
+        // A LOCAL manifest path (the dev/testing source) that no longer exists
+        // can only ever error — self-heal to the public default instead of
+        // showing a dead version list forever.
+        if !cfg.settings.manifest_url.starts_with("http")
+            && !std::path::Path::new(&cfg.settings.manifest_url).exists()
+        {
+            cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
+        }
         cfg
     }
 
