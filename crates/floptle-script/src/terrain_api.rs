@@ -43,16 +43,38 @@ pub enum TerrainOpMode {
 const MAX_RADIUS: f32 = 64.0;
 const MAX_OPS_PER_FRAME: usize = 64;
 
+/// The streaming-related shared slots (`terrain.saveDir` / `warm` / `flush`) —
+/// bundled so the install signature stays sane as the API grows.
+pub(crate) struct TerrainStreamShared {
+    pub save_dir: Rc<RefCell<Option<String>>>,
+    pub warm: Rc<RefCell<Vec<String>>>,
+    pub flush: Rc<RefCell<bool>>,
+}
+
 pub(crate) fn install_terrain_api(
     lua: &Lua,
     ops: Rc<RefCell<Vec<TerrainOp>>>,
     generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
-    save_dir: Rc<RefCell<Option<String>>>,
-    warm: Rc<RefCell<Vec<String>>>,
+    stream: TerrainStreamShared,
 ) {
+    let TerrainStreamShared { save_dir, warm, flush } = stream;
     let Ok(t) = lua.create_table() else { return };
+
+    // terrain.flush() — write every EDITED resident field to the save slot NOW
+    // (terrain.saveDir must be set). Call at checkpoints and on exit-to-menu so
+    // a slot always reloads from fast files instead of regenerating; streaming
+    // already flushes on its own when bodies stream out.
+    {
+        let fl = flush.clone();
+        if let Ok(f) = lua.create_function(move |_, ()| {
+            *fl.borrow_mut() = true;
+            Ok(())
+        }) {
+            let _ = t.set("flush", f);
+        }
+    }
 
     // terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame
     // regardless of where the ship/player physically is: it loads if cold and

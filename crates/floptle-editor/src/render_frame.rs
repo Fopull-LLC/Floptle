@@ -4793,6 +4793,10 @@ impl Editor {
             self.run_editor_action(e, &kind, &func);
         }
         // Adopt any finished background planet generations (editor actions).
+        // Runtime `terrain.generatePlanet` (a game regenerating its galaxy from
+        // a save-slot seed at a loading screen) drains here — editor actions
+        // drain their own queue inside `run_editor_action`.
+        self.drain_terrain_generates();
         self.poll_terrain_generates();
         if let Some(name) = cmd.new_scene {
             self.new_scene(&name);

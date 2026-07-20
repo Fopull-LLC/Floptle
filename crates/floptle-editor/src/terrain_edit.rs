@@ -1273,6 +1273,52 @@ impl Editor {
         if anchors.is_empty() {
             return; // a playing scene with no dynamic bodies: leave residency as-is
         }
+        // terrain.flush(): write every edited resident field to the save slot
+        // now — a checkpoint. Slot files are what make the NEXT slot load a
+        // fast read instead of a regeneration.
+        if self.script_host.take_terrain_flush() {
+            if let Some(sd) = self.script_host.terrain_save_dir() {
+                let dirty: Vec<(Entity, u32)> = self
+                    .terrains
+                    .keys()
+                    .filter(|e| self.terrain_disk_dirty.contains(e))
+                    .filter_map(|&e| match self.world.get::<Matter>(e) {
+                        Some(Matter::Terrain { id }) => Some((e, *id)),
+                        _ => None,
+                    })
+                    .collect();
+                let mut wrote = 0usize;
+                for (e, id) in dirty {
+                    let path = self
+                        .project_root
+                        .join(&sd)
+                        .join(format!("{}.{id}.cfield", self.scene_name));
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    if let Some(t) = self.terrains.get(&e)
+                        && std::fs::write(&path, t.field.to_bytes()).is_ok()
+                    {
+                        self.terrain_disk_dirty.remove(&e);
+                        wrote += 1;
+                    }
+                }
+                if wrote > 0 {
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!("⛰ flushed {wrote} terrain field(s) to the save slot"),
+                        None,
+                    );
+                }
+            } else {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "terrain.flush(): no save slot set (terrain.saveDir) — nothing written"
+                        .into(),
+                    None,
+                );
+            }
+        }
         let warm_names = self.script_host.take_terrain_warm();
         let warm: std::collections::HashSet<Entity> = if warm_names.is_empty() {
             Default::default()

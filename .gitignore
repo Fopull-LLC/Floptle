@@ -49,3 +49,6 @@ out.png
 *.cfield
 *.tfield
 **/terrain/*.meta
+
+# Player save slots (per-slot save stores + slot terrain caches) — runtime data.
+**/saves/

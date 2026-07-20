@@ -1,0 +1,277 @@
+(
+    name: "menu",
+    nodes: [
+        (
+            name: "Post Processing",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PostProcess(
+                enabled: true,
+                bloom: true,
+                bloom_threshold: 0.3,
+                bloom_intensity: 0.35,
+                vignette: true,
+                vignette_strength: 0.55,
+                vignette_radius: 0.45,
+                ao: Off,
+                ao_strength: 1.0,
+                ao_radius: 0.7,
+                posterize_bands: 0,
+                posterize_dither: false,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Camera 1",
+            transform: (
+                translation: (0.0, 0.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Camera(
+                fov_y: 1.1519173,
+                active: true,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Menu UI",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            ui_layer: Some((
+                design_height: 720.0,
+                z: 10,
+                enabled: true,
+                space: Screen,
+                canvas_scale: 0.009,
+            )),
+        ),
+        (
+            name: "Menu Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(2),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(560.0), Fixed(470.0)),
+                shape: Some((
+                    fill: (0.05, 0.07, 0.1, 0.92),
+                    radius: 14.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+            )),
+        ),
+        (
+            name: "Menu Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 42.0),
+                ),
+                size: (Pct(1.0), Fixed(56.0)),
+                text: Some((
+                    text: "F L O P T L E   ·   S O L A R",
+                    size: 40.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "Menu Subtitle",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 104.0),
+                ),
+                size: (Pct(1.0), Fixed(24.0)),
+                text: Some((
+                    text: "—  select a galaxy  —",
+                    size: 15.0,
+                    color: (0.5, 0.62, 0.72, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "Slot 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_slot",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (80.0, 160.0),
+                ),
+                size: (Fixed(400.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "SLOT 1",
+                    size: 18.0,
+                    color: (0.78, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Slot 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_slot",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (80.0, 236.0),
+                ),
+                size: (Fixed(400.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "SLOT 2",
+                    size: 18.0,
+                    color: (0.78, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Slot 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "menu_slot",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                ),
+            ],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (80.0, 312.0),
+                ),
+                size: (Fixed(400.0), Fixed(58.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.88),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "SLOT 3",
+                    size: 18.0,
+                    color: (0.78, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Menu Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(3),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 402.0),
+                ),
+                size: (Pct(1.0), Fixed(44.0)),
+                text: Some((
+                    text: "a galaxy is rolled the first time you enter a slot\nprogress and terrain edits save per slot",
+                    size: 12.0,
+                    color: (0.42, 0.52, 0.6, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+    ],
+)

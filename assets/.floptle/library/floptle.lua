@@ -35,6 +35,7 @@
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor.
 ---@field setMaterial fun(self: Node, t: table) Construction API: set (and create if absent) the node's Material. Fields: color/emissive/specular/rim {r,g,b}, emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>").
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
+---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive ("Cube"/"Sphere"/"Capsule"/"Plane") with an optional {r,g,b} color.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 
@@ -711,6 +712,23 @@ function terrain.paintTexture(x, y, z, radius, slot) end
 ---@param id number The terrain id (a node with that Terrain id shows the result).
 ---@param opts? table
 function terrain.generatePlanet(id, opts) end
+---Set (or read, with no argument) the game's SAVE-SLOT directory for
+---player-edited terrain, relative to the project root (e.g.
+---"saves/slot1/terrain"). While set, streaming loads a body's field from here
+---FIRST — before the project file or its genspec — and writes edited fields
+---back here when bodies stream out, so a player's digs persist per save slot
+---without touching authored project data. Pass "" to clear; cleared
+---automatically when Play stops.
+---@param path? string
+---@return string|nil
+function terrain.saveDir(path) end
+---Keep the named body's terrain RESIDENT this frame regardless of where the
+---ship/player physically is: it streams in if cold and never streams out.
+---Immediate mode — call it every frame while you care (the map calls it for
+---its focused planet). Streaming is otherwise anchored to the PHYSICAL
+---positions of dynamic bodies, never the camera.
+---@param bodyName string The body's node name (as in `space.bodies()`).
+function terrain.warm(bodyName) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number

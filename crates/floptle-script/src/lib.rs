@@ -208,6 +208,9 @@ pub struct ScriptHost {
     /// gameplay anchor's distance — the map warms its focused planet while
     /// open. A warmed body loads if cold and never evicts.
     terrain_warm: Rc<RefCell<Vec<String>>>,
+    /// `terrain.flush()` — write every dirty resident field to the save slot
+    /// NOW (checkpoints, exit-to-menu). One-shot flag drained per frame.
+    terrain_flush: Rc<RefCell<bool>>,
     /// `createNode(...)` requests, drained with the spawn queue.
     create_requests: Rc<RefCell<Vec<CreateRequest>>>,
     /// Construction-API component/matter writes (see [`RichSet`]).

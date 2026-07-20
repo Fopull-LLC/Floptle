@@ -878,14 +878,18 @@ impl ScriptHost {
         // and the residency streamer prefers/writes player-edited fields there.
         let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let terrain_warm: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
             terrain_generates.clone(),
             colliders.clone(),
             logs.clone(),
-            terrain_save_dir.clone(),
-            terrain_warm.clone(),
+            crate::terrain_api::TerrainStreamShared {
+                save_dir: terrain_save_dir.clone(),
+                warm: terrain_warm.clone(),
+                flush: terrain_flush.clone(),
+            },
         );
         // The `save.*` persistent store (roadmap A2).
         let save_state: Rc<RefCell<crate::save_api::SaveState>> =
@@ -929,6 +933,7 @@ impl ScriptHost {
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
+            terrain_flush,
             create_requests,
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
@@ -1106,6 +1111,12 @@ impl ScriptHost {
     /// (immediate mode: callers re-warm every frame, e.g. the map's focus).
     pub fn take_terrain_warm(&self) -> Vec<String> {
         std::mem::take(&mut *self.terrain_warm.borrow_mut())
+    }
+
+    /// Drain the one-shot `terrain.flush()` request (write dirty resident
+    /// fields to the save slot now — checkpoints, exit-to-menu).
+    pub fn take_terrain_flush(&self) -> bool {
+        std::mem::take(&mut *self.terrain_flush.borrow_mut())
     }
 
     /// Invoke `cb` with a fresh handle for `eid` — the shared callback shape

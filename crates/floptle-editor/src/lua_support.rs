@@ -756,6 +756,11 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
+---Write every EDITED resident terrain field to the save slot NOW
+---(`terrain.saveDir` must be set) — call at checkpoints and on exit-to-menu so
+---the slot always reloads from fast files instead of regenerating. Streaming
+---already flushes on its own when bodies stream out.
+function terrain.flush() end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
