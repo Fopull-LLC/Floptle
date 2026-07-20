@@ -604,10 +604,10 @@ end
 -- THIS is what makes a maneuver node placed BEYOND an SOI crossing land on the
 -- real path and apply its burn in the right frame: true across-SOI planning,
 -- not a single two-body arc around the starting planet.
-local function patched_state_at(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t_target, steps)
+local function patched_state_at(bodies, pidx, wx, wy, wz, wvx, wvy, wvz, cur, t_start, t_target, steps)
   steps = math.max(1, steps)
-  local step = t_target / steps
-  local tt = 0.0
+  local step = (t_target - t_start) / steps
+  local tt = t_start
   local start_states = all_body_states(bodies, pidx, tt)
   for _ = 1, steps do
     local cs = start_states[cur]
@@ -703,6 +703,17 @@ local function draw_diamond(x, y, z, s, r, g, b)
   draw.line(x, y - s, z, x, y, z - s, r, g, b, 1)
 end
 
+-- FROZEN COAST REFERENCE: while the ship coasts its orbit is analytically
+-- fixed, so every trajectory walk + the node projection starts from this
+-- frozen (state, time) — the walks sample the SAME absolute instants every
+-- recompute, so the drawn path and the maneuver node are rock-steady. (They
+-- used to re-derive from the live sim state every 0.15 s: sim noise + step
+-- re-quantization made the node hop and the post-burn path flicker even in a
+-- perfectly stable orbit.) Re-seeded when: thrusting or grounded, the
+-- dominant body changed, the live state drifted off the reference conic
+-- (RCS puffs, collisions, burns), or the ref aged past the walk window.
+local traj_ref = nil -- { t, rx..rz, rvx..rvz (dominant-frame), dbname, span }
+
 -- Recompute the maneuver-node projection + both trajectory walks (throttled).
 -- `db` is the ship's dominant body; `o` its current conic (space.elements).
 local function recompute_trajectories(node, db, bodies, pidx, o)
@@ -713,26 +724,52 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
   end
   if not dbi then traj_now, traj_mnv = nil, nil return end
 
-  -- Ship WORLD state now: node.vx/vy/vz are in the dominant body's frame, so
-  -- world velocity adds the body's own world velocity.
-  local swx, swy, swz = node.x, node.y, node.z
-  local swvx, swvy, swvz = node.vx + db.vx, node.vy + db.vy, node.vz + db.vz
-
-  -- Timescale: your own year if bound, else the planet's year (transfer clock).
-  local span
-  if o and o.period then
-    span = o.period * 1.6
-  else
-    local yp = body_period(bodies, pidx, dbi)
-    span = (yp and yp * 1.2) or 20000.0
+  local now = space.time()
+  local rx0, ry0, rz0 = node.x - db.x, node.y - db.y, node.z - db.z
+  local coasting = throttle < 0.005 and not node.grounded
+  local stale = not coasting or not traj_ref or traj_ref.dbname ~= db.name
+  if not stale then
+    local dtb = now - traj_ref.t
+    if dtb > traj_ref.span * 0.35 then
+      stale = true -- the walk window has drifted behind us: re-anchor
+    else
+      -- Drift gate: where the ref conic says we are now vs the live sim.
+      -- Catches anything that actually changed the orbit (RCS, a bump).
+      local prx, pry, prz = space.propagate(traj_ref.rx, traj_ref.ry, traj_ref.rz,
+        traj_ref.rvx, traj_ref.rvy, traj_ref.rvz, db.mu, dtb)
+      local ex, ey, ez = prx - rx0, pry - ry0, prz - rz0
+      local tol = math.max(4.0, (rx0 * rx0 + ry0 * ry0 + rz0 * rz0) * 4e-6)
+      if ex * ex + ey * ey + ez * ez > tol then stale = true end
+    end
   end
+  if stale then
+    -- Timescale: your own year if bound, else the planet's year (transfer clock).
+    local span
+    if o and o.period then
+      span = o.period * 1.6
+    else
+      local yp = body_period(bodies, pidx, dbi)
+      span = (yp and yp * 1.2) or 20000.0
+    end
+    traj_ref = { t = now, rx = rx0, ry = ry0, rz = rz0,
+      rvx = node.vx, rvy = node.vy, rvz = node.vz, dbname = db.name, span = span }
+  end
+  local span = traj_ref.span
   local segs = 140
+  local toff = traj_ref.t - now -- ≤ 0: walks start at the frozen ref instant
 
-  local rpts, anch, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, 0.0, span, segs)
+  -- Ship WORLD state AT THE REF INSTANT: the dominant body's state then + the
+  -- frozen relative state (node.vx/vy/vz are frame-relative by convention).
+  local dsx, dsy, dsz, dsvx, dsvy, dsvz = body_state_at(bodies, pidx, dbi, toff)
+  local swx, swy, swz = dsx + traj_ref.rx, dsy + traj_ref.ry, dsz + traj_ref.rz
+  local swvx, swvy, swvz = dsvx + traj_ref.rvx, dsvy + traj_ref.rvy, dsvz + traj_ref.rvz
+
+  local rpts, anch, enc = walk_trajectory(bodies, pidx, swx, swy, swz, swvx, swvy, swvz, dbi, toff, span, segs)
   -- Rest-frame cache: rpts are RELATIVE to per-point anchor bodies (anch), drawn
-  -- at each anchor's LIVE position. `step`/`t0` give each point a TIME, which is
-  -- what click-to-place reads to drop the node at the right spot on the orbit.
-  traj_now = { rpts = rpts, anch = anch, enc = enc, t0 = 0.0, step = span / segs }
+  -- at each anchor's LIVE position. `step`/`t0` give each point a TIME (offset
+  -- from now), which is what click-to-place reads to drop the node at the
+  -- right spot on the orbit.
+  traj_now = { rpts = rpts, anch = anch, enc = enc, t0 = toff, step = span / segs }
 
   if mnv then
     -- Walk the CURRENT patched conic to the node time, CROSSING any SOI between
@@ -743,11 +780,14 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
     -- PINNED to its point on the orbit while you close on it. (It used to store a
     -- fixed lead-from-now, so the walk always advanced the same span from an
     -- ever-advancing start → the node marched forever ahead and you never reached it.)
-    local lead = math.max(0, mnv.t0 - space.time())
-    local swvx0, swvy0, swvz0 = node.vx + db.vx, node.vy + db.vy, node.vz + db.vz
-    local nsteps = math.max(8, math.ceil(lead / (span / segs)))
-    local ns = patched_state_at(bodies, pidx, node.x, node.y, node.z,
-      swvx0, swvy0, swvz0, dbi, lead, nsteps)
+    -- Walk from the FROZEN ref instant to the node's absolute time: both ends
+    -- are constants while coasting, so the step count and every SOI-crossing
+    -- decision quantize identically each recompute — the node state (and the
+    -- whole post-burn path) is bit-stable instead of hopping every 0.15 s.
+    local t_node = math.max(mnv.t0 - now, 0)
+    local nsteps = math.max(8, math.ceil((t_node - toff) / (span / segs)))
+    local ns = patched_state_at(bodies, pidx, swx, swy, swz,
+      swvx, swvy, swvz, dbi, toff, t_node, nsteps)
     local ndb = ns.anchor -- the body the node orbits (may DIFFER from the start db!)
     local nrx, nry, nrz = ns.rx, ns.ry, ns.rz
     local nvx, nvy, nvz = ns.rvx, ns.rvy, ns.rvz
@@ -775,7 +815,7 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       mspan = (yp and yp * 1.2) or 20000.0
     end
     local mrpts, manch, menc =
-      walk_trajectory(bodies, pidx, ns.wx, ns.wy, ns.wz, mwvx, mwvy, mwvz, ndb, lead, mspan, segs)
+      walk_trajectory(bodies, pidx, ns.wx, ns.wy, ns.wz, mwvx, mwvy, mwvz, ndb, t_node, mspan, segs)
     local dv = math.sqrt(mnv.pro ^ 2 + mnv.nor ^ 2 + mnv.rad ^ 2)
     -- Cache the burn's WORLD direction so the SAS "node" hold can point at it in
     -- flight (where recompute doesn't run).
@@ -784,7 +824,7 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
       rpts = mrpts, anch = manch, enc = menc,
       m_anchor = ndb, m_rx = nrx, m_ry = nry, m_rz = nrz, -- node marker (its body's frame)
       bx = bx, by = by, bz = bz,
-      dv = dv, t0 = lead, step = mspan / segs,
+      dv = dv, t0 = t_node, step = mspan / segs,
     }
   else
     traj_mnv = nil
