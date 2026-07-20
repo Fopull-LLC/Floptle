@@ -86,6 +86,13 @@ impl Editor {
         // G1 residency: stream celestial terrain fields in/out by camera distance
         // (BEFORE the mesh sync so a landed field streams meshes this same frame;
         // outside the render borrows because a mid-Play arrival rebuilds the sim).
+        // Hand queued `terrain.generatePlanet` fills to the generator BEFORE
+        // residency runs: the fill marks its body generation-owned
+        // (`planet_gen_pending`), and residency must see that mark the same
+        // frame — or it adopts the freshly created body as cold and streams a
+        // STALE same-id file into it (the authored scene's old planet loaded
+        // under a rolled galaxy's spawn world — Ty fell straight through it).
+        self.drain_terrain_generates();
         self.update_terrain_residency(lod_cam);
         // Background checkpoints (terrain.flush): a few chunks of encoding per
         // frame + threaded writes — autosaves must never stutter the game.
@@ -4795,11 +4802,9 @@ impl Editor {
         if let Some((e, kind, func)) = cmd.run_editor_action {
             self.run_editor_action(e, &kind, &func);
         }
-        // Adopt any finished background planet generations (editor actions).
-        // Runtime `terrain.generatePlanet` (a game regenerating its galaxy from
-        // a save-slot seed at a loading screen) drains here — editor actions
-        // drain their own queue inside `run_editor_action`.
-        self.drain_terrain_generates();
+        // Adopt any finished background planet generations. (The runtime queue
+        // DRAINS earlier in the frame — before residency, see render_frame's
+        // ordering comment; editor actions drain inside `run_editor_action`.)
         self.poll_terrain_generates();
         if let Some(name) = cmd.new_scene {
             self.new_scene(&name);
