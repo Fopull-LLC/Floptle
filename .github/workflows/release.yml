@@ -25,7 +25,9 @@ jobs:
         include:
           - { os: ubuntu-latest,  target: linux-x86_64,  rust: x86_64-unknown-linux-gnu }
           - { os: macos-14,       target: macos-aarch64, rust: aarch64-apple-darwin }
-          - { os: macos-13,       target: macos-x86_64,  rust: x86_64-apple-darwin }
+          # Intel macOS CROSS-COMPILES on the ARM runner (Apple toolchains are
+          # multi-arch) — macos-13 Intel runners are retired and queue forever.
+          - { os: macos-14,       target: macos-x86_64,  rust: x86_64-apple-darwin }
           - { os: windows-latest, target: windows-x86_64, rust: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
