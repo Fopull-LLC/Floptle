@@ -272,19 +272,30 @@ impl Editor {
             .collect()
     }
 
-    /// The cold celestials the game cannot start without: any body a dynamic
-    /// node (the player, the ship) is practically ON — within
-    /// `RESIDENT_SYNC_RADII` body radii. Falling through one of these is the
-    /// bug class this exists to kill.
-    pub(crate) fn required_cold_terrains(&self) -> Vec<(Entity, u32)> {
+    /// The UNREADY terrains the game cannot start without: any celestial
+    /// terrain body with NO resident field that a dynamic node (the player,
+    /// the ship) is practically ON — within `RESIDENT_SYNC_RADII` body radii.
+    /// Deliberately not just the COLD set: a spawn planet whose first
+    /// generation is still running (▶ Generate then Play before it lands) is
+    /// in NEITHER set — it was the hole that let the player fall through when
+    /// Play started mid-generation. Falling through one of these is the bug
+    /// class this exists to kill. Returns (entity, id, is_cold) — only cold
+    /// entries are kickable (mid-generation ones land via the generation
+    /// queue's own adopt).
+    pub(crate) fn required_unready_terrains(&self) -> Vec<(Entity, u32, bool)> {
         let anchors: Vec<floptle_core::math::DVec3> = self
             .world
             .query::<floptle_core::RigidBody>()
             .map(|(e, _)| floptle_core::world_transform(&self.world, e).translation)
             .collect();
-        self.terrain_cold
-            .iter()
-            .filter_map(|(&e, cold)| {
+        self.world
+            .query::<floptle_core::Matter>()
+            .filter_map(|(e, m)| match m {
+                floptle_core::Matter::Terrain { id } => Some((e, *id)),
+                _ => None,
+            })
+            .filter(|(e, _)| !self.terrains.contains_key(e))
+            .filter_map(|(e, id)| {
                 let cb = self.world.get::<floptle_core::CelestialBody>(e)?;
                 let p = floptle_core::world_transform(&self.world, e).translation;
                 let reach =
@@ -292,7 +303,7 @@ impl Editor {
                 anchors
                     .iter()
                     .any(|a| (*a - p).length() < reach)
-                    .then_some((e, cold.id))
+                    .then_some((e, id, self.terrain_cold.contains_key(&e)))
             })
             .collect()
     }
@@ -303,12 +314,14 @@ impl Editor {
     /// UI loading it either (the no-stutter rule). The residency driver
     /// releases the hold the moment nothing required is left cold.
     pub(crate) fn begin_play_terrain_hold(&mut self) {
-        let need = self.required_cold_terrains();
+        let need = self.required_unready_terrains();
         if need.is_empty() {
             return;
         }
-        for (e, id) in need {
-            self.kick_terrain_load(e, id);
+        for (e, id, cold) in need {
+            if cold {
+                self.kick_terrain_load(e, id);
+            } // mid-generation bodies land via the generation queue's adopt
         }
         self.play_stream_hold = true;
         self.paused = true;

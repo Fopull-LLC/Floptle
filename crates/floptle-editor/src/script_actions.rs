@@ -163,13 +163,16 @@ impl Editor {
             // the SDF shadow atlas around the new field.
             self.terrain_slots.clear();
             self.terrain_gpu_dirty = true;
+            // Generation may finish DURING Play (▶ Generate then Play before the
+            // fill lands, or a runtime regeneration): rebuild the sim so the new
+            // surface is solid immediately — a body standing there must never
+            // fall through a planet whose field just arrived. This is also what
+            // releases the Play-start streaming hold for mid-generation bodies.
             if self.sim.is_some() {
+                self.rebuild_sim();
                 self.console.push(
-                    floptle_script::LogLevel::Warn,
-                    format!(
-                        "⛰ terrain id {id} replaced during Play — collision keeps the OLD \
-                         surface until Play restarts"
-                    ),
+                    floptle_script::LogLevel::Debug,
+                    format!("⛰ terrain id {id} generated during Play — collision live"),
                     None,
                 );
             }

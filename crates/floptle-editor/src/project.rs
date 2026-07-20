@@ -813,6 +813,36 @@ impl Editor {
             !matches!(world.get::<Matter>(*e),
                 Some(Matter::Terrain { id }) if saved_ids.contains(id))
         });
+        // Stamp each saved celestial field's residency sidecar: impostor color +
+        // the genspec hash it was written under. The hash is what lets streaming
+        // trust this exact file for this exact body — without it, a regenerated
+        // system's stale same-id file would refuse to load (or worse, an unstamped
+        // one would load the WRONG planet).
+        let stamps: Vec<(u32, [f32; 3], Option<u64>)> = self
+            .terrains
+            .iter()
+            .filter_map(|(&e, t)| {
+                let id = match self.world.get::<Matter>(e) {
+                    Some(Matter::Terrain { id }) if saved_ids.contains(id) => *id,
+                    _ => return None,
+                };
+                let cb = self.world.get::<floptle_core::CelestialBody>(e)?;
+                let color = self
+                    .terrain_render
+                    .get(&e)
+                    .and_then(|r| r.impostor_color)
+                    .unwrap_or_else(|| {
+                        crate::terrain_edit::impostor_surface_color(
+                            &t.field,
+                            cb.body_radius as f32,
+                        )
+                    });
+                Some((id, color, self.terrain_spec_hash_of(e)))
+            })
+            .collect();
+        for (id, color, hash) in stamps {
+            self.write_terrain_meta(id, color, hash);
+        }
         // Vertex paint: per-vertex arrays live beside the scene for the same reason
         // terrain fields do — they have no business in a .ron.
         self.save_paint();

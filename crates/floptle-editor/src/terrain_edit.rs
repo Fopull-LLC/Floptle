@@ -137,20 +137,44 @@ pub(crate) struct TerrainLoadJob {
     pub rx: std::sync::mpsc::Receiver<Option<EditorTerrain>>,
 }
 
-/// Run one load/generate to completion — file read+parse or full procgen, plus
-/// the shadow-proxy derivation. Called on background threads (and blockingly at
-/// Play start / the emergency radius). None = unreadable file / bad genspec.
-fn load_terrain_from(src: TerrainSource) -> Option<EditorTerrain> {
-    let field = match src {
-        TerrainSource::File(path) => {
-            floptle_field::ChunkField::from_bytes(&std::fs::read(&path).ok()?)?
+/// Run a load to completion, trying each candidate source IN ORDER — a
+/// truncated/corrupt field file falls back to the next source (usually the
+/// genspec, which regenerates the body deterministically) instead of failing
+/// the whole stream: a bad file must never take a world offline when its
+/// recipe is right there on the node. File read+parse or full procgen, plus
+/// the shadow-proxy derivation; runs on background threads (and blockingly
+/// for file sources at the emergency radius). None = every candidate failed.
+fn load_terrain_from(sources: Vec<TerrainSource>) -> Option<EditorTerrain> {
+    for src in sources {
+        let field = match src {
+            TerrainSource::File(path) => std::fs::read(&path)
+                .ok()
+                .and_then(|b| floptle_field::ChunkField::from_bytes(&b)),
+            TerrainSource::Generate(spec) => ron::from_str(&spec)
+                .ok()
+                .map(|fill: floptle_field::procgen::PlanetFill| {
+                    floptle_field::procgen::generate_planet(&fill)
+                }),
+        };
+        if let Some(field) = field {
+            return Some(EditorTerrain::new(field));
         }
-        TerrainSource::Generate(spec) => {
-            let fill: floptle_field::procgen::PlanetFill = ron::from_str(&spec).ok()?;
-            floptle_field::procgen::generate_planet(&fill)
-        }
-    };
-    Some(EditorTerrain::new(field))
+    }
+    None
+}
+
+/// Stable hash of a genspec string — recorded in the `.meta` sidecar when a
+/// field is written, so a PROJECT field file is only trusted for a body whose
+/// genspec still matches. Regenerating a system reuses terrain ids: without
+/// this, the OLD system's leftover `<scene>.<id>.cfield` would load as the NEW
+/// body's terrain (the wrong planet entirely). Save-slot files skip the check —
+/// a slot belongs to one galaxy seed by construction (the game's contract).
+fn genspec_hash(spec: &str) -> u64 {
+    let mut h: u64 = 5381;
+    for b in spec.as_bytes() {
+        h = h.wrapping_mul(33) ^ u64::from(*b);
+    }
+    h
 }
 
 /// A genspec body's impostor color without generating anything: its surface
@@ -163,7 +187,7 @@ fn genspec_impostor_color(spec: &str) -> Option<[f32; 3]> {
 /// The body's average surface color for its impostor sphere: 26 rays from
 /// outside toward the center, averaging the voxel color where each first hits.
 /// Field-space — celestial terrain fields are authored centered on the origin.
-fn impostor_surface_color(field: &floptle_field::ChunkField, radius: f32) -> [f32; 3] {
+pub(crate) fn impostor_surface_color(field: &floptle_field::ChunkField, radius: f32) -> [f32; 3] {
     let mut sum = [0.0f32; 3];
     let mut n = 0.0f32;
     for x in -1..=1i32 {
@@ -1183,12 +1207,18 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.{id}.meta", self.scene_name))
     }
 
-    fn write_terrain_meta(&self, id: u32, color: [f32; 3]) {
+    /// Meta v2: line 1 = "r g b" (impostor color), line 2 = the genspec hash the
+    /// field file was written under (absent for bodies with no genspec).
+    pub(crate) fn write_terrain_meta(&self, id: u32, color: [f32; 3], spec_hash: Option<u64>) {
         let p = self.terrain_meta_path_id(id);
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("{} {} {}", color[0], color[1], color[2]));
+        let mut text = format!("{} {} {}", color[0], color[1], color[2]);
+        if let Some(h) = spec_hash {
+            text.push_str(&format!("\n{h}"));
+        }
+        let _ = std::fs::write(p, text);
     }
 
     fn read_terrain_meta(&self, id: u32) -> Option<[f32; 3]> {
@@ -1198,6 +1228,18 @@ impl Editor {
             (Some(Ok(r)), Some(Ok(g)), Some(Ok(b))) => Some([r, g, b]),
             _ => None,
         }
+    }
+
+    /// The genspec hash the field file was written under (meta line 2, if any).
+    fn read_terrain_meta_hash(&self, id: u32) -> Option<u64> {
+        let text = std::fs::read_to_string(self.terrain_meta_path_id(id)).ok()?;
+        text.split_whitespace().nth(3)?.parse().ok()
+    }
+
+    /// The genspec-hash stamp for a node's current meta write: hash of its
+    /// genspec, or None for a purely authored body.
+    pub(crate) fn terrain_spec_hash_of(&self, e: Entity) -> Option<u64> {
+        self.world.get::<floptle_core::TerrainGen>(e).map(|g| genspec_hash(&g.0))
     }
 
     // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
@@ -1266,7 +1308,10 @@ impl Editor {
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
         });
         for (e, t, name, secs) in landed {
-            if self.world.is_alive(e) && self.terrain_cold.contains_key(&e) {
+            // Accept as long as the body still lacks a resident field — cold
+            // membership isn't required (the generation queue may have adopted
+            // or a state edge dropped the cold entry mid-flight).
+            if self.world.is_alive(e) && !self.terrains.contains_key(&e) {
                 self.finish_terrain_load(e, t);
                 self.console.push(
                     floptle_script::LogLevel::Debug,
@@ -1345,7 +1390,7 @@ impl Editor {
         //    frees up as loads land; failures drop out of the cold set above, so
         //    a dead stream can't hold Play hostage).
         if self.play_stream_hold && self.playing {
-            let need = self.required_cold_terrains();
+            let need = self.required_unready_terrains();
             if need.is_empty() {
                 self.play_stream_hold = false;
                 self.paused = false;
@@ -1356,34 +1401,53 @@ impl Editor {
                     None,
                 );
             } else {
-                for (e, id) in need {
-                    self.kick_terrain_load(e, id);
+                for (e, id, cold) in need {
+                    if cold {
+                        self.kick_terrain_load(e, id);
+                    } // mid-generation bodies land via the generation queue
                 }
             }
         }
     }
 
-    /// Where a cold terrain's field comes FROM, in priority order (G2):
-    /// the game's save-slot file (player-edited state) → the project file
-    /// (authored) → the node's genspec (deterministic on-demand generation —
-    /// no file anywhere). None = nothing to load (stays an impostor).
-    fn resolve_terrain_source(&self, e: Entity, id: u32) -> Option<TerrainSource> {
+    /// The ORDERED candidate sources for a cold terrain (G2) — the loader tries
+    /// them in sequence, so a corrupt file degrades to regeneration instead of
+    /// taking the world offline:
+    ///   1. the game's save-slot file (player-edited state; trusted as-is —
+    ///      a slot belongs to one galaxy by the game's own contract),
+    ///   2. the project file (authored/cached) — but ONLY if it was written
+    ///      under the node's CURRENT genspec (meta hash line): regeneration
+    ///      reuses terrain ids, and a stale file from the previous system must
+    ///      not load as the new body's terrain,
+    ///   3. the genspec itself (deterministic on-demand generation).
+    ///
+    /// Empty = nothing to load from (stays an impostor).
+    fn resolve_terrain_source(&self, e: Entity, id: u32) -> Vec<TerrainSource> {
+        let mut out = Vec::new();
+        let genspec = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         if let Some(sd) = self.script_host.terrain_save_dir() {
             let p = self
                 .project_root
                 .join(&sd)
                 .join(format!("{}.{id}.cfield", self.scene_name));
             if p.exists() {
-                return Some(TerrainSource::File(p));
+                out.push(TerrainSource::File(p));
             }
         }
         let p = self.terrain_field_path_id(id);
         if p.exists() {
-            return Some(TerrainSource::File(p));
+            let trusted = match &genspec {
+                None => true, // purely authored body: the file IS the truth
+                Some(g) => self.read_terrain_meta_hash(id) == Some(genspec_hash(g)),
+            };
+            if trusted {
+                out.push(TerrainSource::File(p));
+            }
         }
-        self.world
-            .get::<floptle_core::TerrainGen>(e)
-            .map(|g| TerrainSource::Generate(g.0.clone()))
+        if let Some(g) = genspec {
+            out.push(TerrainSource::Generate(g));
+        }
+        out
     }
 
     /// The save-slot destination for an edited field, when the game set one.
@@ -1403,7 +1467,8 @@ impl Editor {
         {
             return;
         }
-        let Some(src) = self.resolve_terrain_source(e, id) else {
+        let sources = self.resolve_terrain_source(e, id);
+        if sources.is_empty() {
             // Nothing to load from at all (no file, no genspec): stop trying.
             self.terrain_cold.remove(&e);
             self.console.push(
@@ -1412,7 +1477,7 @@ impl Editor {
                 None,
             );
             return;
-        };
+        }
         let name = self
             .world
             .get::<floptle_core::Name>(e)
@@ -1420,7 +1485,7 @@ impl Editor {
             .unwrap_or_else(|| format!("terrain {id}"));
         self.console.push(
             floptle_script::LogLevel::Debug,
-            match &src {
+            match &sources[0] {
                 TerrainSource::File(_) => format!("⛰ streaming {name} in (field file)…"),
                 TerrainSource::Generate(_) => {
                     format!("⛰ streaming {name} in (generating from its genspec)…")
@@ -1430,7 +1495,7 @@ impl Editor {
         );
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(load_terrain_from(src));
+            let _ = tx.send(load_terrain_from(sources));
         });
         self.terrain_load_jobs.push(TerrainLoadJob {
             e,
@@ -1440,21 +1505,50 @@ impl Editor {
         });
     }
 
-    /// Blocking load — Play start (the body you spawn ON needs collision before
-    /// the first tick) and the emergency inside `RESIDENT_SYNC_RADII`.
+    /// Blocking load — the mid-play emergency inside `RESIDENT_SYNC_RADII`
+    /// (teleports, summons). Only a FILE loads synchronously; a body whose only
+    /// source is its genspec delegates to the background (a 10-second
+    /// generation must never freeze a frame — Play start covers the common
+    /// case with the streaming hold instead).
     pub(crate) fn load_terrain_blocking(&mut self, e: Entity, id: u32) -> bool {
-        let Some(t) = self.resolve_terrain_source(e, id).and_then(load_terrain_from) else {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                format!("terrain id {id}: cold field failed to load — body stays an impostor"),
-                None,
-            );
-            self.terrain_cold.remove(&e); // don't retry every frame
-            return false;
-        };
-        self.terrain_load_jobs.retain(|j| j.e != e); // a background job is now stale
-        self.finish_terrain_load(e, t);
-        true
+        let sources = self.resolve_terrain_source(e, id);
+        match sources.first() {
+            None => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "⛰ terrain id {id}: no field file and no genspec — impostor only"
+                    ),
+                    None,
+                );
+                self.terrain_cold.remove(&e); // don't retry every frame
+                false
+            }
+            Some(TerrainSource::Generate(_)) => {
+                self.kick_terrain_load(e, id);
+                false
+            }
+            Some(TerrainSource::File(_)) => {
+                // Synchronously try the FILE candidates only — a corrupt file
+                // must fall back to the background chain (which ends in the
+                // genspec), never to an in-frame generation.
+                let files: Vec<TerrainSource> = sources
+                    .into_iter()
+                    .filter(|s| matches!(s, TerrainSource::File(_)))
+                    .collect();
+                match load_terrain_from(files) {
+                    Some(t) => {
+                        self.terrain_load_jobs.retain(|j| j.e != e); // job now stale
+                        self.finish_terrain_load(e, t);
+                        true
+                    }
+                    None => {
+                        self.kick_terrain_load(e, id);
+                        false
+                    }
+                }
+            }
+        }
     }
 
     /// A field arrived (background or blocking): make it resident. During Play the
@@ -1528,7 +1622,8 @@ impl Editor {
             }
         }
         if !self.playing {
-            self.write_terrain_meta(id, color);
+            let hash = self.terrain_spec_hash_of(e);
+            self.write_terrain_meta(id, color, hash);
         }
         self.terrains.remove(&e);
         self.play_loaded_terrains.remove(&e);
@@ -1650,7 +1745,8 @@ impl Editor {
                 && self.terrain_field_path_id(id).exists()
             {
                 let color = impostor_surface_color(&field, cb.body_radius as f32);
-                self.write_terrain_meta(id, color);
+                let hash = self.terrain_spec_hash_of(e);
+                self.write_terrain_meta(id, color, hash);
             }
             self.terrains.insert(e, EditorTerrain::new(field));
         }
@@ -1909,7 +2005,7 @@ mod residency_tests {
         let spec = ron::to_string(&fill).expect("genspec serializes");
         let color = genspec_impostor_color(&spec).expect("impostor color from genspec");
         assert_eq!(color, fill.surface_a.color);
-        let t = load_terrain_from(TerrainSource::Generate(spec))
+        let t = load_terrain_from(vec![TerrainSource::Generate(spec.clone())])
             .expect("genspec generates a terrain");
         assert!(t.field.data_chunks() > 0, "generated field is empty");
         // The surface is really there: a ray from outside hits near the radius.
@@ -1924,7 +2020,23 @@ mod residency_tests {
             fill.radius
         );
         // A garbled genspec fails CLEANLY (None → the loud-failure path), never panics.
-        assert!(load_terrain_from(TerrainSource::Generate("(not ron".into())).is_none());
+        assert!(load_terrain_from(vec![TerrainSource::Generate("(not ron".into())]).is_none());
         assert!(genspec_impostor_color("(not ron").is_none());
+        // A corrupt FILE falls back to the genspec instead of failing the stream —
+        // the exact failure Ty hit (LFS pointer stubs where fields should be).
+        let dir = std::env::temp_dir().join(format!("floptle-badfield-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("corrupt.cfield");
+        std::fs::write(&bad, b"version https://git-lfs -- not a field").unwrap();
+        let t2 = load_terrain_from(vec![
+            TerrainSource::File(bad),
+            TerrainSource::Generate(spec),
+        ])
+        .expect("corrupt file falls back to genspec generation");
+        assert!(t2.field.data_chunks() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Genspec-hash gate: same spec → same hash, different spec → different.
+        assert_eq!(genspec_hash("abc"), genspec_hash("abc"));
+        assert_ne!(genspec_hash("abc"), genspec_hash("abd"));
     }
 }
