@@ -749,6 +749,13 @@ function terrain.generatePlanet(id, opts) end
 ---@param path? string
 ---@return string|nil
 function terrain.saveDir(path) end
+---Keep the named body's terrain RESIDENT this frame regardless of where the
+---ship/player physically is: it streams in if cold and never streams out.
+---Immediate mode — call it every frame while you care (the map calls it for
+---its focused planet). Streaming is otherwise anchored to the PHYSICAL
+---positions of dynamic bodies, never the camera.
+---@param bodyName string The body's node name (as in `space.bodies()`).
+function terrain.warm(bodyName) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
