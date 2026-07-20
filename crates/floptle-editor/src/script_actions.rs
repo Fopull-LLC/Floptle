@@ -160,7 +160,7 @@ impl Editor {
             self.terrains.insert(e, crate::terrain_edit::EditorTerrain::new(field));
             // A generated field exists ONLY in RAM until the scene is saved — an
             // eviction (G1 residency) must write it to disk before dropping it.
-            self.terrain_disk_dirty.insert(e);
+            self.touch_terrain_edit(e);
             // Restream every terrain's render chunks (cheap, brief) + rebuild
             // the SDF shadow atlas around the new field.
             self.terrain_slots.clear();

@@ -137,6 +137,43 @@ pub(crate) struct TerrainLoadJob {
     pub rx: std::sync::mpsc::Receiver<Option<EditorTerrain>>,
 }
 
+/// One in-flight background CHECKPOINT (`terrain.flush()` → the save slot):
+/// the field encodes a few chunks per frame on the main thread (it can't leave
+/// it — scripts keep digging it), then the finished blob writes on a thread.
+pub(crate) struct TerrainSaveJob {
+    pub e: Entity,
+    /// Body name at job start — console lines outlive the entity.
+    pub name: String,
+    /// Slot file the blob lands in (captured at start: save dir can't change
+    /// under a running job).
+    pub path: PathBuf,
+    /// `terrain_edit_stamps` counter at job start. Still equal when the encode
+    /// finishes ⇒ the blob is a clean snapshot and the dirty flag clears; an
+    /// edit raced in ⇒ the blob is torn (valid, just mixed generations) — it
+    /// still writes (newer than any previous file) but the field STAYS dirty
+    /// so the next checkpoint re-saves it whole.
+    pub stamp: u64,
+    pub state: TerrainSaveState,
+}
+
+pub(crate) enum TerrainSaveState {
+    /// Amortized `FieldSaver` encoding — driven a budget of chunks per frame.
+    Encoding(floptle_field::FieldSaver),
+    /// Blob handed to a writer thread; the channel reports bytes written.
+    Writing(std::sync::mpsc::Receiver<Result<usize, String>>),
+}
+
+/// Chunks encoded per frame while checkpointing (~1 ms of RLE walking — the
+/// whole point: a dug-up planet serializes over a few dozen frames instead of
+/// freezing one).
+const CHECKPOINT_CHUNKS_PER_FRAME: usize = 48;
+/// A field edited more recently than this is SKIPPED by the checkpoint picker —
+/// saves happen in the quiet moments between digs, never under the shovel.
+const CHECKPOINT_QUIET_SECS: f64 = 1.5;
+/// …unless it has been waiting this long (someone digging non-stop): start
+/// anyway — a torn snapshot beats a checkpoint that never happens.
+const CHECKPOINT_FORCE_SECS: f64 = 20.0;
+
 /// Run a load to completion, trying each candidate source IN ORDER — a
 /// truncated/corrupt field file falls back to the next source (usually the
 /// genspec, which regenerates the body deterministically) instead of failing
@@ -1121,7 +1158,17 @@ impl Editor {
             _ => (e, mn, mx, geom),
         });
         self.terrain_chunks_dirty.entry(e).or_default().extend(touched);
-        self.terrain_disk_dirty.insert(e); // an eviction must save this field first
+        self.touch_terrain_edit(e); // an eviction must save this field first
+    }
+
+    /// Record a field edit: dirty-for-disk + a fresh edit stamp. EVERY path that
+    /// changes a field's voxels must come through here (brush/script dabs, undo
+    /// swaps, generation adopts) — the stamp is how a background checkpoint
+    /// knows its snapshot raced an edit, and how the picker finds quiet fields.
+    pub(crate) fn touch_terrain_edit(&mut self, e: Entity) {
+        self.terrain_disk_dirty.insert(e);
+        self.terrain_edit_clock += 1;
+        self.terrain_edit_stamps.insert(e, (self.terrain_edit_clock, std::time::Instant::now()));
     }
 
     /// End-of-stroke bookkeeping (mouse-up): if the stroke pushed the field past its
@@ -1242,6 +1289,236 @@ impl Editor {
         self.world.get::<floptle_core::TerrainGen>(e).map(|g| genspec_hash(&g.0))
     }
 
+    // ---- background checkpoints (terrain.flush) -------------------------------
+
+    /// Per-frame driver for BACKGROUND checkpoints, one job at a time: absorb
+    /// `terrain.flush()` requests into the queue, drive the in-flight
+    /// encode/write, start the next quiet field. The encode runs on the main
+    /// thread (the field can't leave it — scripts keep digging) but only
+    /// [`CHECKPOINT_CHUNKS_PER_FRAME`] chunks per frame; the file write runs
+    /// on a thread. The synchronous ancestor of this froze the game ~1s per
+    /// autosave on a dug-up planet — the player must never feel a checkpoint.
+    pub(crate) fn step_terrain_checkpoint(&mut self) {
+        // 1. terrain.flush() → queue every dirty resident field (dedup).
+        if self.script_host.take_terrain_flush() {
+            if self.script_host.terrain_save_dir().is_some() {
+                let now = std::time::Instant::now();
+                let dirty: Vec<Entity> = self
+                    .terrains
+                    .keys()
+                    .copied()
+                    .filter(|e| self.terrain_disk_dirty.contains(e))
+                    .collect();
+                let mut queued = 0usize;
+                for e in dirty {
+                    let already = self.terrain_flush_queue.iter().any(|(q, _)| *q == e)
+                        || self.terrain_save_job.as_ref().is_some_and(|j| j.e == e);
+                    if !already {
+                        self.terrain_flush_queue.push((e, now));
+                        queued += 1;
+                    }
+                }
+                if queued > 0 {
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!("⛰ checkpoint: {queued} field(s) queued — saving in the background"),
+                        None,
+                    );
+                }
+            } else {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "terrain.flush(): no save slot set (terrain.saveDir) — nothing written"
+                        .into(),
+                    None,
+                );
+            }
+        }
+
+        // 2. Drive the in-flight job.
+        if let Some(mut job) = self.terrain_save_job.take() {
+            match job.state {
+                TerrainSaveState::Writing(rx) => match rx.try_recv() {
+                    Ok(Ok(bytes)) => self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "⛰ checkpointed {} → save slot ({:.1} MB)",
+                            job.name,
+                            bytes as f64 / 1e6
+                        ),
+                        None,
+                    ),
+                    Ok(Err(err)) => {
+                        self.terrain_disk_dirty.insert(job.e); // NOT safely on disk
+                        self.console.push(
+                            floptle_script::LogLevel::Error,
+                            format!("⛰ checkpoint of {} FAILED: {err}", job.name),
+                            None,
+                        );
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        job.state = TerrainSaveState::Writing(rx);
+                        self.terrain_save_job = Some(job);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.terrain_disk_dirty.insert(job.e);
+                        self.console.push(
+                            floptle_script::LogLevel::Error,
+                            format!("⛰ checkpoint writer for {} died — field kept dirty", job.name),
+                            None,
+                        );
+                    }
+                },
+                TerrainSaveState::Encoding(mut saver) => {
+                    let Some(t) = self.terrains.get(&job.e) else {
+                        return; // field left RAM mid-encode (the evictor saved it) — drop
+                    };
+                    if !t.field.save_step(&mut saver, CHECKPOINT_CHUNKS_PER_FRAME) {
+                        job.state = TerrainSaveState::Encoding(saver);
+                        self.terrain_save_job = Some(job);
+                        return;
+                    }
+                    let bytes = saver.finish();
+                    // Clean snapshot ⇒ the file will match RAM: clear dirty now
+                    // (an edit AFTER this line re-dirties via its new stamp).
+                    // Torn (an edit raced the encode) ⇒ blob is valid but mixes
+                    // generations: still write it — newer than any previous
+                    // file — but keep the field dirty for the next checkpoint.
+                    let clean = self.terrain_edit_stamps.get(&job.e).map(|(s, _)| *s)
+                        == Some(job.stamp);
+                    if clean {
+                        self.terrain_disk_dirty.remove(&job.e);
+                    }
+                    let path = job.path.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let res = (|| {
+                            if let Some(dir) = path.parent() {
+                                std::fs::create_dir_all(dir)
+                                    .map_err(|e| format!("create {dir:?}: {e}"))?;
+                            }
+                            std::fs::write(&path, &bytes)
+                                .map_err(|e| format!("write {path:?}: {e}"))?;
+                            Ok(bytes.len())
+                        })();
+                        let _ = tx.send(res);
+                    });
+                    job.state = TerrainSaveState::Writing(rx);
+                    self.terrain_save_job = Some(job);
+                }
+            }
+        }
+
+        // 3. Start the next job — QUIET fields only (edited ≥1.5s ago), forced
+        //    past the age cap so non-stop digging can't starve checkpoints.
+        if self.terrain_save_job.is_some() || self.terrain_flush_queue.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let stamps = &self.terrain_edit_stamps;
+        let pick = self.terrain_flush_queue.iter().position(|(e, since)| {
+            let quiet = stamps.get(e).is_none_or(|(_, at)| {
+                now.duration_since(*at).as_secs_f64() >= CHECKPOINT_QUIET_SECS
+            });
+            quiet || now.duration_since(*since).as_secs_f64() >= CHECKPOINT_FORCE_SECS
+        });
+        let Some(i) = pick else { return };
+        let (e, _) = self.terrain_flush_queue.remove(i);
+        // Stale entries drop silently: written by a sync path, evicted, node
+        // destroyed, or the slot closed — nothing left to checkpoint.
+        if !self.terrain_disk_dirty.contains(&e) || !self.world.is_alive(e) {
+            return;
+        }
+        let Some(t) = self.terrains.get(&e) else { return };
+        let Some(sd) = self.script_host.terrain_save_dir() else { return };
+        let Some(Matter::Terrain { id }) = self.world.get::<Matter>(e).cloned() else { return };
+        let name = self
+            .world
+            .get::<floptle_core::Name>(e)
+            .map(|n| n.0.clone())
+            .unwrap_or_else(|| format!("terrain {id}"));
+        let path =
+            self.project_root.join(&sd).join(format!("{}.{id}.cfield", self.scene_name));
+        let stamp = self.terrain_edit_stamps.get(&e).map(|(s, _)| *s).unwrap_or(0);
+        self.terrain_save_job = Some(TerrainSaveJob {
+            e,
+            name,
+            path,
+            stamp,
+            state: TerrainSaveState::Encoding(t.field.begin_save()),
+        });
+    }
+
+    /// Land or cancel the in-flight background checkpoint before a SYNCHRONOUS
+    /// writer (Stop, eviction, scene switch) touches the same files: an encode
+    /// just drops (the sync path writes fresher data anyway), an in-flight
+    /// write JOINS — an older blob must never land after a newer sync write.
+    pub(crate) fn settle_terrain_checkpoint(&mut self) {
+        let Some(job) = self.terrain_save_job.take() else { return };
+        if let TerrainSaveState::Writing(rx) = job.state {
+            match rx.recv() {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    self.terrain_disk_dirty.insert(job.e);
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("⛰ checkpoint of {} FAILED: {err}", job.name),
+                        None,
+                    );
+                }
+                Err(_) => {
+                    self.terrain_disk_dirty.insert(job.e);
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("⛰ checkpoint writer for {} died — field kept dirty", job.name),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Synchronously write EVERY dirty resident field to the save slot — the
+    /// exit-path guarantee (Stop, scene switch out of a slot): whatever the
+    /// background pipeline was mid-way through, the player's edits are on disk
+    /// when this returns. No-op without a slot.
+    pub(crate) fn flush_slot_terrains_sync(&mut self) {
+        let Some(sd) = self.script_host.terrain_save_dir() else { return };
+        self.settle_terrain_checkpoint();
+        self.terrain_flush_queue.clear();
+        let _ = self.script_host.take_terrain_flush(); // absorbed: all writes now
+        let dirty: Vec<(Entity, u32)> = self
+            .terrains
+            .keys()
+            .filter(|e| self.terrain_disk_dirty.contains(e))
+            .filter_map(|&e| match self.world.get::<Matter>(e) {
+                Some(Matter::Terrain { id }) => Some((e, *id)),
+                _ => None,
+            })
+            .collect();
+        let mut wrote = 0usize;
+        for (e, id) in dirty {
+            let path =
+                self.project_root.join(&sd).join(format!("{}.{id}.cfield", self.scene_name));
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Some(t) = self.terrains.get(&e)
+                && std::fs::write(&path, t.field.to_bytes()).is_ok()
+            {
+                self.terrain_disk_dirty.remove(&e);
+                wrote += 1;
+            }
+        }
+        if wrote > 0 {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("⛰ flushed {wrote} terrain field(s) to the save slot"),
+                None,
+            );
+        }
+    }
+
     // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
 
     /// Per-frame residency driver: land finished background loads, kick loads
@@ -1273,52 +1550,8 @@ impl Editor {
         if anchors.is_empty() {
             return; // a playing scene with no dynamic bodies: leave residency as-is
         }
-        // terrain.flush(): write every edited resident field to the save slot
-        // now — a checkpoint. Slot files are what make the NEXT slot load a
-        // fast read instead of a regeneration.
-        if self.script_host.take_terrain_flush() {
-            if let Some(sd) = self.script_host.terrain_save_dir() {
-                let dirty: Vec<(Entity, u32)> = self
-                    .terrains
-                    .keys()
-                    .filter(|e| self.terrain_disk_dirty.contains(e))
-                    .filter_map(|&e| match self.world.get::<Matter>(e) {
-                        Some(Matter::Terrain { id }) => Some((e, *id)),
-                        _ => None,
-                    })
-                    .collect();
-                let mut wrote = 0usize;
-                for (e, id) in dirty {
-                    let path = self
-                        .project_root
-                        .join(&sd)
-                        .join(format!("{}.{id}.cfield", self.scene_name));
-                    if let Some(dir) = path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    if let Some(t) = self.terrains.get(&e)
-                        && std::fs::write(&path, t.field.to_bytes()).is_ok()
-                    {
-                        self.terrain_disk_dirty.remove(&e);
-                        wrote += 1;
-                    }
-                }
-                if wrote > 0 {
-                    self.console.push(
-                        floptle_script::LogLevel::Debug,
-                        format!("⛰ flushed {wrote} terrain field(s) to the save slot"),
-                        None,
-                    );
-                }
-            } else {
-                self.console.push(
-                    floptle_script::LogLevel::Warn,
-                    "terrain.flush(): no save slot set (terrain.saveDir) — nothing written"
-                        .into(),
-                    None,
-                );
-            }
-        }
+        // (terrain.flush() checkpoints are handled by `step_terrain_checkpoint`
+        // — background, amortized. Exit paths use `flush_slot_terrains_sync`.)
         let warm_names = self.script_host.take_terrain_warm();
         let warm: std::collections::HashSet<Entity> = if warm_names.is_empty() {
             Default::default()
@@ -1671,6 +1904,12 @@ impl Editor {
         {
             return;
         }
+        // A background checkpoint mid-flight on this body races the eviction
+        // save (same file) — settle it first; its queue entries are moot.
+        if self.terrain_save_job.as_ref().is_some_and(|j| j.e == e) {
+            self.settle_terrain_checkpoint();
+        }
+        self.terrain_flush_queue.retain(|(q, _)| *q != e);
         let Some(t) = self.terrains.get(&e) else { return };
         let color = self
             .terrain_render
@@ -1737,6 +1976,11 @@ impl Editor {
     /// sparse store, old scenes just work) → a fresh flat slab. Call once `scene_name`
     /// is set.
     pub(crate) fn adopt_terrain(&mut self) {
+        // A checkpoint mid-flight for the OLD scene must land before its
+        // entities are forgotten (entity ids recycle across scene loads).
+        self.settle_terrain_checkpoint();
+        self.terrain_flush_queue.clear();
+        self.terrain_edit_stamps.clear();
         self.terrains.clear();
         self.terrain_cold.clear();
         self.terrain_disk_dirty.clear();

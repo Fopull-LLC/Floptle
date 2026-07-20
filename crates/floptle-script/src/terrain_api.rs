@@ -49,6 +49,9 @@ pub(crate) struct TerrainStreamShared {
     pub save_dir: Rc<RefCell<Option<String>>>,
     pub warm: Rc<RefCell<Vec<String>>>,
     pub flush: Rc<RefCell<bool>>,
+    /// Project root — `terrain.deleteSaveDir` resolves its (validated,
+    /// relative) path against this.
+    pub root: Rc<RefCell<std::path::PathBuf>>,
 }
 
 pub(crate) fn install_terrain_api(
@@ -59,8 +62,58 @@ pub(crate) fn install_terrain_api(
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
     stream: TerrainStreamShared,
 ) {
-    let TerrainStreamShared { save_dir, warm, flush } = stream;
+    let TerrainStreamShared { save_dir, warm, flush, root } = stream;
     let Ok(t) = lua.create_table() else { return };
+
+    // terrain.deleteSaveDir(path) — delete a save slot's PERSISTED TERRAIN from
+    // disk ("delete this save" UIs, paired with save.deleteSlot). Deliberately
+    // narrow, not a generic rm -rf: the path must be relative with no "..",
+    // must not be the ACTIVE saveDir (clear it first), and only terrain files
+    // (.cfield/.tfield/.meta) inside that one directory are removed — the
+    // directory itself (and an emptied parent) goes only once it's empty.
+    // Returns the number of files removed.
+    {
+        let sd = save_dir.clone();
+        let root = root.clone();
+        if let Ok(f) = lua.create_function(move |_, path: String| {
+            let bad = path.is_empty()
+                || std::path::Path::new(&path).is_absolute()
+                || path.split(['/', '\\']).any(|c| c == ".." || c.is_empty());
+            if bad {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "terrain.deleteSaveDir(\"{path}\"): needs a relative project path with no \"..\""
+                )));
+            }
+            if sd.borrow().as_deref() == Some(path.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "terrain.deleteSaveDir(\"{path}\"): that is the ACTIVE saveDir — \
+                     clear it (terrain.saveDir(\"\")) before deleting the slot"
+                )));
+            }
+            let dir = root.borrow().join(&path);
+            let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+            let mut removed = 0u32;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                let terrain_file = p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                    matches!(x, "cfield" | "tfield" | "meta")
+                });
+                if terrain_file && std::fs::remove_file(&p).is_ok() {
+                    removed += 1;
+                }
+            }
+            // Tidy up: the dir if now empty, then ITS parent if that emptied too
+            // (a game's saves/<slot>/terrain layout leaves saves/<slot> behind).
+            if std::fs::remove_dir(&dir).is_ok()
+                && let Some(parent) = dir.parent()
+            {
+                let _ = std::fs::remove_dir(parent);
+            }
+            Ok(removed)
+        }) {
+            let _ = t.set("deleteSaveDir", f);
+        }
+    }
 
     // terrain.flush() — write every EDITED resident field to the save slot NOW
     // (terrain.saveDir must be set). Call at checkpoints and on exit-to-menu so

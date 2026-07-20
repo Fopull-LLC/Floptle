@@ -574,6 +574,11 @@ impl Editor {
             );
             return;
         }
+        // Leaving a scene with a save slot active (exit-to-menu): the slot's
+        // terrain edits must be on disk BEFORE the world unloads — the flush a
+        // script queued this same frame hasn't run yet, and the background
+        // pipeline may be mid-encode. Synchronous, settles the in-flight job.
+        self.flush_slot_terrains_sync();
         let Some(rel) = self.switch_scene_during_play(req) else { return };
         // The new scene's input model is its own business — release any cursor
         // grab the OLD scene earned (game trap / script mouse lock), or a

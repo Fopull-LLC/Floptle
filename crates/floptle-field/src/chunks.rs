@@ -110,6 +110,36 @@ impl Default for ChunkField {
     }
 }
 
+/// In-progress incremental `.cfield` serialization — see [`ChunkField::begin_save`].
+/// Holds the chunk worklist and the growing blob; the field it came from does the
+/// encoding ([`ChunkField::save_step`]), a budget of chunks per call.
+pub struct FieldSaver {
+    coords: Vec<[i32; 3]>,
+    at: usize,
+    written: u32,
+    count_pos: usize,
+    buf: Vec<u8>,
+}
+
+impl FieldSaver {
+    /// Chunks still waiting to encode.
+    pub fn remaining(&self) -> usize {
+        self.coords.len() - self.at
+    }
+
+    /// Total chunks in the worklist (progress display: `1 - remaining/total`).
+    pub fn total(&self) -> usize {
+        self.coords.len()
+    }
+
+    /// Take the finished blob (call once [`ChunkField::save_step`] returns `true`).
+    pub fn finish(mut self) -> Vec<u8> {
+        self.buf[self.count_pos..self.count_pos + 4]
+            .copy_from_slice(&self.written.to_le_bytes());
+        self.buf
+    }
+}
+
 impl ChunkField {
     /// An empty field of open air. `voxel` is the cubic voxel edge in world units — the
     /// ONE density knob (the dense grid's "detail" was a cell *count* that silently
@@ -1213,12 +1243,30 @@ impl ChunkField {
     /// (≤ voxel/32 error — far under the mesher's 0.3-voxel acceptance) and both
     /// channels RLE-encode, so the band's saturated plateaus cost almost nothing.
     /// Air-uniform chunks are implicit (absent == air) and never written.
+    ///
+    /// This walks EVERY stored voxel — a dug-up planet takes hundreds of ms.
+    /// Anything that runs per-frame must use [`Self::begin_save`] /
+    /// [`Self::save_step`] instead and spread the walk across frames.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(64 * 1024);
-        out.extend_from_slice(b"FCF1");
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&self.voxel.to_le_bytes());
-        out.extend_from_slice(&self.base_color);
+        let mut s = self.begin_save();
+        self.save_step(&mut s, usize::MAX);
+        s.finish()
+    }
+
+    /// Start an incremental save: captures the chunk list + header. Encode with
+    /// [`Self::save_step`] a budget at a time, then [`FieldSaver::finish`].
+    ///
+    /// The field MAY mutate between steps: each chunk encodes atomically from
+    /// its state at its step (a chunk dug to air since `begin_save` is simply
+    /// skipped), so the finished blob is always a VALID field — at worst a
+    /// torn snapshot mixing edit generations. Callers detect that (edit stamp)
+    /// and keep such a field dirty for the next checkpoint.
+    pub fn begin_save(&self) -> FieldSaver {
+        let mut buf = Vec::with_capacity(64 * 1024);
+        buf.extend_from_slice(b"FCF1");
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&self.voxel.to_le_bytes());
+        buf.extend_from_slice(&self.base_color);
         let band = self.band();
         // Stored chunks: data + non-air uniforms (solid interior). Air is implicit.
         let mut coords: Vec<[i32; 3]> = self
@@ -1231,18 +1279,35 @@ impl ChunkField {
             .map(|(c, _)| *c)
             .collect();
         coords.sort_unstable(); // deterministic output (byte-identical saves)
-        out.extend_from_slice(&(coords.len() as u32).to_le_bytes());
-        for c in coords {
+        let count_pos = buf.len();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // patched by finish()
+        FieldSaver { coords, at: 0, written: 0, count_pos, buf }
+    }
+
+    /// Encode up to `max_chunks` more chunks into `s`. Returns `true` once the
+    /// blob is complete (call [`FieldSaver::finish`] to take the bytes).
+    pub fn save_step(&self, s: &mut FieldSaver, max_chunks: usize) -> bool {
+        let band = self.band();
+        let end = s.at.saturating_add(max_chunks).min(s.coords.len());
+        while s.at < end {
+            let c = s.coords[s.at];
+            s.at += 1;
+            // Edited away since begin_save (dug to implicit air): drop out.
+            let ch = match self.chunks.get(&c) {
+                Some(Chunk::Uniform(v)) if *v >= band - 1e-6 => continue,
+                Some(ch) => ch,
+                None => continue,
+            };
             for k in c {
-                out.extend_from_slice(&k.to_le_bytes());
+                s.buf.extend_from_slice(&k.to_le_bytes());
             }
-            match &self.chunks[&c] {
+            match ch {
                 Chunk::Uniform(v) => {
-                    out.push(0);
-                    out.extend_from_slice(&v.to_le_bytes());
+                    s.buf.push(0);
+                    s.buf.extend_from_slice(&v.to_le_bytes());
                 }
                 Chunk::Data(d) => {
-                    out.push(1);
+                    s.buf.push(1);
                     // Distance: i8 in band units, RLE (u16 run, i8 value).
                     let q = |v: f32| ((v / band) * 127.0).round().clamp(-127.0, 127.0) as i8;
                     let mut runs: Vec<(u16, i8)> = Vec::new();
@@ -1253,10 +1318,10 @@ impl ChunkField {
                             _ => runs.push((1, qv)),
                         }
                     }
-                    out.extend_from_slice(&(runs.len() as u32).to_le_bytes());
+                    s.buf.extend_from_slice(&(runs.len() as u32).to_le_bytes());
                     for (n, v) in runs {
-                        out.extend_from_slice(&n.to_le_bytes());
-                        out.push(v as u8);
+                        s.buf.extend_from_slice(&n.to_le_bytes());
+                        s.buf.push(v as u8);
                     }
                     // Colour: RLE (u16 run, RGBA8).
                     let mut cruns: Vec<(u16, [u8; 4])> = Vec::new();
@@ -1266,15 +1331,16 @@ impl ChunkField {
                             _ => cruns.push((1, *v)),
                         }
                     }
-                    out.extend_from_slice(&(cruns.len() as u32).to_le_bytes());
+                    s.buf.extend_from_slice(&(cruns.len() as u32).to_le_bytes());
                     for (n, v) in cruns {
-                        out.extend_from_slice(&n.to_le_bytes());
-                        out.extend_from_slice(&v);
+                        s.buf.extend_from_slice(&n.to_le_bytes());
+                        s.buf.extend_from_slice(&v);
                     }
                 }
             }
+            s.written += 1;
         }
-        out
+        s.at == s.coords.len()
     }
 
     /// Parse a `.cfield` blob written by [`Self::to_bytes`]. `None` on any malformed
@@ -1626,6 +1692,30 @@ mod tests {
             );
         }
         f
+    }
+
+    /// The incremental saver IS `to_bytes`, just spread across calls: tiny
+    /// per-step budgets must produce the byte-identical blob (autosaves stream
+    /// through it every few frames — any drift silently corrupts save slots).
+    /// And a field edited MID-SAVE must still finish into a parseable blob:
+    /// that's the whole contract that lets checkpoints run under live digging.
+    #[test]
+    fn incremental_save_matches_to_bytes_and_survives_midsave_edits() {
+        let f = rolling_terrain();
+        let whole = f.to_bytes();
+        let mut s = f.begin_save();
+        while !f.save_step(&mut s, 3) {}
+        assert_eq!(whole, s.finish(), "chunk-budgeted save drifted from to_bytes");
+
+        // Mid-save edit: dig while a save is in flight, then let it finish.
+        let mut f = rolling_terrain();
+        let mut s = f.begin_save();
+        assert!(!f.save_step(&mut s, 2), "test field too small to interrupt");
+        f.sculpt(Brush::Lower, Vec3::new(0.0, 2.0, 0.0), 12.0, 1.0, BrushProfile::default());
+        while !f.save_step(&mut s, 2) {}
+        let torn = s.finish();
+        let back = ChunkField::from_bytes(&torn).expect("torn snapshot must stay parseable");
+        assert!(back.data_chunks() > 0);
     }
 
     /// Per-write-path |∇d| report. This is the diagnostic that found the real culprit:
