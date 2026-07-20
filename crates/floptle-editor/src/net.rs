@@ -575,6 +575,17 @@ impl Editor {
             return;
         }
         let Some(rel) = self.switch_scene_during_play(req) else { return };
+        // The new scene's input model is its own business — release any cursor
+        // grab the OLD scene earned (game trap / script mouse lock), or a
+        // cursor-driven scene (a main menu) arrives with the mouse frozen.
+        // Its scripts re-lock via input.setMouseLocked if they want free-look.
+        if self.game_trap || self.script_mouse_lock {
+            self.game_trap = false;
+            self.script_mouse_lock = false;
+            if let Some(window) = self.window.as_ref() {
+                self.cursor_lock_soft = crate::grab_cursor(window, false);
+            }
+        }
         if self.net_server.is_some() {
             // Re-run the host's per-scene session setup against the new world:
             // slot ownership, script filters, fresh NetIds, a clean lag-comp
