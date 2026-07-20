@@ -1330,6 +1330,47 @@ impl Editor {
                 .collect()
         };
         let near = |p: DVec3, reach: f64| anchors.iter().any(|a| (*a - p).length() < reach);
+
+        // 0. Adopt terrain bodies born at RUNTIME: a game's loading screen builds
+        //    its galaxy with createNode + setTerrainGen, and those nodes went
+        //    through no scene load — they were in NEITHER the resident nor the
+        //    cold set, so nothing drew or streamed them (planets that were only
+        //    their atmosphere, warm/TAB focuses that never landed). Anything
+        //    untracked becomes COLD exactly like adopt_terrain would make it —
+        //    unless its FIRST generation is queued (the generation queue owns
+        //    those until the fill lands).
+        let untracked: Vec<(Entity, u32)> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(e, m)| match m {
+                Matter::Terrain { id } => Some((e, *id)),
+                _ => None,
+            })
+            .filter(|(e, id)| {
+                !self.terrains.contains_key(e)
+                    && !self.terrain_cold.contains_key(e)
+                    && !self.planet_gen_pending.contains(id)
+                    && self.world.get::<floptle_core::CelestialBody>(*e).is_some()
+            })
+            .collect();
+        for (e, id) in untracked {
+            let has_file = self.terrain_field_path_id(id).exists();
+            let color = (has_file.then(|| self.read_terrain_meta(id)).flatten())
+                .or_else(|| {
+                    self.world
+                        .get::<floptle_core::TerrainGen>(e)
+                        .map(|g| genspec_impostor_color(&g.0).unwrap_or([0.62, 0.62, 0.68]))
+                })
+                // A file with no meta and no genspec is still loadable — a
+                // neutral sphere beats an invisible planet.
+                .or_else(|| has_file.then_some([0.62, 0.62, 0.68]));
+            let Some(color) = color else { continue }; // nothing to ever load: skip
+            self.next_terrain_id = self.next_terrain_id.max(id + 1);
+            let render = self.terrain_render.entry(e).or_default();
+            render.impostor = true;
+            render.impostor_color = Some(color);
+            self.terrain_cold.insert(e, ColdTerrain { id, color });
+        }
         // 1. Land finished loads (parse/generate + shadow proxy all happened on
         //    the thread). Failures are LOUD and final: a body whose stream died
         //    (bad genspec, unreadable file, a panicked generation = disconnected

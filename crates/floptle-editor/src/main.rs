@@ -1433,6 +1433,10 @@ struct Editor {
     /// Play start when a required body is still cold; released (auto-unpause)
     /// by the residency driver the moment nothing required is left cold.
     play_stream_hold: bool,
+    /// Terrain ids with a `terrain.generatePlanet` fill queued or in flight —
+    /// the residency driver must not ALSO stream those bodies (the generation
+    /// queue owns them until each fill lands).
+    planet_gen_pending: std::collections::HashSet<u32>,
     /// The background remesh worker (P4) — spawned lazily on first terrain use.
     terrain_worker: Option<crate::terrain_edit::TerrainWorker>,
     /// Monotonic job stamp for worker remeshes: never repeats across scenes, so a

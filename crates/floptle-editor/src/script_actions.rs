@@ -109,6 +109,7 @@ impl Editor {
             format!("⛰ generating {} terrain field(s) in the background…", gens.len()),
             None,
         );
+        self.planet_gen_pending.extend(gens.iter().map(|(id, _)| *id));
         let (tx, rx) = std::sync::mpsc::channel();
         self.planet_gen_job = Some(rx);
         std::thread::spawn(move || {
@@ -139,6 +140,7 @@ impl Editor {
             }
         }
         for (id, field, ms) in arrived {
+            self.planet_gen_pending.remove(&id);
             let target = self
                 .world
                 .query::<floptle_core::Matter>()
@@ -184,6 +186,7 @@ impl Editor {
         }
         if done {
             self.planet_gen_job = None;
+            self.planet_gen_pending.clear(); // a crashed batch must not wedge streaming
         }
     }
 }

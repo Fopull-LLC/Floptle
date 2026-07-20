@@ -244,7 +244,19 @@ impl Editor {
         if !self.playing {
             return;
         }
-        let sim = self.build_play_sim();
+        // Bodies re-seed at their current transforms, but their VELOCITIES must
+        // survive the rebuild — terrain streaming in mid-flight used to zero
+        // them, dropping ships out of orbit ("the sun just sucked me up": zero
+        // relative velocity under warp is a plummet straight into the star).
+        let saved: Vec<(u32, floptle_core::math::Vec3)> = self
+            .sim
+            .as_ref()
+            .map(|s| s.body_states().map(|(e, vel, ..)| (e.index(), vel)).collect())
+            .unwrap_or_default();
+        let mut sim = self.build_play_sim();
+        for (eid, vel) in saved {
+            sim.set_body_velocity(eid, vel);
+        }
         self.sim = Some(sim);
     }
 
