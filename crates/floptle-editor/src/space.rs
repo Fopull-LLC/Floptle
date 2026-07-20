@@ -176,19 +176,29 @@ impl Editor {
                 // (old frame vel − new frame vel) — leave a planet's SOI and
                 // you carry its orbital velocity into the star's frame.
                 let dom_key = cb[i].0.index();
-                let prev = self.space_frame.insert(eid, dom_key);
-                if let Some(p) = prev
-                    && p != dom_key
-                    && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
-                {
-                    let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
-                    vel = (vel.as_dvec3() + dv).as_vec3();
-                    sim.set_body_velocity(eid, vel);
-                    self.console.push(
-                        floptle_script::LogLevel::Debug,
-                        format!("entered {}'s sphere of influence", names[i]),
-                        None,
-                    );
+                // The tick-sampled SOI seam ONLY runs for bodies NOT coasting
+                // on rails: a coast handles its own frame handoffs at the
+                // EXACT crossing time (bisected on the conic below). Applying
+                // this sampled seam to a coasting ship at high warp put the
+                // velocity step at the wrong time/place — every moon-SOI
+                // transit bent the orbit a little until clean ellipses
+                // "escaped".
+                let coast_active = warping && self.space_coast.contains_key(&eid);
+                if !coast_active {
+                    let prev = self.space_frame.insert(eid, dom_key);
+                    if let Some(p) = prev
+                        && p != dom_key
+                        && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
+                    {
+                        let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
+                        vel = (vel.as_dvec3() + dv).as_vec3();
+                        sim.set_body_velocity(eid, vel);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            format!("entered {}'s sphere of influence", names[i]),
+                            None,
+                        );
+                    }
                 }
                 let center = DVec3::from(bodies[i].pos);
                 // Relative to the OLD center: `center` already moved by delta
@@ -199,57 +209,126 @@ impl Editor {
                     && rel.length() > cb[i].1.body_radius + 8.0
                     && vel.as_dvec3().length_squared() > 0.01;
                 if flying && cb[i].1.mu > 0.0 {
-                    let recapture = self
-                        .space_coast
-                        .get(&eid)
-                        .is_none_or(|(d, _)| *d != dom_key);
-                    if recapture {
+                    // Capture on engage only. An EXISTING coast keeps its conic
+                    // even when this tick's sampled dominant differs — the
+                    // crossing walk below hands frames off at the exact
+                    // boundary time instead of the tick boundary.
+                    self.space_coast.entry(eid).or_insert_with(|| {
                         // Capture the conic from the PRE-TICK state (old center,
                         // old time) — from here on the cached elements are truth.
                         // The sim velocity IS the frame-relative velocity.
-                        let k = Kepler::from_state(rel, vel.as_dvec3(), cb[i].1.mu, t_old);
-                        self.space_coast.insert(eid, (dom_key, k));
-                    }
-                    if let Some((_, k)) = self.space_coast.get(&eid) {
-                        let (r2, v2) = k.pos_vel(cb[i].1.mu, t);
-                        // G1 residency: warp crosses the 80-radii terrain-load
-                        // lead in milliseconds — closing on a body whose field is
-                        // still COLD drops to realtime so the background stream
-                        // gets its seconds (the residency driver kicks the load
-                        // as the camera arrives). Re-warp once it's resident.
-                        if self.terrain_cold.contains_key(&cb[i].0)
-                            && r2.length() < cb[i].1.body_radius * 60.0
-                        {
-                            self.space_warp = 1.0;
-                            self.space_coast.remove(&eid);
-                            self.console.push(
-                                floptle_script::LogLevel::Debug,
-                                format!(
-                                    "time-warp dropped to 1× — streaming {}'s terrain in \
-                                     (re-warp in a moment)",
-                                    names[i]
-                                ),
-                                None,
-                            );
-                            continue;
+                        (dom_key, Kepler::from_state(rel, vel.as_dvec3(), cb[i].1.mu, t_old))
+                    });
+                    // World state of body index `j` at absolute time τ.
+                    let body_w = |j: usize, tau: f64| {
+                        let (p, v) = sys.body_pos_vel(j, tau);
+                        (root_pos + p, v)
+                    };
+                    // Smallest containing SOI at τ — the patched-conic rule,
+                    // evaluated on the ANALYTIC rails (exact at any warp).
+                    let dom_at = |wp: DVec3, tau: f64| -> usize {
+                        let mut best = root;
+                        let mut best_soi = f64::INFINITY;
+                        for (j, sb) in sys.bodies.iter().enumerate() {
+                            if sb.soi < best_soi && (wp - body_w(j, tau).0).length() <= sb.soi
+                            {
+                                best = j;
+                                best_soi = sb.soi;
+                            }
                         }
-                        // Surface proximity KILLS warp (the KSP rule): a conic
-                        // whose next sample dips near the ground would teleport
-                        // the ship into rock at 1000×. Drop to realtime and let
-                        // physics take it from the last on-conic state.
-                        if r2.length() < cb[i].1.body_radius + 25.0 {
-                            self.space_warp = 1.0;
-                            self.space_coast.remove(&eid);
-                            self.console.push(
-                                floptle_script::LogLevel::Debug,
-                                "time-warp dropped to 1× — surface proximity".into(),
-                                None,
-                            );
-                            continue;
+                        best
+                    };
+                    let (mut fdk, mut k) = *self.space_coast.get(&eid).unwrap();
+                    let mut fd =
+                        cb.iter().position(|(e, _)| e.index() == fdk).unwrap_or(i);
+                    // Evaluate t_old → t, bisecting each SOI crossing to its
+                    // exact time and re-capturing the conic THERE (world
+                    // velocity continuous by construction). A warped tick can
+                    // hop hundreds of seconds; the handoff must not.
+                    let mut t_lo = t_old;
+                    let (mut r2, mut v2);
+                    let mut hops = 0;
+                    loop {
+                        let (rr, vv) = k.pos_vel(cb[fd].1.mu, t);
+                        r2 = rr;
+                        v2 = vv;
+                        let d_now = dom_at(body_w(fd, t).0 + r2, t);
+                        if d_now == fd || hops >= 4 {
+                            break;
                         }
-                        sim.set_body_position(eid, center + r2);
-                        sim.set_body_velocity(eid, v2.as_vec3());
+                        hops += 1;
+                        let (mut lo, mut hi) = (t_lo, t);
+                        for _ in 0..32 {
+                            let mid = 0.5 * (lo + hi);
+                            let (rm, _) = k.pos_vel(cb[fd].1.mu, mid);
+                            if dom_at(body_w(fd, mid).0 + rm, mid) == fd {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                        let tx = hi;
+                        let (rx, vx) = k.pos_vel(cb[fd].1.mu, tx);
+                        let (op, ov) = body_w(fd, tx);
+                        let (wpx, wvx) = (op + rx, ov + vx);
+                        let nd = dom_at(wpx, tx);
+                        if nd == fd || cb[nd].1.mu <= 0.0 {
+                            break; // numeric edge, or a massless marker: keep frame
+                        }
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            if sys.bodies[nd].parent == Some(fd) {
+                                format!("entered {}'s sphere of influence", names[nd])
+                            } else {
+                                format!("left {}'s sphere of influence", names[fd])
+                            },
+                            None,
+                        );
+                        let (np, nv) = body_w(nd, tx);
+                        k = Kepler::from_state(wpx - np, wvx - nv, cb[nd].1.mu, tx);
+                        fd = nd;
+                        fdk = cb[nd].0.index();
+                        t_lo = tx;
                     }
+                    self.space_coast.insert(eid, (fdk, k));
+                    self.space_frame.insert(eid, fdk);
+                    // G1 residency: warp crosses the 80-radii terrain-load
+                    // lead in milliseconds — closing on a body whose field is
+                    // still COLD drops to realtime so the background stream
+                    // gets its seconds (the residency driver kicks the load
+                    // as the camera arrives). Re-warp once it's resident.
+                    if self.terrain_cold.contains_key(&cb[fd].0)
+                        && r2.length() < cb[fd].1.body_radius * 60.0
+                    {
+                        self.space_warp = 1.0;
+                        self.space_coast.remove(&eid);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            format!(
+                                "time-warp dropped to 1× — streaming {}'s terrain in \
+                                 (re-warp in a moment)",
+                                names[fd]
+                            ),
+                            None,
+                        );
+                        continue;
+                    }
+                    // Surface proximity KILLS warp (the KSP rule): a conic
+                    // whose next sample dips near the ground would teleport
+                    // the ship into rock at 1000×. Drop to realtime and let
+                    // physics take it from the last on-conic state.
+                    if r2.length() < cb[fd].1.body_radius + 25.0 {
+                        self.space_warp = 1.0;
+                        self.space_coast.remove(&eid);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            "time-warp dropped to 1× — surface proximity".into(),
+                            None,
+                        );
+                        continue;
+                    }
+                    sim.set_body_position(eid, DVec3::from(bodies[fd].pos) + r2);
+                    sim.set_body_velocity(eid, v2.as_vec3());
                 } else {
                     self.space_coast.remove(&eid);
                     if deltas[i].length_squared() > 1e-18 {
