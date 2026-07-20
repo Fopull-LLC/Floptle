@@ -193,6 +193,11 @@ jobs:
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes "Floptle $TAG — download the floptle-hub archive for your platform; the Hub installs engine versions." || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to
-          # the newest list (releases/download/manifest/releases.json).
-          gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --notes "Always-latest version manifest for the Floptle Hub." || true
+          # the newest list (releases/download/manifest/releases.json). It's a PRERELEASE
+          # and the version release is explicitly marked LATEST: GitHub otherwise crowns
+          # the most recently CREATED release, which made /releases/latest land on the
+          # manifest holder (a page with no downloads) instead of the real bundles.
+          gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --prerelease --notes "Machine-readable version manifest for the Floptle Hub — not a download page. Get Floptle from the LATEST release instead." || true
           gh release upload manifest releases.json --clobber --repo "$PUBLIC_REPO"
+          gh release edit manifest --repo "$PUBLIC_REPO" --prerelease
+          case "$TAG" in *-*) ;; *) gh release edit "$TAG" --repo "$PUBLIC_REPO" --latest;; esac
