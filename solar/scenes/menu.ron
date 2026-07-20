@@ -405,7 +405,8 @@
                 (
                     kind: "menu_newsave",
                     enabled: true,
-                    params: [],
+                    params: [
+                    ],
                 ),
             ],
             parent: Some(2),
@@ -436,12 +437,12 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (0.0, 24.0),
+                    pos: (0.0, 22.0),
                 ),
-                size: (Pct(1.0), Fixed(34.0)),
+                size: (Pct(1.0), Fixed(32.0)),
                 text: Some((
                     text: "N E W   G A L A X Y",
-                    size: 26.0,
+                    size: 24.0,
                     color: (0.82, 0.92, 1.0, 1.0),
                     align: Center,
                     valign: Center,
@@ -461,7 +462,7 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (0.0, 62.0),
+                    pos: (0.0, 56.0),
                 ),
                 size: (Pct(1.0), Fixed(18.0)),
                 text: Some((
@@ -486,7 +487,8 @@
                 (
                     kind: "menu_ng_button",
                     enabled: true,
-                    params: [],
+                    params: [
+                    ],
                     strs: [
                         ("role", "seed"),
                     ],
@@ -495,9 +497,9 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (80.0, 94.0),
+                    pos: (80.0, 84.0),
                 ),
-                size: (Fixed(400.0), Fixed(42.0)),
+                size: (Fixed(400.0), Fixed(40.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.88),
                     radius: 8.0,
@@ -516,7 +518,7 @@
             )),
         ),
         (
-            name: "NG Planets Label",
+            name: "NG Params",
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -527,9 +529,36 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (40.0, 160.0),
+                    pos: (30.0, 140.0),
                 ),
-                size: (Fixed(140.0), Fixed(18.0)),
+                size: (Fixed(500.0), Fixed(212.0)),
+                shape: Some((
+                    fill: (0.06, 0.08, 0.11, 0.6),
+                    radius: 10.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.42, 0.52, 0.4),
+                )),
+                scroll: Some((
+                    offset: 0.0,
+                    speed: 40.0,
+                )),
+            )),
+        ),
+        (
+            name: "NG Planets Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 14.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
                 text: Some((
                     text: "planets",
                     size: 13.0,
@@ -549,12 +578,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (190.0, 161.0),
+                    pos: (176.0, 15.0),
                 ),
-                size: (Fixed(250.0), Fixed(16.0)),
+                size: (Fixed(230.0), Fixed(16.0)),
                 shape: Some((
                     fill: (0.07, 0.1, 0.14, 0.95),
                     radius: 8.0,
@@ -580,7 +609,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(18),
+            parent: Some(19),
             ui: Some((
                 place: Free(
                     pos: (0.0, 0.0),
@@ -604,14 +633,14 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (452.0, 160.0),
+                    pos: (420.0, 14.0),
                 ),
                 size: (Fixed(70.0), Fixed(18.0)),
                 text: Some((
-                    text: "3",
+                    text: "-",
                     size: 13.0,
                     color: (0.82, 0.92, 1.0, 1.0),
                     align: Start,
@@ -629,12 +658,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (40.0, 210.0),
+                    pos: (16.0, 56.0),
                 ),
-                size: (Fixed(140.0), Fixed(18.0)),
+                size: (Fixed(150.0), Fixed(18.0)),
                 text: Some((
                     text: "moon chance",
                     size: 13.0,
@@ -654,12 +683,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (190.0, 211.0),
+                    pos: (176.0, 57.0),
                 ),
-                size: (Fixed(250.0), Fixed(16.0)),
+                size: (Fixed(230.0), Fixed(16.0)),
                 shape: Some((
                     fill: (0.07, 0.1, 0.14, 0.95),
                     radius: 8.0,
@@ -685,7 +714,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(22),
+            parent: Some(23),
             ui: Some((
                 place: Free(
                     pos: (0.0, 0.0),
@@ -709,14 +738,14 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (452.0, 210.0),
+                    pos: (420.0, 56.0),
                 ),
                 size: (Fixed(70.0), Fixed(18.0)),
                 text: Some((
-                    text: "60%",
+                    text: "-",
                     size: 13.0,
                     color: (0.82, 0.92, 1.0, 1.0),
                     align: Start,
@@ -734,12 +763,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (40.0, 260.0),
+                    pos: (16.0, 98.0),
                 ),
-                size: (Fixed(140.0), Fixed(18.0)),
+                size: (Fixed(150.0), Fixed(18.0)),
                 text: Some((
                     text: "atmospheres",
                     size: 13.0,
@@ -759,12 +788,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (190.0, 261.0),
+                    pos: (176.0, 99.0),
                 ),
-                size: (Fixed(250.0), Fixed(16.0)),
+                size: (Fixed(230.0), Fixed(16.0)),
                 shape: Some((
                     fill: (0.07, 0.1, 0.14, 0.95),
                     radius: 8.0,
@@ -790,7 +819,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(26),
+            parent: Some(27),
             ui: Some((
                 place: Free(
                     pos: (0.0, 0.0),
@@ -814,14 +843,14 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (452.0, 260.0),
+                    pos: (420.0, 98.0),
                 ),
                 size: (Fixed(70.0), Fixed(18.0)),
                 text: Some((
-                    text: "80%",
+                    text: "-",
                     size: 13.0,
                     color: (0.82, 0.92, 1.0, 1.0),
                     align: Start,
@@ -839,12 +868,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (40.0, 310.0),
+                    pos: (16.0, 140.0),
                 ),
-                size: (Fixed(140.0), Fixed(18.0)),
+                size: (Fixed(150.0), Fixed(18.0)),
                 text: Some((
                     text: "cave scale",
                     size: 13.0,
@@ -864,12 +893,12 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (190.0, 311.0),
+                    pos: (176.0, 141.0),
                 ),
-                size: (Fixed(250.0), Fixed(16.0)),
+                size: (Fixed(230.0), Fixed(16.0)),
                 shape: Some((
                     fill: (0.07, 0.1, 0.14, 0.95),
                     radius: 8.0,
@@ -895,7 +924,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(30),
+            parent: Some(31),
             ui: Some((
                 place: Free(
                     pos: (0.0, 0.0),
@@ -919,17 +948,777 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(13),
+            parent: Some(17),
             ui: Some((
                 place: Free(
-                    pos: (452.0, 310.0),
+                    pos: (420.0, 140.0),
                 ),
                 size: (Fixed(70.0), Fixed(18.0)),
                 text: Some((
-                    text: "×1.00",
+                    text: "-",
                     size: 13.0,
                     color: (0.82, 0.92, 1.0, 1.0),
                     align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG MinOrbit Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 182.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "min orbit",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG MinOrbit Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 183.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 3000.0,
+                    max: 12000.0,
+                    value: 5000.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG MinOrbit Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(35),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG MinOrbit Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 182.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Spacing Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 224.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "orbit spacing",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Spacing Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 225.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 1.6,
+                    max: 3.2,
+                    value: 2.2,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Spacing Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(39),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Spacing Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 224.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMin Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 266.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "planet size min",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMin Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 267.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 60.0,
+                    max: 200.0,
+                    value: 100.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMin Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(43),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG RadMin Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 266.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMax Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 308.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "planet size max",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMax Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 309.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 150.0,
+                    max: 400.0,
+                    value: 230.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG RadMax Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(47),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG RadMax Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 308.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMin Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 350.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "gravity min",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMin Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 351.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 2.0,
+                    max: 8.0,
+                    value: 4.5,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMin Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(51),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG GravMin Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 350.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMax Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 392.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "gravity max",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMax Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 393.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 6.0,
+                    max: 16.0,
+                    value: 10.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG GravMax Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(55),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG GravMax Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 392.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Star Label",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (16.0, 434.0),
+                ),
+                size: (Fixed(150.0), Fixed(18.0)),
+                text: Some((
+                    text: "star brightness",
+                    size: 13.0,
+                    color: (0.62, 0.74, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Star Track",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (176.0, 435.0),
+                ),
+                size: (Fixed(230.0), Fixed(16.0)),
+                shape: Some((
+                    fill: (0.07, 0.1, 0.14, 0.95),
+                    radius: 8.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                slider: Some((
+                    min: 0.5,
+                    max: 2.0,
+                    value: 1.0,
+                    dir: Row,
+                    flip: false,
+                    interact: true,
+                )),
+            )),
+        ),
+        (
+            name: "NG Star Fill",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(59),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Pct(1.0), Pct(1.0)),
+                shape: Some((
+                    fill: (0.3, 0.55, 0.75, 0.9),
+                    radius: 8.0,
+                    border: 0.0,
+                    border_color: (0.0, 0.0, 0.0, 0.0),
+                )),
+                part: Some(Fill),
+            )),
+        ),
+        (
+            name: "NG Star Val",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(17),
+            ui: Some((
+                place: Free(
+                    pos: (420.0, 434.0),
+                ),
+                size: (Fixed(70.0), Fixed(18.0)),
+                text: Some((
+                    text: "-",
+                    size: 13.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "NG Scroll Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(13),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 354.0),
+                ),
+                size: (Pct(1.0), Fixed(16.0)),
+                text: Some((
+                    text: "· scroll for more ·",
+                    size: 11.0,
+                    color: (0.4, 0.5, 0.58, 1.0),
+                    align: Center,
                     valign: Center,
                     fit: false,
                 )),
@@ -947,7 +1736,8 @@
                 (
                     kind: "menu_ng_button",
                     enabled: true,
-                    params: [],
+                    params: [
+                    ],
                     strs: [
                         ("role", "create"),
                     ],
@@ -956,9 +1746,9 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (80.0, 366.0),
+                    pos: (80.0, 376.0),
                 ),
-                size: (Fixed(195.0), Fixed(48.0)),
+                size: (Fixed(195.0), Fixed(46.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.88),
                     radius: 8.0,
@@ -988,7 +1778,8 @@
                 (
                     kind: "menu_ng_button",
                     enabled: true,
-                    params: [],
+                    params: [
+                    ],
                     strs: [
                         ("role", "cancel"),
                     ],
@@ -997,9 +1788,9 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (285.0, 366.0),
+                    pos: (285.0, 376.0),
                 ),
-                size: (Fixed(195.0), Fixed(48.0)),
+                size: (Fixed(195.0), Fixed(46.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.88),
                     radius: 8.0,
@@ -1029,9 +1820,9 @@
             parent: Some(13),
             ui: Some((
                 place: Free(
-                    pos: (0.0, 424.0),
+                    pos: (0.0, 430.0),
                 ),
-                size: (Pct(1.0), Fixed(34.0)),
+                size: (Pct(1.0), Fixed(30.0)),
                 text: Some((
                     text: "type digits for a fixed seed · click the seed row to clear it\nthe galaxy always regenerates from these choices",
                     size: 11.0,

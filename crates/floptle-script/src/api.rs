@@ -114,6 +114,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             }
             f.insert("cell".to_string(), img.cell as f64);
         }
+        if let Some(sc) = spec.scroll {
+            f.insert("scrollY".to_string(), sc.offset as f64);
+        }
         out.insert("UiElement".to_string(), f);
         if let Some(s) = spec.slider {
             out.insert(
@@ -263,6 +266,13 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "cell" => {
                         if let Some(img) = &mut spec.image {
                             img.cell = val.max(0.0) as u32;
+                        }
+                    }
+                    // Scroll-view position (the wheel drives it too; the input
+                    // pass clamps to the content every frame).
+                    "scrollY" => {
+                        if let Some(sc) = &mut spec.scroll {
+                            sc.offset = v.max(0.0);
                         }
                     }
                     _ => {}

@@ -497,7 +497,7 @@ end
 | Handle | Fields |
 |---|---|
 | `node.text` | The element's label text — read/write; writing a number is fine (`label.text = 42`). `nil` on nodes without a UI text. Writing to a UI element without a text spec creates one. |
-| `getcomponent("UiElement")` | `visible` (1/0), `opacity`, `posX` `posY` (free position or pin offset, design units), `width` `height` (the number in the axis's sizing mode: px value, % fraction, or grow weight; `nil` on a *fit* axis — writing one makes it fixed px), `radius`, `border`, `fillR/G/B/A`, `textSize`, `textR/G/B/A`, `tintR/G/B/A`. |
+| `getcomponent("UiElement")` | `visible` (1/0), `opacity`, `posX` `posY` (free position or pin offset, design units), `width` `height` (the number in the axis's sizing mode: px value, % fraction, or grow weight; `nil` on a *fit* axis — writing one makes it fixed px), `radius`, `border`, `fillR/G/B/A`, `textSize`, `textR/G/B/A`, `tintR/G/B/A`, `scrollY` (scroll views only: scroll position, 0 = top). |
 | `getcomponent("UiSlider")` | `value`, `min`, `max` — on a slider (track) element. `value` is clamped to the range at draw time. |
 | `getcomponent("UiLayer")` | `enabled` (1/0 — an off layer draws nothing), `z`, `designHeight`. |
 
@@ -678,6 +678,19 @@ A slider with **draggable** on lets the player click/drag the track to set its
 value — read it with `getcomponent("UiSlider").value` (a settings volume slider
 is a draggable slider + one `update` that reads the value). Display-only meters
 (health bars) leave it off.
+
+### Scroll views
+
+An element with the **scroll view** option (Add ⏵ UI ⏵ Scroll View, or the
+Inspector checkbox) turns into a wheel-scrollable viewport: put more content
+inside than fits and it clips to the element's rounded rect and scrolls —
+children keep their authored layout, rows scrolled out of view neither draw
+nor click, and the wheel only reaches gameplay when the pointer isn't over a
+scroll view. The offset is clamped to the content, so a view whose content
+fits doesn't scroll at all. Scripts read/write it as
+`getcomponent("UiElement").scrollY` (design units, `0` = top — reset it when
+you re-open a panel). The solar demo's New Galaxy panel is the reference: a
+`Scroll View` holding one slider row per generator parameter.
 
 ## 8. Referencing other nodes & scripts
 

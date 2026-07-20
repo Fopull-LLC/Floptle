@@ -103,6 +103,13 @@ function start(node)
     moonChance = save.get("g_moonchance"),
     atmoChance = save.get("g_atmo"),
     caveScale = save.get("g_caves"),
+    minOrbit = save.get("g_minorbit"),
+    spacing = save.get("g_spacing"),
+    radiusMin = save.get("g_radmin"),
+    radiusMax = save.get("g_radmax"),
+    gravityMin = save.get("g_gravmin"),
+    gravityMax = save.get("g_gravmax"),
+    starScale = save.get("g_star"),
   })
   if seed <= 0 then
     seed = gen.lastSeed
@@ -113,18 +120,31 @@ function start(node)
   spawn_r = gen.lastSpawnRadius
 end
 
+-- The spawn planet ORBITS while the loading screen runs (rails advance with
+-- sim time), so its roll-time coordinates go stale within seconds — holding
+-- or dropping the crew at those stranded them in empty space while the planet
+-- sailed away. Every spawn-relative position must come from the body's LIVE
+-- rails position; the roll numbers are only the fallback for the first frames
+-- before the generated body registers with the rails system.
+local function spawn_live()
+  local b = spawn_body and space.body(spawn_body)
+  if b then return b.x, b.y, b.z end
+  return spawn_x, spawn_y, spawn_z
+end
+
 function update(node, dt)
   if not slot then return end
 
   if loading then
-    -- Hold the crew safely above the spawn planet while its terrain streams in
-    -- (the generator queued the fill; the world can't hurt what physics can't
-    -- reach — velocity pinned to zero).
-    local hover = spawn_y + spawn_r + 60
+    -- Hold the crew safely above the spawn planet (its LIVE position — it is
+    -- orbiting under us right now) while its terrain streams in. Velocity
+    -- pinned to zero: the world can't hurt what physics can't reach.
+    local sx, sy, sz = spawn_live()
+    local hover = sy + spawn_r + 60
     for _, nm in ipairs({ "Astronaut", "Ship" }) do
       local n = find(nm)
       if n then
-        n.x, n.y, n.z = spawn_x + (nm == "Ship" and 14 or 0), hover, spawn_z
+        n.x, n.y, n.z = sx + (nm == "Ship" and 14 or 0), hover, sz
         n.vx, n.vy, n.vz = 0, 0, 0
       end
     end
@@ -134,18 +154,19 @@ function update(node, dt)
       ttl.text = string.format("ENTERING GALAXY %d %s", seed, dots)
     end
     -- Ready = the spawn planet's SURFACE answers: the signed distance at its
-    -- north-pole surface point is small only once ITS field has collision.
-    local d = terrain.query(spawn_x, spawn_y + spawn_r, spawn_z)
+    -- (live) north-pole surface point is small only once ITS field has
+    -- collision.
+    local d = terrain.query(sx, sy + spawn_r, sz)
     if d and math.abs(d) < spawn_r * 0.5 and time - load_t > 1.0 then
       loading = false
       local astro = find("Astronaut")
       if astro and not restore_pos_of(astro, "p") then
-        astro.x, astro.y, astro.z = spawn_x, spawn_y + spawn_r + 6, spawn_z
+        astro.x, astro.y, astro.z = sx, sy + spawn_r + 6, sz
         astro.vx, astro.vy, astro.vz = 0, 0, 0
       end
       local ship = find("Ship")
       if ship and not restore_pos_of(ship, "s") then
-        ship.x, ship.y, ship.z = spawn_x + 14, spawn_y + spawn_r + 4, spawn_z
+        ship.x, ship.y, ship.z = sx + 14, sy + spawn_r + 4, sz
         ship.vx, ship.vy, ship.vz = 0, 0, 0
       end
       for _, nm in ipairs({ "Loading Screen", "Loading Text" }) do
