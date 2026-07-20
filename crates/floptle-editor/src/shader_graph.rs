@@ -597,6 +597,7 @@ impl EditorTabViewer<'_> {
             if let Some(Some(p)) = crate::ui_widgets::asset_picker(
                 ui,
                 egui::Id::new("shader-graph-pick"),
+                self.project_root,
                 &cur,
                 None,
                 self.asset_tree,

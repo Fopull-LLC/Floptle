@@ -1626,6 +1626,7 @@ impl EditorTabViewer<'_> {
                                     if let Some(pick) = crate::ui_widgets::asset_picker(
                                         ui,
                                         egui::Id::new(("prop-sel-tex", ci, ti)),
+                                        self.project_root,
                                         &label,
                                         Some("(clear)"),
                                         tree,

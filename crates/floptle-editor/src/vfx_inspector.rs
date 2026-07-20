@@ -29,6 +29,7 @@ impl EditorTabViewer<'_> {
         // texture picker browses the tree directly; the mesh picker still needs
         // a flat list so it can mix in the `builtin://` shapes.
         let tree = self.asset_tree;
+        let root = self.project_root;
         let mut model_list = Vec::new();
         collect_model_paths(self.asset_tree, &mut model_list);
 
@@ -104,7 +105,7 @@ impl EditorTabViewer<'_> {
                     .show(ui, |ui| body(ui));
             };
             section(ui, "vfx_look", "🎨  Look", true, &mut |ui| {
-                look_section(ui, track, tree, &model_list, &mut dirty)
+                look_section(ui, track, tree, root, &model_list, &mut dirty)
             });
             section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
                 emission_section(ui, ti, track, &mut dirty)
@@ -237,6 +238,7 @@ fn look_section(
     ui: &mut egui::Ui,
     track: &mut floptle_scene::VfxTrackDoc,
     asset_tree: &[crate::assets::AssetEntry],
+    project_root: &std::path::Path,
     model_list: &[String],
     dirty: &mut bool,
 ) {
@@ -263,6 +265,7 @@ fn look_section(
                 if let Some(pick) = crate::ui_widgets::asset_picker(
                     ui,
                     egui::Id::new("vfx_tex"),
+                    project_root,
                     &short(texture.as_deref().unwrap_or("(plain quad)")),
                     Some("(plain quad)"),
                     asset_tree,

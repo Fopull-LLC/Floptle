@@ -106,7 +106,7 @@
         (
             name: "Sphere",
             transform: (
-                translation: (-4.183319020163211, -3.9869964336589803, 18.02386868844449),
+                translation: (4.632544589150754, 0.5677406574054729, 9.239258893827792),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (0.6, 0.55, 0.55),
             ),
@@ -136,10 +136,7 @@
                 unlit: true,
                 ambient: 1.0,
                 alpha: 1.0,
-                shader: Some("assets/shaders/examples/lavaFlow.flsl"),
-                shader_params: {
-                    "flow": (1.15, 0.0, 0.0, 0.0),
-                },
+                shader: Some("shaders/examples/plasma.flsl"),
             )),
             rigidbody: Some((
                 capsule: false,

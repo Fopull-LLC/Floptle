@@ -65,12 +65,15 @@ impl AudioSystem {
     /// written, else with each audio extension appended (so Lua can say
     /// `"audio/hit"`).
     fn resolve_clip_path(root: &Path, key: &str) -> Option<PathBuf> {
-        let direct = root.join(key);
+        // resolve_asset_path handles every ref spelling (project-relative,
+        // legacy `assets/…`-prefixed, CWD-relative, absolute) — probe the key
+        // as written, then with each audio extension appended.
+        let direct = crate::project::resolve_asset_path(root, key);
         if direct.is_file() {
             return Some(direct);
         }
         for ext in floptle_audio::AUDIO_EXTENSIONS {
-            let p = root.join(format!("{key}.{ext}"));
+            let p = crate::project::resolve_asset_path(root, &format!("{key}.{ext}"));
             if p.is_file() {
                 return Some(p);
             }

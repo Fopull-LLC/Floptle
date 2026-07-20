@@ -13,9 +13,18 @@ use crate::assets::{asset_kind_icon, is_texture, truncate_label, AssetEntry};
 /// Persists its search text, layout choice, and (via egui) folder-collapse
 /// state per `id`. Returns `Some(pick)` when something is chosen this frame —
 /// `Some(None)` is the `none_label` entry, `Some(Some(path))` a file.
+///
+/// The returned path is **project-root-relative** (`textures/foo.png`), never the
+/// asset tree's on-disk spelling — tree paths embed how the editor was launched
+/// (absolute under the Hub, `assets/…` under a repo-root `cargo run`), and refs
+/// stored that way break the moment the project is opened any other way or moved
+/// to another machine. Loaders take the relative form through
+/// [`crate::project::resolve_asset_path`].
+#[allow(clippy::too_many_arguments)] // one widget, one call shape — a param struct would just rename the args
 pub(crate) fn asset_picker(
     ui: &mut egui::Ui,
     id: egui::Id,
+    project_root: &Path,
     selected_text: &str,
     none_label: Option<&str>,
     tree: &[AssetEntry],
@@ -120,7 +129,7 @@ pub(crate) fn asset_picker(
     {
         picked = Some(Some(payload.path.clone()));
     }
-    picked
+    picked.map(|opt| opt.map(|p| crate::assets::asset_rel_path(&p, project_root)))
 }
 
 /// A ComboBox-styled button (framed box, left-aligned selected text clipped so it

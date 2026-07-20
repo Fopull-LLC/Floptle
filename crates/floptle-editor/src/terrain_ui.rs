@@ -169,6 +169,7 @@ impl EditorTabViewer<'_> {
         let terrain_glow = &mut *self.terrain_glow;
         let materials = self.materials;
         let asset_tree = self.asset_tree;
+        let project_root = self.project_root;
         let terrain_present = self.terrain_present;
         let terrain_stats = self.terrain_stats;
 
@@ -286,8 +287,12 @@ impl EditorTabViewer<'_> {
                                     .file_name()
                                     .map(|s| s.to_string_lossy().to_string())
                                     .unwrap_or_default();
-                                if ui.selectable_label(*tex == *p, n).clicked() {
-                                    *tex = p.clone();
+                                // Store the PORTABLE project-relative form (tree paths
+                                // embed how the editor was launched); match either
+                                // spelling so legacy slots still show as selected.
+                                let rel = crate::assets::asset_rel_path(p, project_root);
+                                if ui.selectable_label(*tex == *p || *tex == rel, n).clicked() {
+                                    *tex = rel;
                                     cmd.terrain_palette_changed = true;
                                 }
                             }
