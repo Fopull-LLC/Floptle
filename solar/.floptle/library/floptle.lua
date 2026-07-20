@@ -32,7 +32,7 @@
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
----@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor.
+---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
 ---@field setMaterial fun(self: Node, t: table) Construction API: set (and create if absent) the node's Material. Fields: color/emissive/specular/rim {r,g,b}, emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>").
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
@@ -98,6 +98,7 @@
 ---@field tintB number Image tint blue 0..1.
 ---@field tintA number Image tint alpha 0..1.
 ---@field cell number Spritesheet cell index the image shows (set per frame for sprite animation).
+---@field scrollY number Scroll-view position, design units (0 = top; the wheel drives it too, clamped to the content). Present only on elements with the scroll-view option.
 
 ---A UI slider's live value (`node:getcomponent("UiSlider")`) — the health-bar hook:
 ---`bar:getcomponent("UiSlider").value = hp` and the Fill/Handle parts follow.
@@ -729,6 +730,22 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
+---Checkpoint every EDITED resident terrain field to the save slot
+---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
+---encoding per frame plus a threaded write, deferred while a field is being
+---actively dug — so autosaves never stutter the game. Exit paths (Stop,
+---scene.load out of the slot) finish the writes synchronously, so a
+---checkpoint is never lost. Streaming also flushes when bodies stream out.
+function terrain.flush() end
+---Delete a save slot's persisted terrain directory from disk (pair with
+---`save.deleteSlot` in a "delete this save" UI). Narrow by design: the path
+---must be relative with no "..", must not be the ACTIVE `terrain.saveDir`
+---(clear it first), and only terrain files (.cfield/.tfield/.meta) in that one
+---directory are removed — the emptied directory (and an emptied parent) is
+---then tidied away. Returns the number of files removed.
+---@param path string e.g. "saves/slot2/terrain"
+---@return number
+function terrain.deleteSaveDir(path) end
 ---Signed distance from (x,y,z) to the nearest terrain surface (negative =
 ---inside rock), or nil when the scene has no terrain.
 ---@param x number
@@ -804,6 +821,13 @@ function save.delete(key) end
 ---@param name? string
 ---@return string
 function save.slot(name) end
+---Delete a slot's store file from disk ("delete this save" UIs). Deleting
+---the ACTIVE slot also empties the in-memory store, so the slot is instantly
+---reusable as a fresh save. Per-slot terrain is a separate directory — pair
+---with `terrain.deleteSaveDir`. Returns true if a file was removed.
+---@param name string
+---@return boolean
+function save.deleteSlot(name) end
 ---Write the store to disk now (checkpoints). Returns false on an IO error
 ---(also surfaced in the Console).
 ---@return boolean
