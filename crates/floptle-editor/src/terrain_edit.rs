@@ -121,6 +121,37 @@ pub(crate) struct ColdTerrain {
     pub color: [f32; 3],
 }
 
+/// Where a cold terrain's field comes from when it streams in (G2): a `.cfield`
+/// on disk (save-slot or project), or on-demand generation from the node's
+/// RON genspec — the galaxy path, where unvisited worlds have no file at all.
+enum TerrainSource {
+    File(PathBuf),
+    Generate(String),
+}
+
+/// Run one load/generate to completion — file read+parse or full procgen, plus
+/// the shadow-proxy derivation. Called on background threads (and blockingly at
+/// Play start / the emergency radius). None = unreadable file / bad genspec.
+fn load_terrain_from(src: TerrainSource) -> Option<EditorTerrain> {
+    let field = match src {
+        TerrainSource::File(path) => {
+            floptle_field::ChunkField::from_bytes(&std::fs::read(&path).ok()?)?
+        }
+        TerrainSource::Generate(spec) => {
+            let fill: floptle_field::procgen::PlanetFill = ron::from_str(&spec).ok()?;
+            floptle_field::procgen::generate_planet(&fill)
+        }
+    };
+    Some(EditorTerrain::new(field))
+}
+
+/// A genspec body's impostor color without generating anything: its surface
+/// palette's primary tint (close enough for a sub-pixel-to-few-pixel sphere).
+fn genspec_impostor_color(spec: &str) -> Option<[f32; 3]> {
+    let fill: floptle_field::procgen::PlanetFill = ron::from_str(spec).ok()?;
+    Some(fill.surface_a.color)
+}
+
 /// The body's average surface color for its impostor sphere: 26 rays from
 /// outside toward the center, averaging the voxel color where each first hits.
 /// Field-space — celestial terrain fields are authored centered on the origin.
@@ -1234,34 +1265,58 @@ impl Editor {
         }
     }
 
-    /// Spawn a background read+parse+shadow-proxy job for a cold terrain (capped
-    /// at 2 in flight; duplicates are no-ops).
+    /// Where a cold terrain's field comes FROM, in priority order (G2):
+    /// the game's save-slot file (player-edited state) → the project file
+    /// (authored) → the node's genspec (deterministic on-demand generation —
+    /// no file anywhere). None = nothing to load (stays an impostor).
+    fn resolve_terrain_source(&self, e: Entity, id: u32) -> Option<TerrainSource> {
+        if let Some(sd) = self.script_host.terrain_save_dir() {
+            let p = self
+                .project_root
+                .join(&sd)
+                .join(format!("{}.{id}.cfield", self.scene_name));
+            if p.exists() {
+                return Some(TerrainSource::File(p));
+            }
+        }
+        let p = self.terrain_field_path_id(id);
+        if p.exists() {
+            return Some(TerrainSource::File(p));
+        }
+        self.world
+            .get::<floptle_core::TerrainGen>(e)
+            .map(|g| TerrainSource::Generate(g.0.clone()))
+    }
+
+    /// The save-slot destination for an edited field, when the game set one.
+    fn terrain_save_slot_path(&self, id: u32) -> Option<PathBuf> {
+        self.script_host.terrain_save_dir().map(|sd| {
+            self.project_root.join(sd).join(format!("{}.{id}.cfield", self.scene_name))
+        })
+    }
+
+    /// Spawn a background load/generate job for a cold terrain (capped at 2 in
+    /// flight; duplicates are no-ops). Reads + parses a file, or generates the
+    /// whole planet from its genspec — either way the shadow proxy derives on
+    /// the thread too, so the main thread never hitches (Ty's no-stutter rule).
     fn kick_terrain_load(&mut self, e: Entity, id: u32) {
         if self.terrain_load_jobs.iter().any(|(je, _)| *je == e)
             || self.terrain_load_jobs.len() >= 2
         {
             return;
         }
-        let path = self.terrain_field_path_id(id);
+        let Some(src) = self.resolve_terrain_source(e, id) else { return };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let t = std::fs::read(&path)
-                .ok()
-                .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
-                .map(EditorTerrain::new);
-            let _ = tx.send(t);
+            let _ = tx.send(load_terrain_from(src));
         });
         self.terrain_load_jobs.push((e, rx));
     }
 
-    /// Blocking load — Play start (the spawn planet needs collision before the
-    /// first tick) and the emergency inside `RESIDENT_SYNC_RADII`.
+    /// Blocking load — Play start (the body you spawn ON needs collision before
+    /// the first tick) and the emergency inside `RESIDENT_SYNC_RADII`.
     pub(crate) fn load_terrain_blocking(&mut self, e: Entity, id: u32) -> bool {
-        let Some(t) = std::fs::read(self.terrain_field_path_id(id))
-            .ok()
-            .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
-            .map(EditorTerrain::new)
-        else {
+        let Some(t) = self.resolve_terrain_source(e, id).and_then(load_terrain_from) else {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!("terrain id {id}: cold field failed to load — body stays an impostor"),
@@ -1321,9 +1376,16 @@ impl Editor {
                     .unwrap_or(50.0);
                 impostor_surface_color(&t.field, r)
             });
-        if !self.playing {
-            if self.terrain_disk_dirty.contains(&e) {
-                let path = self.terrain_field_path_id(id);
+        // Edited fields save before dropping. Destination (G2): the game's
+        // save-slot dir when set (player state — writable even during Play,
+        // that's the whole point of a save slot), else the project file (edit-
+        // mode authoring). Playing with NO save slot = drop without saving
+        // (Stop reverts terrain anyway — today's Play semantics).
+        if self.terrain_disk_dirty.contains(&e) {
+            let dest = self
+                .terrain_save_slot_path(id)
+                .or_else(|| (!self.playing).then(|| self.terrain_field_path_id(id)));
+            if let Some(path) = dest {
                 if let Some(dir) = path.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
@@ -1337,6 +1399,8 @@ impl Editor {
                 }
                 self.terrain_disk_dirty.remove(&e);
             }
+        }
+        if !self.playing {
             self.write_terrain_meta(id, color);
         }
         self.terrains.remove(&e);
@@ -1377,21 +1441,33 @@ impl Editor {
         let single = nodes.len() == 1;
         for (e, id) in nodes {
             max_id = max_id.max(id);
-            // G1 RESIDENCY: a celestial body with a field file + meta sidecar
-            // starts COLD — no field read at all. The per-frame residency driver
-            // streams in whatever the camera is actually near (scene open gets
-            // FASTER as systems get bigger). Bodies without a meta yet (pre-G1
-            // scenes) load eagerly below, cache their color, and can go cold
-            // from then on. Non-celestial terrains are always resident.
-            if self.world.get::<floptle_core::CelestialBody>(e).is_some()
-                && self.terrain_field_path_id(id).exists()
-                && let Some(color) = self.read_terrain_meta(id)
-            {
-                let render = self.terrain_render.entry(e).or_default();
-                render.impostor = true;
-                render.impostor_color = Some(color);
-                self.terrain_cold.insert(e, ColdTerrain { id, color });
-                continue;
+            // G1/G2 RESIDENCY: a celestial body starts COLD — no field read, no
+            // generation — whenever its impostor color is knowable up front:
+            // from the meta sidecar (a field file exists), or from its genspec's
+            // surface palette (the galaxy path — the body has NO file anywhere
+            // and generates on first approach). The per-frame residency driver
+            // streams in whatever the camera is actually near, so scene open
+            // gets FASTER as systems get bigger. Bodies with a file but no meta
+            // yet (pre-G1 scenes) load eagerly below, cache their color, and go
+            // cold from then on. Non-celestial terrains are always resident.
+            if self.world.get::<floptle_core::CelestialBody>(e).is_some() {
+                let color = if self.terrain_field_path_id(id).exists() {
+                    self.read_terrain_meta(id)
+                } else {
+                    // A genspec body is ALWAYS cold (falling through to the eager
+                    // path would give it a flat starter slab — it has no file to
+                    // load); a garbled spec just gets a neutral sphere color.
+                    self.world.get::<floptle_core::TerrainGen>(e).map(|g| {
+                        genspec_impostor_color(&g.0).unwrap_or([0.62, 0.62, 0.68])
+                    })
+                };
+                if let Some(color) = color {
+                    let render = self.terrain_render.entry(e).or_default();
+                    render.impostor = true;
+                    render.impostor_color = Some(color);
+                    self.terrain_cold.insert(e, ColdTerrain { id, color });
+                    continue;
+                }
             }
             let dense_migration = || {
                 std::fs::read(self.terrain_tfield_path_id(id))

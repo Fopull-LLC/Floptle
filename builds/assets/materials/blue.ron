@@ -1,0 +1,13 @@
+(
+    color: (0.4, 0.7, 0.95),
+    emissive: (0.0, 0.0, 0.0),
+    emissive_strength: 0.0,
+    specular: (1.0, 1.0, 1.0),
+    shininess: 16.0,
+    specular_strength: 0.0,
+    rim: (0.0, 0.0, 0.0),
+    rim_strength: 0.0,
+    unlit: false,
+    ambient: 1.0,
+    alpha: 1.0,
+)

@@ -1,0 +1,18 @@
+// Lava — scrolling, churning noise. Hot veins ride an "ember" palette while
+// the cooled crust goes through the engine's real lighting (litSurface), so
+// the rock still catches sun, shadows and AO.
+shader lavaFlow {
+  stage fragment
+  uniform flow: float = 0.4 range(0, 2)
+  uniform heat: float = 1.4 range(0.2, 3)
+
+  let drift = uv * 3 + vec2(0, time * flow)
+  let churn = domainWarp(drift, scale: 2, time: time * flow)
+  let veins = fbm(churn, octaves: 5)
+  let crust = smoothstep(0.1, 0.7, veins)
+  let molten = palette(veins * 0.5 + 0.35, "ember") * heat
+  let rock = litSurface(vec3(0.06, 0.04, 0.05))
+
+  output color = vec4(mix(molten, rock, crust), 1)
+}
+//@layout { churn: (-1824, 0), crust: (-684, 490), drift: (-2052, 0), in.time: (-2736, 0), in.uv: (-2508, 0), molten: (-684, 0), out: (0, 0), rock: (-684, 256), u.flow: (-2736, 212), u.heat: (-912, 256), veins: (-1596, 0) }

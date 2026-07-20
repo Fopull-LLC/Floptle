@@ -1,0 +1,22 @@
+// Nebula dream — you're floating INSIDE the cloud: domain-warped fbm swirls
+// in slow motion, a cosine palette paints it, and the whole sky drifts around
+// the hue wheel over a couple of minutes. Stars burn through where it thins.
+shader nebulaDream {
+  stage sky
+  uniform deep: color = #050310
+  uniform density: float = 1 range(0.2, 2.5)
+  uniform swirl: float = 1 range(0, 3)
+  uniform hueDrift: float = 0.5 range(0, 2)
+
+  let p = domainWarp(skyDir * 1.8, scale: 1.5, time: time * 0.04 * swirl, strength: 2.3)
+  let body = fbm(p, octaves: 6) * 0.5 + 0.5
+  let veil = fbm(p * 2.3 + vec3(0, time * 0.012 * swirl, 0), octaves: 4) * 0.5 + 0.5
+  let neb = pow(body, 3) * 1.45 * density
+  let paint = contrast(hueShift(palette(body * 0.9 + veil * 0.35, "bruise"), time * 0.01 * hueDrift), 1.3)
+  let cores = pow(saturate(veil * body * 2 - 0.35), 2) * 0.55
+  let rnd = valueNoise(floor(skyDir * 44) + 0.5)
+  let stars = (1 - smoothstep(0.02, 0.07, worley(skyDir * 44))) * step(0.5, rnd) * (0.45 + rnd) * 1.3
+  let blink = 0.7 + 0.3 * sin(time * 3 + rnd * 30)
+  output color = deep.rgb + paint * neb + paint * cores + vec3(0.9, 0.9, 1) * stars * blink * saturate(1.2 - neb * 1.8)
+}
+//@layout { blink: (-912, 1024), body: (-2280, 0), cores: (-912, 512), in.skyDir: (-3876, 0), in.time: (-4104, 0), neb: (-1368, 256), out: (0, 0), p: (-3420, 0), paint: (-1140, 146), rnd: (-2052, 1046), stars: (-1140, 658), u.deep: (-1140, 0), u.density: (-1596, 768), u.hueDrift: (-1824, 512), u.swirl: (-3876, 468), veil: (-2280, 256) }

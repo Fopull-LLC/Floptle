@@ -1,0 +1,62 @@
+(
+    default_fade: 0.25,
+    sample_fps: Some(10.0),
+    layers: [
+        (
+            name: "Base",
+            weight: 1.0,
+            states: [
+                (
+                    name: "Idle.001",
+                    clip: "animations/UVMappedR6/Idle.001",
+                    speed: 1.0,
+                    looped: true,
+                    fade_in: Some(0.25),
+                    pos: (475.0, 236.0),
+                ),
+                (
+                    name: "Jump",
+                    clip: "animations/UVMappedR6/Jump",
+                    speed: 1.0,
+                    looped: true,
+                    fade_in: Some(0.0),
+                    pos: (492.0, 399.0),
+                ),
+                (
+                    name: "Walk",
+                    clip: "animations/UVMappedR6/Walk",
+                    speed: 1.5,
+                    looped: true,
+                    pos: (645.0, 155.0),
+                ),
+                (
+                    name: "Run",
+                    clip: "animations/UVMappedR6/Run",
+                    speed: 2.0,
+                    looped: true,
+                    pos: (714.0, 376.0),
+                ),
+                (
+                    name: "Test",
+                    clip: "animations/Test",
+                    speed: 1.0,
+                    looped: true,
+                    pos: (160.0, 40.0),
+                ),
+            ],
+            default_state: Some("Idle.001"),
+            transitions: [
+                (
+                    from: "Idle.001",
+                    to: "Walk",
+                    fade: 0.1,
+                ),
+                (
+                    from: "Idle.001",
+                    to: "Run",
+                    fade: 0.05,
+                ),
+            ],
+        ),
+    ],
+)

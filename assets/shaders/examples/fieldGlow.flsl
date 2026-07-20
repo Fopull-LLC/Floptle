@@ -1,0 +1,18 @@
+// Field glow — the hook no other engine hands a shader: fieldDistance() is
+// the distance from any point to the scene's SDF field (terrain, blobs,
+// Field Shapes). This material grows an aura wherever the scene gets close,
+// and sdfAo() concentrates it into crevices.
+shader fieldGlow {
+  stage fragment
+  uniform auraColor: color = #64FFC8
+  uniform reach: float = 1.5 range(0.1, 6)
+
+  let albedo = baseTexture() * instanceColor
+  let lit = litSurface(albedo.rgb)
+  let near = 1 - saturate(fieldDistance(worldPos + normal * 0.05) / reach)
+  let cavity = sdfAo(worldPos, normal)
+  let aura = auraColor.rgb * pow(near, 2) * (0.4 + 0.6 * cavity)
+
+  output color = vec4(lit + aura, albedo.a)
+}
+//@layout { albedo: (-912, 0), lit: (-684, 0), near: (-684, 140), cavity: (-684, 280), aura: (-342, 180), out: (0, 90) }

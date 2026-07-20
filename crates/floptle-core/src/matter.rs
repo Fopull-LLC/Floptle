@@ -237,6 +237,16 @@ pub struct MeshCollider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collidable;
 
+/// On-demand terrain generation spec (G2 galaxy streaming): the RON-serialized
+/// `PlanetFill` recipe for this Terrain node's field. A body carrying this needs
+/// no `.cfield` on disk at all — when something first approaches, the engine
+/// generates the field from this spec on a background thread (deterministic per
+/// seed), and player edits saved to a save-slot dir take priority over
+/// regeneration. Written by the Lua construction API (`node:setTerrainGen{...}`);
+/// the payload stays an opaque string here (core doesn't know `PlanetFill`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerrainGen(pub String);
+
 /// Makes a [`Collidable`] node's static collider a **trigger**: bodies pass
 /// straight through it (no blocking, no push-out), but overlap still fires the
 /// `onTriggerEnter` / `onTriggerStay` / `onTriggerExit` script hooks — the

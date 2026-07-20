@@ -1,0 +1,19 @@
+shader myShader {
+  stage fragment
+  uniform tint: color = #FFFFFF
+  uniform glow: float = 0 range(0, 4)
+
+  let baseTexture1 = baseTexture()
+  let mixdown1 = baseTexture1 * tint
+  let base = mixdown1 * instanceColor
+  let part1 = base.rgb
+  let lit = litSurface(part1)
+  let part2 = base.rgb
+  let mixdown2 = part2 * glow
+  let mixdown3 = lit + mixdown2
+  let part3 = base.a
+  let node1 = vec4(mixdown3, part3)
+
+  output color = node1
+}
+//@layout { base: (-1154, 7), baseTexture1: (-1650, 39), in.instanceColor: (-1422, 141), lit: (-655, -43), mixdown1: (-1422, 39), mixdown2: (-655, 37), mixdown3: (-427, -43), node1: (-179, -4), out: (34, -19), part1: (-906, -36), part2: (-921, 90), part3: (-427, 59), u.glow: (-908, 226), u.tint: (-1650, 119) }

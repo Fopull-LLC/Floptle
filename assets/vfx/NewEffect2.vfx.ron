@@ -1,0 +1,151 @@
+(
+    name: "NewEffect2",
+    lifetime: 1.35,
+    playback: Looping,
+    end: Destroy,
+    tracks: [
+        (
+            name: "Fountain",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Smoke/8.png"),
+            ),
+            blend: Additive,
+            space: Local,
+            clips: [],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 5,
+                ),
+            ],
+            automation: [],
+            rate: 1.0,
+            shape: Cone(
+                angle: 61.0,
+                radius: 0.0,
+            ),
+            particle_lifetime: 0.45,
+            lifetime_jitter: 0.4,
+            velocity: Range(Vec3((0.0, 5.0, 0.0)), Vec3((0.0, 9.0, 0.0))),
+            size: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: F32(0.25),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.24721853,
+                        v: F32(0.41633642),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.54941624,
+                        v: F32(0.573383),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: F32(0.6322756),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
+            angular_velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.0,
+                        v: Rgba((1.0, 1.0, 1.0, 1.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 1.23,
+            drag: 5.42,
+        ),
+        (
+            name: "Track 2",
+            render: Billboard(
+                texture: Some("assets/textures/VFXTEX/Smoke/21.png"),
+            ),
+            blend: Alpha,
+            space: Local,
+            clips: [],
+            bursts: [
+                (
+                    t: 0.0,
+                    count: 12,
+                ),
+            ],
+            automation: [],
+            rate: 1.0,
+            shape: Cone(
+                angle: 88.5,
+                radius: 0.0,
+            ),
+            particle_lifetime: 0.19,
+            lifetime_jitter: 0.4,
+            velocity: Const(Vec3((0.0, 4.5, 0.0))),
+            size: Const(F32(0.66)),
+            rotation: Const(Vec3((0.0, 0.0, 0.0))),
+            angular_velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            color: Curve((
+                keys: [
+                    (
+                        t: 0.005451747,
+                        v: Rgba((0.040314503, 0.040314503, 0.040314503, 0.3488016)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.5136937,
+                        v: Rgba((0.018829916, 0.018829916, 0.018829916, 0.2706766)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.8241333,
+                        v: Rgba((0.012519872, 0.012519872, 0.012519872, 0.1685133)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.0, 0.0, 0.0, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 1.25,
+            drag: 0.0,
+        ),
+    ],
+    seed: 1,
+)

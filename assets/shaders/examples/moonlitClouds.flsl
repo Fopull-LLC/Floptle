@@ -1,0 +1,32 @@
+// Moonlit clouds — a night deck sliding under a hard little moon. Clouds
+// facing the moon catch a silver lining, the disc dims behind them instead
+// of vanishing, and a few twinkling stars survive in the gaps.
+shader moonlitClouds {
+  stage sky
+  uniform night: color = #0A1124
+  uniform haze: color = #1B2740
+  uniform moonGlow: color = #E9EFFF
+  uniform moonDir: vec3 = vec3(0.4, 0.55, 0.3)
+  uniform cover: float = 0.55 range(0, 1)
+  uniform drift: float = 1 range(0, 4)
+
+  let up = saturate(skyDir.y)
+  let base = mix(haze.rgb, night.rgb, pow(up, 0.8))
+  let moon = normalize(moonDir)
+  let toMoon = saturate(dot(skyDir, moon))
+  let disc = smoothstep(0.9975, 0.9986, toMoon) * 1.6
+  let halo = pow(toMoon, 90) * 0.5 + pow(toMoon, 12) * 0.12
+  let rnd = valueNoise(floor(skyDir * 30) + 0.5)
+  let stars = (1 - smoothstep(0.02, 0.09, worley(skyDir * 30))) * step(0.7, rnd) * (0.5 + 0.5 * sin(time * 2 + rnd * 30)) * 1.2
+  let sp = skyDir.xz / (max(skyDir.y, 0.0) * 2.2 + 0.3)
+  let scrolled = vec2(time * 0.016 * drift, time * 0.009 * drift)
+  let puffs = fbm(sp * 3 + scrolled, octaves: 5) * 0.5 + 0.5
+  let detail = fbm(sp * 9 - scrolled * 2, octaves: 4) * 0.5 + 0.5
+  let shape = puffs * 0.85 + detail * 0.25
+  let dens = smoothstep(0.95 - cover * 0.9, 1.12 - cover * 0.9, shape) * smoothstep(0.015, 0.12, skyDir.y)
+  let lining = mix(night.rgb * 1.35, moonGlow.rgb * 0.95, pow(toMoon, 4) * 0.85 + saturate(detail * 1.2 - 0.5) * 0.12)
+  let open = 1 - dens
+  let sky = base + stars * open * vec3(0.8, 0.88, 1) + (disc + halo) * moonGlow.rgb * (open * 0.92 + 0.08)
+  output color = mix(mix(sky, lining, dens), haze.rgb * 0.55, saturate(-skyDir.y * 3))
+}
+//@layout { base: (-1140, 0), dens: (-1824, 512), detail: (-2736, 892), disc: (-1596, 1038), halo: (-1596, 1294), in.skyDir: (-5016, 0), in.time: (-4560, 0), lining: (-684, 256), moon: (-2736, 1148), open: (-1596, 782), out: (0, 0), puffs: (-2736, 636), rnd: (-3192, 0), scrolled: (-3876, 512), shape: (-2280, 1280), sky: (-684, 0), sp: (-3876, 256), stars: (-1596, 526), toMoon: (-2280, 1792), u.cover: (-2736, 490), u.drift: (-4332, 512), u.haze: (-1596, 0), u.moonDir: (-2964, 1280), u.moonGlow: (-1596, 1550), u.night: (-1596, 146), up: (-1596, 292) }

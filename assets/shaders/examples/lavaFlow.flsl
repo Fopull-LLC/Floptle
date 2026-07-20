@@ -1,0 +1,20 @@
+shader lavaFlow {
+  stage fragment
+  uniform flow: float = 0.4 range(0, 2)
+  uniform heat: float = 1.4 range(0.2, 3)
+
+  let rock = litSurface(vec3(0.06, 0.04, 0.05))
+  let mixdown1 = time * flow
+  let mixdown2 = uv * 3
+  let mixdown3 = time * flow
+  let node1 = vec2(0, mixdown3)
+  let drift = mixdown2 + node1
+  let churn = domainWarp(drift, scale: 2, time: mixdown1)
+  let veins = fbm(churn, octaves: 5)
+  let crust = smoothstep(0.1, 0.7, veins)
+  let palette1 = palette(veins * 0.5 + 0.35, "ember")
+  let molten = palette1 * heat
+
+  output color = vec4(mix(molten, rock, crust), 1)
+}
+//@layout { churn: (-684, 30), crust: (-228, 0), drift: (-912, 30), in.time: (-2263, -128), in.uv: (-2086, -7), mixdown1: (-1560, -165), mixdown2: (-1641, 39), mixdown3: (-2069, 84), molten: (-228, 120), node1: (-1644, 184), out: (0, 90), palette1: (-848, -115), rock: (-228, 260), u.flow: (-1804, -122), u.heat: (-920, 245), veins: (-456, 30) }

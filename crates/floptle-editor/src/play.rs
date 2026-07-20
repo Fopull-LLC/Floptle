@@ -272,10 +272,12 @@ impl Editor {
             .collect()
     }
 
-    /// G1 residency, Play start: synchronously load every COLD celestial terrain
-    /// within its load radius of any RigidBody node or the camera — collision
-    /// must exist before the first tick (a background load would leave the spawn
-    /// planet intangible for a second).
+    /// G1 residency, Play start: synchronously load any COLD celestial terrain a
+    /// dynamic body is practically ON (within `RESIDENT_SYNC_RADII` body radii)
+    /// — collision must exist before the first tick. Deliberately TIGHT: bodies
+    /// merely nearby (a moon a few radii out) stream in the background instead,
+    /// showing their impostor meanwhile — Play start must not stack blocking
+    /// generations (the no-stutter rule).
     pub(crate) fn force_load_play_terrains(&mut self) {
         let mut anchors: Vec<floptle_core::math::DVec3> = self
             .world
@@ -289,7 +291,8 @@ impl Editor {
             .filter_map(|(&e, cold)| {
                 let cb = self.world.get::<floptle_core::CelestialBody>(e)?;
                 let p = floptle_core::world_transform(&self.world, e).translation;
-                let reach = cb.body_radius.max(1.0) * 80.0; // RESIDENT_LOAD_RADII
+                let reach =
+                    cb.body_radius.max(1.0) * crate::terrain_edit::RESIDENT_SYNC_RADII;
                 anchors
                     .iter()
                     .any(|a| (*a - p).length() < reach)
@@ -308,7 +311,9 @@ impl Editor {
     }
 
     /// G1 residency, Stop: drop terrains that streamed in during Play back to
-    /// cold — nothing saves (their disk file is the untouched pre-Play state).
+    /// cold. The project file is never touched — but a field DUG during Play
+    /// with a save SLOT set (`terrain.saveDir`) flushes to the slot first:
+    /// that's player state, exactly what a slot is for (G2).
     pub(crate) fn drop_play_loaded_terrains(&mut self) {
         let dropped: Vec<Entity> = self.play_loaded_terrains.drain().collect();
         for e in dropped {
@@ -320,6 +325,20 @@ impl Editor {
             else {
                 continue;
             };
+            if self.terrain_disk_dirty.contains(&e)
+                && let Some(sd) = self.script_host.terrain_save_dir()
+            {
+                let path = self
+                    .project_root
+                    .join(&sd)
+                    .join(format!("{}.{id}.cfield", self.scene_name));
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Some(t) = self.terrains.get(&e) {
+                    let _ = std::fs::write(&path, t.field.to_bytes());
+                }
+            }
             let color = self
                 .terrain_render
                 .get(&e)
@@ -451,9 +470,13 @@ impl Editor {
             // G1 residency: terrains that streamed IN during Play were cold at
             // Play start (not in the snapshot above) — drop them back to cold so
             // Play can't leak residency or persist in-Play digs on them. Their
-            // on-disk field is untouched (nothing saves during Play), so cold +
-            // disk file IS the pre-Play state.
+            // on-disk field is untouched (nothing saves to the PROJECT during
+            // Play), so cold + disk file IS the pre-Play state. (Fields dug
+            // during Play with a save SLOT set flushed to the slot inside
+            // drop_play_loaded_terrains — player state, not authoring.)
             self.drop_play_loaded_terrains();
+            // The save slot never outlives its run.
+            self.script_host.clear_terrain_save_dir();
         } else {
             // Scripts run from what's on DISK — flush unsaved IDE edits first so
             // Play always tests the code you're looking at.

@@ -1047,6 +1047,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
     let up = right.cross(fwd);
     let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
     floptle_scene::NodeDoc {
+        terrain_gen: None,
         name: "Camera".into(),
         transform: floptle_scene::TransformDoc {
             translation: [pos.x as f64, pos.y as f64, pos.z as f64],
@@ -1106,6 +1107,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
         lighting: LightDoc::default(),
         nodes: vec![
             NodeDoc {
+                terrain_gen: None,
                 name: "cube".into(),
                 transform: TransformDoc { translation: [-2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
@@ -1132,6 +1134,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 tags: Vec::new(),
             },
             NodeDoc {
+                terrain_gen: None,
                 name: "sphere".into(),
                 transform: TransformDoc { translation: [2.0, 0.0, 0.0], ..Default::default() },
                 matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
@@ -1158,6 +1161,7 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
                 tags: Vec::new(),
             },
             NodeDoc {
+                terrain_gen: None,
                 name: "blob".into(),
                 transform: TransformDoc { translation: [0.0, 1.6, 0.0], ..Default::default() },
                 matter: MatterDoc::Blob { scale: 1.0 },

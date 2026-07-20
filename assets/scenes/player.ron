@@ -1,0 +1,46 @@
+(
+    name: "player",
+    nodes: [
+        (
+            name: "Player",
+            transform: (
+                translation: (0.0, 2.0, 8.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Capsule,
+                color: (0.35, 0.55, 0.95),
+            ),
+            scripts: [
+                (
+                    kind: "third_person",
+                    enabled: true,
+                    params: [],
+                ),
+                (
+                    kind: "sword",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            rigidbody: Some((
+                capsule: true,
+                radius: 0.5,
+                height: 2.0,
+                half_extents: (0.5, 0.5, 0.5),
+                restitution: 0.0,
+                friction: 0.3,
+                gravity: true,
+                lock_pos: (false, false, false),
+                lock_rot: (false, false, false),
+            )),
+            net: Some((
+                predicted: true,
+                transform: true,
+                physics: true,
+                interp: true,
+            )),
+        ),
+    ],
+)

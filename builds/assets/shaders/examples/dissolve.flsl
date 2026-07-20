@@ -1,0 +1,20 @@
+// Dissolve — a burn-away cutout. Noise decides which pixels survive as
+// `progress` sweeps 0 → 1 (animate it from Lua or scrub it in the Inspector),
+// and the surviving rim right at the threshold glows hot.
+shader dissolve {
+  stage fragment
+  blend alpha
+  uniform progress: float = 0.35 range(0, 1)
+  uniform edgeColor: color = #FF9A3C
+  uniform edgeWidth: float = 0.08 range(0.01, 0.3)
+
+  let grain = fbm(uv * 6, octaves: 4) * 0.5 + 0.5
+  let alive = step(progress, grain)
+  let edge = smoothstep(progress, progress + edgeWidth, grain)
+  let albedo = baseTexture() * instanceColor
+  let lit = litSurface(albedo.rgb)
+  let burning = mix(edgeColor.rgb * 2.5, lit, edge)
+
+  output color = vec4(burning, albedo.a * alive)
+}
+//@layout { albedo: (-1140, 146), alive: (-684, 1024), burning: (-456, 0), edge: (-684, 490), grain: (-912, 768), in.instanceColor: (-1368, 234), in.uv: (-1824, 0), lit: (-684, 256), out: (0, 0), u.edgeColor: (-1140, 0), u.edgeWidth: (-1140, 548), u.progress: (-1140, 402) }

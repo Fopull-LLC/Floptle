@@ -1,0 +1,26 @@
+shader dissolve {
+  stage fragment
+  blend alpha
+  uniform progress: float = 0.35 range(0, 1)
+  uniform edgeColor: color = #FF9A3C
+  uniform edgeWidth: float = 0.08 range(0.01, 0.3)
+
+  let baseTexture1 = baseTexture()
+  let albedo = baseTexture1 * instanceColor
+  let fbm1 = fbm(uv * 6, octaves: 4)
+  let grain = fbm1 * 0.5 + 0.5
+  let alive = step(progress, grain)
+  let part1 = edgeColor.rgb
+  let mixdown1 = progress + edgeWidth
+  let edge = smoothstep(progress, mixdown1, grain)
+  let mixdown3 = part1 * 2.5
+  let part2 = albedo.a
+  let mixdown2 = part2 * alive
+  let part3 = albedo.rgb
+  let lit = litSurface(part3)
+  let burning = mix(mixdown3, lit, edge)
+  let node1 = vec4(burning, mixdown2)
+
+  output color = node1
+}
+//@layout { albedo: (-1099, -386), alive: (-384, -363), baseTexture1: (-1367, -282), burning: (40, 318), edge: (-426, 0), fbm1: (-1399, 338), grain: (-806, 147), lit: (-485, 349), mixdown1: (-690, 432), mixdown2: (-120, -104), mixdown3: (-188, 181), node1: (150, -23), out: (432, 12), part1: (-791, -122), part2: (-608, -536), part3: (-792, -394) }

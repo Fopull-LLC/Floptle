@@ -1,6 +1,11 @@
 # Galaxy-Scale Streaming — terrain residency, on-demand generation, multi-system worlds
 
-Status: **G1 implemented** (terrain residency streaming) · G2–G5 proposed
+Status: **G1 + G2 implemented** (residency streaming; on-demand genspec generation +
+save-slot terrain via `node:setTerrainGen` / `terrain.saveDir`) · G3–G5 proposed
+Ty's directives (2026-07-19): game logic surfaced through the Lua API (game-in-engine,
+not engine-for-game) · zero generation stutter · big terrain files stay OUT of git
+(genspecs in the scene; player edits in save slots keyed by the galaxy seed) · the map
+should navigate every system in the galaxy cleanly (→ G3).
 Author: Fable, 2026-07-19 · requested by Ty ("simulate massive galaxies… travel across an
 entire galaxy without the computer dying")
 

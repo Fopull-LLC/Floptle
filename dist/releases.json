@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "channels": { "stable": ["0.1.0"] },
+  "versions": [
+    {
+      "version": "0.1.0",
+      "channel": "stable",
+      "date": "2026-07-04",
+      "artifacts": {
+        "linux-x86_64": { "url": "/mnt/disks/3tb/GithubRepositories/Floptle/dist/floptle-0.1.0-linux-x86_64.tar.gz", "sha256": "6a63cc0df5d7cd3fe08606860752f84b926050bb1e2ff069d0d68467c619cfa4", "size": 9055684 }
+      }
+    }
+  ]
+}
