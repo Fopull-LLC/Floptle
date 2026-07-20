@@ -50,11 +50,15 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build editor
-        run: cargo build --release -p floptle-editor --target ${{ matrix.rust }}
+      - name: Build editor + hub
+        run: |
+          cargo build --release -p floptle-editor --target ${{ matrix.rust }}
+          cargo build --release -p floptle-hub --target ${{ matrix.rust }}
 
       # A flat archive: the bundle's CONTENTS (editor binary + version.json) sit at the
-      # archive root, matching floptle_hub::install::unpack.
+      # archive root, matching floptle_hub::install::unpack. The HUB ships as its own
+      # small archive beside it — the thing a new user downloads first (the Hub then
+      # installs engine versions itself).
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -69,6 +73,10 @@ jobs:
           else SHA=$(shasum -a 256 "$B.tar.gz" | cut -d' ' -f1); fi
           SIZE=$(wc -c < "$B.tar.gz" | tr -d ' ')
           printf '{"target":"%s","file":"%s.tar.gz","sha256":"%s","size":%s}\n' "$T" "$B" "$SHA" "$SIZE" > "fragment-$T.json"
+          H="floptle-hub-$VER-$T"
+          mkdir -p "$H"
+          cp "target/${{ matrix.rust }}/release/floptle-hub" "$H/floptle-hub"
+          tar -C "$H" -czf "$H.tar.gz" .
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -84,6 +92,10 @@ jobs:
           $sha  = (Get-FileHash "$b.zip" -Algorithm SHA256).Hash.ToLower()
           $size = (Get-Item "$b.zip").Length
           "{""target"":""$t"",""file"":""$b.zip"",""sha256"":""$sha"",""size"":$size}" | Set-Content -NoNewline "fragment-$t.json"
+          $h = "floptle-hub-$ver-$t"
+          New-Item -ItemType Directory -Force -Path $h | Out-Null
+          Copy-Item "target/${{ matrix.rust }}/release/floptle-hub.exe" "$h/floptle-hub.exe"
+          Compress-Archive -Path "$h/*" -DestinationPath "$h.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,6 +103,8 @@ jobs:
           path: |
             floptle-*.tar.gz
             floptle-*.zip
+            floptle-hub-*.tar.gz
+            floptle-hub-*.zip
             fragment-*.json
           if-no-files-found: error
 
@@ -98,34 +112,42 @@ jobs:
     name: publish
     needs: build
     runs-on: ubuntu-latest
+    # Distribution is PUBLIC (Fopull-LLC/Floptle-releases): the Hub's default
+    # manifest URL points there and anyone can download — the engine source
+    # stays in this private repo. Publishing there needs the RELEASES_TOKEN
+    # secret (a PAT with write access to the releases repo); without it, this
+    # job still archives everything on THIS repo and someone with local gh
+    # auth finishes with scripts/publish-public.sh <tag>.
+    env:
+      PUBLIC_REPO: Fopull-LLC/Floptle-releases
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
       # Merge this version into the manifest (fetch the existing one so past versions
-      # survive), pointing each artifact at its release download URL.
+      # survive), pointing each artifact at its PUBLIC release download URL.
       - name: Assemble releases.json
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN != '' && secrets.RELEASES_TOKEN || github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME#v}"; TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
+          VER="${GITHUB_REF_NAME#v}"; TAG="$GITHUB_REF_NAME"
           ARTIFACTS="{}"
           for f in artifacts/*/fragment-*.json; do
             T=$(jq -r .target "$f"); FILE=$(jq -r .file "$f"); SHA=$(jq -r .sha256 "$f"); SIZE=$(jq -r .size "$f")
-            URL="https://github.com/$REPO/releases/download/$TAG/$FILE"
+            URL="https://github.com/$PUBLIC_REPO/releases/download/$TAG/$FILE"
             ARTIFACTS=$(jq -n --argjson a "$ARTIFACTS" --arg t "$T" --arg u "$URL" --arg s "$SHA" --argjson z "$SIZE" \
               '$a + {($t): {url:$u, sha256:$s, size:$z}}')
           done
           # A prerelease tag (v0.4.0-rc1) goes on the 'beta' channel, else 'stable'.
           CHAN=stable; case "$VER" in *-*) CHAN=beta;; esac
-          ENTRY=$(jq -n --arg v "$VER" --arg c "$CHAN" --arg d "$(date +%F)" --arg n "https://github.com/$REPO/releases/tag/$TAG" --argjson a "$ARTIFACTS" \
+          ENTRY=$(jq -n --arg v "$VER" --arg c "$CHAN" --arg d "$(date +%F)" --arg n "https://github.com/$PUBLIC_REPO/releases/tag/$TAG" --argjson a "$ARTIFACTS" \
             '{version:$v, channel:$c, date:$d, notes_url:$n, artifacts:$a}')
-          # Start from the existing manifest if one is published, else empty.
+          # Start from the PUBLIC manifest if one is published, else empty.
           EXISTING='{"schema":1,"channels":{},"versions":[]}'
-          if gh release download manifest --repo "$REPO" --pattern releases.json --dir prev 2>/dev/null; then
+          if gh release download manifest --repo "$PUBLIC_REPO" --pattern releases.json --dir prev 2>/dev/null; then
             EXISTING=$(cat prev/releases.json)
           fi
           jq -n --argjson m "$EXISTING" --argjson e "$ENTRY" --arg v "$VER" --arg c "$CHAN" '
@@ -136,7 +158,9 @@ jobs:
             }' > releases.json
           cat releases.json
 
-      - name: Publish release + manifest
+      # Archive of record on the private repo — always happens, and is what
+      # scripts/publish-public.sh mirrors when RELEASES_TOKEN isn't set.
+      - name: Archive on this repo
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -147,7 +171,24 @@ jobs:
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "Automated release $TAG" || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$REPO"
+
+      - name: Publish to the public releases repo
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASES_TOKEN:-}" ]; then
+            echo "::warning::RELEASES_TOKEN not set — public publish skipped. Run scripts/publish-public.sh $GITHUB_REF_NAME locally to finish the release."
+            exit 0
+          fi
+          export GH_TOKEN="$RELEASES_TOKEN"
+          TAG="$GITHUB_REF_NAME"
+          shopt -s nullglob
+          BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
+          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes "Floptle $TAG — download the floptle-hub archive for your platform; the Hub installs engine versions." || true
+          gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to
           # the newest list (releases/download/manifest/releases.json).
-          gh release create manifest --repo "$REPO" --title "Release manifest" --notes "Always-latest version manifest for the Floptle Hub." || true
-          gh release upload manifest releases.json --clobber --repo "$REPO"
+          gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --notes "Always-latest version manifest for the Floptle Hub." || true
+          gh release upload manifest releases.json --clobber --repo "$PUBLIC_REPO"
