@@ -362,7 +362,7 @@ pub struct Raymarch {
 /// Layers in the terrain texture palette + the size each is stored at. 12 layers:
 /// enough for a planet's biomes + strata + cave materials AND a moon's, in one scene
 /// palette (the palette is per-scene, shared by every terrain volume in it).
-pub const TERRAIN_SLOTS: u32 = 12;
+pub const TERRAIN_SLOTS: u32 = 32;
 const TERRAIN_TEX_SIZE: u32 = 256;
 
 impl Raymarch {
@@ -516,7 +516,8 @@ impl Raymarch {
             &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback,
         );
         let field_layout = field_bind_layout(device);
-        let field_bind = make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &sampler);
+        let field_bind =
+            make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler);
 
         Self {
             pipeline,
@@ -845,8 +846,9 @@ impl Raymarch {
             let (tight_min, tight_max) = full_content_bounds(b);
             self.slots.push(VolSlot { origin: *origin, dims: b.dims, tight_min, tight_max });
         }
-        self.field_bind =
-            make_field_bind(&gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &self.sampler);
+        self.field_bind = make_field_bind(
+            &gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &color_tex, &self.sampler,
+        );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
         self.rebuild_binds(&gpu.device);
@@ -1089,6 +1091,10 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // The COLOR atlas (rgba8, alpha = exact palette slot byte): the raster's
+            // splat shader textureLoads it so texture transitions blend WEIGHTS of
+            // real slots instead of interpolating slot indices.
+            vol_tex_entry(3),
         ],
     })
 }
@@ -1098,9 +1104,11 @@ pub(crate) fn make_field_bind(
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
     dist: &wgpu::Texture,
+    color: &wgpu::Texture,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("sdf-field"),
         layout,
@@ -1108,6 +1116,7 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dist_view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&color_view) },
         ],
     })
 }

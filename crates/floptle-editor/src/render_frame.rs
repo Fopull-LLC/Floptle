@@ -786,13 +786,14 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
-            // Meshed terrain reads the per-slot NEAREST bitmask, triplanar scale and
-            // per-slot GLOW bitmask here.
-            terrain_mask: [
+            // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
+            // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
+            terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            terrain_bits: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
-                0.22,
-                self.terrain_glow_mask as f32,
-                0.0,
+                self.terrain_glow_mask,
+                0,
+                0,
             ],
         };
 
@@ -1055,7 +1056,7 @@ impl Editor {
                 // .w = per-slot NEAREST mask (bit i = slot i is Pixelated). The palette
                 // is one texture_2d_array with one sampler, so the shader can't pick a
                 // sampler per slot — it reads this mask and selects the result instead.
-                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask],
+                terrain_tint: [tm.color[0], tm.color[1], tm.color[2], terrain_nearest_mask as f32],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
                 terrain_params: [tm.shininess, tm.rim_strength, if tm.unlit { 1.0 } else { 0.0 }, tm.ambient],
@@ -3286,8 +3287,7 @@ impl Editor {
                 })
                 .collect();
             let mask =
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings)
-                    as u32;
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings);
             if let Some(gpu) = self.gpu.as_ref() {
                 if let Some(raymarch) = self.raymarch.as_mut() {
                     raymarch.set_terrain_textures(gpu, &layers);
@@ -4997,13 +4997,14 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
-            // Meshed terrain reads the per-slot NEAREST bitmask, triplanar scale and
-            // per-slot GLOW bitmask here.
-            terrain_mask: [
+            // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
+            // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
+            terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            terrain_bits: [
                 crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
-                0.22,
-                self.terrain_glow_mask as f32,
-                0.0,
+                self.terrain_glow_mask,
+                0,
+                0,
             ],
         };
 
@@ -5161,7 +5162,10 @@ impl Editor {
                     tm.color[0],
                     tm.color[1],
                     tm.color[2],
-                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                    // Legacy raymarch path packs the mask in an f32 lane — exact for
+                    // slots 0..23 only; the meshed raster path uses u32 terrain_bits.
+                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings)
+                        as f32,
                 ],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],
                 terrain_specular: [tm.specular[0], tm.specular[1], tm.specular[2], tm.specular_strength],
