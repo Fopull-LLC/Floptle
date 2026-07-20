@@ -1318,7 +1318,7 @@ struct FocusAnim {
 /// physically can't move (Wayland/macOS/Windows) — falling back to confining it
 /// to the window (X11, which has no lock). Returns true when only the CONFINE
 /// took, so the caller re-centers the cursor every frame to emulate the pin.
-fn grab_cursor(window: &Window, want: bool) -> bool {
+pub(crate) fn grab_cursor(window: &Window, want: bool) -> bool {
     if !want {
         let _ = window.set_cursor_grab(CursorGrabMode::None);
         window.set_cursor_visible(true);
@@ -2402,8 +2402,21 @@ impl ApplicationHandler for Editor {
                     // Clicking into the Game view while playing traps the cursor there
                     // (Escape or Stop releases it) so playing doesn't let the mouse
                     // wander onto editor panels. `cursor_over_game()` gates it to the
-                    // Game rect, so a click on any panel never grabs.
-                    if self.playing && !self.game_trap && self.cursor_over_game() {
+                    // Game rect, so a click on any panel never grabs. A CURSOR-DRIVEN
+                    // game must keep its cursor: while any interactive game-UI is on
+                    // screen (a main menu's slot buttons, the ship's SAS cluster) the
+                    // pointer IS the gameplay — trapping it froze the menu dead.
+                    // Scripts still grab for free-look via input.setMouseLocked.
+                    let ui_interactive = self.ui_hover.is_some()
+                        || self
+                            .world
+                            .query::<floptle_ui::ElementSpec>()
+                            .any(|(_, s)| s.button && s.visible);
+                    if self.playing
+                        && !self.game_trap
+                        && !ui_interactive
+                        && self.cursor_over_game()
+                    {
                         self.game_trap = true;
                         if let Some(window) = self.window.as_ref() {
                             self.cursor_lock_soft = grab_cursor(window, true);
