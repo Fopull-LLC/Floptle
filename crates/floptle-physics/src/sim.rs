@@ -36,6 +36,14 @@ struct CompoundLink {
     compound: usize,
 }
 
+/// One scripted force held on a compound for the current tick (world frame).
+struct HeldForce {
+    eid: u32,
+    force: Vec3,
+    at: Option<DVec3>,
+    torque: Vec3,
+}
+
 pub struct Sim {
     pub world: PhysicsWorld,
     map: Vec<BodyLink>,
@@ -43,6 +51,9 @@ pub struct Sim {
     /// Each compound's (CoM pos, orient) at the START of the last gameplay
     /// tick — the interpolation anchor, like `tick_prev` for bodies.
     tick_prev_c: Vec<(Vec3, Quat)>,
+    /// Scripted forces held on compounds for the current tick (re-armed each
+    /// substep, cleared at tick end). World-frame; converted per substep.
+    held: Vec<HeldForce>,
     accum: f32,
     pub fixed_dt: f32,
     /// The project's resolved layer table (names → bit indices + collision
@@ -224,6 +235,7 @@ impl Sim {
             map,
             cmap,
             tick_prev_c: Vec::new(),
+            held: Vec::new(),
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
             layers,
@@ -462,6 +474,26 @@ impl Sim {
             return false;
         }
         let Some(rb) = ecs.get::<RigidBody>(e).copied() else { return false };
+        // Assembly roots register via `add_compound_for`, and a part node
+        // under an assembly root is a compound SHAPE, not its own body.
+        if rb.assembly && rb.mode == floptle_core::BodyMode::Dynamic {
+            return false;
+        }
+        {
+            let mut cur = e;
+            for _ in 0..64 {
+                let Some(floptle_core::Parent(p)) = ecs.get::<floptle_core::Parent>(cur).copied()
+                else {
+                    break;
+                };
+                if ecs.get::<RigidBody>(p).is_some_and(|prb| {
+                    prb.assembly && prb.mode == floptle_core::BodyMode::Dynamic
+                }) {
+                    return false;
+                }
+                cur = p;
+            }
+        }
         // A STATIC-mode spawn (net.spawn of a wall/prop) bakes its collider
         // live instead of registering a body.
         if rb.mode == floptle_core::BodyMode::Static {
@@ -665,11 +697,53 @@ impl Sim {
         let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
         let mut tick_kin: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
         for _ in 0..n {
+            // Held forces (scripted thrust/RCS/aero on compounds) act through
+            // EVERY substep of this tick — the accumulators clear per step, so
+            // re-arm them each substep. World→sim conversion happens here,
+            // after any rebase, so held entries survive an origin shift.
+            for h in &self.held {
+                if let Some(link) = self.cmap.iter().find(|l| l.entity.index() == h.eid) {
+                    let c = &mut self.world.compounds[link.compound];
+                    match h.at {
+                        Some(at) => {
+                            let at_sim = (at - self.world.origin).as_vec3();
+                            c.apply_force_at(h.force, at_sim);
+                        }
+                        None => c.apply_force(h.force),
+                    }
+                    c.apply_torque(h.torque);
+                }
+            }
             self.world.step(self.fixed_dt);
             tick_contacts.extend(self.world.contacts.iter().copied());
             tick_kin.extend(self.world.kin_contacts.iter().copied());
         }
+        self.held.clear();
         self.detect_touches(&tick_contacts, &tick_kin);
+    }
+
+    /// Hold a force on the compound rooted at `eid` for the NEXT tick: `force`
+    /// (sim-scale newtons, world axes) acting at world point `at` (`None` =
+    /// through the CoM), plus an optional pure `torque`. Scripts re-arm this
+    /// every tick they're thrusting; it applies through every substep and
+    /// clears at tick end (a dropped call = thrust stops, no latching).
+    pub fn hold_compound_force(&mut self, eid: u32, force: Vec3, at: Option<DVec3>, torque: Vec3) {
+        self.held.push(HeldForce { eid, force, at, torque });
+    }
+
+    /// Instantaneous impulse on the compound rooted at `eid` at world point `at`.
+    pub fn compound_impulse(&mut self, eid: u32, imp: Vec3, at: DVec3) {
+        let origin = self.world.origin;
+        if let Some(c) = self.compound_of_mut(eid) {
+            let at_sim = (at - origin).as_vec3();
+            c.apply_impulse_at(imp, at_sim);
+        }
+    }
+
+    /// Every live assembly: (root entity index, its compound). The script
+    /// layer mirrors these into `assembly.info(...)` each frame.
+    pub fn assemblies(&self) -> impl Iterator<Item = (u32, &Compound)> {
+        self.cmap.iter().map(|l| (l.entity.index(), &self.world.compounds[l.compound]))
     }
 
     /// Diff this tick's touching pairs against the last tick's into

@@ -75,6 +75,7 @@ mod net_api;
 mod preprocess;
 mod save_api;
 mod sched_api;
+mod assembly_api;
 mod space_api;
 mod terrain_api;
 mod view_api;
@@ -85,6 +86,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
+pub use assembly_api::{AssemblyCmd, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
 pub use view_api::ViewInfo;
@@ -309,6 +311,11 @@ pub struct ScriptHost {
     spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
     /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
+    /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
+    assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
+    /// Queued `assembly.*` commands (held forces, impulses, splits), drained
+    /// by the driver after the script pass.
+    assembly_cmds: Rc<RefCell<Vec<assembly_api::AssemblyCmd>>>,
     /// Nodes scripts asked to remove via `destroy(node)` / `node:destroy()`
     /// (entity indices) — drained by the driver, which despawns the subtree
     /// and its physics bodies.

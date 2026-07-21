@@ -910,6 +910,17 @@ impl ScriptHost {
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
         let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
+        // The `assembly.*` API: compound-vessel forces/splits out, per-frame
+        // assembly mirror in (SC1 ship physics surface).
+        let assembly_info: Rc<RefCell<HashMap<u32, crate::assembly_api::AssemblyInfo>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let assembly_cmds: Rc<RefCell<Vec<crate::assembly_api::AssemblyCmd>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        if let Err(e) =
+            crate::assembly_api::install_assembly_api(&lua, assembly_info.clone(), assembly_cmds.clone())
+        {
+            eprintln!("[lua] failed to install the assembly API: {e}");
+        }
         // The `camera.*` world→screen API (map click-on-line picking).
         let view_info: Rc<RefCell<crate::view_api::ViewInfo>> =
             Rc::new(RefCell::new(crate::view_api::ViewInfo::default()));
@@ -967,6 +978,8 @@ impl ScriptHost {
             gizmos,
             spawn_effects,
             spawn_requests,
+            assembly_info,
+            assembly_cmds,
             draw_lines,
             destroy_queue,
             net,
@@ -1012,12 +1025,29 @@ impl ScriptHost {
             }
         }
         self.destroy_queue.borrow_mut().clear();
+        self.assembly_info.borrow_mut().clear();
+        for cmd in self.assembly_cmds.borrow_mut().drain(..) {
+            if let crate::assembly_api::AssemblyCmd::Split { cb: Some(cb), .. } = cmd {
+                let _ = self.lua.remove_registry_value(cb);
+            }
+        }
     }
 
     /// Feed each animated entity's controller state for this frame (before `run`),
     /// so scripts can read `anim:state()/:time()/:clips()`.
     pub fn set_anim_info(&self, map: HashMap<u32, AnimInfo>) {
         *self.anim_info.borrow_mut() = map;
+    }
+
+    /// Feed this frame's assembly mirror (`assembly.info` reads it).
+    pub fn set_assembly_info(&self, map: HashMap<u32, crate::assembly_api::AssemblyInfo>) {
+        *self.assembly_info.borrow_mut() = map;
+    }
+
+    /// Drain the `assembly.*` commands scripts queued (held forces, impulses,
+    /// splits) — the driver applies them to the Sim, performing splits itself.
+    pub fn take_assembly_cmds(&self) -> Vec<crate::assembly_api::AssemblyCmd> {
+        std::mem::take(&mut *self.assembly_cmds.borrow_mut())
     }
 
     /// Feed this tick's celestial snapshot (`space.*` reads it — solar demo S2).
@@ -1156,6 +1186,11 @@ impl ScriptHost {
         }
         let _ = self.lua.remove_registry_value(cb);
         self.flush_writes(world);
+    }
+
+    /// Discard an unused callback registry key (a split that failed).
+    pub fn drop_registry_value(&self, cb: mlua::RegistryKey) {
+        let _ = self.lua.remove_registry_value(cb);
     }
 
     /// Call `func(node)` on every script instance attached to entity `eid` whose

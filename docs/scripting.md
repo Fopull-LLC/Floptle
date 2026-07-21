@@ -185,6 +185,43 @@ format, so replicated/spawned nodes behave identically over the network — a
 server-moved Kinematic platform replicates its transform like any node, and
 clients keep its collision hull where the players *see* it.
 
+### 4.1 Assemblies: `assembly.*` — multi-part vessels
+
+Tick **assembly** on a Dynamic RigidBody and that node roots ONE compound
+6-DOF rigid body built from every descendant node that carries a RigidBody:
+each part becomes an oriented shape at its offset, weighted by its `mass`
+field (the root's own shape fields are ignored). Composed mass, center of
+mass and inertia are real — thrust that doesn't point through the CoM
+*torques the vessel*, and landing on one leg tips it. Ships, rovers, cranes,
+breakable structures.
+
+```lua
+-- fixedUpdate: hold thrust for this tick (world space; re-arm every tick —
+-- a dropped call means the engine stops, nothing latches).
+function fixedUpdate(node, dt)
+  local i = assembly.info(node)         -- mass, com, vel, angVel (vec3 tables),
+  if i == nil then return end           -- grounded, parts (entity ids)
+  local up = vec3(0, 1, 0)
+  if input.down("space") then
+    -- 20 kN straight up THROUGH an engine mounted at the base: if that point
+    -- is off the CoM line, the vessel honestly starts to rotate.
+    assembly.forceAt(node, vec3(0, 20000, 0), vec3(i.com.x + 0.4, i.com.y - 2, i.com.z))
+  end
+  assembly.torque(node, vec3(0, 0, 400))          -- reaction-wheel roll
+end
+
+-- Staging: detach parts into a NEW live vessel (a fresh root node; the part
+-- nodes re-parent under it, physics momentum hands off exactly).
+assembly.split(node, { boosterA, boosterB }, function(stage)
+  assembly.impulseAt(stage, vec3(0, -800, 0), assembly.info(stage).com)  -- sep spring
+end)
+```
+
+`assembly.force(node, f)` pushes through the CoM; `assembly.impulseAt` is a
+one-shot kick (explosions, docking bumps). All vectors are world-space
+`vec3`s. Forces are **held per tick** and applied through every physics
+substep — call them from `fixedUpdate` for continuous thrust.
+
 ## 5. `input` — keyboard & mouse
 
 Available while playing.

@@ -259,6 +259,11 @@ impl Editor {
                 for &e in &ents {
                     sim.add_body_for(e, &self.world);
                 }
+                // A spawned VESSEL prefab (assembly root) registers its whole
+                // hierarchy as one compound (add_body_for refused the parts).
+                for &e in &ents {
+                    sim.add_compound_for(e, &self.world);
+                }
             }
             let root = ents
                 .iter()
@@ -269,6 +274,133 @@ impl Editor {
                 self.script_host.call_spawn_callback(&mut self.world, cb, root.index());
             }
         }
+    }
+
+    /// Feed the per-frame `assembly.info` mirror from the sim's live compounds.
+    pub(crate) fn feed_assembly_info(&mut self) {
+        let Some(sim) = self.sim.as_ref() else { return };
+        let origin = sim.world.origin;
+        let mut map = std::collections::HashMap::new();
+        for (eid, c) in sim.assemblies() {
+            map.insert(
+                eid,
+                floptle_script::AssemblyInfo {
+                    mass: c.mass,
+                    com: [
+                        origin.x + c.pos.x as f64,
+                        origin.y + c.pos.y as f64,
+                        origin.z + c.pos.z as f64,
+                    ],
+                    vel: [c.vel.x, c.vel.y, c.vel.z],
+                    ang_vel: [c.ang_vel.x, c.ang_vel.y, c.ang_vel.z],
+                    grounded: c.grounded,
+                    parts: c.shapes.iter().map(|s| s.id as u32).collect(),
+                },
+            );
+        }
+        self.script_host.set_assembly_info(map);
+    }
+
+    /// Drain queued `assembly.*` commands: held forces/impulses go to the sim;
+    /// SPLITS are performed here — spawn a fresh vessel root, split the physics
+    /// compound onto it, re-parent the detached part nodes (world pose kept),
+    /// then hand the new root to the script callback.
+    pub(crate) fn drain_assembly_cmds(&mut self) {
+        let cmds = self.script_host.take_assembly_cmds();
+        if cmds.is_empty() {
+            return;
+        }
+        use floptle_core::math::{DVec3, Vec3};
+        for cmd in cmds {
+            match cmd {
+                floptle_script::AssemblyCmd::Hold { root, force, at, torque } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.hold_compound_force(
+                            root,
+                            Vec3::new(force[0] as f32, force[1] as f32, force[2] as f32),
+                            at.map(|a| DVec3::new(a[0], a[1], a[2])),
+                            Vec3::new(torque[0] as f32, torque[1] as f32, torque[2] as f32),
+                        );
+                    }
+                }
+                floptle_script::AssemblyCmd::Impulse { root, imp, at } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.compound_impulse(
+                            root,
+                            Vec3::new(imp[0] as f32, imp[1] as f32, imp[2] as f32),
+                            DVec3::new(at[0], at[1], at[2]),
+                        );
+                    }
+                }
+                floptle_script::AssemblyCmd::Split { root, parts, cb } => {
+                    let new_root = self.perform_assembly_split(root, &parts);
+                    match (new_root, cb) {
+                        (Some(nr), Some(cb)) => {
+                            self.script_host.call_spawn_callback(&mut self.world, cb, nr);
+                        }
+                        (_, Some(cb)) => self.script_host.drop_registry_value(cb),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Split `parts` out of the assembly rooted at `root_eid` into a NEW root
+    /// node named after the old vessel. Returns the new root's entity index.
+    fn perform_assembly_split(&mut self, root_eid: u32, parts: &[u32]) -> Option<u32> {
+        use floptle_core::{Name, Parent, RigidBody};
+        use floptle_core::transform::Transform;
+        self.sim.as_ref()?;
+        let root_ent = self
+            .world
+            .query::<RigidBody>()
+            .map(|(e, _)| e)
+            .find(|e| e.index() == root_eid)?;
+        // The fresh vessel root: inherits the old root's RigidBody (assembly
+        // flag, friction...) and a derived name.
+        let new_root = self.world.spawn();
+        self.world.insert(new_root, Transform::IDENTITY);
+        if let Some(rb) = self.world.get::<RigidBody>(root_ent).copied() {
+            self.world.insert(new_root, rb);
+        }
+        let base = self
+            .world
+            .get::<Name>(root_ent)
+            .map(|n| n.0.clone())
+            .unwrap_or_else(|| "Vessel".into());
+        self.world.insert(new_root, Name(format!("{base} (stage)")));
+        let sim = self.sim.as_mut()?;
+        if !sim.split_compound(root_eid, parts, new_root, &mut self.world) {
+            self.world.despawn(new_root);
+            return None;
+        }
+        // Re-parent each detached part under the new root, preserving its
+        // world pose: local = inverse(new_root_world) ∘ part_world.
+        let nw = floptle_core::world_transform(&self.world, new_root);
+        let inv_rot = nw.rotation.inverse();
+        for pid in parts {
+            let Some(pe) = self
+                .world
+                .query::<RigidBody>()
+                .map(|(e, _)| e)
+                .find(|e| e.index() == *pid)
+            else {
+                continue;
+            };
+            let pw = floptle_core::world_transform(&self.world, pe);
+            let local = Transform {
+                translation: inv_rot.as_dquat() * (pw.translation - nw.translation)
+                    / nw.scale.as_dvec3().max(floptle_core::math::DVec3::splat(1e-9)),
+                rotation: (inv_rot * pw.rotation).normalize(),
+                scale: pw.scale / nw.scale.max(floptle_core::math::Vec3::splat(1e-9)),
+            };
+            if let Some(t) = self.world.get_mut::<Transform>(pe) {
+                *t = local;
+            }
+            self.world.insert(pe, Parent(new_root));
+        }
+        Some(new_root.index())
     }
 
     fn apply_destroys(&mut self, destroys: Vec<u32>) {
@@ -329,6 +461,7 @@ impl Editor {
                 }
                 if let Some(sim) = self.sim.as_mut() {
                     sim.remove_body(idx);
+                    sim.remove_compound(idx);
                 }
             }
         }

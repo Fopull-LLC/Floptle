@@ -1740,6 +1740,35 @@ impl EditorTabViewer<'_> {
                             // mode dropdown reads as the one switch it is.
                             let dynamic = rb.mode == BodyMode::Dynamic;
                             ui.add_enabled_ui(dynamic, |ui| {
+                                let asm = ui
+                                    .checkbox(&mut rb.assembly, "assembly (compound of children)")
+                                    .on_hover_text(
+                                        "This node roots ONE 6-DOF rigid body built from every \
+                                         descendant node that has a RigidBody: each becomes an \
+                                         oriented shape at its offset, weighted by its mass (this \
+                                         node's own shape fields are ignored). Multi-part \
+                                         vehicles, decoupling rockets, breakable structures — \
+                                         drive it from Lua with assembly.forceAt / .split.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= asm;
+                                cmd.rebuild_physics |= asm;
+                                if rb.assembly {
+                                    ui.small("children with RigidBody = this vessel's parts");
+                                }
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut rb.mass)
+                                            .speed(0.05)
+                                            .range(0.001..=100000.0)
+                                            .prefix("mass "),
+                                    )
+                                    .on_hover_text(
+                                        "This shape's mass share inside an assembly compound \
+                                         (composed mass / center of mass / inertia). Plain \
+                                         bodies ignore it.",
+                                    )
+                                    .changed();
                                 cmd.inspector_changed |=
                                     ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
                                 cmd.inspector_changed |=
