@@ -7,7 +7,13 @@
             scale: (1.0, 1.0, 1.0),
         ),
         matter: Empty,
-        scripts: [],
+        scripts: [
+            (
+                kind: "vessel_test",
+                enabled: true,
+                params: [],
+            ),
+        ],
         rigidbody: Some((
             mode: Dynamic,
             radius: 0.5,
