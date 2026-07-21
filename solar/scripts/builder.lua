@@ -1,7 +1,7 @@
--- SHIP BUILDER v1.2 (game roadmap SC1) — free placement, free ORIENTATION,
--- radial mounts, precise editing. A ship is just the connected part graph;
--- any part (or the whole ship) moves freely; the blueprint is self-contained
--- (the launch site never needs this registry).
+-- SHIP BUILDER v1.3 (game roadmap SC1) — free placement, free ORIENTATION,
+-- radial mounts + SYMMETRY, precise editing. A ship is just the connected
+-- part graph; any part (or the whole ship) moves freely; the blueprint is
+-- self-contained (the launch site never needs this registry).
 --
 --   catalogue button   pick up a part (ghost follows the cursor)
 --     click            place — ONLY on a highlighted attach node (green tie
@@ -10,12 +10,16 @@
 --     R / SHIFT+R      rotate 15° / 5° (yaw)
 --     T / SHIFT+T      pitch 90° / 15°     Y / SHIFT+Y  roll 90° / 15°
 --                      (build sideways — a pitched pod is a rocket car's nose)
+--     X / SHIFT+X      SYMMETRY ×1 ×2 ×3 ×4 ×6 ×8 — a radial placement
+--                      repeats around the host's axis (boosters in one click)
 --     ESC              put the part back
 --   click a placed part      pick it (and everything stacked on it) back up
+--                            (a SYMMETRY member brings its whole ring)
 --   hover a placed part      arrows nudge it (SHIFT = fine; ↑/↓ vertical,
 --                            ←/→ screen-horizontal, ALT+←/→ depth)
 --                            R/T/Y rotate it in place
---   DEL (hovering)           scrap a part + its stack
+--   DEL (hovering)           scrap a part + its stack (a symmetry member
+--                            scraps the whole ring)
 --   G                        grab the WHOLE ship; click sets it down
 --   CTRL+Z undo   ·   CTRL+S save   ·   F5 reload
 --
@@ -24,6 +28,13 @@
 -- same height: side boosters, outriggers, wheels-on-a-sideways-ship. The
 -- radial decoupler is the separator: at staging its whole outboard branch
 -- (parent links) kicks away laterally.
+--
+-- SYMMETRY: with ×N up, one radial placement rings N copies around the host
+-- (ghost previews show all of them). Anything you then stack ON a symmetry
+-- member — a tank on one radial decoupler, an engine under one booster —
+-- AUTO-MIRRORS onto every other member of that ring, however deep the stack
+-- goes. Rings are edited as one: pick one up and the ring comes with it,
+-- scrap one and the ring goes.
 --
 -- All clicks are edge-detected IN-SCRIPT (input snapshots can serve two
 -- frames at uneven fps — raw `input.clicked` double-fires a pickup into an
@@ -75,13 +86,23 @@ local click_cool = 0
 centerX, centerY, centerZ = 0.0, 1.5, 0.0
 partCount = 0
 
+-- ── Symmetry state ──────────────────────────────────────────────────────────
+-- sym_n is the ×N mode (X cycles it); parts placed as a ring share a `sym`
+-- group id, and children stacked on a ring member auto-mirror into their own
+-- ring (chained groups). Group geometry is DERIVED, never stored: a ring's
+-- HUB is the members' common parent (first generation) or, for a chained
+-- ring, the hub of the parent ring — so save/load only needs the id.
+local SYM_STEPS = { 1, 2, 3, 4, 6, 8 }
+local sym_n = 1
+local next_sym = 0
+
 local function hint(msg, secs)
   if hint_node then hint_node.text = msg end
   hint_t = secs or 2.5
 end
 
-local HINT_IDLE = "click part = pick up   ·   hover: arrows nudge, R/T/Y rotate   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
-local HINT_GHOST = "click an attach node to place (green = stack, amber = radial)   ·   ALT = place free   ·   R yaw · T pitch · Y roll   ·   ESC cancel"
+local HINT_IDLE = "click part = pick up   ·   hover: arrows nudge, R/T/Y rotate   ·   X symmetry   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
+local HINT_GHOST = "click an attach node to place (green = stack, amber = radial)   ·   ALT = place free   ·   R yaw · T pitch · Y roll   ·   X symmetry ×N   ·   ESC cancel"
 local HINT_GRAB = "move the mouse to slide the whole ship   ·   click to set it down"
 
 local function publish_center()
@@ -141,6 +162,80 @@ end
 
 local function part_extents(p)
   return eff_extents(p.def, p.yaw, p.pitch, p.roll)
+end
+
+-- ── Symmetry geometry ───────────────────────────────────────────────────────
+-- Rotate world vector (vx,vy,vz) about the hub part's stack axis by `a`.
+local function rot_about(hub, vx, vy, vz, a)
+  local e1, ax, e2 = rot_basis(hub.yaw, hub.pitch, hub.roll)
+  local d = vx * ax.x + vy * ax.y + vz * ax.z
+  local px, py, pz = vx - ax.x * d, vy - ax.y * d, vz - ax.z * d
+  local c1 = px * e1.x + py * e1.y + pz * e1.z
+  local c2 = px * e2.x + py * e2.y + pz * e2.z
+  local ca, sa = math.cos(a), math.sin(a)
+  local r1 = c1 * ca - c2 * sa
+  local r2 = c1 * sa + c2 * ca
+  return e1.x * r1 + e2.x * r2 + ax.x * d,
+         e1.y * r1 + e2.y * r2 + ax.y * d,
+         e1.z * r1 + e2.z * r2 + ax.z * d
+end
+
+-- A part's angle around the hub's axis (for mapping ring member → member).
+local function angle_about(hub, p)
+  local e1, ax, e2 = rot_basis(hub.yaw, hub.pitch, hub.roll)
+  local vx, vy, vz = p.x - hub.x, p.y - hub.y, p.z - hub.z
+  local d = vx * ax.x + vy * ax.y + vz * ax.z
+  local px, py, pz = vx - ax.x * d, vy - ax.y * d, vz - ax.z * d
+  return math.atan2(px * e2.x + py * e2.y + pz * e2.z,
+                    px * e1.x + py * e1.y + pz * e1.z)
+end
+
+local function group_members(gid)
+  local out = {}
+  for uid, p in pairs(parts) do
+    if p.sym == gid then out[#out + 1] = uid end
+  end
+  table.sort(out)
+  return out
+end
+
+-- The ring's HUB part: first generation rings share a parent (the hub);
+-- a chained ring (children mirrored onto ring members) inherits the hub of
+-- its parents' ring. Bounded walk — malformed links return nil safely.
+local function group_hub(gid, depth)
+  depth = (depth or 0) + 1
+  if depth > 8 then return nil end
+  local members = group_members(gid)
+  if #members == 0 then return nil end
+  local first_parent = parts[members[1]] and parts[members[1]].parent
+  if not first_parent then return nil end
+  local shared = true
+  for _, u in ipairs(members) do
+    if not parts[u] or parts[u].parent ~= first_parent then shared = false break end
+  end
+  if shared then return parts[first_parent] end
+  local pp = parts[first_parent]
+  if pp and pp.sym then return group_hub(pp.sym, depth) end
+  return nil
+end
+
+-- The outward self-orientation for a radial decoupler at direction (ux,uy,uz).
+local function outward_orient(ux, uy, uz)
+  local roll = math.asin(math.max(-1, math.min(1, -ux)))
+  local pitch = math.atan2(uz, uy)
+  return pitch, roll
+end
+
+-- The EDIT SET for a part: its subtree — and, for a symmetry-ring member,
+-- every member's subtree. Rings pick up, scrap and highlight as ONE.
+local function edit_set(uid)
+  local p = parts[uid]
+  if not (p and p.sym) then return subtree(uid) end
+  local out = {}
+  for _, m in ipairs(group_members(p.sym)) do
+    for u in pairs(subtree(m)) do out[u] = true end
+  end
+  return out
 end
 
 -- ── Stats + staging readout ─────────────────────────────────────────────────
@@ -216,8 +311,9 @@ local function refresh_stats()
   end
   local twr = (mass > 0) and (thrust / (mass * 9.81)) or 0
   local twr_s = (thrust > 0) and string.format("   TWR %.2f", twr) or ""
-  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s",
-    n, mass, cost, twr_s, stage_lines())
+  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s%s",
+    n, mass, cost, twr_s,
+    sym_n > 1 and ("   SYM ×" .. sym_n) or "", stage_lines())
 end
 
 -- ── Undo (robust: ops that can't apply yet re-push and wait) ────────────────
@@ -226,7 +322,7 @@ local function push_undo(op)
   if #undo_stack > 40 then table.remove(undo_stack, 1) end
 end
 
-local function spawn_part(id, x, y, z, yaw, parent, uid, pitch, roll, att)
+local function spawn_part(id, x, y, z, yaw, parent, uid, pitch, roll, att, sym)
   local def = REG[id]
   local u = uid or next_uid
   if not uid then next_uid = next_uid + 1 end
@@ -235,7 +331,7 @@ local function spawn_part(id, x, y, z, yaw, parent, uid, pitch, roll, att)
     node.yaw, node.pitch, node.roll = yaw or 0, pitch or 0, roll or 0
     parts[u] = { id = id, def = def, node = node, x = x, y = y, z = z,
                  yaw = yaw or 0, pitch = pitch or 0, roll = roll or 0,
-                 parent = parent, att = att }
+                 parent = parent, att = att, sym = sym }
     pending_spawns = pending_spawns - 1
     publish_center(); refresh_stats()
   end)
@@ -246,7 +342,8 @@ local function remove_part(uid)
   local p = parts[uid]
   if not p then return nil end
   local data = { uid = uid, id = p.id, x = p.x, y = p.y, z = p.z, yaw = p.yaw,
-                 pitch = p.pitch, roll = p.roll, parent = p.parent }
+                 pitch = p.pitch, roll = p.roll, parent = p.parent,
+                 att = p.att, sym = p.sym }
   if p.node then destroy(p.node) end
   parts[uid] = nil
   for _, q in pairs(parts) do
@@ -262,9 +359,13 @@ local function undo()
   if not op then return end
   if op.type == "place" then
     if not remove_part(op.uid) then return end
+  elseif op.type == "place_group" then
+    -- A symmetry ring placed as one op un-places as one op.
+    for _, u in ipairs(op.uids) do remove_part(u) end
   elseif op.type == "scrap" then
     for _, d in ipairs(op.parts) do
-      spawn_part(d.id, d.x, d.y, d.z, d.yaw, d.parent, d.uid, d.pitch, d.roll)
+      spawn_part(d.id, d.x, d.y, d.z, d.yaw, d.parent, d.uid, d.pitch, d.roll,
+                 d.att, d.sym)
       if d.uid >= next_uid then next_uid = d.uid + 1 end
     end
   elseif op.type == "move" then
@@ -351,12 +452,21 @@ local function attach_nodes_of(uid, p, gdef, g_ext_y, exclude, occupied_top, occ
   -- pushed out by host half-width + the ghost's own half-width that way.
   if p.def.side then
     local gex, gey, gez = eff_extents(gdef, ghost.yaw, ghost.pitch, ghost.roll)
-    local dirs = {
-      { a = X, r = p.def.rx },
-      { a = { x = -X.x, y = -X.y, z = -X.z }, r = p.def.rx },
-      { a = Z, r = p.def.rz },
-      { a = { x = -Z.x, y = -Z.y, z = -Z.z }, r = p.def.rz },
-    }
+    local dirs
+    if p.def.radial then
+      -- A mounted radial decoupler's usable face is its disc's OUTWARD +Y
+      -- (the inner face is against the hull): ONE node there, and whatever
+      -- attaches keeps its own orientation — a vertical booster tank hangs
+      -- off the disc exactly like KSP.
+      dirs = { { a = Y, r = hh } }
+    else
+      dirs = {
+        { a = X, r = p.def.rx },
+        { a = { x = -X.x, y = -X.y, z = -X.z }, r = p.def.rx },
+        { a = Z, r = p.def.rz },
+        { a = { x = -Z.x, y = -Z.y, z = -Z.z }, r = p.def.rz },
+      }
+    end
     for _, d in ipairs(dirs) do
       -- Ghost half-width projected along the outward direction.
       local g = math.abs(d.a.x) * gex + math.abs(d.a.y) * gey + math.abs(d.a.z) * gez
@@ -489,7 +599,7 @@ function pick(id)
 end
 
 local function pickup(uid)
-  local grab = subtree(uid)
+  local grab = edit_set(uid) -- a ring member brings its whole ring
   local moved = {}
   for u in pairs(grab) do
     local p = parts[u]
@@ -505,7 +615,8 @@ local function pickup(uid)
   hint(HINT_GHOST, 6.0)
 end
 
-local function place_ghost(x, y, z, parent, att)
+local function place_ghost(x, y, z, parent, att, sym)
+  local placed_uid = nil
   if ghost.carried then
     local root = parts[ghost.from_uid]
     if root then
@@ -516,6 +627,7 @@ local function place_ghost(x, y, z, parent, att)
       end
       root.parent = parent
       root.att = att
+      placed_uid = ghost.from_uid
     end
   else
     -- The ghost node BECOMES the placed part. (Spawning a second node here
@@ -528,13 +640,79 @@ local function place_ghost(x, y, z, parent, att)
     ghost.node.yaw, ghost.node.pitch, ghost.node.roll = ghost.yaw, ghost.pitch, ghost.roll
     parts[u] = { id = ghost.id, def = ghost.def, node = ghost.node,
                  x = x, y = y, z = z, yaw = ghost.yaw, pitch = ghost.pitch,
-                 roll = ghost.roll, parent = parent, att = att }
+                 roll = ghost.roll, parent = parent, att = att, sym = sym }
     push_undo({ type = "place", uid = u })
+    placed_uid = u
   end
   ghost = nil
   click_cool = 0.15
   hint(HINT_IDLE, 0.0); hint_t = 0
   publish_center(); refresh_stats()
+  return placed_uid
+end
+
+-- ── Symmetry placement ──────────────────────────────────────────────────────
+-- The mirrored centers/orientations for placing `gdef` at (x,y,z) around
+-- `hub` with ×n symmetry (k = 1 .. n-1; k = 0 is the original placement).
+local function symmetry_slots(hub, gdef, gyaw, gpitch, groll, x, y, z, n)
+  local out = {}
+  for k = 1, n - 1 do
+    local a = k * (2 * math.pi / n)
+    local vx, vy, vz = rot_about(hub, x - hub.x, y - hub.y, z - hub.z, a)
+    local px, py, pz = hub.x + vx, hub.y + vy, hub.z + vz
+    local yaw2, pitch2, roll2 = wrap_angle(gyaw + a), gpitch, groll
+    if gdef.radial then
+      -- Radial decouplers self-orient: disc axis outward at THIS angle.
+      local ol = math.sqrt(vx * vx + vy * vy + vz * vz)
+      if ol > 1e-4 then
+        pitch2, roll2 = outward_orient(vx / ol, vy / ol, vz / ol)
+        yaw2 = 0
+      end
+    end
+    out[#out + 1] = { x = px, y = py, z = pz, yaw = yaw2, pitch = pitch2, roll = roll2 }
+  end
+  return out
+end
+
+-- Mirror a just-placed part from ring member `host` onto every OTHER member
+-- of its ring — the stacked-children rule that makes ×N boosters build in
+-- N clicks total, not N × parts. The copies form their own (chained) ring.
+local function mirror_onto_ring(host_uid, placed_uid)
+  local host = parts[host_uid]
+  local src = parts[placed_uid]
+  if not (host and host.sym and src) then return end
+  local hub = group_hub(host.sym)
+  if not hub then return end
+  local a0 = angle_about(hub, host)
+  next_sym = next_sym + 1
+  local gid = next_sym
+  src.sym = gid
+  local uids = { placed_uid }
+  for _, m in ipairs(group_members(host.sym)) do
+    if m ~= host_uid then
+      local da = angle_about(hub, parts[m]) - a0
+      local vx, vy, vz = rot_about(hub, src.x - hub.x, src.y - hub.y, src.z - hub.z, da)
+      local px, py, pz = hub.x + vx, hub.y + vy, hub.z + vz
+      local yaw2, pitch2, roll2 = wrap_angle(src.yaw + da), src.pitch, src.roll
+      if src.def.radial and src.att == "radial" then
+        local ox, oy, oz = px - parts[m].x, py - parts[m].y, pz - parts[m].z
+        local ol = math.sqrt(ox * ox + oy * oy + oz * oz)
+        if ol > 1e-4 then
+          pitch2, roll2 = outward_orient(ox / ol, oy / ol, oz / ol)
+          yaw2 = 0
+        end
+      end
+      uids[#uids + 1] = spawn_part(src.id, px, py, pz, yaw2, m, nil,
+                                   pitch2, roll2, src.att, gid)
+    end
+  end
+  -- One undo op covers the whole mirrored set (replace the single-place op).
+  if #undo_stack > 0 and undo_stack[#undo_stack].type == "place"
+    and undo_stack[#undo_stack].uid == placed_uid then
+    table.remove(undo_stack)
+  end
+  push_undo({ type = "place_group", uids = uids })
+  hint(string.format("mirrored ×%d across the ring", #uids), 2.0)
 end
 
 local function cancel_ghost()
@@ -563,7 +741,7 @@ local function save_blueprint()
       uid = uid, id = p.id, prefab = d.prefab, label = d.label,
       x = p.x - centerX, y = p.y - ref_y, z = p.z - centerZ,
       yaw = p.yaw, pitch = p.pitch or 0, roll = p.roll or 0,
-      parent = p.parent or 0, att = p.att or "",
+      parent = p.parent or 0, att = p.att or "", sym = p.sym or 0,
       h = d.h, mass = d.mass, cost = d.cost, kind = d.kind,
       thrust = d.thrust or 0, burn = d.burn or 0, fuel = d.fuel or 0,
       decouple = d.decouple and 1 or 0, legs = d.legs and 1 or 0,
@@ -583,7 +761,9 @@ local function load_blueprint()
   for _, d in pairs(bp.parts) do
     spawn_part(d.id, d.x, d.y + params.floor_y, d.z, d.yaw,
                d.parent ~= 0 and d.parent or nil, d.uid, d.pitch, d.roll,
-               d.att ~= "" and d.att or nil)
+               d.att ~= "" and d.att or nil,
+               (d.sym or 0) ~= 0 and d.sym or nil)
+    if (d.sym or 0) > next_sym then next_sym = d.sym end
     if d.uid >= next_uid then next_uid = d.uid + 1 end
   end
 end
@@ -646,6 +826,21 @@ function update(node, dt)
     end
   end
   local cam_busy = input.button(1) -- RMB = the camera's; never build through it
+
+  -- SYMMETRY mode: X cycles ×1 ×2 ×3 ×4 ×6 ×8 (SHIFT+X cycles back).
+  -- Applies to radial placements; stacking on a ring always auto-mirrors.
+  if input.pressed("x") then
+    local idx = 1
+    for i, n in ipairs(SYM_STEPS) do
+      if n == sym_n then idx = i end
+    end
+    idx = input.key("shift") and ((idx - 2) % #SYM_STEPS + 1) or (idx % #SYM_STEPS + 1)
+    sym_n = SYM_STEPS[idx]
+    hint(sym_n > 1
+      and ("symmetry ×" .. sym_n .. " — a radial placement rings the hull")
+      or "symmetry off", 2.0)
+    refresh_stats()
+  end
 
   -- Self-heal: never let a bad ghost wedge the builder.
   if ghost then
@@ -732,6 +927,9 @@ function update(node, dt)
     local free_ok = (partCount == 0) or (ghost.carried and #ghost.carried >= partCount)
         or input.key("alt")
     local can_place, why
+    -- Symmetry ring this placement would make: a fresh ×N ring on a plain
+    -- radial snap (never on a ring member — those AUTO-mirror instead).
+    local sym_slots = nil
     if snap then
       local ex2 = { [snap.uid] = true }
       if exclude then for u in pairs(exclude) do ex2[u] = true end end
@@ -742,6 +940,24 @@ function update(node, dt)
         can_place = true
         draw.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4, 1.0)
         draw.ring(snap.x, snap.y, snap.z, 0, 1, 0, 0.4, 0.3, 1.0, 0.4, 1.0)
+      end
+      if can_place and snap.side == "radial" and sym_n > 1 and not ghost.carried then
+        local host = parts[snap.uid]
+        if host and not host.sym then
+          sym_slots = symmetry_slots(host, ghost.def, ghost.yaw, ghost.pitch,
+                                     ghost.roll, x, y, z, sym_n)
+          for _, s in ipairs(sym_slots) do
+            local bx3, by3, bz3 = eff_extents(ghost.def, s.yaw, s.pitch, s.roll)
+            if overlaps(ghost.def, s.x, s.y, s.z, ex2, s.yaw, s.pitch, s.roll) then
+              can_place, why = false, "symmetry ring blocked — clear the flanks or lower ×N"
+              draw.box(s.x, s.y, s.z, bx3, by3, bz3, s.yaw, 1.0, 0.25, 0.2, 0.8)
+            else
+              -- Ghost preview of every mirrored copy.
+              draw.box(s.x, s.y, s.z, bx3, by3, bz3, s.yaw, 1.0, 0.75, 0.3, 0.55)
+            end
+          end
+          if not can_place then sym_slots = nil end
+        end
       end
     elseif free_ok then
       if overlaps(ghost.def, x, y, z, exclude, ghost.yaw, ghost.pitch, ghost.roll) then
@@ -786,7 +1002,34 @@ function update(node, dt)
     if input.pressed("escape") then cancel_ghost() return end
     if not cam_busy and clicked then
       if can_place then
-        place_ghost(x, y, z, snap and snap.uid or nil, snap and snap.side or nil)
+        local host_uid = snap and snap.uid or nil
+        local host = host_uid and parts[host_uid]
+        -- Placing ON a ring member auto-mirrors across its whole ring;
+        -- sym_slots means a fresh ×N ring around a plain host.
+        local on_ring = (host and host.sym and not ghost.carried) or false
+        local gdata = sym_slots and { id = ghost.id } or nil
+        local gid = nil
+        if sym_slots then
+          next_sym = next_sym + 1
+          gid = next_sym
+        end
+        local placed = place_ghost(x, y, z, host_uid, snap and snap.side or nil, gid)
+        if sym_slots and placed then
+          local uids = { placed }
+          for _, s in ipairs(sym_slots) do
+            uids[#uids + 1] = spawn_part(gdata.id, s.x, s.y, s.z, s.yaw,
+                                         host_uid, nil, s.pitch, s.roll, "radial", gid)
+          end
+          -- The ring un-places as ONE undo op.
+          if #undo_stack > 0 and undo_stack[#undo_stack].type == "place"
+            and undo_stack[#undo_stack].uid == placed then
+            table.remove(undo_stack)
+          end
+          push_undo({ type = "place_group", uids = uids })
+          hint(string.format("×%d ring placed — CTRL+Z removes it all", #uids), 2.5)
+        elseif on_ring and placed then
+          mirror_onto_ring(host_uid, placed)
+        end
       elseif why then
         hint(why, 2.0)
       else
@@ -841,9 +1084,10 @@ function update(node, dt)
   hover_uid = (not cam_busy) and part_under_cursor(70) or nil
   if hover_uid then
     local p = parts[hover_uid]
-    -- Selection outline: the hovered part bright, the stack it would carry dim.
+    -- Selection outline: the hovered part bright, everything it would carry
+    -- dim — for a symmetry-ring member that is the WHOLE ring.
     outline(p, 0.55, 0.85, 1.0, 1.0)
-    for u in pairs(subtree(hover_uid)) do
+    for u in pairs(edit_set(hover_uid)) do
       if u ~= hover_uid and parts[u] then outline(parts[u], 0.55, 0.85, 1.0, 0.35) end
     end
 
@@ -876,21 +1120,48 @@ function update(node, dt)
       if nudge_uid ~= hover_uid then
         nudge_uid = hover_uid
         local moved = {}
-        for u in pairs(subtree(hover_uid)) do
+        for u in pairs(edit_set(hover_uid)) do
           local q = parts[u]
           moved[#moved + 1] = { uid = u, x = q.x, y = q.y, z = q.z,
                                 yaw = q.yaw, pitch = q.pitch, roll = q.roll, parent = q.parent }
         end
         push_undo({ type = "move", moved = moved })
       end
-      if turned then set_part_rot(p, rot.yaw, rot.pitch, rot.roll) end
-      if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 then
-        for u in pairs(subtree(hover_uid)) do
-          local q = parts[u]
-          if q then set_part_pos(q, q.x + ddx, q.y + ddy, q.z + ddz) end
+      local dyaw = turned and (rot.yaw - (p.yaw or 0)) or 0
+      local dpitch = turned and (rot.pitch - (p.pitch or 0)) or 0
+      local droll = turned and (rot.roll - (p.roll or 0)) or 0
+      -- A ring member edits SYMMETRICALLY: each member gets the displacement
+      -- rotated to its own angle (nudge one booster outward, they all move
+      -- outward) and the same local rotation delta.
+      local hub = p.sym and group_hub(p.sym) or nil
+      if hub then
+        local a0 = angle_about(hub, p)
+        for _, m in ipairs(group_members(p.sym)) do
+          local q = parts[m]
+          if q then
+            local da = angle_about(hub, q) - a0
+            local rdx, rdy, rdz = rot_about(hub, ddx, ddy, ddz, da)
+            for u in pairs(subtree(m)) do
+              local sub = parts[u]
+              if sub then set_part_pos(sub, sub.x + rdx, sub.y + rdy, sub.z + rdz) end
+            end
+            if turned then
+              set_part_rot(q, wrap_angle((q.yaw or 0) + dyaw),
+                           wrap_angle((q.pitch or 0) + dpitch),
+                           wrap_angle((q.roll or 0) + droll))
+            end
+          end
         end
-        publish_center()
+      else
+        if turned then set_part_rot(p, rot.yaw, rot.pitch, rot.roll) end
+        if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 then
+          for u in pairs(subtree(hover_uid)) do
+            local q = parts[u]
+            if q then set_part_pos(q, q.x + ddx, q.y + ddy, q.z + ddz) end
+          end
+        end
       end
+      publish_center()
       refresh_stats()
       hint(string.format("precise edit  ·  step %.2g (SHIFT fine)  ·  ALT+←/→ depth  ·  CTRL+Z undoes it all", step), 2.0)
     end
@@ -900,7 +1171,7 @@ function update(node, dt)
       return
     end
     if input.pressed("delete") or input.pressed("del") then
-      local grab = subtree(hover_uid)
+      local grab = edit_set(hover_uid) -- a ring member scraps the whole ring
       local datas = {}
       for u in pairs(grab) do
         local d = remove_part(u)
