@@ -1,0 +1,29 @@
+[
+    (
+        name: "Launchpad",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (0.05, 0.05, 0.05),
+        ),
+        matter: Mesh(
+            asset_path: "models/nasa/mobile_launcher_pad_only.glb",
+        ),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Static,
+            radius: 0.5,
+            height: 2.0,
+            // Half-extents are multiplied by the node's world scale (0.05):
+            // the mesh is inch-authored (102x50x87), so these land at
+            // ~2.55 x 1.24 x 2.17 world units — deck top ~1.24 above center.
+            half_extents: (51.0, 24.9, 43.4),
+            restitution: 0.0,
+            friction: 0.9,
+            gravity: false,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+        )),
+    ),
+]

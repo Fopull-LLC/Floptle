@@ -305,15 +305,26 @@ end
 local function place_ghost(x, y, z, parent)
   if ghost.carried then
     local root = parts[ghost.from_uid]
-    local dx, dy, dz = x - root.x, y - root.y, z - root.z
-    for _, m in ipairs(ghost.carried) do
-      local p = parts[m.uid]
-      if p then set_part_pos(p, p.x + dx, p.y + dy, p.z + dz) end
+    if root then
+      local dx, dy, dz = x - root.x, y - root.y, z - root.z
+      for _, m in ipairs(ghost.carried) do
+        local p = parts[m.uid]
+        if p then set_part_pos(p, p.x + dx, p.y + dy, p.z + dz) end
+      end
+      root.parent = parent
     end
-    root.parent = parent
   else
-    local uid = spawn_part(ghost.id, x, y, z, ghost.yaw, parent)
-    push_undo({ type = "place", uid = uid })
+    -- The ghost node BECOMES the placed part. (Spawning a second node here
+    -- was the great twin bug: every placed part got an invisible orphan
+    -- double exactly on top of it — phantom "copies", un-selectable spots,
+    -- parts "clipping inside each other".)
+    local u = next_uid
+    next_uid = next_uid + 1
+    ghost.node.x, ghost.node.y, ghost.node.z = x, y, z
+    ghost.node.yaw = ghost.yaw
+    parts[u] = { id = ghost.id, def = ghost.def, node = ghost.node,
+                 x = x, y = y, z = z, yaw = ghost.yaw, parent = parent }
+    push_undo({ type = "place", uid = u })
   end
   ghost = nil
   click_cool = 0.15
@@ -379,6 +390,7 @@ end
 
 local grab_mode = false
 local grab_last = nil
+local grab_moved = false
 
 function update(node, dt)
   -- One shared click edge for the whole frame.
@@ -393,6 +405,20 @@ function update(node, dt)
     end
   end
   local cam_busy = input.button(1) -- RMB = the camera's; never build through it
+
+  -- Self-heal: never let a bad ghost wedge the builder.
+  if ghost then
+    if ghost.carried and not parts[ghost.from_uid] then
+      ghost = nil
+      hint(HINT_IDLE, 0.0); hint_t = 0
+    elseif not ghost.carried and not ghost.node then
+      ghost.wait = (ghost.wait or 0) + dt
+      if ghost.wait > 4.0 then
+        ghost = nil
+        hint("that part failed to spawn — try again", 2.5)
+      end
+    end
+  end
 
   -- ── Ghost follows the cursor ──
   if ghost and (ghost.node or ghost.carried) then
@@ -451,9 +477,16 @@ function update(node, dt)
         or input.key("alt")
     local can_place, why
     if snap then
-      can_place = true
-      draw.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4, 1.0)
-      draw.ring(snap.x, snap.y, snap.z, 0, 1, 0, 0.4, 0.3, 1.0, 0.4, 1.0)
+      local ex2 = { [snap.uid] = true }
+      if exclude then for u in pairs(exclude) do ex2[u] = true end end
+      if overlaps(ghost.def, x, y, z, ex2) then
+        can_place, why = false, "that spot is blocked by another part"
+        draw.sphere(x, y, z, 0.35, 1.0, 0.25, 0.2, 1.0)
+      else
+        can_place = true
+        draw.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4, 1.0)
+        draw.ring(snap.x, snap.y, snap.z, 0, 1, 0, 0.4, 0.3, 1.0, 0.4, 1.0)
+      end
     elseif free_ok then
       if overlaps(ghost.def, x, y, z, exclude) then
         can_place, why = false, "overlapping — find clear ground"
@@ -508,6 +541,7 @@ function update(node, dt)
   if input.pressed("g") and partCount > 0 and not grab_mode then
     grab_mode = true
     grab_last = nil
+    grab_moved = false
     local moved = {}
     for uid, p in pairs(parts) do
       moved[#moved + 1] = { uid = uid, x = p.x, y = p.y, z = p.z, parent = p.parent }
@@ -525,6 +559,7 @@ function update(node, dt)
         local gx, gz = ox + dx * t, oz + dz * t
         if grab_last then
           local ddx, ddz = gx - grab_last.x, gz - grab_last.z
+          if math.abs(ddx) + math.abs(ddz) > 1e-4 then grab_moved = true end
           for _, p in pairs(parts) do set_part_pos(p, p.x + ddx, p.y, p.z + ddz) end
           publish_center()
         end
@@ -534,6 +569,10 @@ function update(node, dt)
     draw.ring(centerX, params.floor_y + 0.02, centerZ, 0, 1, 0, 1.2, 0.4, 0.8, 1.0, 1.0)
     if (clicked and not cam_busy) or input.pressed("escape") or input.pressed("g") then
       grab_mode = false
+      -- A grab that never moved anything shouldn't eat a CTRL+Z.
+      if not grab_moved and #undo_stack > 0 and undo_stack[#undo_stack].type == "move" then
+        table.remove(undo_stack)
+      end
       hint(HINT_IDLE, 0.0); hint_t = 0
     end
     return
