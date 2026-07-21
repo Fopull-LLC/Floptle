@@ -461,10 +461,22 @@ impl PhysicsWorld {
                         if !(w.is_finite() && w > 1e-9) {
                             continue;
                         }
-                        // Positional: push the contact point out along n.
+                        // Positional: push the contact point out along n. The
+                        // per-resolve correction is CAPPED (translation and
+                        // rotation) so a deeply-spawned assembly un-buries over
+                        // a few steps instead of catapulting — uncapped, a
+                        // meters-deep corner sample yields a huge λ, the
+                        // rotation correction flips the body, the next sample
+                        // reads even deeper, and the assembly explodes off
+                        // into the sky (Ty's "cloud of scattered parts").
                         let lambda = pen / w;
-                        c.pos += n * (lambda / c.mass);
-                        let rot_corr = inv_i * r.cross(n * lambda);
+                        let push = (lambda / c.mass).min(0.35);
+                        c.pos += n * push;
+                        let mut rot_corr = inv_i * r.cross(n * lambda);
+                        let rc_len = rot_corr.length();
+                        if rc_len > 0.12 {
+                            rot_corr *= 0.12 / rc_len;
+                        }
                         if rot_corr.length_squared() > 1e-14 {
                             c.orient = (Quat::from_scaled_axis(rot_corr) * c.orient).normalize();
                         }

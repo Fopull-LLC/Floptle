@@ -4,7 +4,7 @@
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
-            scale: (1.0, 0.85, 1.0),
+            scale: (1.0, 1.0, 1.0),
         ),
         matter: Mesh(
             asset_path: "models/space-kit/rocket_fuelB.glb",
@@ -15,7 +15,7 @@
             mode: Kinematic,
             radius: 0.5,
             height: 2.0,
-            half_extents: (0.55, 0.75, 0.55),
+            half_extents: (0.5, 0.5, 0.5),
             restitution: 0.05,
             friction: 0.6,
             gravity: true,

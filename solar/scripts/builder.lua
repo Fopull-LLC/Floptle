@@ -1,63 +1,73 @@
--- SHIP BUILDER v1 (game roadmap SC1) — free placement, no root-pod tyranny.
+-- SHIP BUILDER v1.1 (game roadmap SC1) — free placement, no root-pod tyranny.
 -- A ship is just the connected part graph; any part (or the whole ship) moves
 -- freely; the blueprint is self-contained (the launch site never needs this
 -- registry).
 --
---   click a CATALOGUE button   pick up a part (ghost follows the cursor)
---       click                  place it (snaps to the highlighted attach node;
---                              green ghost line = will attach, amber = floating)
---       R / SHIFT+R            rotate the ghost 15° / fine
---       ESC                    put the part back
---   click a PLACED part        pick it (and everything stacked on it) back up
---   DEL (hovering a part)      scrap it + its stack (refunds nothing — undo!)
---   G                          grab the WHOLE ship, click to set it down
---   CTRL+Z                     undo (place / scrap / move / grab)
---   CTRL+S                     save the blueprint    F5  reload it
+--   catalogue button   pick up a part (ghost follows the cursor)
+--     click            place — ONLY on a highlighted attach node (green tie
+--                      line); hold ALT to place free (red halo = overlapping,
+--                      refused). The first part places freely on the pad.
+--     R / SHIFT+R      rotate the ghost 15° / 5°
+--     ESC              put the part back
+--   click a placed part      pick it (and everything stacked on it) back up
+--   DEL (hovering)           scrap a part + its stack
+--   G                        grab the WHOLE ship; click sets it down
+--   CTRL+Z undo   ·   CTRL+S save   ·   F5 reload
 --
--- Published (read by builder_camera + the HUD): centerX/Y/Z, partCount,
--- pick(id) — the catalogue buttons call pick.
+-- All clicks are edge-detected IN-SCRIPT (input snapshots can serve two
+-- frames at uneven fps — raw `input.clicked` double-fires a pickup into an
+-- instant re-place, which reads as "selection doesn't work").
 
 defaults = {
-  snap_px = 46.0,     -- screen px within which an attach node captures the ghost
-  floor_y = 0.1,      -- top of the work floor
+  snap_px = 52.0,     -- screen px within which an attach node captures the ghost
+  floor_y = 0.11,     -- top of the pad
 }
 
 -- ── Part registry (builder-side only; blueprints embed everything) ──────────
--- h = stack height; top/bottom = stack attach nodes; engine parts carry
--- thrust (kN-ish) + burn, tanks carry fuel — the stats readout and (later)
--- the flight spawner read these OUT OF THE BLUEPRINT, not from here.
+-- h = FULL visual stack height (measured from the mesh AABB × prefab scale,
+-- so stacked parts sit flush); rx/rz = half-widths for overlap tests.
 local REG = {
-  pod       = { prefab = "PartPod",       label = "Pod Mk1",     h = 1.7, mass = 1.2, cost = 400, top = true,  bottom = true, kind = "crewed" },
-  chute     = { prefab = "PartChute",     label = "Parachute",   h = 0.55, mass = 0.1, cost = 80,  top = false, bottom = true, kind = "canvas" },
-  tankS     = { prefab = "PartTankS",     label = "FT-S Tank",   h = 1.55, mass = 1.5, cost = 120, top = true,  bottom = true, kind = "tank", fuel = 60 },
-  tankM     = { prefab = "PartTankM",     label = "FT-M Tank",   h = 2.35, mass = 3.0, cost = 260, top = true,  bottom = true, kind = "tank", fuel = 150 },
-  engineS   = { prefab = "PartEngineS",   label = "Sputter",     h = 1.05, mass = 0.8, cost = 150, top = true,  bottom = false, kind = "engine", thrust = 55,  burn = 0.9 },
-  engineM   = { prefab = "PartEngineM",   label = "Anvil",       h = 1.45, mass = 1.8, cost = 380, top = true,  bottom = false, kind = "engine", thrust = 130, burn = 2.0 },
-  decoupler = { prefab = "PartDecoupler", label = "Decoupler",   h = 0.25, mass = 0.15, cost = 60, top = true,  bottom = true, kind = "structural", decouple = true },
-  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.85, mass = 0.3, cost = 90, top = true,  bottom = false, kind = "structural", legs = true },
+  pod       = { prefab = "PartPod",       label = "Pod Mk1",      h = 0.80, rx = 0.50, rz = 0.50, mass = 1.2,  cost = 400, top = true,  bottom = true,  kind = "crewed" },
+  chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.88, rx = 0.40, rz = 0.40, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas" },
+  tankS     = { prefab = "PartTankS",     label = "FT-S Tank",    h = 1.00, rx = 0.50, rz = 0.50, mass = 1.5,  cost = 120, top = true,  bottom = true,  kind = "tank", fuel = 60 },
+  tankM     = { prefab = "PartTankM",     label = "FT-M Tank",    h = 1.50, rx = 0.50, rz = 0.50, mass = 3.0,  cost = 260, top = true,  bottom = true,  kind = "tank", fuel = 150 },
+  engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 0.78, rx = 0.54, rz = 0.54, mass = 0.8,  cost = 150, top = true,  bottom = false, kind = "engine", thrust = 55,  burn = 0.9 },
+  engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.04, rx = 0.59, rz = 0.59, mass = 1.8,  cost = 380, top = true,  bottom = false, kind = "engine", thrust = 130, burn = 2.0 },
+  decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.22, rx = 0.50, rz = 0.50, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
+  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = false, kind = "structural", legs = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
 local parts = {}        -- uid -> { id, def, node, x,y,z, yaw, parent (uid|nil) }
 local next_uid = 1
-local ghost = nil       -- { uid?, id, def, node, yaw, restore? } while placing
+local ghost = nil       -- { id, def, node, yaw [, carried, from_uid] }
 local undo_stack = {}
+local pending_spawns = 0
 local hover_uid = nil
-local snap_target = nil -- { uid, side = "top"|"bottom" } for the current ghost
-local cam
 local stats_node, hint_node
+local hint_t = 0        -- seconds a transient hint stays up
+
+-- Edge-detected mouse + a short cooldown so one physical click never both
+-- picks up AND re-places.
+local lmb_prev = false
+local click_cool = 0
 
 -- Published (builder_camera frames the ship with these).
 centerX, centerY, centerZ = 0.0, 1.5, 0.0
 partCount = 0
 
-local function iter_parts()
-  return pairs(parts)
+local function hint(msg, secs)
+  if hint_node then hint_node.text = msg end
+  hint_t = secs or 2.5
 end
+
+local HINT_IDLE = "click part = pick up   ·   R rotate   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
+local HINT_GHOST = "click an attach node to place (green line)   ·   ALT = place free   ·   R rotate   ·   ESC cancel"
+local HINT_GRAB = "move the mouse to slide the whole ship   ·   click to set it down"
 
 local function publish_center()
   local n, sx, sy, sz = 0, 0.0, 0.0, 0.0
-  for _, p in iter_parts() do
+  for _, p in pairs(parts) do
     n = n + 1; sx = sx + p.x; sy = sy + p.y; sz = sz + p.z
   end
   partCount = n
@@ -70,7 +80,7 @@ local function subtree(uid)
   local out, grew = { [uid] = true }, true
   while grew do
     grew = false
-    for u, p in iter_parts() do
+    for u, p in pairs(parts) do
       if p.parent and out[p.parent] and not out[u] then out[u] = true; grew = true end
     end
   end
@@ -82,11 +92,11 @@ local function set_part_pos(p, x, y, z)
   if p.node then p.node.x, p.node.y, p.node.z = x, y, z end
 end
 
--- ── Stats (honest numbers §4.2 — v1: mass / cost / TWR vs 9.81) ─────────────
+-- ── Stats ───────────────────────────────────────────────────────────────────
 local function refresh_stats()
   if not stats_node then return end
   local mass, cost, thrust, n = 0.0, 0, 0.0, 0
-  for _, p in iter_parts() do
+  for _, p in pairs(parts) do
     n = n + 1
     mass = mass + p.def.mass
     cost = cost + p.def.cost
@@ -101,7 +111,7 @@ local function refresh_stats()
   stats_node.text = string.format("%d parts   %.2f t   $%d%s", n, mass, cost, twr_s)
 end
 
--- ── Undo ────────────────────────────────────────────────────────────────────
+-- ── Undo (robust: ops that can't apply yet re-push and wait) ────────────────
 local function push_undo(op)
   undo_stack[#undo_stack + 1] = op
   if #undo_stack > 40 then table.remove(undo_stack, 1) end
@@ -111,9 +121,11 @@ local function spawn_part(id, x, y, z, yaw, parent, uid)
   local def = REG[id]
   local u = uid or next_uid
   if not uid then next_uid = next_uid + 1 end
+  pending_spawns = pending_spawns + 1
   spawn(def.prefab, vec3(x, y, z), function(node)
     node.yaw = yaw or 0
     parts[u] = { id = id, def = def, node = node, x = x, y = y, z = z, yaw = yaw or 0, parent = parent }
+    pending_spawns = pending_spawns - 1
     publish_center(); refresh_stats()
   end)
   return u
@@ -125,8 +137,7 @@ local function remove_part(uid)
   local data = { uid = uid, id = p.id, x = p.x, y = p.y, z = p.z, yaw = p.yaw, parent = p.parent }
   if p.node then destroy(p.node) end
   parts[uid] = nil
-  -- Orphan anything that was stacked on it (they keep their place, just unlinked).
-  for _, q in iter_parts() do
+  for _, q in pairs(parts) do
     if q.parent == uid then q.parent = nil end
   end
   publish_center(); refresh_stats()
@@ -134,10 +145,11 @@ local function remove_part(uid)
 end
 
 local function undo()
+  if pending_spawns > 0 then return end -- let in-flight spawns land first
   local op = table.remove(undo_stack)
   if not op then return end
   if op.type == "place" then
-    remove_part(op.uid)
+    if not remove_part(op.uid) then return end
   elseif op.type == "scrap" then
     for _, d in ipairs(op.parts) do
       spawn_part(d.id, d.x, d.y, d.z, d.yaw, d.parent, d.uid)
@@ -158,12 +170,10 @@ local function screen_of(x, y, z)
   return sx, sy, on
 end
 
--- The placed part whose center is nearest the cursor (within `px`), for
--- pickup / hover / delete.
 local function part_under_cursor(px)
   local mx, my = input.mouse()
   local best, best_d = nil, px * px
-  for uid, p in iter_parts() do
+  for uid, p in pairs(parts) do
     local sx, sy, on = screen_of(p.x, p.y, p.z)
     if on then
       local d = (sx - mx) ^ 2 + (sy - my) ^ 2
@@ -173,137 +183,148 @@ local function part_under_cursor(px)
   return best
 end
 
--- The best attach node for the current ghost: scan every placed part's free
--- stack nodes, project to screen, take the nearest to the cursor within
--- snap_px. A node is FREE if no part is already linked there.
+-- The best FREE attach node for the current ghost (nearest to the cursor on
+-- screen, within snap_px). Carried stacks never attach to themselves.
 local function find_snap()
   if not ghost then return nil end
   local gdef = ghost.def
   local mx, my = input.mouse()
   local best, best_d = nil, params.snap_px * params.snap_px
-  -- A carried stack must never attach to itself.
   local exclude = {}
   if ghost.carried then
     for _, m in ipairs(ghost.carried) do exclude[m.uid] = true end
   end
   local occupied_top, occupied_bottom = {}, {}
-  for _, p in iter_parts() do
-    if p.parent then
-      -- p sits ON its parent: if p is ABOVE the parent it occupies the top.
-      local pp = parts[p.parent]
-      if pp then
-        if p.y >= pp.y then occupied_top[p.parent] = true
-        else occupied_bottom[p.parent] = true end
-      end
+  for _, p in pairs(parts) do
+    if p.parent and parts[p.parent] and not exclude[p.parent] then
+      if p.y >= parts[p.parent].y then occupied_top[p.parent] = true
+      else occupied_bottom[p.parent] = true end
     end
   end
-  for uid, p in iter_parts() do
-    if exclude[uid] then goto continue end
-    -- Their TOP welcomes our BOTTOM; their BOTTOM welcomes our TOP.
-    if p.def.top and gdef.bottom and not occupied_top[uid] then
-      local ax, ay, az = p.x, p.y + p.def.h * 0.5, p.z
-      local sx, sy, on = screen_of(ax, ay, az)
-      if on then
-        local d = (sx - mx) ^ 2 + (sy - my) ^ 2
-        if d < best_d then best, best_d = { uid = uid, side = "top", x = ax, y = ay, z = az }, d end
+  for uid, p in pairs(parts) do
+    if not exclude[uid] then
+      if p.def.top and gdef.bottom and not occupied_top[uid] then
+        local ax, ay, az = p.x, p.y + p.def.h * 0.5, p.z
+        local sx, sy, on = screen_of(ax, ay, az)
+        if on then
+          local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+          if d < best_d then best, best_d = { uid = uid, side = "top", x = ax, y = ay, z = az }, d end
+        end
+      end
+      if p.def.bottom and gdef.top and not occupied_bottom[uid] then
+        local ax, ay, az = p.x, p.y - p.def.h * 0.5, p.z
+        local sx, sy, on = screen_of(ax, ay, az)
+        if on then
+          local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+          if d < best_d then best, best_d = { uid = uid, side = "bottom", x = ax, y = ay, z = az }, d end
+        end
       end
     end
-    if p.def.bottom and gdef.top and not occupied_bottom[uid] then
-      local ax, ay, az = p.x, p.y - p.def.h * 0.5, p.z
-      local sx, sy, on = screen_of(ax, ay, az)
-      if on then
-        local d = (sx - mx) ^ 2 + (sy - my) ^ 2
-        if d < best_d then best, best_d = { uid = uid, side = "bottom", x = ax, y = ay, z = az }, d end
-      end
-    end
-    ::continue::
   end
   return best
 end
 
--- Where the free-floating ghost sits: the cursor ray dropped onto the ground
--- plane (first parts), or held at the ship's depth once something exists.
+-- Would a part of `def` centered at (x,y,z) overlap any placed part's box?
+-- (Boxes shrunk a touch so flush stacking never counts as overlap.)
+local function overlaps(def, x, y, z, exclude)
+  for uid, p in pairs(parts) do
+    if not (exclude and exclude[uid]) then
+      local d = p.def
+      if math.abs(x - p.x) < (def.rx + d.rx) * 0.9
+        and math.abs(y - p.y) < (def.h + d.h) * 0.5 * 0.9
+        and math.abs(z - p.z) < (def.rz + d.rz) * 0.9 then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Where a free-floating ghost sits: cursor ray onto the pad plane, else held
+-- at the ship's depth.
 local function free_pos()
   local mx, my = input.mouse()
   local ox, oy, oz, dx, dy, dz = camera.screenToRay(mx, my)
   local gh = ghost.def.h * 0.5 + params.floor_y
-  -- Prefer the ground plane while it's in front of us.
   if dy < -1e-4 then
     local t = (gh - oy) / dy
     if t > 0.3 and t < 400 then return ox + dx * t, gh, oz + dz * t end
   end
-  -- Otherwise hold at the ship's distance along the ray.
   local ddx, ddy, ddz = centerX - ox, centerY - oy, centerZ - oz
   local t = math.max(3.0, ddx * dx + ddy * dy + ddz * dz)
   return ox + dx * t, math.max(gh, oy + dy * t), oz + dz * t
 end
 
--- ── The catalogue calls this (via findScript("builder").pick) ───────────────
+-- ── The catalogue calls this (findScript("builder").pick) ───────────────────
 function pick(id)
   if ghost or not REG[id] then return end
   local def = REG[id]
   ghost = { id = id, def = def, yaw = 0, node = nil }
-  spawn(def.prefab, vec3(0, -50, 0), function(node)  -- parked till first update
-    if ghost and ghost.id == id and not ghost.node then ghost.node = node
-    else destroy(node) end
+  click_cool = 0.15
+  hint(HINT_GHOST, 6.0)
+  spawn(def.prefab, vec3(0, -80, 0), function(node)
+    if ghost and ghost.id == id and not ghost.node and not ghost.carried then
+      ghost.node = node
+    else
+      destroy(node)
+    end
   end)
 end
 
--- Pick a PLACED part (and its stack) back up: scrap the subtree into ghost
--- restore data, keep only the picked part visible as the new ghost.
 local function pickup(uid)
   local grab = subtree(uid)
   local moved = {}
   for u in pairs(grab) do
     local p = parts[u]
-    moved[#moved + 1] = { uid = u, id = p.id, x = p.x, y = p.y, z = p.z, yaw = p.yaw, parent = p.parent,
-                          dx = p.x - parts[uid].x, dy = p.y - parts[uid].y, dz = p.z - parts[uid].z }
+    moved[#moved + 1] = { uid = u, id = p.id, x = p.x, y = p.y, z = p.z, yaw = p.yaw, parent = p.parent }
   end
   local root = parts[uid]
   ghost = { id = root.id, def = root.def, yaw = root.yaw, node = root.node, carried = moved, from_uid = uid }
-  -- Detach the root from the graph; carried parts stay live and ride along.
-  root.picked = true
+  root.parent = nil
   push_undo({ type = "move", moved = moved })
+  click_cool = 0.18
+  hint(HINT_GHOST, 6.0)
 end
 
 local function place_ghost(x, y, z, parent)
   if ghost.carried then
-    -- Re-place the whole carried stack, offset from the root's new spot.
-    local dx, dy, dz = x - parts[ghost.from_uid].x, y - parts[ghost.from_uid].y, z - parts[ghost.from_uid].z
+    local root = parts[ghost.from_uid]
+    local dx, dy, dz = x - root.x, y - root.y, z - root.z
     for _, m in ipairs(ghost.carried) do
       local p = parts[m.uid]
       if p then set_part_pos(p, p.x + dx, p.y + dy, p.z + dz) end
     end
-    parts[ghost.from_uid].parent = parent
-    parts[ghost.from_uid].picked = nil
+    root.parent = parent
   else
     local uid = spawn_part(ghost.id, x, y, z, ghost.yaw, parent)
     push_undo({ type = "place", uid = uid })
   end
   ghost = nil
+  click_cool = 0.15
+  hint(HINT_IDLE, 0.0); hint_t = 0
   publish_center(); refresh_stats()
 end
 
 local function cancel_ghost()
   if not ghost then return end
   if ghost.carried then
-    ghost.node = nil -- the part was never removed; it just stops following
-    parts[ghost.from_uid].picked = nil
-    undo() -- restore the pre-pickup positions (the pushed move op)
-  elseif ghost.node then
-    destroy(ghost.node)
+    ghost = nil
+    undo() -- restores the pre-pickup poses + links (the op pushed at pickup)
+  else
+    if ghost.node then destroy(ghost.node) end
+    ghost = nil
   end
-  ghost = nil
+  hint(HINT_IDLE, 0.0); hint_t = 0
 end
 
 -- ── Blueprint (self-contained; save.* slot store) ───────────────────────────
 local function save_blueprint()
   local bp = { parts = {} }
   local ref_y = math.huge
-  for _, p in iter_parts() do ref_y = math.min(ref_y, p.y - p.def.h * 0.5) end
+  for _, p in pairs(parts) do ref_y = math.min(ref_y, p.y - p.def.h * 0.5) end
   if ref_y == math.huge then ref_y = 0 end
   local i = 0
-  for uid, p in iter_parts() do
+  for uid, p in pairs(parts) do
     i = i + 1
     local d = p.def
     bp.parts[i] = {
@@ -317,7 +338,7 @@ local function save_blueprint()
   end
   save.set("shipyard.blueprint", bp)
   save.flush()
-  if hint_node then hint_node.text = "blueprint saved  ·  " .. i .. " parts" end
+  hint("blueprint saved  ·  " .. i .. " parts", 2.5)
 end
 
 local function load_blueprint()
@@ -344,90 +365,132 @@ local grab_mode = false
 local grab_last = nil
 
 function update(node, dt)
-  if not cam then cam = findScript("builder_camera") end
-  local cam_busy = input.button(1) -- RMB = camera's; never place through it
+  -- One shared click edge for the whole frame.
+  local lmb = input.button(0)
+  local clicked = lmb and not lmb_prev and click_cool <= 0
+  lmb_prev = lmb
+  if click_cool > 0 then click_cool = click_cool - dt end
+  if hint_t > 0 then
+    hint_t = hint_t - dt
+    if hint_t <= 0 and hint_node and not ghost and not grab_mode then
+      hint_node.text = HINT_IDLE
+    end
+  end
+  local cam_busy = input.button(1) -- RMB = the camera's; never build through it
 
   -- ── Ghost follows the cursor ──
-  if ghost and ghost.node then
-    snap_target = find_snap()
+  if ghost and (ghost.node or ghost.carried) then
+    local snap = find_snap()
     local x, y, z
-    if snap_target then
+    if snap then
       local h = ghost.def.h * 0.5
-      if snap_target.side == "top" then y = snap_target.y + h else y = snap_target.y - h end
-      x, z = snap_target.x, snap_target.z
+      x, z = snap.x, snap.z
+      y = (snap.side == "top") and (snap.y + h) or (snap.y - h)
     else
       x, y, z = free_pos()
     end
     if ghost.carried then
-      local dx, dy, dz = x - parts[ghost.from_uid].x, y - parts[ghost.from_uid].y, z - parts[ghost.from_uid].z
+      local root = parts[ghost.from_uid]
+      local dx, dy, dz = x - root.x, y - root.y, z - root.z
       for _, m in ipairs(ghost.carried) do
         local p = parts[m.uid]
         if p then set_part_pos(p, p.x + dx, p.y + dy, p.z + dz) end
       end
-    else
+    elseif ghost.node then
       ghost.node.x, ghost.node.y, ghost.node.z = x, y, z
     end
-    -- Attach telegraph: green tie line to the captured node, amber halo free.
-    if snap_target then
-      gizmo.line(x, y, z, snap_target.x, snap_target.y, snap_target.z, 0.3, 1.0, 0.4)
-      gizmo.sphere(snap_target.x, snap_target.y, snap_target.z, 0.18, 0.3, 1.0, 0.4)
-    else
-      gizmo.sphere(x, y, z, 0.22, 1.0, 0.75, 0.25)
+
+    -- Placement legality + telegraph: green = attach, blue = free spot OK
+    -- (first part / ALT), red = refused.
+    local exclude = nil
+    if ghost.carried then
+      exclude = {}
+      for _, m in ipairs(ghost.carried) do exclude[m.uid] = true end
     end
+    local free_ok = (partCount == 0) or (ghost.carried and #ghost.carried >= partCount)
+        or input.key("alt")
+    local can_place, why
+    if snap then
+      can_place = true
+      gizmo.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4)
+      gizmo.sphere(snap.x, snap.y, snap.z, 0.16, 0.3, 1.0, 0.4)
+    elseif free_ok then
+      if overlaps(ghost.def, x, y, z, exclude) then
+        can_place, why = false, "overlapping — find clear ground"
+        gizmo.sphere(x, y, z, 0.3, 1.0, 0.25, 0.2)
+      else
+        can_place = true
+        gizmo.sphere(x, y, z, 0.2, 0.4, 0.7, 1.0)
+      end
+    else
+      can_place, why = false, nil -- routine: aim at an attach node
+      gizmo.sphere(x, y, z, 0.3, 1.0, 0.25, 0.2)
+    end
+
     if input.pressed("r") then
       local step = input.key("shift") and (math.pi / 36) or (math.pi / 12)
       ghost.yaw = ghost.yaw + step
-      if ghost.node then ghost.node.yaw = ghost.yaw end
+      local gn = ghost.carried and parts[ghost.from_uid].node or ghost.node
+      if gn then gn.yaw = ghost.yaw end
     end
-    if input.pressed("escape") then cancel_ghost() end
-    if not cam_busy and input.clicked(0) then
-      place_ghost(x, y, z, snap_target and snap_target.uid or nil)
+    if input.pressed("escape") then cancel_ghost() return end
+    if not cam_busy and clicked then
+      if can_place then
+        place_ghost(x, y, z, snap and snap.uid or nil)
+      elseif why then
+        hint(why, 2.0)
+      else
+        hint("no attach node under the cursor — aim at a green node, or hold ALT to place free", 2.5)
+      end
     end
     return
   end
 
   -- ── Whole-ship grab ──
-  if input.pressed("g") and partCount > 0 then
-    grab_mode = not grab_mode
+  if input.pressed("g") and partCount > 0 and not grab_mode then
+    grab_mode = true
     grab_last = nil
-    if grab_mode then
-      local moved = {}
-      for uid, p in iter_parts() do
-        moved[#moved + 1] = { uid = uid, x = p.x, y = p.y, z = p.z, parent = p.parent }
-      end
-      push_undo({ type = "move", moved = moved })
+    local moved = {}
+    for uid, p in pairs(parts) do
+      moved[#moved + 1] = { uid = uid, x = p.x, y = p.y, z = p.z, parent = p.parent }
     end
+    push_undo({ type = "move", moved = moved })
+    click_cool = 0.15
+    hint(HINT_GRAB, 8.0)
   end
   if grab_mode then
     local mx, my = input.mouse()
     local ox, oy, oz, dx, dy, dz = camera.screenToRay(mx, my)
     if dy < -1e-4 then
-      local t = (centerY - oy) / dy
+      local t = (params.floor_y - oy) / dy
       if t > 0.3 and t < 500 then
         local gx, gz = ox + dx * t, oz + dz * t
         if grab_last then
           local ddx, ddz = gx - grab_last.x, gz - grab_last.z
-          for _, p in iter_parts() do set_part_pos(p, p.x + ddx, p.y, p.z + ddz) end
+          for _, p in pairs(parts) do set_part_pos(p, p.x + ddx, p.y, p.z + ddz) end
           publish_center()
         end
         grab_last = { x = gx, z = gz }
       end
     end
     gizmo.sphere(centerX, centerY, centerZ, 0.35, 0.4, 0.8, 1.0)
-    if input.clicked(0) or input.pressed("escape") then grab_mode = false end
+    if (clicked and not cam_busy) or input.pressed("escape") or input.pressed("g") then
+      grab_mode = false
+      hint(HINT_IDLE, 0.0); hint_t = 0
+    end
     return
   end
 
   -- ── Hover / pickup / scrap ──
-  hover_uid = (not cam_busy) and part_under_cursor(60) or nil
+  hover_uid = (not cam_busy) and part_under_cursor(70) or nil
   if hover_uid then
     local p = parts[hover_uid]
-    gizmo.sphere(p.x, p.y, p.z, 0.28, 0.55, 0.85, 1.0)
-    if input.clicked(0) then
+    gizmo.sphere(p.x, p.y, p.z, math.max(p.def.rx, p.def.h * 0.5) + 0.12, 0.55, 0.85, 1.0)
+    if clicked then
       pickup(hover_uid)
       return
     end
-    if input.pressed("delete") then
+    if input.pressed("delete") or input.pressed("del") then
       local grab = subtree(hover_uid)
       local datas = {}
       for u in pairs(grab) do
@@ -435,6 +498,7 @@ function update(node, dt)
         if d then datas[#datas + 1] = d end
       end
       push_undo({ type = "scrap", parts = datas })
+      hint("scrapped " .. #datas .. " part(s) — CTRL+Z to undo", 2.5)
     end
   end
 
@@ -447,8 +511,9 @@ end
 -- The HUD buttons call these too.
 function doSave() save_blueprint() end
 function doLaunch()
+  if partCount == 0 then hint("nothing to launch — build something first", 2.5) return end
   save_blueprint()
   save.set("shipyard.launch", 1)
   save.flush()
-  scene.load("planetoid")
+  scene.load("system")
 end
