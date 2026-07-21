@@ -28,11 +28,11 @@ defaults = {
 -- so stacked parts sit flush); rx/rz = half-widths for overlap tests.
 local REG = {
   pod       = { prefab = "PartPod",       label = "Pod Mk1",      h = 0.80, rx = 0.50, rz = 0.50, mass = 1.2,  cost = 400, top = true,  bottom = true,  kind = "crewed" },
-  chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.88, rx = 0.40, rz = 0.40, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas" },
+  chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.61, rx = 0.28, rz = 0.28, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas" },
   tankS     = { prefab = "PartTankS",     label = "FT-S Tank",    h = 1.00, rx = 0.50, rz = 0.50, mass = 1.5,  cost = 120, top = true,  bottom = true,  kind = "tank", fuel = 60 },
   tankM     = { prefab = "PartTankM",     label = "FT-M Tank",    h = 1.50, rx = 0.50, rz = 0.50, mass = 3.0,  cost = 260, top = true,  bottom = true,  kind = "tank", fuel = 150 },
-  engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = false, kind = "engine", thrust = 55,  burn = 0.9 },
-  engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = false, kind = "engine", thrust = 130, burn = 2.0 },
+  engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = true,  kind = "engine", thrust = 55,  burn = 0.9 },
+  engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = true,  kind = "engine", thrust = 130, burn = 2.0 },
   decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
   legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = false, kind = "structural", legs = true },
 }

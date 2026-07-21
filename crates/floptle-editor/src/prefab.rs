@@ -292,6 +292,19 @@ impl Editor {
                     }
                 }
             }
+            let root = ents
+                .iter()
+                .zip(&docs)
+                .find(|(_, d)| d.parent.is_none())
+                .map(|(&e, _)| e);
+            // The callback runs BEFORE physics wiring (its transform writes
+            // flush inside call_spawn_callback): a spawned Static prop whose
+            // callback orients it (a launchpad aligned to a planet surface)
+            // must bake its collider at the ORIENTED pose, not the authored
+            // one. Velocity writes still land via the body-changes queue.
+            if let (Some(cb), Some(root)) = (req.cb, root) {
+                self.script_host.call_spawn_callback(&mut self.world, cb, root.index());
+            }
             if let Some(sim) = self.sim.as_mut() {
                 for &e in &ents {
                     sim.add_body_for(e, &self.world);
@@ -301,14 +314,6 @@ impl Editor {
                 for &e in &ents {
                     sim.add_compound_for(e, &self.world);
                 }
-            }
-            let root = ents
-                .iter()
-                .zip(&docs)
-                .find(|(_, d)| d.parent.is_none())
-                .map(|(&e, _)| e);
-            if let (Some(cb), Some(root)) = (req.cb, root) {
-                self.script_host.call_spawn_callback(&mut self.world, cb, root.index());
             }
         }
     }
