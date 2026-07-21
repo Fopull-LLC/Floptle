@@ -1712,6 +1712,10 @@ struct Editor {
     /// body's sim velocity is re-expressed in the new frame so its WORLD
     /// velocity stays continuous across the SOI seam (see space.rs).
     space_frame: std::collections::HashMap<u32, u32>,
+    /// Physics LOD for DISTANT compound craft (root eid → state): far from the
+    /// camera, landed craft freeze in the carried frame and in-flight craft
+    /// coast on analytic Kepler rails; both wake on approach (see space.rs).
+    compound_lod: std::collections::HashMap<u32, crate::space::CompoundLod>,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.

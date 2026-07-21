@@ -16,6 +16,26 @@ use floptle_core::math::DVec3;
 
 use crate::Editor;
 
+/// Physics LOD for a DISTANT compound craft (a deployed satellite, a spent
+/// stage, a parked rover half a planet away). Far from the camera the full
+/// contact sim is wasted heat: landed/slow craft FREEZE (anchored — pinned,
+/// carried with their planet's frame), in-flight craft coast on an analytic
+/// Kepler conic (drift-free orbits at any warp, for any number of craft).
+/// Both wake to live physics when approached.
+#[derive(Clone, Copy)]
+pub(crate) enum CompoundLod {
+    /// Anchored in place; `was_anchored` remembers a GAMEPLAY anchor (launch
+    /// clamps) so waking doesn't silently release it.
+    Frozen { was_anchored: bool },
+    /// On rails around dominant celestial `dom` with cached elements.
+    Coast { dom: u32, k: Kepler },
+}
+
+/// Beyond this distance from the camera a compound drops to its LOD…
+const LOD_FAR: f64 = 700.0;
+/// …and inside this one it wakes back to live physics (hysteresis).
+const LOD_NEAR: f64 = 500.0;
+
 impl Editor {
     /// Advance rails one gameplay tick. No-op unless Playing with celestial bodies.
     pub(crate) fn update_space_rails(&mut self, tick_dt: f64) {
@@ -405,6 +425,90 @@ impl Editor {
                 if deltas[j].length_squared() > 1e-18 {
                     sim.shift_statics_of(e.index(), deltas[j]);
                 }
+            }
+            // DISTANT-CRAFT LOD (hundreds of deployed craft, cheaply): far
+            // compounds leave live physics — landed/slow ones freeze in the
+            // carried frame, in-flight ones snap to their own Kepler rails —
+            // and wake on approach. The active camera is "near".
+            let cam = self.world.query::<floptle_core::Matter>().find_map(|(e, m)| {
+                matches!(m, floptle_core::Matter::Camera { active: true, .. })
+                    .then(|| floptle_core::world_transform(&self.world, e).translation)
+            });
+            if let Some(cam) = cam {
+                let dom_of = |p: DVec3| -> Option<usize> {
+                    let mut best: Option<(usize, f64)> = None;
+                    for (i, sb) in sys.bodies.iter().enumerate() {
+                        if (p - DVec3::from(bodies[i].pos)).length() <= sb.soi
+                            && best.is_none_or(|(_, s)| sb.soi < s)
+                        {
+                            best = Some((i, sb.soi));
+                        }
+                    }
+                    best.map(|(i, _)| i)
+                };
+                for (eid, com) in sim.compound_positions() {
+                    let d = (com - cam).length();
+                    match self.compound_lod.get(&eid).copied() {
+                        None => {
+                            let Some(c) = sim.compound_of(eid) else { continue };
+                            if d <= LOD_FAR {
+                                continue;
+                            }
+                            let slow = c.grounded || c.anchored || c.vel.length() < 0.5;
+                            let vel = c.vel.as_dvec3();
+                            let was_anchored = c.anchored;
+                            if !slow
+                                && let Some(i) = dom_of(com)
+                                && cb[i].1.mu > 0.0
+                            {
+                                let k = Kepler::from_state(
+                                    com - DVec3::from(bodies[i].pos),
+                                    vel,
+                                    cb[i].1.mu,
+                                    t,
+                                );
+                                sim.set_compound_anchored(eid, true);
+                                self.compound_lod.insert(
+                                    eid,
+                                    CompoundLod::Coast { dom: cb[i].0.index(), k },
+                                );
+                            } else {
+                                sim.set_compound_anchored(eid, true);
+                                self.compound_lod
+                                    .insert(eid, CompoundLod::Frozen { was_anchored });
+                            }
+                        }
+                        Some(CompoundLod::Coast { dom, k }) => {
+                            let Some(i) = cb.iter().position(|(e, _)| e.index() == dom) else {
+                                self.compound_lod.remove(&eid);
+                                sim.set_compound_anchored(eid, false);
+                                continue;
+                            };
+                            // Evaluate the conic at rails time — exact at any
+                            // warp — and place the craft absolutely (the carry
+                            // above already moved it; this overwrites).
+                            let (r, v) = k.pos_vel(cb[i].1.mu, t);
+                            let target = DVec3::from(bodies[i].pos) + r;
+                            sim.shift_compound(eid, target - com);
+                            if d < LOD_NEAR {
+                                self.compound_lod.remove(&eid);
+                                sim.set_compound_anchored(eid, false);
+                                sim.set_compound_velocity(eid, v.as_vec3());
+                            }
+                        }
+                        Some(CompoundLod::Frozen { was_anchored }) => {
+                            if d < LOD_NEAR {
+                                self.compound_lod.remove(&eid);
+                                if !was_anchored {
+                                    sim.set_compound_anchored(eid, false);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Despawned compounds leave stale LOD entries — sweep them.
+                self.compound_lod
+                    .retain(|eid, _| sim.compound_of(*eid).is_some());
             }
         }
         self.script_host.set_space(floptle_script::SpaceInfo {

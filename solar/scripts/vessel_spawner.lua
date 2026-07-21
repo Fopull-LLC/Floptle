@@ -111,9 +111,10 @@ function start(node)
 end
 
 local function try_spawn()
-  -- Pad pos read FRESH each attempt (the game manager can relocate things
-  -- while the world loads).
-  local pad = find("Ship")
+  -- Site reference read FRESH each attempt: the ASTRONAUT (the crew spawn —
+  -- the scout "Ship" node is a stashed debug tool now and may be parked in
+  -- deep space).
+  local pad = find("Astronaut") or find("Ship")
   local px, py, pz = 0, 20, 0
   if pad then px, py, pz = pad.x, pad.y, pad.z end
 

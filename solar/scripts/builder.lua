@@ -96,9 +96,10 @@ end
 
 -- ── Stats + staging readout ─────────────────────────────────────────────────
 -- Stages mirror the FLIGHT model exactly: SPACE fires the lowest remaining
--- decoupler and everything at/below it detaches — so stage k is "the stack
--- above the k-th decoupler", flying on every engine still aboard. Each gets
--- its honest TWR (thrust / mass·g) and pooled fuel.
+-- decoupler and everything at/below it detaches, and only the BOTTOM live
+-- stage's engines burn (everything above the next decoupler waits its turn).
+-- Stage k = the stack above the k-th decoupler, thrusting on the engines
+-- between decouplers k and k+1. Honest TWR (thrust / mass·g) + pooled fuel.
 local function stage_lines()
   local cuts = {}
   for _, p in pairs(parts) do
@@ -107,13 +108,16 @@ local function stage_lines()
   table.sort(cuts)
   local out = ""
   for k = 0, #cuts do
-    local cut = (k == 0) and -math.huge or cuts[k]
+    local lo = (k == 0) and -math.huge or cuts[k]
+    local hi = cuts[k + 1] or math.huge
     local m, th, fu = 0.0, 0.0, 0
     for _, p in pairs(parts) do
-      if p.y > cut + 0.01 then
+      if p.y > lo + 0.01 then
         m = m + p.def.mass
-        th = th + (p.def.thrust or 0)
         fu = fu + (p.def.fuel or 0)
+        if (p.def.thrust or 0) > 0 and p.y < hi - 0.01 then
+          th = th + p.def.thrust
+        end
       end
     end
     if k == 0 or th > 0 or fu > 0 then

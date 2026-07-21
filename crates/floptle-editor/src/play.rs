@@ -562,6 +562,7 @@ impl Editor {
             self.script_host.set_physics_paused(false);
             self.space_coast.clear();
             self.space_frame.clear(); // dominant-frame tracking restarts too
+            self.compound_lod.clear(); // distant-craft LOD restarts with them
             self.script_lines.clear(); // no stale map lines across runs
             // Every Play is a FRESH RUN: drop all script instances so top-level
             // script state can't leak across sessions (Ty's ship still thought
