@@ -516,6 +516,10 @@ pub struct SpawnRequest {
     pub prefab: String,
     pub pos: Option<[f64; 3]>,
     pub cb: Option<mlua::RegistryKey>,
+    /// Spawn the prefab's root(s) as CHILDREN of this entity (kept at the
+    /// world `pos` — the driver converts to the parent's local frame). How a
+    /// vessel prefab's parts land under an assembly root.
+    pub parent: Option<u32>,
 }
 
 /// A `createNode(name [, parent] [, fn])` request: a plain node (Empty matter)

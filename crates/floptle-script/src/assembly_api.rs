@@ -45,6 +45,9 @@ pub enum AssemblyCmd {
     /// Detach `parts` (entity indices) into a new vessel; `cb` (if any) is
     /// called with the new root's node table.
     Split { root: u32, parts: Vec<u32>, cb: Option<RegistryKey> },
+    /// Re-gather the compound from the root's current descendants — call
+    /// after script-assembling a vessel (spawning parts under the root).
+    Rebuild { root: u32 },
 }
 
 /// A `vec3(...)`-ish argument: any table with `x`/`y`/`z` fields.
@@ -166,6 +169,18 @@ pub(crate) fn install_assembly_api(
             },
         )?;
         t.set("split", f)?;
+    }
+    // assembly.rebuild(node) — re-gather the compound from the root's CURRENT
+    // part children. Call once after spawning parts under an assembly root
+    // (script-assembled vessels: blueprint spawners, procgen structures).
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, node: Value| {
+            let root = node_eid(&node, "assembly.rebuild(node)")?;
+            q.borrow_mut().push(AssemblyCmd::Rebuild { root });
+            Ok(())
+        })?;
+        t.set("rebuild", f)?;
     }
     // assembly.info(node) — mass, com (world vec3), vel, angVel (vec3 tables),
     // grounded, and parts (the part nodes' entity ids). nil for non-assemblies.
