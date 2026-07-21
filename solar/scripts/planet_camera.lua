@@ -165,10 +165,16 @@ function lateUpdate(node, dt)
   local fy = ry * cp + uy * sp
   local fz = rz * cp + uz * sp
 
-  -- Look-at point: the character's head (along LOCAL up, not world Y).
-  local hx = target.x + ux * params.height
-  local hy = target.y + uy * params.height
-  local hz = target.z + uz * params.height
+  -- Look-at point: the character's head (along LOCAL up, not world Y). A
+  -- piloted VESSEL's root sits at the stack BASE — orbit its capsule instead
+  -- (the controller publishes the pod's height up the stack).
+  local look_h = params.height
+  if vpiloting and vessel and vessel.focusHeight then
+    look_h = vessel.focusHeight
+  end
+  local hx = target.x + ux * look_h
+  local hy = target.y + uy * look_h
+  local hz = target.z + uz * look_h
 
   -- Wall clip: cast from the head back toward the camera, ignore the player.
   local back = params.distance

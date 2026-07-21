@@ -29,6 +29,9 @@ defaults = {
 piloting = false
 throttle = 0.0
 fuel = 0.0
+-- Where the camera should orbit, vessel-local height: the CAPSULE, not the
+-- stack base the root node sits at (planet_camera reads this while piloting).
+focusHeight = 1.2
 sas_mode = "stability"
 local sas_last = "stability"
 
@@ -93,6 +96,7 @@ local function load_bp()
   end
   table.sort(decouplers, function(a, b) return a.y < b.y end)
   fuel = fuel_cap
+  focusHeight = pod.y
 end
 
 local function pod_world(node)

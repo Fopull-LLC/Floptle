@@ -57,15 +57,22 @@ pub enum AssemblyCmd {
     Teleport { root: u32, pos: [f64; 3] },
 }
 
-/// A `vec3(...)`-ish argument: any table with `x`/`y`/`z` fields.
+/// A `vec3(...)`-ish argument: the `vec3()` value itself (a userdata) or any
+/// table with `x`/`y`/`z` fields. Rejecting the actual `vec3()` type here was
+/// the bug that silently killed EVERY scripted thrust/torque/teleport call.
 fn v3(v: &Value, what: &str) -> mlua::Result<[f64; 3]> {
+    if let Value::UserData(ud) = v
+        && let Ok(u) = ud.borrow::<crate::math_api::LuaVec3>()
+    {
+        return Ok([u.0.x, u.0.y, u.0.z]);
+    }
     if let Value::Table(t) = v {
         let (x, y, z) = (t.get::<f64>("x"), t.get::<f64>("y"), t.get::<f64>("z"));
         if let (Ok(x), Ok(y), Ok(z)) = (x, y, z) {
             return Ok([x, y, z]);
         }
     }
-    Err(mlua::Error::runtime(format!("{what}: expected a vec3 (a table with x, y, z)")))
+    Err(mlua::Error::runtime(format!("{what}: expected a vec3 (or a table with x, y, z)")))
 }
 
 /// The `node` argument's entity index (a node table or handle).
@@ -248,4 +255,47 @@ pub(crate) fn install_assembly_api(
     }
 
     lua.globals().set("assembly", t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The documented contract: every `assembly.*` vector argument accepts the
+    /// `vec3()` value itself (a userdata) AND plain `{x,y,z}` tables. The
+    /// userdata path regressing is what silently killed all scripted thrust —
+    /// every call errored on arg validation, so ships "just wouldn't thrust".
+    #[test]
+    fn vector_args_accept_vec3_userdata_and_tables() {
+        let lua = Lua::new();
+        crate::math_api::install(&lua).unwrap();
+        let info = Rc::new(RefCell::new(HashMap::new()));
+        let cmds: Rc<RefCell<Vec<AssemblyCmd>>> = Rc::new(RefCell::new(Vec::new()));
+        install_assembly_api(&lua, info, cmds.clone()).unwrap();
+        lua.load(
+            r#"
+            local node = { __id = 7 }
+            assembly.forceAt(node, vec3(1, 2, 3), vec3(4, 5, 6))
+            assembly.torque(node, vec3(0, 0, 9))
+            assembly.teleport(node, vec3(10, 11, 12))
+            assembly.impulseAt(node, { x = 1, y = 0, z = 0 }, { x = 0, y = 0, z = 0 })
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let q = cmds.borrow();
+        assert_eq!(q.len(), 4);
+        match &q[0] {
+            AssemblyCmd::Hold { root, force, at, .. } => {
+                assert_eq!(*root, 7);
+                assert_eq!(*force, [1.0, 2.0, 3.0]);
+                assert_eq!(*at, Some([4.0, 5.0, 6.0]));
+            }
+            _ => panic!("expected Hold"),
+        }
+        match &q[2] {
+            AssemblyCmd::Teleport { pos, .. } => assert_eq!(*pos, [10.0, 11.0, 12.0]),
+            _ => panic!("expected Teleport"),
+        }
+    }
 }
