@@ -756,7 +756,7 @@
                     anchor: Right,
                     offset: (-12.0, 0.0),
                 ),
-                size: (Fixed(190.0), Fixed(478.0)),
+                size: (Fixed(190.0), Fixed(530.0)),
                 shape: Some((
                     fill: (0.05, 0.07, 0.1, 0.88),
                     radius: 10.0,
@@ -1085,6 +1085,44 @@
                 )),
                 text: Some((
                     text: "Landing Legs",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Radial Decoupler",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 9.0)],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12, 454),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Radial Decoupler",
                     size: 15.0,
                     color: (0.8, 0.9, 1.0, 1.0),
                     align: Center,

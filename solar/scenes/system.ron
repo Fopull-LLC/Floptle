@@ -1435,15 +1435,15 @@
             parent: Some(18),
             ui: Some((
                 place: Pin(
-                    anchor: Left,
-                    offset: (16.0, 40.0),
+                    anchor: Right,
+                    offset: (-16.0, 0.0),
                 ),
-                size: (Fixed(300.0), Fixed(200.0)),
+                size: (Fixed(230.0), Fixed(240.0)),
                 text: Some((
                     text: "",
                     size: 15.0,
                     color: (0.85, 0.9, 1.0, 1.0),
-                    align: Start,
+                    align: End,
                     valign: Start,
                     fit: false,
                 )),

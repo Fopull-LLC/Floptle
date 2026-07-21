@@ -86,7 +86,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
-pub use assembly_api::{AssemblyCmd, AssemblyInfo};
+pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
 pub use view_api::ViewInfo;
@@ -317,6 +317,9 @@ pub struct ScriptHost {
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
+    /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
+    /// the driver each tick — the damage/stress raw material.
+    assembly_impacts: Rc<RefCell<HashMap<u32, Vec<assembly_api::AssemblyImpact>>>>,
     /// Queued `assembly.*` commands (held forces, impulses, splits), drained
     /// by the driver after the script pass.
     assembly_cmds: Rc<RefCell<Vec<assembly_api::AssemblyCmd>>>,

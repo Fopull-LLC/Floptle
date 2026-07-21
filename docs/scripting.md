@@ -262,6 +262,30 @@ running — the tool for loading screens, cutscenes and pause menus
 (`physics.pause(false)` resumes; `physics.isPaused()` reads it; queued
 thrust is dropped, never banked, while paused).
 
+**Per-part impact attribution — `assembly.impacts(node)`:** the engine
+attributes every contact a compound resolves to the PART that took it. Each
+tick the call returns an array of `{ part, impulse, x, y, z }` — `part` is
+the part node's entity id (match `child.id` over `node:children()` or
+`info.parts`), `impulse` the total normal impulse that part absorbed this
+tick (mass·Δv), `x/y/z` its hardest contact point in world space. Empty
+between contacts; anchored assemblies make no contacts at all. Poll it from
+`fixedUpdate` and compare against per-part strength — that is a damage
+model in ten lines:
+
+```lua
+for _, hit in ipairs(assembly.impacts(node)) do
+  if hit.impulse > strengthOf(hit.part) then
+    spawnEffect("Explosion", hit.x, hit.y, hit.z)
+    -- shear the part off as wreckage:
+    assembly.split(node, { childById(node, hit.part) }, function(junk) end)
+  end
+end
+```
+
+A soft landing on legs reads as a few small impulses on the leg parts; a
+nose-first crash reads as one huge impulse on the nose. The solar demo's
+vessels break exactly this way (`solar/scripts/vessel_controller.lua`).
+
 ### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
 
 They look similar but serve different masters:

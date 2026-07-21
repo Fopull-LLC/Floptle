@@ -23,7 +23,7 @@ local next_id = 1
 
 local function make_node(name, x, y, z, parent)
   local n = {
-    __id = next_id, name = name, valid = true, visible = true,
+    __id = next_id, id = next_id, name = name, valid = true, visible = true,
     x = x or 0, y = y or 0, z = z or 0,
     pitch = 0, roll = 0, yaw = 0,
     vx = 0, vy = 0, vz = 0,
@@ -74,7 +74,8 @@ end
 -- ── world state ─────────────────────────────────────────────────────────────
 -- One planet on rails: it moves +X at 90 u/s. Everything must be positioned
 -- relative to it or drift bugs show as proximity failures.
-local planet = { name = "Golil", x = 5000, y = 0, z = 0, soi = 30000, mu = 4.9e5, radius = 220 }
+local planet = { name = "Golil", x = 5000, y = 0, z = 0, soi = 30000, mu = 4.9e5, radius = 220,
+                 vx = 90, vy = 0, vz = 0 }
 local planet_node = make_node("Golil", planet.x, planet.y, planet.z)
 
 local save_store = {}
@@ -83,6 +84,7 @@ local spawn_queue = {}
 local asm = nil
 local force_calls = 0
 local torque_calls = 0
+local split_calls = {}
 
 -- ── stub API ────────────────────────────────────────────────────────────────
 local API = {}
@@ -103,6 +105,9 @@ API.input = {
   pressed = function(k) return API.KEYS.edge[k] or false end,
   button = function() return false end,
   mouse = function() return 0, 0 end,
+  mouse_delta = function() return 0, 0 end,
+  scroll = function() return 0 end,
+  setMouseLocked = function() end,
 }
 
 API.save = {
@@ -117,16 +122,40 @@ API.space = {
   warp = function(m) return 1 end,
   bodies = function() return { planet } end,
   body = function(name) return name == planet.name and planet or nil end,
-  dominant = function() return planet.name end,
+  -- SOI-honoring, like the engine: outside the planet's sphere of influence
+  -- there is NO dominant body (the stashed scout parks out there on purpose).
+  dominant = function(x, y, z)
+    if not x then return planet.name end
+    local dx, dy, dz = x - planet.x, y - planet.y, z - planet.z
+    if dx * dx + dy * dy + dz * dz < planet.soi * planet.soi then return planet.name end
+    return nil
+  end,
   elements = function()
     if T < 3.0 then return nil end
     return { body = planet.name, apoapsis = 400, periapsis = 250, period = 950 }
   end,
+  propagate = function(x, y, z, vx, vy, vz, mu, dt)
+    return x + vx * dt, y + vy * dt, z + vz * dt, vx, vy, vz
+  end,
+  gravity = function(x, y, z)
+    local dx, dy, dz = planet.x - x, planet.y - y, planet.z - z
+    local r2 = dx * dx + dy * dy + dz * dz
+    if r2 < 1 then return 0, 0, 0 end
+    local r = math.sqrt(r2)
+    local g = planet.mu / r2
+    return dx / r * g, dy / r * g, dz / r * g
+  end,
 }
 
 API.terrain = { warm = function() end, query = function() return 0.1 end }
+-- Line recorder: update_map3d draws the subject craft's conic in cyan
+-- (0.35, 0.85, 1.0) — the map assertions look for it here. Cleared per tick.
+local tick_lines = {}
 API.draw = {
-  ring = function() end, line = function() end,
+  ring = function() end,
+  line = function(x1, y1, z1, x2, y2, z2, r, g, b, a)
+    tick_lines[#tick_lines + 1] = { r = r, g = g, b = b }
+  end,
   sphere = function() end, box = function() end,
 }
 API.physics = { pause = function() end, isPaused = function() return false end }
@@ -139,6 +168,10 @@ end
 
 function API.spawn(prefab, pos, cb, parent)
   spawn_queue[#spawn_queue + 1] = { prefab = prefab, pos = pos, cb = cb, parent = parent }
+end
+API.EFFECTS = {}
+function API.spawnEffect(name, x, y, z)
+  API.EFFECTS[#API.EFFECTS + 1] = { name = name, x = x, y = y, z = z }
 end
 
 API.assembly = {
@@ -177,32 +210,57 @@ API.assembly = {
     -- The application point must be PHYSICS-consistent: computed from
     -- info.origin (node pos + carry), never the stale node pose. An offset
     -- of a carry-delta here was the constant SAS torque bias of round 10.
+    -- Engines sit at known blueprint x-offsets (0 for the stack, 2.0 for
+    -- the side booster) — the point must land on ONE of them, carried.
     if asm and asm.root == node and asm.carry_dx ~= 0 then
-      local expect_x = node.x + asm.carry_dx
-      if math.abs(at.x - expect_x) > 0.5 then
+      local ok = false
+      for _, ex in ipairs({ 0.0, 2.0 }) do
+        if math.abs(at.x - (node.x + asm.carry_dx + ex)) < 0.5 then ok = true break end
+      end
+      if not ok then
         error(string.format(
-          "forceAt point off the physics hull: at.x=%.2f, expected ~%.2f (stale node pose?)",
-          at.x, expect_x))
+          "forceAt point off the physics hull: at.x=%.2f, node.x=%.2f carry=%.2f (stale node pose?)",
+          at.x, node.x, asm.carry_dx))
       end
     end
   end,
   force = function() force_calls = force_calls + 1 end,
   torque = function() torque_calls = torque_calls + 1 end,
   impulseAt = function() end,
-  split = function(node, parts, cb) end,
+  split = function(node, parts, cb) split_calls[#split_calls + 1] = #parts end,
+  -- Injectable per-part contact loads (the engine's per-tick attribution):
+  -- push { part=, impulse=, x=, y=, z= } into API.IMPACTS to simulate a slam.
+  impacts = function(node)
+    local out = API.IMPACTS or {}
+    API.IMPACTS = {}
+    return out
+  end,
 }
 
 -- ── script loading ──────────────────────────────────────────────────────────
+-- kind → LIST of envs, in registration order: findScript returns the FIRST
+-- (arbitrary, like the engine), findScripts returns them all — scripts that
+-- need THE piloted vessel must scan, and the decoy below proves they do.
 local script_envs = {}
 
-function API.findScript(kind)
-  local env = script_envs[kind]
-  if not env then return nil end
+local function handle_of(env)
   return setmetatable({ node = env.__node }, { __index = env })
 end
+
+function API.findScript(kind)
+  local l = script_envs[kind]
+  if not l or #l == 0 then return nil end
+  return handle_of(l[1])
+end
 API.findScripts = function(kind)
-  local s = API.findScript(kind)
-  return s and { s } or {}
+  local out = {}
+  for _, env in ipairs(script_envs[kind] or {}) do out[#out + 1] = handle_of(env) end
+  return out
+end
+
+local function register_script(kind, env)
+  script_envs[kind] = script_envs[kind] or {}
+  table.insert(script_envs[kind], env)
 end
 
 local function load_script(path, kind, node)
@@ -217,7 +275,7 @@ local function load_script(path, kind, node)
   chunk()
   env.params = {}
   for k, v in pairs(env.defaults or {}) do env.params[k] = v end
-  script_envs[kind] = env
+  register_script(kind, env)
   return env
 end
 
@@ -232,7 +290,7 @@ local function call(env, fn, ...)
 end
 
 -- ── the simulated engine loop ───────────────────────────────────────────────
-local spawner_env, controller_env
+local spawner_env, controller_env, scout_env
 
 local function deliver_spawns()
   local batch = spawn_queue
@@ -266,6 +324,7 @@ end
 local function step(n)
   for _ = 1, n do
     T = T + TICK
+    tick_lines = {}
     -- Rails: the planet moves; parented nodes ride via the hierarchy, the
     -- anchored assembly rides via the engine's carry (modeled here).
     local dx = 90 * TICK
@@ -278,6 +337,7 @@ local function step(n)
     if asm then asm.carry_dx = dx end
     deliver_spawns()
     if spawner_env then call(spawner_env, "update", spawner_env.__node, TICK) end
+    if scout_env then call(scout_env, "fixedUpdate", scout_env.__node, TICK) end
     if controller_env then call(controller_env, "fixedUpdate", controller_env.__node, TICK) end
     -- Post-tick writeback closes the gap, then the camera pass runs.
     if asm then
@@ -285,6 +345,7 @@ local function step(n)
       asm.carry_dx = 0
     end
     if controller_env then call(controller_env, "lateUpdate", controller_env.__node, TICK) end
+    if scout_env then call(scout_env, "lateUpdate", scout_env.__node, TICK) end
     API.KEYS.edge = {}
   end
 end
@@ -309,22 +370,45 @@ save_store["shipyard.blueprint"] = { parts = {
   -- no flame) until the stage below separates.
   { uid = 5, id = "engineS", prefab = "PartEngineS", x = 0, y = 2.5, z = 0, yaw = 0,
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 55, burn = 0.9, fuel = 0, decouple = 0, legs = 0 },
+  -- A SIDE BOOSTER branch (builder v1.2 radial mounts): a radial decoupler
+  -- on the tank's flank (disc rolled to face outward) + a booster engine on
+  -- its outer face. Burns from ignition; SPACE kicks the whole branch away
+  -- laterally BEFORE any axial stage fires.
+  { uid = 6, id = "radialDec", prefab = "PartDecoupler", x = 1.02, y = 2.1, z = 0, yaw = 0,
+    roll = -1.5708, h = 0.25, mass = 0.12, cost = 70, kind = "structural",
+    thrust = 0, burn = 0, fuel = 0, decouple = 1, legs = 0, radial = 1, parent = 2, att = "radial" },
+  { uid = 7, id = "engineS", prefab = "PartEngineS", x = 2.0, y = 2.1, z = 0, yaw = 0,
+    h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 40, burn = 0.7,
+    fuel = 0, decouple = 0, legs = 0, parent = 6 },
 } }
 save_store["shipyard.launch"] = 1
 save_store["shipyard.pilot"] = 1
 
 local astro = make_node("Astronaut", planet.x, planet.y + planet.radius + 6, planet.z)
-make_node("Ship", planet.x, planet.y + planet.radius + 4, planet.z)
-for _, nm in ipairs({ "Ship HUD Text", "Vessel HUD", "Navball", "Speed Tape",
+local scout_node = make_node("Ship", planet.x, planet.y + planet.radius + 4, planet.z)
+for _, nm in ipairs({ "Ship HUD Text", "Vessel HUD", "Stage List", "Navball", "Speed Tape",
                       "Alt Tape", "Speed Readout", "Alt Readout", "Heading Readout" }) do
   local n = make_node(nm, 0, 0, 0)
   n.components["UiElement"] = { visible = false }
   n.text = ""
 end
 
+-- A DECOY vessel: a second, unpiloted craft registered BEFORE the real one,
+-- so findScript("vessel_controller") returns the WRONG instance — every
+-- consumer that needs THE piloted vessel must scan findScripts (the
+-- multi-craft world: landed ships, satellites, dropped stages).
+local decoy_node = make_node("Vessel (parked)", planet.x + 40, planet.y + planet.radius, planet.z)
+register_script("vessel_controller", { __node = decoy_node, __kind = "vessel_controller",
+                                       piloting = false })
+
 local sp_node = make_node("Vessel Spawner", 0, 0, 0)
 spawner_env = load_script("solar/scripts/vessel_spawner.lua", "vessel_spawner", sp_node)
 call(spawner_env, "start", sp_node)
+
+-- The REAL scout (debug ship / map owner): it stashes itself on tick 1 and
+-- its lateUpdate drives the 3D map for whatever craft is being flown.
+scout_env = load_script("solar/scripts/ship_controller.lua", "ship_controller", scout_node)
+call(scout_env, "start", scout_node)
 
 step(30) -- spawn pad + vessel + parts, rebuild, clamp, board
 
@@ -351,6 +435,15 @@ local hudn = find_node("Ship HUD Text")
 check(hudn and hudn.text ~= "" and hudn.text:find("CLAMPED") ~= nil,
   "HUD shows the CLAMPED state (got: " .. tostring(hudn and hudn.text) .. ")")
 
+-- The spawner honors the blueprint's full local rotation (v1.2 builds
+-- sideways parts): the radial decoupler's disc must arrive rolled outward.
+local rdec
+for _, n in ipairs(nodes) do
+  if n.name == "PartDecoupler" and math.abs((n.x or 0) - 1.02) < 0.1 then rdec = n end
+end
+check(rdec ~= nil and math.abs((rdec.roll or 0) + 1.5708) < 0.01,
+  "radial decoupler spawns with its blueprint roll (sideways disc)")
+
 -- Release, throttle: thrust + flames must fire.
 press("space")
 step(2)
@@ -359,26 +452,45 @@ API.KEYS.down["shift"] = true
 step(30)
 API.KEYS.down["shift"] = false
 check(force_calls > 0, "throttle produced engine forceAt calls")
--- STAGE GATING: only the BOTTOM stage's single engine may fire — two engines
--- thrusting doubles the per-tick call count (30 ticks → ~30 calls, not ~60).
-check(force_calls <= 35,
-  string.format("upper-stage engine stayed cold before staging (forceAt ×%d over 30 ticks)", force_calls))
+-- STAGE GATING: the bottom stack engine AND the attached side booster burn
+-- (2 × ~30 ticks ≈ 60 calls); the upper-stage engine stays cold (3 burning
+-- would be ~90).
+check(force_calls >= 50 and force_calls <= 70,
+  string.format("core + booster burn, upper stays cold (forceAt ×%d over 30 ticks)", force_calls))
 check(torque_calls > 0, "attitude loop produced torque calls")
 check(controller_env.throttle > 0, "throttle climbed under SHIFT")
-local flame_lo, flame_hi
+local flame_lo, flame_hi, flame_boost
 for _, n in ipairs(nodes) do
   if n.name == "Engine Flame" and n.parent then
-    if n.parent.y < 1.5 then flame_lo = n else flame_hi = n end
+    if (n.parent.x or 0) > 1.0 then flame_boost = n
+    elseif n.parent.y < 1.5 then flame_lo = n
+    else flame_hi = n end
   end
 end
-check(flame_lo ~= nil and flame_hi ~= nil, "both engine prefabs spawned flame children")
+check(flame_lo ~= nil and flame_hi ~= nil and flame_boost ~= nil,
+  "every engine prefab spawned a flame child")
 check(flame_lo and flame_lo.particles_state.playing, "bottom-stage plume plays under throttle")
 check(flame_lo and flame_lo.components["PointLight"].intensity > 0, "plume light follows throttle")
 check(flame_hi and not flame_hi.particles_state.playing, "upper-stage plume stays COLD before staging")
+check(flame_boost and flame_boost.particles_state.playing, "side-booster plume burns from ignition")
 
--- Stage: SPACE now fires the decoupler path (split stubbed; must not error).
+-- SPACE #2: side boosters kick away FIRST — the whole radial branch (its
+-- decoupler + engine) leaves as one lateral group.
 press("space")
 step(2)
+check(#split_calls == 1 and split_calls[1] == 2,
+  string.format("boosters away as one 2-part branch (splits: %d)", #split_calls))
+force_calls = 0
+step(30)
+check(force_calls >= 20 and force_calls <= 35,
+  string.format("only the core engine burns after booster separation (forceAt ×%d)", force_calls))
+check(flame_boost and not flame_boost.particles_state.playing,
+  "booster plume dies with the separation")
+
+-- SPACE #3: the AXIAL decoupler path (split stubbed; must not error).
+press("space")
+step(2)
+check(#split_calls == 2, "axial stage fires after the boosters are gone")
 
 -- EVA: F steps out (flames off, HUD hides); board again FROM THE GROUND —
 -- the pod is ~3 units up, so boarding must measure to the vessel's spine.
@@ -398,6 +510,90 @@ step(2)
 check(controller_env.piloting == true, "F re-boards from the ground (spine reach)")
 step(10)
 check(hudn.text ~= "" and hud_el.visible ~= false, "HUD repaints after re-board")
+
+-- ── THE MAP flies the piloted vessel (round 11) ─────────────────────────────
+-- Put the piloted vessel "in flight" with a real orbital velocity (the engine
+-- mirror feeds node.vx on compound roots; modeled by hand here), open the map
+-- with M, and demand the SHIP'S conic is drawn + the info panel reads the
+-- VESSEL as its subject. The subject swap must survive the scout being
+-- stashed far outside every SOI.
+check(scout_env.stashed == true, "scout stashed itself (debug tool)")
+local svx, svy, svz = world_of(scout_node)
+check(svy > 1.0e6, string.format("scout parked in deep space (y=%.0f)", svy))
+
+asm.vel = { x = 47, y = 0, z = 0 }   -- ~circular at pad radius: sqrt(mu/r)
+asm.root.vx, asm.root.vy, asm.root.vz = 47, 0, 0
+asm.root.grounded = false
+step(9)
+
+-- The stage list: painted on the RIGHT in rocket order while flying…
+local stagen = find_node("Stage List")
+check(stagen.components["UiElement"].visible ~= false and stagen.text:find("▶") ~= nil,
+  "stage list paints in flight with the active stage marked")
+
+press("m")
+step(9) -- past the 10 Hz map-HUD throttle
+
+-- …and stood down while the map owns the screen.
+check(stagen.components["UiElement"].visible == false, "stage list hides under the map")
+
+check(scout_env.map_view == true, "M opens the map while flying a built vessel")
+local conic_drawn = false
+for _, l in ipairs(tick_lines) do
+  if math.abs(l.r - 0.35) < 0.01 and math.abs(l.g - 0.85) < 0.01 and math.abs(l.b - 1.0) < 0.01 then
+    conic_drawn = true
+    break
+  end
+end
+check(conic_drawn, string.format(
+  "map draws the piloted vessel's orbit conic (%d lines drawn this tick)", #tick_lines))
+check(hudn.text:find("MAP") ~= nil and hudn.text:find("SHIP ORBIT") ~= nil,
+  "map info panel reads the vessel's orbit (got: " .. tostring(hudn.text) .. ")")
+press("m")
+step(9) -- the vessel HUD repaints on its own 10 Hz clock
+check(scout_env.map_view == false, "M closes the map again")
+check(hudn.text:find("THR") ~= nil, "vessel HUD repaints after closing the map")
+
+-- ── DESTRUCTION (round 11): per-part impacts → damage → breakup ─────────────
+-- The engine attributes every contact's impulse to the part that took it
+-- (assembly.impacts). Inject a survivable hit on the tank (smoulders + HUD
+-- damage line), then a killing blow (explosion + the part shears off), then
+-- kill the POD (flight over, pilot thrown clear).
+local tank_node, pod_node
+for _, n in ipairs(nodes) do
+  if n.parent == asm.root then
+    if n.name == "PartTankS" then tank_node = n end
+    if n.name == "PartPod" then pod_node = n end
+  end
+end
+check(tank_node ~= nil and pod_node ~= nil, "tank + pod children located")
+
+local n_fx = #API.EFFECTS
+API.IMPACTS = { { part = tank_node.id, impulse = 7.0,
+                  x = tank_node.x, y = tank_node.y, z = tank_node.z } }
+step(9)
+check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
+  "a hard-but-survivable hit smoulders (Smoke effect)")
+check(hudn.text:find("DAMAGE") ~= nil,
+  "HUD reports the damaged part (got: " .. tostring(hudn.text) .. ")")
+
+local n_split = #split_calls
+API.IMPACTS = { { part = tank_node.id, impulse = 25.0,
+                  x = tank_node.x, y = tank_node.y, z = tank_node.z } }
+step(2)
+local exploded = false
+for _, e in ipairs(API.EFFECTS) do
+  if e.name == "Explosion" then exploded = true end
+end
+check(exploded, "a full-strength hit explodes the part")
+check(#split_calls == n_split + 1 and split_calls[#split_calls] == 1,
+  "the broken part shears off as its own wreck")
+
+API.IMPACTS = { { part = pod_node.id, impulse = 40.0,
+                  x = pod_node.x, y = pod_node.y, z = pod_node.z } }
+step(2)
+check(controller_env.piloting == false, "losing the pod ends the flight")
+check(astro.visible == true, "the pilot is thrown clear (astronaut visible)")
 
 -- ── verdict ─────────────────────────────────────────────────────────────────
 if #failures == 0 then
