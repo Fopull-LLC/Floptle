@@ -222,6 +222,11 @@ one-shot kick (explosions, docking bumps). All vectors are world-space
 `vec3`s. Forces are **held per tick** and applied through every physics
 substep — call them from `fixedUpdate` for continuous thrust.
 
+**Script-assembled vessels:** spawn part prefabs as children of an assembly
+root (`spawn(part, pos, fn, vesselNode)`), then call
+`assembly.rebuild(vesselNode)` once — the compound re-gathers from the
+root's current descendants. That's the whole blueprint-spawner pattern.
+
 ## 5. `input` — keyboard & mouse
 
 Available while playing.
@@ -1633,6 +1638,7 @@ node:destroy()      -- same thing, method form (self-destruct a pickup)
 | `spawn(prefab)` | spawn an instance — `"bullet"` finds `prefabs/bullet.prefab.ron`; subfolders (`"weapons/sword"`) and full paths work too |
 | `spawn(prefab, pos)` | ...with its first root placed at `pos` (a vec3/table/node — sibling roots keep their relative offsets) |
 | `spawn(prefab, pos, fn)` | ...then call `fn(root)` with the new node's handle, same frame — velocities, params, tags, whatever |
+| `spawn(prefab, pos, fn, parentNode)` | ...spawned as a CHILD of `parentNode`, still landing at the world `pos` (converted into the parent's frame). How a blueprint spawner assembles parts under a vessel's assembly root — follow with `assembly.rebuild(parentNode)` |
 | `destroy(node)` / `node:destroy()` | queue the node + its whole subtree for removal (applied after the pass, so the handle stays readable through the current call) |
 
 The spawned node is complete immediately: rigidbodies simulate (all three

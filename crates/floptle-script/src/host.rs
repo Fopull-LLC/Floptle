@@ -732,7 +732,7 @@ impl ScriptHost {
         {
             let q = spawn_requests.clone();
             if let Ok(f) = lua.create_function(
-                move |lua, (name, a, b): (String, Value, Value)| {
+                move |lua, (name, a, b, c): (String, Value, Value, Value)| {
                     let (mut pos, mut cb) = (None, None);
                     for v in [a, b] {
                         match v {
@@ -748,7 +748,13 @@ impl ScriptHost {
                             },
                         }
                     }
-                    q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb });
+                    // Optional 4th arg: a PARENT node — the spawned subtree
+                    // lands under it (still at the world `pos`).
+                    let parent = match &c {
+                        Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+                        _ => None,
+                    };
+                    q.borrow_mut().push(crate::SpawnRequest { prefab: name, pos, cb, parent });
                     Ok(())
                 },
             ) {

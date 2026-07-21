@@ -1,0 +1,24 @@
+[
+    (
+        name: "Vessel",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Empty,
+        scripts: [],
+        rigidbody: Some((
+            mode: Dynamic,
+            radius: 0.5,
+            height: 2.0,
+            half_extents: (0.5, 0.5, 0.5),
+            restitution: 0.05,
+            friction: 0.7,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            assembly: true,
+        )),
+    ),
+]

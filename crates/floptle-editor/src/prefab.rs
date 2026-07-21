@@ -255,6 +255,43 @@ impl Editor {
             if docs.iter().any(|d| matches!(d.matter, floptle_scene::MatterDoc::Mesh { .. })) {
                 self.register_scene_meshes();
             }
+            // Optional parenting (`spawn(name, pos, fn, parentNode)`): the
+            // spawned ROOTS go under the parent, keeping their WORLD pose —
+            // convert into the parent's local frame. Done BEFORE physics
+            // wiring so ancestry rules (assembly parts) see the hierarchy.
+            if let Some(pid) = req.parent {
+                let pe = self
+                    .world
+                    .query::<floptle_core::Matter>()
+                    .map(|(pe, _)| pe)
+                    .find(|pe| pe.index() == pid);
+                if let Some(pe) = pe {
+                    let pw = floptle_core::world_transform(&self.world, pe);
+                    let inv_rot = pw.rotation.inverse();
+                    let roots: Vec<_> = ents
+                        .iter()
+                        .zip(&docs)
+                        .filter(|(_, d)| d.parent.is_none())
+                        .map(|(&e, _)| e)
+                        .collect();
+                    for e in roots {
+                        let ew = floptle_core::world_transform(&self.world, e);
+                        let local = floptle_core::transform::Transform {
+                            translation: inv_rot.as_dquat() * (ew.translation - pw.translation)
+                                / pw.scale.as_dvec3().max(DVec3::splat(1e-9)),
+                            rotation: (inv_rot * ew.rotation).normalize(),
+                            scale: ew.scale
+                                / pw.scale.max(floptle_core::math::Vec3::splat(1e-9)),
+                        };
+                        if let Some(t) =
+                            self.world.get_mut::<floptle_core::transform::Transform>(e)
+                        {
+                            *t = local;
+                        }
+                        self.world.insert(e, floptle_core::Parent(pe));
+                    }
+                }
+            }
             if let Some(sim) = self.sim.as_mut() {
                 for &e in &ents {
                     sim.add_body_for(e, &self.world);
@@ -330,6 +367,19 @@ impl Editor {
                             Vec3::new(imp[0] as f32, imp[1] as f32, imp[2] as f32),
                             DVec3::new(at[0], at[1], at[2]),
                         );
+                    }
+                }
+                floptle_script::AssemblyCmd::Rebuild { root } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.remove_compound(root);
+                        let ent = self
+                            .world
+                            .query::<floptle_core::RigidBody>()
+                            .map(|(e, _)| e)
+                            .find(|e| e.index() == root);
+                        if let Some(e) = ent {
+                            sim.add_compound_for(e, &self.world);
+                        }
                     }
                 }
                 floptle_script::AssemblyCmd::Split { root, parts, cb } => {
