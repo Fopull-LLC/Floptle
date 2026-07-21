@@ -1,5 +1,5 @@
 (
-    retro: true,
+    retro: false,
     retro_height: 270,
     matter: true,
     title: Some("Floptle Solar"),
