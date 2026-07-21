@@ -1407,6 +1407,22 @@
                 visible: false,
             )),
         ),
+        (
+            name: "Vessel Spawner",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "vessel_spawner",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
     ],
 
 

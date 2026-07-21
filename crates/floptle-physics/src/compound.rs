@@ -537,6 +537,39 @@ mod tests {
     }
 
     #[test]
+    fn deep_spawn_unburies_without_catapulting() {
+        // An assembly spawned mostly INSIDE a thick static box (a mis-placed
+        // vessel spawn on curved terrain) must climb out over a few steps and
+        // settle — never explode off at escape velocity. The per-resolve
+        // positional caps in step_compound are what guarantee this.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(crate::BoxShape::new(
+            Vec3::new(0.0, -2.0, 0.0),
+            Vec3::new(20.0, 2.5, 20.0), // top face at y = +0.5
+            Quat::IDENTITY,
+        )));
+        let ci = w.add_compound(Compound::new(
+            Vec3::new(0.0, -0.6, 0.0), // buried ~1.1 units under the top face
+            Quat::IDENTITY,
+            vec![
+                boxs(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.5, 0.9, 0.5), 4.0, 1),
+                ball(Vec3::new(0.0, 1.7, 0.0), 0.35, 1.0, 2),
+            ],
+        ));
+        let mut peak = 0.0f32;
+        for _ in 0..600 {
+            w.step(1.0 / 120.0);
+            peak = peak.max(w.compounds[ci].vel.length());
+            assert!(w.compounds[ci].pos.is_finite(), "went non-finite");
+        }
+        let c = &w.compounds[ci];
+        assert!(peak < 12.0, "un-burying must not catapult (peak speed {peak})");
+        assert!(c.vel.length() < 0.5, "must settle, vel={:?}", c.vel);
+        // The hull box's bottom (local y −0.4 from CoM-ish) ends at/above the face.
+        assert!(c.pos.y > 0.4, "climbed out of the box, y={}", c.pos.y);
+    }
+
+    #[test]
     fn compound_step_is_deterministic() {
         let build = || {
             let mut w = ground_world();
