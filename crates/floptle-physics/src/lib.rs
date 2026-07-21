@@ -35,6 +35,7 @@
 
 mod body;
 mod character;
+mod compound;
 mod gravity;
 mod shapes;
 mod sim;
@@ -42,6 +43,7 @@ mod world;
 
 pub use body::*;
 pub use character::*;
+pub use compound::*;
 pub use gravity::*;
 pub use shapes::*;
 pub use sim::*;
