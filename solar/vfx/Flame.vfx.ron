@@ -7,7 +7,7 @@
         (
             name: "Jet",
             render: Billboard(
-                texture: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/textures/VFXTEX/Fire/3.png"),
+                texture: Some("textures/VFXTEX/Fire/3.png"),
             ),
             blend: Additive,
             space: Local,
