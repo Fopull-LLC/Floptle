@@ -24,4 +24,23 @@
             mass: 0.8,
         )),
     ),
+    (
+        name: "Engine Flame",
+        transform: (
+            translation: (0.0, -0.7, 0.0),
+            rotation: (1.0, 0.0, 0.0, 0.0),
+            scale: (0.55, 0.4, 0.55),
+        ),
+        matter: PointLight(
+            color: (1.0, 0.62, 0.25),
+            intensity: 0.0,
+            range: 14.0,
+        ),
+        scripts: [],
+        particles: Some((
+            asset: "vfx/Flame",
+            play_on_start: false,
+        )),
+        parent: Some(0),
+    ),
 ]

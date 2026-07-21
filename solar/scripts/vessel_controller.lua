@@ -33,6 +33,10 @@ sas_mode = "stability"
 local sas_last = "stability"
 
 local bp = nil
+local launch_mode = false -- arrived via the builder's LAUNCH (clamp lifecycle)
+local released = false    -- the pilot has released the clamps at least once
+local info_seen = false   -- first sighting of the live compound (diagnostics)
+local no_info_t = 0.0     -- how long we've piloted WITHOUT a compound
 local engines = {}     -- { {x,y,z, thrust, burn} } vessel-local, live only
 local tanks = {}       -- { {y, fuel} } vessel-local, live only
 local decouplers = {}  -- { {uid, y} } sorted bottom-up, fired in order
@@ -96,6 +100,24 @@ local function pod_world(node)
   return node.x + rx.x * pod.x + up.x * pod.y + rz.x * pod.z,
          node.y + rx.y * pod.x + up.y * pod.y + rz.y * pod.z,
          node.z + rx.z * pod.x + up.z * pod.y + rz.z * pod.z
+end
+
+-- Boarding reach: distance to the vessel's SPINE (base → pod), not to the pod
+-- point itself — a pod on top of a tall stack is 6+ units off the ground, and
+-- demanding you touch it made re-boarding physically impossible. Standing at
+-- the rocket counts as climbing the ladder.
+local function board_dist(node, a)
+  local px, py, pz = pod_world(node)
+  local sx, sy, sz = node.x, node.y, node.z -- spine base (stack bottom)
+  local dx, dy, dz = px - sx, py - sy, pz - sz
+  local len2 = dx * dx + dy * dy + dz * dz
+  local t = 0.0
+  if len2 > 1e-9 then
+    t = ((a.x - sx) * dx + (a.y - sy) * dy + (a.z - sz) * dz) / len2
+    t = math.max(0.0, math.min(1.0, t))
+  end
+  local cx, cy, cz = sx + dx * t, sy + dy * t, sz + dz * t
+  return math.sqrt((a.x - cx) ^ 2 + (a.y - cy) ^ 2 + (a.z - cz) ^ 2)
 end
 
 -- ── instruments (the scout ship's cluster, reused verbatim) ─────────────────
@@ -184,6 +206,31 @@ local function update_navball(node, nx, ny, nz, fx, fy, fz, tgtx, tgty, tgtz)
   if txt_hdg then txt_hdg.text = string.format("HDG %03.0f°", heading) end
 end
 
+-- ── engine plumes ───────────────────────────────────────────────────────────
+-- Every live engine part carries an "Engine Flame" child (Flame vfx + point
+-- light); the plume density and light follow the throttle. Staged-away
+-- engines re-root under the detached stage, so `node:children()` only ever
+-- yields the LIVE stack — no bookkeeping.
+local function set_flames(node, pct)
+  local on = pct > 0.02
+  for _, c in ipairs(node:children()) do
+    if c.name and c.name:find("PartEngine") then
+      for _, f in ipairs(c:children()) do
+        if f.name == "Engine Flame" then
+          local ps = f:particles()
+          if ps then
+            if on and not ps:isPlaying() then ps:play() end
+            if not on and ps:isPlaying() then ps:stop() end
+            if on then ps:setIntensity(0.25 + pct * 1.25) end
+          end
+          local light = f:getcomponent("PointLight")
+          if light then light.intensity = on and (0.8 + pct * 4.0) or 0.0 end
+        end
+      end
+    end
+  end
+end
+
 -- ── SAS ─────────────────────────────────────────────────────────────────────
 local SAS_KEYS = {
   ["1"] = "stability", ["2"] = "prograde", ["3"] = "retrograde",
@@ -245,6 +292,7 @@ function start(node)
   if (save.get("shipyard.pilot") or 0) == 1 then
     save.set("shipyard.pilot", 0)
     boarding = true
+    launch_mode = true
   end
 end
 
@@ -265,6 +313,30 @@ end
 function fixedUpdate(node, dt)
   if not astronaut or not astronaut.valid then astronaut = find("Astronaut") end
   local info = assembly.info(node)
+
+  -- State diagnostics + clamp redundancy: the moment the compound exists,
+  -- say so — and on a builder launch, ENGAGE the clamps from this side too
+  -- (belt and braces: a lost spawner callback must not leave the vessel
+  -- loose on the pad). A piloted vessel with no compound for seconds is an
+  -- impossible state worth shouting about.
+  if info and not info_seen then
+    info_seen = true
+    if launch_mode and not released and not info.anchored then
+      assembly.setAnchored(node, true)
+      log("vessel: clamps engaged (" .. #info.parts .. " parts)")
+    else
+      log("vessel: compound live (" .. #info.parts .. " parts)")
+    end
+  end
+  if piloting and not info then
+    no_info_t = no_info_t + dt
+    if no_info_t > 5.0 and no_info_t - dt <= 5.0 then
+      log("vessel: PILOTED BUT NO PHYSICS ASSEMBLY under this root for 5s — " ..
+        "the launch cannot proceed; please report this line")
+    end
+  else
+    no_info_t = 0.0
+  end
 
   -- Launch handoff: climb into the pod the moment the astronaut node exists.
   if boarding and astronaut then
@@ -299,6 +371,7 @@ function fixedUpdate(node, dt)
     if piloting then
       piloting = false
       throttle = 0.0
+      set_flames(node, 0)
       astronaut.x = px + rx.x * 2.2 + up.x * 0.4
       astronaut.y = py + rx.y * 2.2 + up.y * 0.4
       astronaut.z = pz + rx.z * 2.2 + up.z * 0.4
@@ -308,7 +381,7 @@ function fixedUpdate(node, dt)
       astronaut.visible = true
       set_hud(nil)
       set_navball(false)
-    elseif distance(astronaut, vec3(px, py, pz)) <= params.board_range then
+    elseif board_dist(node, astronaut) <= params.board_range then
       piloting = true
       astronaut.visible = false
       set_navball(true)
@@ -331,7 +404,7 @@ function fixedUpdate(node, dt)
 
   if not piloting then
     if astronaut and astronaut.visible
-      and distance(astronaut, vec3(px, py, pz)) <= params.board_range + 1.2 then
+      and board_dist(node, astronaut) <= params.board_range + 1.4 then
       draw.ring(px, py, pz, up.x, up.y, up.z, 0.75, 0.3, 0.95, 1.0, 0.9)
       set_prompt("F — board")
     else
@@ -385,6 +458,7 @@ function fixedUpdate(node, dt)
       assembly.forceAt(node, vec3(nx * f, ny * f, nz * f), vec3(ex, ey, ez))
     end
   end
+  set_flames(node, (info.anchored or fuel <= 0) and 0 or throttle)
 
   -- ---- attitude: rate-commanded, the KSP feel ----------------------------
   if input.pressed("t") then
@@ -451,6 +525,7 @@ function fixedUpdate(node, dt)
   if input.pressed("space") then
     if info.anchored then
       if assembly_ready(info) then
+        released = true
         assembly.setAnchored(node, false)
         log("launch clamps released")
       else
