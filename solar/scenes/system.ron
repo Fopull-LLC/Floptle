@@ -1424,6 +1424,34 @@
             ],
         ),
         (
+            name: "Stage List",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Left,
+                    offset: (16.0, 40.0),
+                ),
+                size: (Fixed(300.0), Fixed(200.0)),
+                text: Some((
+                    text: "",
+                    size: 15.0,
+                    color: (0.85, 0.9, 1.0, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 0.9,
+            )),
+        ),
+        (
             name: "Vessel HUD",
             transform: (
                 translation: (0.0, 0.0, 0.0),
