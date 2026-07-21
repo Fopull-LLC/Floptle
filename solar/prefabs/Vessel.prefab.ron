@@ -9,7 +9,7 @@
         matter: Empty,
         scripts: [
             (
-                kind: "vessel_test",
+                kind: "vessel_controller",
                 enabled: true,
                 params: [],
             ),

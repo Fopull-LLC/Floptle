@@ -41,7 +41,7 @@ function update(node, dt)
   if ship and ship.piloting then return end
   -- …or a BUILT vessel (fetched fresh: vessels spawn and despawn at runtime),
   -- or while a launch handoff is waiting to seat us in the pod.
-  local vessel = findScript("vessel_test")
+  local vessel = findScript("vessel_controller")
   if vessel and vessel.piloting then return end
   if (save.get("shipyard.pilot") or 0) == 1 then return end
   -- Nothing is piloting us anywhere: we must be walkable AND visible (a

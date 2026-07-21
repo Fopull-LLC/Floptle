@@ -1222,7 +1222,13 @@ function fixedUpdate(node, dt)
       set_navball(false)
       map_view = false
       mnv = nil -- drop any planned burn when you leave the seat
-    elseif distance(astronaut, node) <= params.board_range then
+    elseif distance(astronaut, node) <= params.board_range
+      and not (function()
+        -- F is also the BUILT vessel's exit key: never board the scout in the
+        -- same press that steps out of a pod parked nearby.
+        local vc = findScript("vessel_controller")
+        return vc and vc.piloting
+      end)() then
       piloting = true
       astronaut.visible = false
       set_navball(true)

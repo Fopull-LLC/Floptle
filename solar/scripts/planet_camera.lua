@@ -76,7 +76,7 @@ function lateUpdate(node, dt)
   -- the ship after exit).
   if not ship then ship = findScript("ship_controller") end
   -- Built vessels spawn/despawn at runtime — fetch fresh, never cache.
-  local vessel = findScript("vessel_test")
+  local vessel = findScript("vessel_controller")
   local vpiloting = (vessel and vessel.piloting) or false
   local piloting = ((ship and ship.piloting) or false) or vpiloting
   if piloting ~= was_piloting then
