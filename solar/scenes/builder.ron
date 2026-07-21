@@ -1,0 +1,610 @@
+(
+    name: "builder",
+    nodes: [
+        (
+            name: "Post Processing",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PostProcess(
+                enabled: true,
+                bloom: true,
+                bloom_threshold: 0.35,
+                bloom_intensity: 0.3,
+                vignette: true,
+                vignette_strength: 0.45,
+                vignette_radius: 0.5,
+                ao: ScreenSpace,
+                ao_strength: 1.0,
+                ao_radius: 0.7,
+                posterize_bands: 0,
+                posterize_dither: false,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Builder Camera",
+            transform: (
+                translation: (0.0, 3.2, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Camera(
+                fov_y: 1.08,
+                active: true,
+            ),
+            scripts: [
+                (
+                    kind: "builder_camera",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Work Floor",
+            transform: (
+                translation: (0.0, -0.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (46.0, 1.0, 46.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.16, 0.18, 0.21),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Pad",
+            transform: (
+                translation: (0.0, 0.05, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (7.0, 0.12, 7.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.24, 0.27, 0.31),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Builder",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "builder",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Builder UI",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            ui_layer: Some((
+                design_height: 720.0,
+                z: 10,
+                enabled: true,
+                space: Screen,
+                canvas_scale: 0.009,
+            )),
+        ),
+        (
+            name: "BuildTitle",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(5),
+            ui: Some((
+                place: Free(
+                    pos: (18, 12),
+                ),
+                size: (Fixed(500), Fixed(26)),
+                text: Some((
+                    text: "ASSEMBLY  ·  ship builder",
+                    size: 19.0,
+                    color: (0.82, 0.92, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "BuildStats",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(5),
+            ui: Some((
+                place: Free(
+                    pos: (18, 40),
+                ),
+                size: (Fixed(600), Fixed(22)),
+                text: Some((
+                    text: "",
+                    size: 15.0,
+                    color: (0.95, 0.85, 0.5, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "BuildHint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(5),
+            ui: Some((
+                place: Free(
+                    pos: (18, 694),
+                ),
+                size: (Fixed(1100), Fixed(20)),
+                text: Some((
+                    text: "click part = pick up   ·   R rotate   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus",
+                    size: 12.5,
+                    color: (0.5, 0.6, 0.7, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "Catalogue",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(5),
+            ui: Some((
+                place: Pin(
+                    anchor: Right,
+                    offset: (-12.0, 0.0),
+                ),
+                size: (Fixed(190.0), Fixed(478.0)),
+                shape: Some((
+                    fill: (0.05, 0.07, 0.1, 0.88),
+                    radius: 10.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+            )),
+        ),
+        (
+            name: "CatTitle",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (14, 10),
+                ),
+                size: (Fixed(160), Fixed(20)),
+                text: Some((
+                    text: "PARTS",
+                    size: 14.0,
+                    color: (0.6, 0.75, 0.85, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+            )),
+        ),
+        (
+            name: "Cat Pod Mk1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 1.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 38),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Pod Mk1",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Parachute",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 2.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 90),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Parachute",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat FT-S Tank",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 3.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 142),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "FT-S Tank",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat FT-M Tank",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 4.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 194),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "FT-M Tank",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Sputter Engine",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 5.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 246),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Sputter Engine",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Anvil Engine",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 6.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 298),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Anvil Engine",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Decoupler",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 7.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 350),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Decoupler",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Landing Legs",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 8.0)],
+                ),
+            ],
+            parent: Some(9),
+            ui: Some((
+                place: Free(
+                    pos: (12, 402),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Landing Legs",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "SaveBtn",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "builder_hud_button",
+                    enabled: true,
+                    params: [("action", 1.0)],
+                ),
+            ],
+            parent: Some(5),
+            ui: Some((
+                place: Free(
+                    pos: (18, 620),
+                ),
+                size: (Fixed(150), Fixed(46)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "SAVE",
+                    size: 16.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "LaunchBtn",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "builder_hud_button",
+                    enabled: true,
+                    params: [("action", 2.0)],
+                ),
+            ],
+            parent: Some(5),
+            ui: Some((
+                place: Free(
+                    pos: (186, 620),
+                ),
+                size: (Fixed(170), Fixed(46)),
+                shape: Some((
+                    fill: (0.13, 0.2, 0.12, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.45, 0.8, 0.45, 0.6),
+                )),
+                text: Some((
+                    text: "LAUNCH ▸",
+                    size: 16.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+    ],
+)
