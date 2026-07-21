@@ -49,6 +49,7 @@ Engine gaps this game forces (the honest list — each is scheduled in a phase):
 |---|---|---|
 | **Compound rigidbodies** (multi-shape, composed mass/inertia, runtime split) | SC1 | bodies are single-shape today; a ship IS a compound; decouplers split it |
 | **Aero drag + parachute forces** | SC2 | atmosphere exists visually; no flight forces yet |
+| **Per-link stress + material-class destruction** | SC2 | analytic loads on the rigid weld; failures split/explode/shatter; craters via sculpt |
 | **Biome-aware planet gen + prop scattering (instancing)** | SC3 | planetoid gen is single-character; no instanced foliage path |
 | **Structure embedding in terrain** (CSG stamp at gen; buried interiors) | SC3 | mesh + SDF must agree so digging into a lab feels solid |
 | **Terrain P5** (streaming/quantized band/shadow clipmap) | SC3 | Earth-scale home planet wants it; signed off already |
@@ -64,9 +65,11 @@ Everything else below is game-side Lua/content on existing engine APIs.
 1. **Builder freedom.** No part is special. Move any part or subtree freely;
    grab the whole ship and reposition it; the "ship" is just the connected
    graph. A ship without a pod is a valid (unpilotable) ship.
-2. **Balanced for fun, not realism.** Part stats serve progression pacing.
-   No real-engine cosplay. Rule of thumb: first-tier parts make wobbly,
-   charming successes possible in ~15 minutes of building.
+2. **Balanced parts, honest physics.** Part *stats* serve progression pacing
+   — no real-engine cosplay. But the *flight model and instruments are real*:
+   thrust, mass, TWR, Δv, center of mass vs. center of thrust, stress loads —
+   all computed with the actual math, shown truthfully, and consequential.
+   The numbers you pilot by are never fudged; only the catalogue is a game.
 3. **Progression = discovery.** Money is the throughput; discoveries are the
    gates. Every locked part states its requirement in plain words
    ("Discover uranium", "Return a sample from a moon", "Reach reputation 3").
@@ -123,10 +126,19 @@ kit facility set-dressing), entered by walking up / from the base menu.
   del/duplicate, full undo/redo — the standing canvas bar (§3.7).
   Rotation with R/T around view axes; fine-rotate holding Shift.
 - **Symmetry v1:** radial ×2/×3/×4/×6 around the part being attached to.
-- **Stats readout:** mass, cost, Δv per stage (simple Tsiolkovsky from part
-  stats), TWR vs. home gravity — live, in a corner, no popups.
+- **Engineering gizmos (live, in-viewport):** center-of-mass marker,
+  center-of-thrust vector per stage, and a misalignment warning when CoT
+  doesn't point through CoM (the torque that will flip you — shown as the
+  arc it'll induce, not just a color). Corner readout: mass, cost, per-stage
+  Δv (real Tsiolkovsky) and TWR vs. home gravity. All honest numbers (§3.2).
 - **Staging strip:** vertical stage list (bottom-right, KSP-familiar);
-  engines/decouplers/chutes auto-file into stages, drag between stages.
+  engines/decouplers/chutes auto-file into stages, drag to reorder freely —
+  reordering must never require touching the ship itself.
+- **Structure data:** every part carries a **strength** rating and a
+  **material class** (`tank`, `engine`, `structural`, `crewed`, `canvas`…);
+  every link carries the strength of the weaker face. This is authored in
+  the part registry here so SC2's stress/destruction reads it — the builder
+  shows weak links on request (stress preview under a chosen TWR).
 - **Starter parts (primitives + .flsl until Space Kit lands):** Pod Mk1
   (crew 1, hatch), FT-S / FT-M fuel tanks, "Sputter" small engine, "Anvil"
   medium engine, stack decoupler, parachute, fixed landing legs, ladder.
@@ -144,6 +156,29 @@ whole thing mid-build, launch it, stage the chute off, land on legs.
   velocity² drag on the compound (per-part drag stat, dumb and tunable);
   **parachute part** = staged drag spike with deploy animation + jolt;
   chutes shred above a speed threshold (teaches "slow down first").
+- `[engine]` **Stress & destruction v1:** the welded compound stays rigid
+  (no wobble) but computes **per-link stress analytically** each tick —
+  axial/shear from thrust and g-load across the link (mass beyond the link ×
+  acceleration), aero pressure, and impact impulses attributed to the shape
+  that took them. Stress > link strength → the link **separates cleanly**
+  (runtime split, same machinery as decoupling); load > a *part's* strength →
+  the part **fails by material class**:
+  - `tank` / `engine` (energetic): explosion — blast impulse to neighbors,
+    VFX, and a **terrain crater** via the existing sculpt API, radius scaled
+    by remaining fuel/energy;
+  - `structural` (inert): shatters into debris bodies, at most a scuff on
+    the ground — no crater;
+  - `crewed`: crumples (survivability window before it's a loss);
+  - `canvas` (chutes): shreds.
+  Failures cascade honestly (a tank cooking off can snap the stack above
+  it). Craters use dig machinery, so wrecks interact with SC4 yields later.
+- **Flight HUD v1 (the pilot's cockpit UI — clean, everything you need,
+  nothing twitchy §3.7):** altitude (sea + radar), vertical speed, velocity,
+  attitude/heading, throttle, live TWR and per-stage Δv/fuel, current stage
+  highlighted in the same staging strip as the builder (drag-reorder works
+  in flight too), G-load with a stress warning as links approach limits, and
+  the **peripherals panel** (SC4 pattern) docked on the same screen. One
+  visual language across builder HUD and flight HUD.
 - **Missions v1** (mission board at the Ops building): scripted checks over
   existing Lua state — #1 "Reach 2,000 m and land intact under canvas"
   (grants money + unlocks FT-M), then altitude/distance/return-sample
@@ -156,7 +191,10 @@ whole thing mid-build, launch it, stage the chute off, land on legs.
 - Home-base exterior v1: pad, Assembly, Commerce, Ops from the Kenney kit
   on the current planetoid (placeholder planet until SC3).
 **Playable proof:** fresh save → name company/planet → buy → build → fly
-mission #1 → get paid → afford the part you couldn't before.
+mission #1 → get paid → afford the part you couldn't before. And the dark
+proof: over-throttle a top-heavy stack — watch it snap at the weak link the
+builder warned about, the tank cratering the pad while the struts just
+shatter.
 
 ### SC3 — Terra: the Earth-like home planet *(planet gen v2)*
 - `[engine]` **Biome generation:** latitude temperature curve + noise
@@ -324,8 +362,9 @@ reputation & lawsuits · mission board · starting funds slider · preset rows:
 
 1. **Builder camera**: fixed-interior orbit around the work floor (default;
    KSP-familiar) vs. free-fly. Orbit ships first either way.
-2. **Ship physics fidelity**: welded-rigid stacks, no wobble (default —
-   wobble is KSP's most-hated tax) vs. flexible joints later for drama.
+2. ~~Ship physics fidelity~~ **Resolved by Ty (2026-07-21):** welded-rigid
+   (no wobble) **with analytic per-link stress and material-class
+   destruction** — real loads, clean separation, honest failures (SC2).
 3. **Fuel routing**: per-stage pooled fuel (default, readable) vs. per-tank
    plumbing with crossfeed rules (sim-ier, fiddlier).
 4. **Terra scale**: radius ~600 units (default; ~4× planetoid, biome walks
