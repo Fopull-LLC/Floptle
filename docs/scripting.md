@@ -249,6 +249,13 @@ unchanged.
 hierarchy carries the visuals and the engine carries the baked collider. A
 launchpad parented to its planet stays exactly as solid as the terrain.
 
+**Distant craft cost nothing:** compounds far from the camera (~700 units)
+leave live physics automatically — landed or slow ones freeze in their
+planet's carried frame, in-flight ones coast on analytic Kepler rails
+(drift-free at any warp) — and wake to full contact physics on approach.
+Deploy hundreds of satellites, stages and rovers; only the neighborhood
+simulates. While parked this way `info.anchored` reads true.
+
 **Pausing physics wholesale:** `physics.pause(true)` skips the entire
 physics step each tick while scripts, rails and terrain streaming keep
 running — the tool for loading screens, cutscenes and pause menus

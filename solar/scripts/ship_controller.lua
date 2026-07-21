@@ -58,6 +58,18 @@ piloting = false
 wrecked = false
 throttle = 0.0
 fuel = 100.0
+-- The scout is a DEBUG TOOL now: it starts STASHED (hidden, parked in deep
+-- space) and only exists in the world after L summons it. game_manager skips
+-- placing/saving it while stashed.
+stashed = false
+local stash_pending = true
+
+-- Is a BUILT vessel being piloted? The scout must not fight it for the
+-- shared instruments (HUD/navball) or answer L mid-flight.
+local function vessel_flying()
+  local v = findScript("vessel_controller")
+  return (v and v.piloting) or false
+end
 
 -- SAS autopilot (KSP hold modes). "off" = free (rates persist), "stability" =
 -- damp rotation to zero, and the pointing modes auto-rotate the nose to that
@@ -716,7 +728,7 @@ local traj_ref = nil -- { t, rx..rz, rvx..rvz (dominant-frame), dbname, span }
 
 -- Recompute the maneuver-node projection + both trajectory walks (throttled).
 -- `db` is the ship's dominant body; `o` its current conic (space.elements).
-local function recompute_trajectories(node, db, bodies, pidx, o)
+local function recompute_trajectories(node, db, bodies, pidx, o, thr)
   -- Find the dominant body's index for the walkers.
   local dbi
   for i, b in ipairs(bodies) do
@@ -726,7 +738,9 @@ local function recompute_trajectories(node, db, bodies, pidx, o)
 
   local now = space.time()
   local rx0, ry0, rz0 = node.x - db.x, node.y - db.y, node.z - db.z
-  local coasting = throttle < 0.005 and not node.grounded
+  -- `thr` = the SUBJECT craft's throttle (a piloted vessel's map passes its
+  -- own; nil falls back to the scout's).
+  local coasting = (thr or throttle) < 0.005 and not node.grounded
   local stale = not coasting or not traj_ref or traj_ref.dbname ~= db.name
   if not stale then
     local dtb = now - traj_ref.t
@@ -833,6 +847,15 @@ end
 
 local function update_map3d(node, dt)
   if not map_view then return end
+  -- The map's SUBJECT is whatever craft is being flown: a piloted BUILT
+  -- vessel takes over from the scout — same focus, same trajectory walker,
+  -- same click-to-plan view (burn EXECUTION tracking stays scout-only for
+  -- now; vessels use the planned line as a visual reference).
+  local vc = findScript("vessel_controller")
+  local vfly = (vc and vc.piloting and vc.node and vc.node.valid) or false
+  if vfly then node = vc.node end
+  local craft_flying = piloting or vfly
+  local subj_throttle = vfly and (vc.throttle or 0) or throttle
   if not cam_node then cam_node = find("Camera 1") end
   local bodies = space.bodies()
   local nf = #bodies + 1 -- focus slots: the SHIP first, then every body
@@ -855,7 +878,7 @@ local function update_map3d(node, dt)
   end
   local focus, fname, fradius
   if map_focus == 1 then
-    if piloting or not astronaut then
+    if craft_flying or not astronaut then
       focus = { x = node.x, y = node.y, z = node.z }
       fname = "SHIP"
     else
@@ -990,7 +1013,7 @@ local function update_map3d(node, dt)
   -- the node (drag to move it); ←/→ fine-tune its time; N clears; X zeroes ΔV.
   local oe = db and space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
   local hover_x, hover_y, hover_z -- the orbit point under the cursor (draw below)
-  if piloting and db and not node.grounded then
+  if craft_flying and db and not node.grounded then
     local pidx = parent_indices(bodies)
     local vref = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
     local dvrate = math.max(0.5, vref * 0.12)
@@ -1042,7 +1065,7 @@ local function update_map3d(node, dt)
     end
     if time - traj_t >= 0.15 then
       traj_t = time
-      recompute_trajectories(node, db, bodies, pidx, oe)
+      recompute_trajectories(node, db, bodies, pidx, oe, subj_throttle)
     end
   else
     mnv = nil
@@ -1204,6 +1227,18 @@ end
 function fixedUpdate(node, dt)
   if not astronaut then astronaut = find("Astronaut") end
 
+  -- Stash on the first tick (locals like set_ship_visible are in scope here):
+  -- hidden, parked far outside every SOI (no dominant body = no gravity, no
+  -- carry), zero velocity. L brings it back.
+  if stash_pending then
+    stash_pending = false
+    stashed = true
+    node.x, node.y, node.z = 0, 4.0e6, 0
+    node.vx, node.vy, node.vz = 0, 0, 0
+    set_ship_visible(node, false)
+    set_flame(node, false, 0)
+  end
+
   -- ---- board / exit -------------------------------------------------------
   if input.pressed("f") and astronaut then
     if piloting then
@@ -1253,18 +1288,22 @@ function fixedUpdate(node, dt)
     map_zoom = nil -- re-fit to the focus every time it opens
     map_focus = 1 -- always open on yourself
     map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
-    -- The instrument cluster stands down while the map owns the screen.
-    set_navball(not map_view and piloting)
-    if not map_view then set_hud(node, piloting and "" or nil) end
+    -- The instrument cluster stands down while the map owns the screen. When
+    -- a BUILT vessel is flying, the instruments are ITS — closing the map
+    -- hands the navball back to it, and its own HUD repaints itself.
+    local vf = vessel_flying()
+    set_navball(not map_view and (piloting or vf))
+    if not map_view and not vf then set_hud(node, piloting and "" or nil) end
   end
   -- The map itself (camera + line drawing) runs in lateUpdate — the CAMERA
   -- pass. From fixedUpdate it sampled tick poses while the world renders
   -- interpolated ones, which showed as constant back-and-forth jitter.
 
   if not piloting then
-    -- ---- summon the ship: L places it right in front of you (testing / a
-    -- lost ship). Un-wrecks, refuels, lands upright on its gear.
-    if input.pressed("l") and astronaut then
+    -- ---- summon the ship: L places it right in front of you (the debug
+    -- test ship). Un-wrecks, refuels, lands upright on its gear. Never
+    -- answers while you're flying a built vessel.
+    if input.pressed("l") and astronaut and not vessel_flying() then
       local dxs, dys, dzs = 0, 0, 1
       if not cam_node then cam_node = find("Camera 1") end
       if cam_node then
@@ -1285,13 +1324,16 @@ function fixedUpdate(node, dt)
       -- Ride the player's frame (matters when summoning in orbit/space).
       node.vx, node.vy, node.vz = astronaut.vx, astronaut.vy, astronaut.vz
       set_ship_visible(node, true)
+      stashed = false
       legs_deployed, leg_anim = true, 1.0
       animate_legs(0)
       for _, d in ipairs(debris) do destroy(d) end
       debris = {}
       print("ship summoned")
     end
-    if not map_view then set_hud(node, nil) end
+    -- Hide the HUD only when it's OURS to hide — hiding it every tick while
+    -- a built vessel repaints it was the rapid HUD flashing.
+    if not map_view and not vessel_flying() then set_hud(node, nil) end
     pvx, pvy, pvz = node.vx, node.vy, node.vz
     return
   end

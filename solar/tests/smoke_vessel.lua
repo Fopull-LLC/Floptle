@@ -279,6 +279,10 @@ save_store["shipyard.blueprint"] = { parts = {
     h = 0.25, mass = 0.15, cost = 60, kind = "structural", thrust = 0, burn = 0, fuel = 0, decouple = 1, legs = 0 },
   { uid = 4, id = "engineS", prefab = "PartEngineS", x = 0, y = 0.65, z = 0, yaw = 0,
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 55, burn = 0.9, fuel = 0, decouple = 0, legs = 0 },
+  -- An UPPER-stage engine above the decoupler: it must stay cold (no thrust,
+  -- no flame) until the stage below separates.
+  { uid = 5, id = "engineS", prefab = "PartEngineS", x = 0, y = 2.5, z = 0, yaw = 0,
+    h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 55, burn = 0.9, fuel = 0, decouple = 0, legs = 0 },
 } }
 save_store["shipyard.launch"] = 1
 save_store["shipyard.pilot"] = 1
@@ -329,15 +333,22 @@ API.KEYS.down["shift"] = true
 step(30)
 API.KEYS.down["shift"] = false
 check(force_calls > 0, "throttle produced engine forceAt calls")
+-- STAGE GATING: only the BOTTOM stage's single engine may fire — two engines
+-- thrusting doubles the per-tick call count (30 ticks → ~30 calls, not ~60).
+check(force_calls <= 35,
+  string.format("upper-stage engine stayed cold before staging (forceAt ×%d over 30 ticks)", force_calls))
 check(torque_calls > 0, "attitude loop produced torque calls")
 check(controller_env.throttle > 0, "throttle climbed under SHIFT")
-local flame
+local flame_lo, flame_hi
 for _, n in ipairs(nodes) do
-  if n.name == "Engine Flame" then flame = n end
+  if n.name == "Engine Flame" and n.parent then
+    if n.parent.y < 1.5 then flame_lo = n else flame_hi = n end
+  end
 end
-check(flame ~= nil, "engine prefab spawned its flame child")
-check(flame and flame.particles_state.playing, "plume plays under throttle")
-check(flame and flame.components["PointLight"].intensity > 0, "plume light follows throttle")
+check(flame_lo ~= nil and flame_hi ~= nil, "both engine prefabs spawned flame children")
+check(flame_lo and flame_lo.particles_state.playing, "bottom-stage plume plays under throttle")
+check(flame_lo and flame_lo.components["PointLight"].intensity > 0, "plume light follows throttle")
+check(flame_hi and not flame_hi.particles_state.playing, "upper-stage plume stays COLD before staging")
 
 -- Stage: SPACE now fires the decoupler path (split stubbed; must not error).
 press("space")
@@ -349,7 +360,8 @@ press("f")
 step(2)
 check(controller_env.piloting == false, "F exits the pod")
 check(astro.visible == true, "astronaut visible after EVA exit")
-check(flame and flame.particles_state.playing == false, "plume stops on EVA exit")
+check(flame_lo and flame_lo.particles_state.playing == false, "plume stops on EVA exit")
+check(flame_hi and flame_hi.particles_state.playing == false, "upper plume off on EVA exit")
 local hud_el = hudn.components["UiElement"]
 check(hud_el.visible == false, "HUD hidden on EVA")
 astro.x = asm.root.x + 2.0 -- standing beside the stack, at BASE height

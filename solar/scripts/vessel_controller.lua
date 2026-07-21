@@ -29,8 +29,11 @@ defaults = {
 piloting = false
 throttle = 0.0
 fuel = 0.0
--- Where the camera should orbit, vessel-local height: the CAPSULE, not the
--- stack base the root node sits at (planet_camera reads this while piloting).
+-- Where the camera should orbit: the CAPSULE's WORLD position, republished
+-- every tick (the root node sits at the stack base; a gravity-up offset
+-- drifts off the hull the moment the vessel pitches). focusHeight is the
+-- vessel-local fallback.
+focusX, focusY, focusZ = nil, nil, nil
 focusHeight = 1.2
 sas_mode = "stability"
 local sas_last = "stability"
@@ -215,20 +218,24 @@ end
 -- light); the plume density and light follow the throttle. Staged-away
 -- engines re-root under the detached stage, so `node:children()` only ever
 -- yields the LIVE stack — no bookkeeping.
-local function set_flames(node, pct)
+local function set_flames(node, pct, cut)
   local on = pct > 0.02
+  cut = cut or math.huge
   for _, c in ipairs(node:children()) do
+    -- Only ACTIVE engines light: parts above the next decoupler are a later
+    -- stage, cold until their turn (part local Y = blueprint height).
     if c.name and c.name:find("PartEngine") then
+      local live = on and (c.y or 0) < cut - 0.01
       for _, f in ipairs(c:children()) do
         if f.name == "Engine Flame" then
           local ps = f:particles()
           if ps then
-            if on and not ps:isPlaying() then ps:play() end
-            if not on and ps:isPlaying() then ps:stop() end
-            if on then ps:setIntensity(0.25 + pct * 1.25) end
+            if live and not ps:isPlaying() then ps:play() end
+            if not live and ps:isPlaying() then ps:stop() end
+            if live then ps:setIntensity(0.25 + pct * 1.25) end
           end
           local light = f:getcomponent("PointLight")
-          if light then light.intensity = on and (0.8 + pct * 4.0) or 0.0 end
+          if light then light.intensity = live and (0.8 + pct * 4.0) or 0.0 end
         end
       end
     end
@@ -369,6 +376,13 @@ function fixedUpdate(node, dt)
   -- Ship frame: nose = stack axis (+Y), fwd = −Z column, right = fwd × nose.
   local nx, ny, nz = up.x, up.y, up.z
   local fx, fy, fz = -rz.x, -rz.y, -rz.z
+  -- The camera's orbit center: the CAPSULE's live world position (the root
+  -- node sits at the stack base, and gravity-up offsets drift off the hull
+  -- the moment the vessel pitches — world-exact is the only stable center).
+  focusX, focusY, focusZ = px, py, pz
+  -- Only the BOTTOM live stage burns: everything above the next decoupler
+  -- waits its turn. No decouplers left = every remaining engine fires.
+  local cut = decouplers[1] and decouplers[1].y or math.huge
 
   -- ---- board / exit -------------------------------------------------------
   if input.pressed("f") and astronaut then
@@ -441,7 +455,9 @@ function fixedUpdate(node, dt)
   throttle = math.max(0.0, math.min(1.0, throttle))
   if fuel <= 0.0 then throttle = 0.0 end
   local burn_total = 0.0
-  for _, e in ipairs(engines) do burn_total = burn_total + e.burn end
+  for _, e in ipairs(engines) do
+    if e.y < cut - 0.01 then burn_total = burn_total + e.burn end
+  end
   local refueling = false
   if info.anchored and fuel < fuel_cap then
     fuel = math.min(fuel_cap, fuel + params.refuel_rate * dt)
@@ -450,19 +466,23 @@ function fixedUpdate(node, dt)
     fuel = math.max(0.0, fuel - throttle * burn_total * dt)
   end
 
-  -- ---- thrust at every live engine's offset ------------------------------
+  -- ---- thrust at every ACTIVE engine's offset ----------------------------
   local total_thrust = 0.0
-  for _, e in ipairs(engines) do total_thrust = total_thrust + e.thrust end
+  for _, e in ipairs(engines) do
+    if e.y < cut - 0.01 then total_thrust = total_thrust + e.thrust end
+  end
   if throttle > 0 and not info.anchored and fuel > 0 then
     for _, e in ipairs(engines) do
-      local ex = node.x + rx.x * e.x + up.x * e.y + rz.x * e.z
-      local ey = node.y + rx.y * e.x + up.y * e.y + rz.y * e.z
-      local ez = node.z + rx.z * e.x + up.z * e.y + rz.z * e.z
-      local f = e.thrust * throttle
-      assembly.forceAt(node, vec3(nx * f, ny * f, nz * f), vec3(ex, ey, ez))
+      if e.y < cut - 0.01 then
+        local ex = node.x + rx.x * e.x + up.x * e.y + rz.x * e.z
+        local ey = node.y + rx.y * e.x + up.y * e.y + rz.y * e.z
+        local ez = node.z + rx.z * e.x + up.z * e.y + rz.z * e.z
+        local f = e.thrust * throttle
+        assembly.forceAt(node, vec3(nx * f, ny * f, nz * f), vec3(ex, ey, ez))
+      end
     end
   end
-  set_flames(node, (info.anchored or fuel <= 0) and 0 or throttle)
+  set_flames(node, (info.anchored or fuel <= 0) and 0 or throttle, cut)
 
   -- ---- attitude: rate-commanded, the KSP feel ----------------------------
   if input.pressed("t") then
@@ -560,6 +580,13 @@ function fixedUpdate(node, dt)
   -- ---- HUD (10 Hz, the scout ship's format) ------------------------------
   if time - hud_t >= 0.1 then
     hud_t = time
+    -- The map owns the screen while it's open (its info panel replaces the
+    -- flight HUD) — stand down instead of painting through it.
+    local sc = findScript("ship_controller")
+    if sc and sc.map_view then
+      set_hud(nil)
+      return
+    end
     local dom = space.dominant(node.x, node.y, node.z)
     local b = dom and space.body(dom)
     local lines = {}

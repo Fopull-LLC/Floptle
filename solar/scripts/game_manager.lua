@@ -66,8 +66,10 @@ function saveGame()
   if not slot then return end
   local astro = find("Astronaut")
   if astro then save_pos_of(astro, "p") end
+  -- The scout is a stashed debug tool: only track it while it's summoned.
+  local sc = findScript("ship_controller")
   local ship = find("Ship")
-  if ship then save_pos_of(ship, "s") end
+  if ship and not (sc and sc.stashed) then save_pos_of(ship, "s") end
   save.set("g_played", (save.get("g_played") or 0) + 1)
   terrain.flush()
 end
@@ -150,11 +152,15 @@ function update(node, dt)
     -- pinned to zero: the world can't hurt what physics can't reach.
     local sx, sy, sz = spawn_live()
     local hover = sy + spawn_r + 60
+    local sc = findScript("ship_controller")
     for _, nm in ipairs({ "Astronaut", "Ship" }) do
-      local n = find(nm)
-      if n then
-        n.x, n.y, n.z = sx + (nm == "Ship" and 14 or 0), hover, sz
-        n.vx, n.vy, n.vz = 0, 0, 0
+      -- A stashed scout stays parked in deep space — don't drag it along.
+      if nm ~= "Ship" or not (sc and sc.stashed) then
+        local n = find(nm)
+        if n then
+          n.x, n.y, n.z = sx + (nm == "Ship" and 14 or 0), hover, sz
+          n.vx, n.vy, n.vz = 0, 0, 0
+        end
       end
     end
     local ttl = find("Loading Text")
@@ -185,6 +191,10 @@ function update(node, dt)
         astro.vx, astro.vy, astro.vz = 0, 0, 0
       end
       local ship = find("Ship")
+      local sc2 = findScript("ship_controller")
+      if sc2 and sc2.stashed then
+        ship = nil -- summon it with L when you want it
+      end
       if ship and not restore_pos_of(ship, "s") then
         ship.x, ship.y, ship.z = sx + 14, sy + spawn_r + 4, sz
         ship.vx, ship.vy, ship.vz = 0, 0, 0
