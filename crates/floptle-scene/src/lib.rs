@@ -269,6 +269,16 @@ pub struct RigidBodyDoc {
     /// Tilt the node so local +Y tracks −gravity (radial-planet characters).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub align_up: bool,
+    /// Mass (a shape's share inside an assembly compound).
+    #[serde(default = "one_f32", skip_serializing_if = "is_one")]
+    pub mass: f32,
+    /// Root of a compound assembly built from descendant RigidBody shapes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assembly: bool,
+}
+
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
 }
 
 fn true_bool() -> bool {
@@ -341,6 +351,8 @@ impl RigidBodyDoc {
             lock_pos: self.lock_pos,
             lock_rot: self.lock_rot,
             align_up: self.align_up,
+            mass: self.mass,
+            assembly: self.assembly,
         }
     }
     pub fn from_rigidbody(rb: &RigidBody) -> Self {
@@ -357,6 +369,8 @@ impl RigidBodyDoc {
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
             align_up: rb.align_up,
+            mass: rb.mass,
+            assembly: rb.assembly,
         }
     }
 }
@@ -1631,6 +1645,8 @@ mod tests {
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
                         align_up: true, // exercise the align-to-gravity round-trip
+                        mass: 3.5,      // exercise the assembly-field round-trips
+                        assembly: true,
                     }),
                     celestial: Some(CelestialBodyDoc {
                         mu: 25000.0,

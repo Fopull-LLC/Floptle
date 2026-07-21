@@ -53,7 +53,7 @@ pub use world::*;
 mod tests {
     use floptle_core::math::{DVec3, EulerRot, Quat, Vec3};
     use floptle_core::transform::Transform;
-    use floptle_core::{BodyKind, RigidBody, World};
+    use floptle_core::{BodyKind, Entity, RigidBody, World};
 
     use super::*;
 
@@ -700,6 +700,110 @@ mod tests {
             "mid-play lock must freeze in place: was at x={x_before}, locked to x={}",
             t.x
         );
+    }
+
+    /// A three-part rocket: root vessel (assembly) + tank + engine + a nose
+    /// ball, authored as child nodes with RigidBody shapes.
+    fn spawn_rocket(ecs: &mut World, at: DVec3) -> (Entity, Entity, Entity, Entity) {
+        use floptle_core::Parent;
+        let root = ecs.spawn();
+        ecs.insert(root, Transform::from_translation(at));
+        ecs.insert(root, RigidBody { assembly: true, ..Default::default() });
+        let mut part = |local: DVec3, rb: RigidBody| {
+            let e = ecs.spawn();
+            ecs.insert(e, Transform::from_translation(local));
+            ecs.insert(e, rb);
+            ecs.insert(e, Parent(root));
+            e
+        };
+        let engine = part(
+            DVec3::new(0.0, 0.4, 0.0),
+            RigidBody { kind: BodyKind::Box, half_extents: [0.4, 0.4, 0.4], mass: 2.0, ..Default::default() },
+        );
+        let tank = part(
+            DVec3::new(0.0, 1.6, 0.0),
+            RigidBody { kind: BodyKind::Box, half_extents: [0.4, 0.8, 0.4], mass: 4.0, ..Default::default() },
+        );
+        let nose = part(
+            DVec3::new(0.0, 2.8, 0.0),
+            RigidBody { radius: 0.35, mass: 1.0, ..Default::default() },
+        );
+        (root, engine, tank, nose)
+    }
+
+    #[test]
+    fn assembly_builds_one_compound_and_lands_on_ground() {
+        // Parts become ONE compound (no separate bodies), the stack falls and
+        // settles engine-down, and the ROOT transform gets pose + rotation.
+        let mut ecs = World::default();
+        let (root, ..) = spawn_rocket(&mut ecs, DVec3::new(0.0, 0.8, 0.0));
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.add_static_box(DVec3::ZERO, Vec3::new(20.0, 0.5, 20.0), Quat::IDENTITY, StaticTag { layer: 0, eid: 0, sensor: false });
+        assert_eq!(sim.world.compounds.len(), 1, "one compound for the vessel");
+        assert_eq!(sim.world.bodies.len(), 0, "parts must not become plain bodies");
+        assert_eq!(sim.world.compounds[0].shapes.len(), 3);
+        assert!((sim.world.compounds[0].mass - 7.0).abs() < 1e-3);
+        for _ in 0..600 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = *ecs.get::<Transform>(root).unwrap();
+        // Root (assembly origin at the base) rests on the platform top (y=0.5).
+        assert!((t.translation.y - 0.5).abs() < 0.15, "base on the pad, y={}", t.translation.y);
+        let up = t.rotation * Vec3::Y;
+        assert!(up.y > 0.9, "stack stays upright, up={up:?}");
+    }
+
+    #[test]
+    fn assembly_splits_into_two_live_compounds() {
+        // Decoupling: split the nose off to a fresh root; both halves keep
+        // simulating and the new root's transform tracks the detached half.
+        let mut ecs = World::default();
+        let (root, _engine, _tank, nose) = spawn_rocket(&mut ecs, DVec3::new(0.0, 10.0, 0.0));
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        let new_root = ecs.spawn();
+        ecs.insert(new_root, Transform::IDENTITY);
+        assert!(sim.split_compound(root.index(), &[nose.index()], new_root, &mut ecs));
+        assert_eq!(sim.world.compounds.len(), 2);
+        assert_eq!(sim.compound_of(root.index()).unwrap().shapes.len(), 2);
+        assert_eq!(sim.compound_of(new_root.index()).unwrap().shapes.len(), 1);
+        // The new root spawned AT the nose's world position.
+        let t = ecs.get::<Transform>(new_root).unwrap().translation;
+        assert!((t.y - 12.8).abs() < 0.1, "detached root at the nose, y={}", t.y);
+        // Push the detached half sideways; only it should drift.
+        let origin = sim.world.origin;
+        if let Some(c) = sim.compound_of_mut(new_root.index()) {
+            c.apply_impulse_at(Vec3::new(6.0, 0.0, 0.0), (t - origin).as_vec3());
+        }
+        for _ in 0..30 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let nose_x = ecs.get::<Transform>(new_root).unwrap().translation.x;
+        let root_x = ecs.get::<Transform>(root).unwrap().translation.x;
+        assert!(nose_x > 0.5, "detached half flies off, x={nose_x}");
+        assert!(root_x.abs() < 0.1, "kept half unaffected, x={root_x}");
+        // Degenerate: splitting a non-assembly entity fails cleanly.
+        assert!(!sim.split_compound(9999, &[1], new_root, &mut ecs));
+    }
+
+    #[test]
+    fn runtime_spawned_assembly_registers_via_add_compound_for() {
+        let mut ecs = World::default();
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        assert_eq!(sim.world.compounds.len(), 0);
+        let (root, ..) = spawn_rocket(&mut ecs, DVec3::new(0.0, 3.0, 0.0));
+        assert!(sim.add_compound_for(root, &ecs), "spawned assembly must register");
+        assert!(!sim.add_compound_for(root, &ecs), "no double registration");
+        assert_eq!(sim.world.compounds.len(), 1);
+        for _ in 0..60 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        assert!(ecs.get::<Transform>(root).unwrap().translation.y < 3.0, "it falls");
+        sim.remove_compound(root.index());
+        assert_eq!(sim.world.compounds.len(), 0);
+        assert!(sim.compound_of(root.index()).is_none());
     }
 
     #[test]

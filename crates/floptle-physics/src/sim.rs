@@ -8,6 +8,7 @@ use floptle_core::{world_transform, BodyKind, Entity, RigidBody, World};
 use floptle_field::ChunkField;
 
 use crate::body::{Body, BodyShape};
+use crate::compound::{Compound, CompoundShape, ShapeGeom};
 use crate::gravity::GravityField;
 use crate::shapes::{BoxShape, CapsuleShape, ChunkTerrain, SphereShape, TriMeshCollider};
 use crate::world::{BodyHull, PhysicsWorld, RayHit};
@@ -28,9 +29,20 @@ struct BodyLink {
     align_up: bool,
 }
 
+/// One compound assembly's link back to its ROOT entity. Shape ids inside the
+/// compound are the PART entities' indices (see `Sim::build`'s assembly pass).
+struct CompoundLink {
+    entity: Entity,
+    compound: usize,
+}
+
 pub struct Sim {
     pub world: PhysicsWorld,
     map: Vec<BodyLink>,
+    cmap: Vec<CompoundLink>,
+    /// Each compound's (CoM pos, orient) at the START of the last gameplay
+    /// tick — the interpolation anchor, like `tick_prev` for bodies.
+    tick_prev_c: Vec<(Vec3, Quat)>,
     accum: f32,
     pub fixed_dt: f32,
     /// The project's resolved layer table (names → bit indices + collision
@@ -190,7 +202,16 @@ impl Sim {
         // body never fights a static shape sitting on top of it.
         let found: Vec<(Entity, RigidBody)> =
             ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
+        // ASSEMBLY pass first: a Dynamic RigidBody with `assembly` set roots a
+        // COMPOUND built from its RigidBody-bearing descendants — those part
+        // nodes become the compound's shapes and are claimed OUT of the plain
+        // body/static pass below (a part is not its own body).
+        let mut cmap = Vec::new();
+        let claimed = Self::build_assemblies(&mut world, ecs, &found, &layers, &mut cmap);
         for (e, rb) in found {
+            if claimed.contains(&e.index()) {
+                continue;
+            }
             if rb.mode == floptle_core::BodyMode::Static {
                 Self::add_static_body_collider(&mut world, ecs, e, &rb, &layers);
                 continue;
@@ -201,6 +222,8 @@ impl Sim {
         Self {
             world,
             map,
+            cmap,
+            tick_prev_c: Vec::new(),
             accum: 0.0,
             fixed_dt: 1.0 / 120.0,
             layers,
@@ -209,6 +232,126 @@ impl Sim {
             touching: std::collections::HashMap::new(),
             events: Vec::new(),
         }
+    }
+
+    /// Build every compound assembly: for each Dynamic `RigidBody` with
+    /// `assembly` set, gather the RigidBody-bearing DESCENDANT nodes (nearest
+    /// assembly ancestor wins when they nest), turn each into an oriented
+    /// [`CompoundShape`] at its offset from the root (shape id = the part
+    /// entity's index), and register one [`Compound`] linked to the root.
+    /// Returns every claimed entity index (roots and parts) so the caller's
+    /// plain-body pass skips them. Roots with no shaped parts are skipped
+    /// entirely (an empty vessel simulates as nothing, and stays claimed so
+    /// it doesn't fall back to a stray sphere body).
+    fn build_assemblies(
+        world: &mut PhysicsWorld,
+        ecs: &World,
+        found: &[(Entity, RigidBody)],
+        layers: &floptle_core::Layers,
+        cmap: &mut Vec<CompoundLink>,
+    ) -> std::collections::HashSet<u32> {
+        use std::collections::HashSet;
+        let mut claimed: HashSet<u32> = HashSet::new();
+        let is_root = |e: Entity| {
+            found.iter().any(|(fe, frb)| {
+                *fe == e && frb.assembly && frb.mode == floptle_core::BodyMode::Dynamic
+            })
+        };
+        let roots: Vec<(Entity, RigidBody)> =
+            found.iter().filter(|(e, _)| is_root(*e)).copied().collect();
+        if roots.is_empty() {
+            return claimed;
+        }
+        for (root, _) in &roots {
+            claimed.insert(root.index());
+        }
+        // Assign each non-root RigidBody node to its NEAREST assembly-root
+        // ancestor (if any) by walking Parent links (bounded like
+        // `world_transform`'s cycle guard).
+        let mut parts: Vec<Vec<(Entity, RigidBody)>> = vec![Vec::new(); roots.len()];
+        for (e, rb) in found {
+            if is_root(*e) {
+                continue;
+            }
+            let mut cur = *e;
+            for _ in 0..64 {
+                let Some(floptle_core::Parent(p)) = ecs.get::<floptle_core::Parent>(cur).copied()
+                else {
+                    break;
+                };
+                if let Some(ri) = roots.iter().position(|(r, _)| *r == p) {
+                    parts[ri].push((*e, *rb));
+                    claimed.insert(e.index());
+                    break;
+                }
+                if is_root(p) {
+                    break; // unreachable given the position() above; guard anyway
+                }
+                cur = p;
+            }
+        }
+        for (ri, (root, root_rb)) in roots.iter().enumerate() {
+            if parts[ri].is_empty() {
+                continue;
+            }
+            let c = Self::compound_from(ecs, *root, root_rb, &parts[ri], world.origin, layers);
+            let idx = world.add_compound(c);
+            cmap.push(CompoundLink { entity: *root, compound: idx });
+        }
+        claimed
+    }
+
+    /// Build one assembly's [`Compound`] from its root pose + part nodes. Each
+    /// part contributes its RigidBody shape at its offset/orientation RELATIVE
+    /// TO THE ROOT, weighted by its `mass`; the shape id is the part entity's
+    /// index (how contacts/splits name parts back to nodes).
+    fn compound_from(
+        ecs: &World,
+        root: Entity,
+        root_rb: &RigidBody,
+        parts: &[(Entity, RigidBody)],
+        origin: DVec3,
+        layers: &floptle_core::Layers,
+    ) -> Compound {
+        let root_wt = world_transform(ecs, root);
+        let root_pos = (root_wt.translation - origin).as_vec3();
+        let inv_rot = root_wt.rotation.inverse();
+        let shapes = parts
+            .iter()
+            .map(|(pe, prb)| {
+                let wt = world_transform(ecs, *pe);
+                // Part pose in the root's frame (f64 subtraction first).
+                let offset = (inv_rot * (wt.translation - root_wt.translation).as_vec3())
+                    / root_wt.scale.max(Vec3::splat(1e-6));
+                let rot = (inv_rot * wt.rotation).normalize();
+                let r = prb.radius.max(0.01);
+                let geom = match prb.kind {
+                    BodyKind::Sphere => ShapeGeom::Sphere { radius: r },
+                    BodyKind::Capsule => ShapeGeom::Capsule {
+                        radius: r,
+                        half_height: (prb.height.max(2.0 * r) * 0.5 - r).max(0.0),
+                    },
+                    BodyKind::Box => {
+                        let h = prb.half_extents;
+                        let s = wt.scale;
+                        ShapeGeom::Box { half: Vec3::new(h[0] * s.x, h[1] * s.y, h[2] * s.z) }
+                    }
+                };
+                CompoundShape {
+                    geom,
+                    offset,
+                    rot,
+                    mass: prb.mass.max(1e-3),
+                    id: pe.index() as u64,
+                }
+            })
+            .collect();
+        let mut c = Compound::new(root_pos, root_wt.rotation, shapes);
+        c.restitution = root_rb.restitution;
+        c.friction = root_rb.friction;
+        c.use_gravity = root_rb.gravity;
+        c.layer = layers.index_for(ecs, root);
+        c
     }
 
     /// The layer table this sim resolves named layers with (the editor uses it
@@ -514,6 +657,8 @@ impl Sim {
         // Anchor AFTER any rebase so tick_prev and pos share the same frame.
         self.tick_prev.clear();
         self.tick_prev.extend(self.world.bodies.iter().map(|b| b.pos));
+        self.tick_prev_c.clear();
+        self.tick_prev_c.extend(self.world.compounds.iter().map(|c| (c.pos, c.orient)));
         let n = (tick_dt / self.fixed_dt).round().max(1.0) as u32;
         // Accumulate contacts across the tick's substeps (each step clears its
         // own) so a one-substep graze still registers as a touch this tick.
@@ -720,6 +865,152 @@ impl Sim {
             let p = from.lerp(b.pos, alpha);
             self.write_one_transform(ecs, link, p);
         }
+        self.writeback_compounds(ecs, alpha, true);
+    }
+
+    /// Write every compound's interpolated pose to its root entity: the node
+    /// gets the ASSEMBLY ORIGIN's position (`Compound::origin`, not the CoM)
+    /// and the body orientation, so part children ride at their authored
+    /// offsets. `ticked` picks the tick-start anchors; the frame-driver path
+    /// (`writeback_transforms`) uses per-step `prev_*`.
+    fn writeback_compounds(&self, ecs: &mut World, alpha: f32, ticked: bool) {
+        for link in &self.cmap {
+            let c = &self.world.compounds[link.compound];
+            if !c.active {
+                continue;
+            }
+            let (from_pos, from_rot) = if ticked {
+                self.tick_prev_c.get(link.compound).copied().unwrap_or((c.prev_pos, c.prev_orient))
+            } else {
+                (c.prev_pos, c.prev_orient)
+            };
+            let rot = from_rot.slerp(c.orient, alpha).normalize();
+            let com = from_pos.lerp(c.pos, alpha);
+            let p = com + rot * c.local_origin;
+            if let Some(t) = ecs.get_mut::<Transform>(link.entity) {
+                t.translation =
+                    self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+                t.rotation = rot;
+            }
+        }
+    }
+
+    /// The compound rooted at entity `eid`, if any.
+    pub fn compound_of(&self, eid: u32) -> Option<&Compound> {
+        let link = self.cmap.iter().find(|l| l.entity.index() == eid)?;
+        self.world.compounds.get(link.compound)
+    }
+
+    /// Mutable access to the compound rooted at `eid` — scripts push thrust /
+    /// RCS / aero through this ([`Compound::apply_force_at`] and friends take
+    /// SIM-frame points; convert world → sim by subtracting `world.origin`).
+    pub fn compound_of_mut(&mut self, eid: u32) -> Option<&mut Compound> {
+        let link = self.cmap.iter().find(|l| l.entity.index() == eid)?;
+        self.world.compounds.get_mut(link.compound)
+    }
+
+    /// Split parts (by their entity indices) OUT of the compound rooted at
+    /// `root_eid`, binding the detached half to `new_root` (a node the caller
+    /// just spawned; its transform is written immediately so the caller can
+    /// re-parent the detached part nodes under it without a one-frame pop).
+    /// Returns false if there's no such compound or the split is degenerate.
+    pub fn split_compound(
+        &mut self,
+        root_eid: u32,
+        part_eids: &[u32],
+        new_root: Entity,
+        ecs: &mut World,
+    ) -> bool {
+        let Some(link_idx) = self.cmap.iter().position(|l| l.entity.index() == root_eid) else {
+            return false;
+        };
+        let ci = self.cmap[link_idx].compound;
+        let ids: Vec<u64> = part_eids.iter().map(|&e| e as u64).collect();
+        let Some(detached) = self.world.compounds[ci].split(&ids) else {
+            return false;
+        };
+        // Write the new root's transform at the detached origin (its CoM).
+        let p = detached.origin();
+        if let Some(t) = ecs.get_mut::<Transform>(new_root) {
+            t.translation = self.world.origin + DVec3::new(p.x as f64, p.y as f64, p.z as f64);
+            t.rotation = detached.orient;
+        }
+        let idx = self.world.add_compound(detached);
+        self.cmap.push(CompoundLink { entity: new_root, compound: idx });
+        if self.tick_prev_c.len() == idx {
+            let c = &self.world.compounds[idx];
+            self.tick_prev_c.push((c.pos, c.orient));
+        }
+        true
+    }
+
+    /// Register a compound for a RUNTIME-SPAWNED assembly root (prefab spawn
+    /// of a whole vessel) — the assembly counterpart of [`Self::add_body_for`].
+    /// Gathers the root's RigidBody-bearing descendants exactly like build.
+    /// No-op (false) without an assembly-flagged Dynamic RigidBody or with no
+    /// shaped parts.
+    pub fn add_compound_for(&mut self, root: Entity, ecs: &World) -> bool {
+        if self.cmap.iter().any(|l| l.entity == root) {
+            return false;
+        }
+        let Some(rb) = ecs.get::<RigidBody>(root).copied() else { return false };
+        if !rb.assembly || rb.mode != floptle_core::BodyMode::Dynamic {
+            return false;
+        }
+        // Collect descendants with RigidBody by walking every candidate's
+        // parent chain toward `root` (same rule as build's assembly pass).
+        let parts: Vec<(Entity, RigidBody)> = ecs
+            .query::<RigidBody>()
+            .filter(|(e, _)| *e != root)
+            .filter(|(e, _)| {
+                let mut cur = *e;
+                for _ in 0..64 {
+                    let Some(floptle_core::Parent(p)) =
+                        ecs.get::<floptle_core::Parent>(cur).copied()
+                    else {
+                        return false;
+                    };
+                    if p == root {
+                        return true;
+                    }
+                    // Stop at a NEARER assembly root: that one owns the part.
+                    if ecs.get::<RigidBody>(p).is_some_and(|prb| prb.assembly) {
+                        return false;
+                    }
+                    cur = p;
+                }
+                false
+            })
+            .map(|(e, prb)| (e, *prb))
+            .collect();
+        if parts.is_empty() {
+            return false;
+        }
+        let c = Self::compound_from(ecs, root, &rb, &parts, self.world.origin, &self.layers);
+        let idx = self.world.add_compound(c);
+        self.cmap.push(CompoundLink { entity: root, compound: idx });
+        if self.tick_prev_c.len() == idx {
+            let c = &self.world.compounds[idx];
+            self.tick_prev_c.push((c.pos, c.orient));
+        }
+        true
+    }
+
+    /// Remove a despawned assembly root's compound (swap-remove; the displaced
+    /// link is re-pointed, transient contacts/anchors clear like bodies').
+    pub fn remove_compound(&mut self, eid: u32) {
+        let Some(li) = self.cmap.iter().position(|l| l.entity.index() == eid) else { return };
+        let ci = self.cmap[li].compound;
+        let last = self.world.compounds.len() - 1;
+        self.world.compounds.swap_remove(ci);
+        self.cmap.remove(li);
+        for l in &mut self.cmap {
+            if l.compound == last {
+                l.compound = ci;
+            }
+        }
+        self.world.compound_contacts.clear();
+        self.tick_prev_c.clear();
     }
 
     /// Advance ONE body by one gameplay tick (the prediction-replay driver,
@@ -1033,6 +1324,7 @@ impl Sim {
             let p = b.prev_pos.lerp(b.pos, alpha);
             self.write_one_transform(ecs, link, p);
         }
+        self.writeback_compounds(ecs, alpha, false);
     }
 
     /// Write one body's (interpolated) sim-frame position to its entity's transform,

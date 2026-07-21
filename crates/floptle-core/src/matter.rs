@@ -209,6 +209,17 @@ pub struct RigidBody {
     /// (cameras, held items) inherit the tilt. Smoothed; visual-only (the physics
     /// capsule already follows −gravity regardless). Overrides `lock_rot` when set.
     pub align_up: bool,
+    /// Mass in kilogram-ish sim units. Plain bodies ignore it today (the
+    /// translational solver is mass-free); it is the mass SHARE of a shape
+    /// inside an [`Self::assembly`] compound, where composed mass/CoM/inertia
+    /// are what make off-center thrust and contacts behave.
+    pub mass: f32,
+    /// This node is the ROOT of a COMPOUND ASSEMBLY: one 6-DOF rigid body
+    /// built from every descendant node that carries a `RigidBody` (each
+    /// becomes an oriented shape at its offset, weighted by its `mass` —
+    /// the root's own shape fields are ignored). Multi-part vehicles,
+    /// decoupling rockets, breakable structures. Requires `Dynamic` mode.
+    pub assembly: bool,
 }
 
 impl Default for RigidBody {
@@ -225,6 +236,8 @@ impl Default for RigidBody {
             lock_pos: [false; 3],
             lock_rot: [false; 3],
             align_up: false,
+            mass: 1.0,
+            assembly: false,
         }
     }
 }
