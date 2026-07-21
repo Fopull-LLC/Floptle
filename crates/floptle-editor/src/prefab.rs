@@ -348,6 +348,18 @@ impl Editor {
             );
         }
         self.script_host.set_assembly_info(map);
+        // Per-part contact loads from the last stepped tick (`assembly.impacts`
+        // — the damage/stress raw material).
+        let mut impacts: std::collections::HashMap<u32, Vec<floptle_script::AssemblyImpact>> =
+            std::collections::HashMap::new();
+        for (root, part, impulse, point) in sim.compound_impacts() {
+            impacts.entry(root).or_default().push(floptle_script::AssemblyImpact {
+                part,
+                impulse,
+                point: [point.x, point.y, point.z],
+            });
+        }
+        self.script_host.set_assembly_impacts(impacts);
     }
 
     /// Drain queued `assembly.*` commands: held forces/impulses go to the sim;

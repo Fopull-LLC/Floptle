@@ -176,8 +176,11 @@ function update(node, dt)
       loading = false
       physics.pause(false)
       local astro = find("Astronaut")
-      local vp = findScript("vessel_controller")
-      if (save.get("shipyard.pilot") or 0) == 1 or (vp and vp.piloting) then
+      local vp = nil
+      for _, s in ipairs(findScripts("vessel_controller")) do
+        if s.piloting then vp = s break end
+      end
+      if (save.get("shipyard.pilot") or 0) == 1 or vp then
         -- Arriving from the builder's LAUNCH: the astronaut starts IN the
         -- vessel's pod (the vessel pilot seats them the moment it spawns) —
         -- never standing on the surface next to their own rocket.

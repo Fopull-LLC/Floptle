@@ -65,10 +65,14 @@ stashed = false
 local stash_pending = true
 
 -- Is a BUILT vessel being piloted? The scout must not fight it for the
--- shared instruments (HUD/navball) or answer L mid-flight.
+-- shared instruments (HUD/navball) or answer L mid-flight. Scans EVERY
+-- instance: once several craft exist (landed ships, satellites, dropped
+-- stages), findScript's "first" is arbitrary.
 local function vessel_flying()
-  local v = findScript("vessel_controller")
-  return (v and v.piloting) or false
+  for _, v in ipairs(findScripts("vessel_controller")) do
+    if v.piloting then return true end
+  end
+  return false
 end
 
 -- SAS autopilot (KSP hold modes). "off" = free (rates persist), "stability" =
@@ -845,15 +849,49 @@ local function recompute_trajectories(node, db, bodies, pidx, o, thr)
   end
 end
 
+-- One-shot map diagnostics: if the subject hand-off ever breaks in the wild,
+-- the Console says WHICH link failed instead of the map silently going empty.
+local map_diag = false
+
 local function update_map3d(node, dt)
   if not map_view then return end
   -- The map's SUBJECT is whatever craft is being flown: a piloted BUILT
   -- vessel takes over from the scout — same focus, same trajectory walker,
   -- same click-to-plan view (burn EXECUTION tracking stays scout-only for
   -- now; vessels use the planned line as a visual reference).
-  local vc = findScript("vessel_controller")
-  local vfly = (vc and vc.piloting and vc.node and vc.node.valid) or false
-  if vfly then node = vc.node end
+  -- Scan EVERY vessel instance: with several craft alive (landed stages,
+  -- parked ships, satellites) findScript's "first" is arbitrary — the map
+  -- must find THE piloted one.
+  local vc = nil
+  for _, s in ipairs(findScripts("vessel_controller")) do
+    if s.piloting then
+      if s.node and s.node.valid then
+        vc = s
+      elseif not map_diag then
+        map_diag = true
+        print("map: a piloted vessel has an invalid node — subject falls back to the scout")
+      end
+      break
+    end
+  end
+  local vfly = vc ~= nil
+  if vfly then
+    -- Frame discipline (round 10): a compound root's kinematics come from
+    -- the SIM (assembly.info) — position, velocity AND grounded — never the
+    -- node-pose mirror, so the map can't go dark if the mirror lags/misses.
+    local vi = assembly.info(vc.node)
+    if vi then
+      node = { x = vi.origin.x, y = vi.origin.y, z = vi.origin.z,
+               vx = vi.vel.x, vy = vi.vel.y, vz = vi.vel.z,
+               grounded = vi.grounded }
+    else
+      node = vc.node -- parts still assembling: the node pose is all there is
+      if not map_diag then
+        map_diag = true
+        print("map: piloted vessel has no physics assembly yet — showing its node pose")
+      end
+    end
+  end
   local craft_flying = piloting or vfly
   local subj_throttle = vfly and (vc.throttle or 0) or throttle
   if not cam_node then cam_node = find("Camera 1") end
@@ -1154,7 +1192,7 @@ local function update_map3d(node, dt)
         lines[#lines + 1] = string.format("  ⇒ %s %s in %.0fs", verb, e.name, e.t)
       end
       lines[#lines + 1] = "  LMB-drag on orbit moves it · W/S prograde · A/D radial · Q/E normal · X zero · N clear"
-    elseif piloting and not node.grounded then
+    elseif craft_flying and not node.grounded then
       if traj_now and #traj_now.enc > 0 then
         local e = traj_now.enc[1]
         local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "SOI exit")
@@ -1258,12 +1296,9 @@ function fixedUpdate(node, dt)
       map_view = false
       mnv = nil -- drop any planned burn when you leave the seat
     elseif distance(astronaut, node) <= params.board_range
-      and not (function()
-        -- F is also the BUILT vessel's exit key: never board the scout in the
-        -- same press that steps out of a pod parked nearby.
-        local vc = findScript("vessel_controller")
-        return vc and vc.piloting
-      end)() then
+      -- F is also the BUILT vessel's exit key: never board the scout in the
+      -- same press that steps out of a pod parked nearby.
+      and not vessel_flying() then
       piloting = true
       astronaut.visible = false
       set_navball(true)
@@ -1288,6 +1323,7 @@ function fixedUpdate(node, dt)
     map_zoom = nil -- re-fit to the focus every time it opens
     map_focus = 1 -- always open on yourself
     map_offx, map_offy, map_offz = 0.0, 0.0, 0.0
+    map_diag = false -- each opening may report one subject anomaly
     -- The instrument cluster stands down while the map owns the screen. When
     -- a BUILT vessel is flying, the instruments are ITS — closing the map
     -- hands the navball back to it, and its own HUD repaints itself.

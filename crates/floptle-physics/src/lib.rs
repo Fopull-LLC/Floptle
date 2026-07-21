@@ -788,6 +788,41 @@ mod tests {
     }
 
     #[test]
+    fn compound_impacts_attribute_a_landing_to_the_bottom_part() {
+        // Drop the rocket onto a pad: the tick it lands, `compound_impacts`
+        // must report the ENGINE (the bottom shape) absorbing the slam — with
+        // a real impulse and the root attributed — and never the nose. This is
+        // the per-part attribution the damage/stress systems are built on.
+        let mut ecs = World::default();
+        let (root, engine, _tank, nose) = spawn_rocket(&mut ecs, DVec3::new(0.0, 4.0, 0.0));
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.add_static_box(
+            DVec3::ZERO,
+            Vec3::new(20.0, 0.5, 20.0),
+            Quat::IDENTITY,
+            StaticTag { layer: 0, eid: 0, sensor: false },
+        );
+        let mut engine_hit = 0.0f32;
+        let mut nose_hit = 0.0f32;
+        for _ in 0..600 {
+            sim.step_tick(1.0 / 60.0, None); // the editor's Play loop driver
+            for (r, part, j, point) in sim.compound_impacts() {
+                assert_eq!(r, root.index(), "impacts attribute to the assembly root");
+                assert!(point.y < 1.5, "contact points sit near the pad, y={}", point.y);
+                if part == engine.index() {
+                    engine_hit = engine_hit.max(j);
+                }
+                if part == nose.index() {
+                    nose_hit = nose_hit.max(j);
+                }
+            }
+        }
+        assert!(engine_hit > 0.5, "the bottom part takes the landing, impulse={engine_hit}");
+        assert_eq!(nose_hit, 0.0, "the nose never touches anything");
+    }
+
+    #[test]
     fn runtime_spawned_assembly_registers_via_add_compound_for() {
         let mut ecs = World::default();
         let mut sim =

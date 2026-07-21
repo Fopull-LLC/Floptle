@@ -14,9 +14,10 @@ local el, ship
 
 local function ship_ref()
   -- A piloted BUILT vessel owns the cluster; otherwise the scout ship does.
-  -- (Vessels spawn/despawn at runtime — fetch fresh, never cache.)
-  local v = findScript("vessel_controller")
-  if v and v.piloting then return v end
+  -- (Vessels spawn/despawn at runtime — fetch fresh, scan EVERY instance.)
+  for _, v in ipairs(findScripts("vessel_controller")) do
+    if v.piloting then return v end
+  end
   if not ship or not ship.node or not ship.node.valid then
     ship = findScript("ship_controller")
   end
@@ -31,8 +32,10 @@ function update(node, dt)
   if not el then el = node:getcomponent("UiElement") end
   if not el then return end
   local s = ship_ref()
-  -- Shown only while piloting (and not in the map, which owns the screen).
-  local show = (s and s.piloting and not s.map_view) or false
+  -- Shown only while piloting (and not in the map, which owns the screen —
+  -- the map flag lives on the SCOUT script whichever craft is flown).
+  local sc = findScript("ship_controller")
+  local show = (s and s.piloting and not (sc and sc.map_view)) or false
   el.visible = show
   if not show then return end
   -- Highlight the active mode; dim the rest.

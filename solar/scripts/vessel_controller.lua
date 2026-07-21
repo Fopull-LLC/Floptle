@@ -47,10 +47,17 @@ local launch_mode = false -- arrived via the builder's LAUNCH (clamp lifecycle)
 local released = false    -- the pilot has released the clamps at least once
 local info_seen = false   -- first sighting of the live compound (diagnostics)
 local no_info_t = 0.0     -- how long we've piloted WITHOUT a compound
-local engines = {}     -- { {x,y,z, thrust, burn} } vessel-local, live only
-local tanks = {}       -- { {y, fuel} } vessel-local, live only
-local decouplers = {}  -- { {uid, y} } sorted bottom-up, fired in order
+local engines = {}     -- { {x,y,z, dx,dy,dz, thrust, burn, branch} } vessel-local, live only
+local tanks = {}       -- { {y, fuel, branch} } vessel-local, live only
+local decouplers = {}  -- AXIAL cuts { {uid, y} } sorted bottom-up, fired in order
+local boosters = {}    -- radial-decoupler branches { {uid, x,y,z, uids={...}} }
 local pod = { x = 0, y = 0.5, z = 0 }
+-- Damage model (assembly.impacts → per-part strength): see the block after
+-- the staging helpers.
+local bp_by_uid = {}   -- uid → blueprint part record
+local part_hp = {}     -- uid → 1.0 pristine … 0.0 destroyed
+local destroyed = false -- the POD is gone: the vessel is lost
+local smoke_t = 0.0
 local part_total = 0
 local fuel_cap = 0.0
 local boarding = false
@@ -85,20 +92,64 @@ local function basis(node)
 end
 
 -- ── blueprint ───────────────────────────────────────────────────────────────
+-- The part's local +Y (its thrust/stack axis) in the VESSEL frame, from the
+-- blueprint's YXZ rotation — a sideways-mounted engine pushes sideways.
+local function part_axis(d)
+  local cy, sy = math.cos(d.yaw or 0), math.sin(d.yaw or 0)
+  local cx, sx = math.cos(d.pitch or 0), math.sin(d.pitch or 0)
+  local cz, sz = math.cos(d.roll or 0), math.sin(d.roll or 0)
+  return -cy * sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz
+end
+
 local function load_bp()
   bp = save.get("shipyard.blueprint")
-  engines, tanks, decouplers, part_total, fuel_cap = {}, {}, {}, 0, 0.0
+  engines, tanks, decouplers, boosters, part_total, fuel_cap = {}, {}, {}, {}, 0, 0.0
   if not bp or not bp.parts then return end
+  -- Parent links → radial-decoupler BRANCHES (each = the decoupler + its
+  -- whole outboard subtree; they separate laterally as one group).
+  local by_uid, kids = {}, {}
+  for _, d in pairs(bp.parts) do
+    by_uid[d.uid] = d
+    local pu = d.parent or 0
+    if pu ~= 0 then
+      kids[pu] = kids[pu] or {}
+      kids[pu][#kids[pu] + 1] = d.uid
+    end
+  end
+  local in_branch = {} -- uid → branch root uid
+  for _, d in pairs(bp.parts) do
+    if (d.radial or 0) == 1 and (d.decouple or 0) == 1 then
+      local uids, queue = {}, { d.uid }
+      while #queue > 0 do
+        local u = table.remove(queue)
+        if not uids[u] then
+          uids[u] = true
+          in_branch[u] = d.uid
+          for _, k in ipairs(kids[u] or {}) do queue[#queue + 1] = k end
+        end
+      end
+      local pos = {}
+      for u in pairs(uids) do
+        local dd = by_uid[u]
+        if dd then pos[#pos + 1] = { x = dd.x, y = dd.y, z = dd.z } end
+      end
+      boosters[#boosters + 1] = { uid = d.uid, x = d.x, y = d.y, z = d.z,
+                                  uids = uids, pos = pos }
+    end
+  end
   for _, d in pairs(bp.parts) do
     part_total = part_total + 1
     if (d.thrust or 0) > 0 then
-      engines[#engines + 1] = { x = d.x, y = d.y, z = d.z, thrust = d.thrust, burn = d.burn or 1 }
+      local ax, ay, az = part_axis(d)
+      engines[#engines + 1] = { x = d.x, y = d.y, z = d.z, dx = ax, dy = ay, dz = az,
+                                thrust = d.thrust, burn = d.burn or 1,
+                                branch = in_branch[d.uid], uid = d.uid }
     end
     if (d.fuel or 0) > 0 then
-      tanks[#tanks + 1] = { y = d.y, fuel = d.fuel }
+      tanks[#tanks + 1] = { y = d.y, fuel = d.fuel, branch = in_branch[d.uid], uid = d.uid }
       fuel_cap = fuel_cap + d.fuel
     end
-    if (d.decouple or 0) == 1 then
+    if (d.decouple or 0) == 1 and (d.radial or 0) ~= 1 then
       decouplers[#decouplers + 1] = { uid = d.uid, y = d.y }
     end
     if d.kind == "crewed" then pod = { x = d.x, y = d.y, z = d.z } end
@@ -107,6 +158,20 @@ local function load_bp()
   fuel = fuel_cap
   focusHeight = pod.y
   podLX, podLY, podLZ = pod.x, pod.y, pod.z
+  -- Damage model state: every part starts pristine.
+  bp_by_uid = by_uid
+  part_hp = {}
+  for _, d in pairs(bp.parts) do part_hp[d.uid] = 1.0 end
+  destroyed = false
+end
+
+
+-- Is this engine part of the CURRENTLY BURNING set? Bottom live axial stage
+-- + every still-attached side booster (boosters light with stage 1 and burn
+-- until their radial decoupler fires).
+local function engine_active(e, cut)
+  if e.branch then return true end -- attached booster (dropped at separation)
+  return e.y < cut - 0.01
 end
 
 -- The PHYSICS-FRESH base of the vessel frame. Inside fixedUpdate the node
@@ -256,10 +321,20 @@ local function set_flames(node, pct, cut)
   local on = pct > 0.02
   cut = cut or math.huge
   for _, c in ipairs(node:children()) do
-    -- Only ACTIVE engines light: parts above the next decoupler are a later
-    -- stage, cold until their turn (part local Y = blueprint height).
+    -- Only ACTIVE engines light: match the child to its blueprint engine by
+    -- local pose (bottom live stage + attached side boosters burn; parts
+    -- above the next decoupler are a later stage, cold until their turn).
     if c.name and c.name:find("PartEngine") then
-      local live = on and (c.y or 0) < cut - 0.01
+      local live = false
+      if on then
+        for _, e in ipairs(engines) do
+          if math.abs((c.x or 0) - e.x) < 0.05 and math.abs((c.y or 0) - e.y) < 0.05
+            and math.abs((c.z or 0) - e.z) < 0.05 and engine_active(e, cut) then
+            live = true
+            break
+          end
+        end
+      end
       for _, f in ipairs(c:children()) do
         if f.name == "Engine Flame" then
           local ps = f:particles()
@@ -314,15 +389,16 @@ end
 
 -- ── staging ─────────────────────────────────────────────────────────────────
 -- Detaching everything at/below a decoupler also gives away its tanks' share
--- of the pooled fuel and forgets its engines.
+-- of the pooled fuel and forgets its engines. (Attached side boosters live
+-- in their own branches — an axial cut never takes them.)
 local function drop_below(cut_y)
   local frac = (fuel_cap > 0) and (fuel / fuel_cap) or 0
   local keep_e, keep_t, cap = {}, {}, 0.0
   for _, e in ipairs(engines) do
-    if e.y > cut_y + 0.01 then keep_e[#keep_e + 1] = e end
+    if e.branch or e.y > cut_y + 0.01 then keep_e[#keep_e + 1] = e end
   end
   for _, t in ipairs(tanks) do
-    if t.y > cut_y + 0.01 then
+    if t.branch or t.y > cut_y + 0.01 then
       keep_t[#keep_t + 1] = t
       cap = cap + t.fuel
     end
@@ -330,6 +406,153 @@ local function drop_below(cut_y)
   engines, tanks, fuel_cap = keep_e, keep_t, cap
   fuel = cap * frac
 end
+
+-- Booster separation bookkeeping: the branch's engines and tanks leave with
+-- it (its tanks take their pooled-fuel share along).
+local function drop_branch(root_uid)
+  local frac = (fuel_cap > 0) and (fuel / fuel_cap) or 0
+  local keep_e, keep_t, cap = {}, {}, 0.0
+  for _, e in ipairs(engines) do
+    if e.branch ~= root_uid then keep_e[#keep_e + 1] = e end
+  end
+  for _, t in ipairs(tanks) do
+    if t.branch ~= root_uid then
+      keep_t[#keep_t + 1] = t
+      cap = cap + t.fuel
+    end
+  end
+  engines, tanks, fuel_cap = keep_e, keep_t, cap
+  fuel = cap * frac
+end
+
+-- ── damage / destruction ────────────────────────────────────────────────────
+-- `assembly.impacts()` reports how hard each PART hit something last tick
+-- (the engine attributes every contact's impulse to the part that took it).
+-- Under ~half the part's strength a hit is just a landing; past that, damage
+-- accumulates (the part smoulders); a full-strength blow — or worn-out HP —
+-- BREAKS the part: explosion, the part shears off as tumbling wreckage, and
+-- losing the pod loses the ship.
+local STRENGTH = { crewed = 26, tank = 10, engine = 16, structural = 22, canvas = 6 }
+local function part_strength(d)
+  if (d.legs or 0) == 1 then return 40 end -- legs exist to hit the ground
+  return STRENGTH[d.kind or "structural"] or 18
+end
+
+-- The live child node (and blueprint uid) behind a reported part entity id.
+local function uid_of_child(node, eid)
+  for _, c in ipairs(node:children()) do
+    if c.id == eid then
+      for uid, d in pairs(bp_by_uid) do
+        if math.abs((c.x or 0) - d.x) < 0.05 and math.abs((c.y or 0) - d.y) < 0.05
+          and math.abs((c.z or 0) - d.z) < 0.05 then
+          return uid, c
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- A destroyed part's engines/tanks leave the pools (its fuel share with it).
+local function drop_part(uid)
+  local frac = (fuel_cap > 0) and (fuel / fuel_cap) or 0
+  local keep_e, keep_t, cap = {}, {}, 0.0
+  for _, e in ipairs(engines) do
+    if e.uid ~= uid then keep_e[#keep_e + 1] = e end
+  end
+  for _, t in ipairs(tanks) do
+    if t.uid ~= uid then
+      keep_t[#keep_t + 1] = t
+      cap = cap + t.fuel
+    end
+  end
+  engines, tanks, fuel_cap = keep_e, keep_t, cap
+  fuel = cap * frac
+end
+
+local function break_part(node, uid, d, c, hx, hy, hz)
+  part_hp[uid] = 0
+  spawnEffect("Explosion", hx, hy, hz)
+  drop_part(uid)
+  log("💥 " .. (d.label or d.id or "part") .. " destroyed!")
+  if d.kind == "crewed" then
+    -- The POD is the ship. Its pilot is thrown clear of the wreck.
+    destroyed = true
+    if piloting then
+      piloting = false
+      if astronaut then
+        astronaut.visible = true
+        astronaut.x, astronaut.y, astronaut.z = hx, hy + 2.0, hz
+        local i2 = assembly.info(node)
+        if i2 then
+          astronaut.vx, astronaut.vy, astronaut.vz = i2.vel.x, i2.vel.y + 3.0, i2.vel.z
+        end
+      end
+      set_hud(nil)
+      set_navball(false)
+      set_stage_list(nil)
+      set_prompt("")
+    end
+    log("the pod is gone — vessel lost")
+    return
+  end
+  -- The broken part shears off as its own tumbling wreck, kicked outward
+  -- from the impact point.
+  local i2 = assembly.info(node)
+  if c and c.valid and i2 and #i2.parts > 1 then
+    assembly.split(node, { c }, function(junk)
+      local ji = assembly.info(junk)
+      if ji then
+        local dxk, dyk, dzk = ji.com.x - hx, ji.com.y - hy, ji.com.z - hz
+        local l = math.sqrt(dxk * dxk + dyk * dyk + dzk * dzk)
+        if l < 1e-3 then dxk, dyk, dzk, l = 0, 1, 0, 1 end
+        assembly.impulseAt(junk,
+          vec3(dxk / l * 4, dyk / l * 4 + 2, dzk / l * 4), ji.com)
+      end
+    end)
+  end
+end
+
+local function damage_tick(node, info)
+  for _, h in ipairs(assembly.impacts(node)) do
+    local uid, c = uid_of_child(node, h.part)
+    local d = uid and bp_by_uid[uid]
+    local hp = uid and part_hp[uid]
+    if d and hp and hp > 0 then
+      local s = part_strength(d)
+      if h.impulse >= s * 0.45 then
+        local dmg = math.min(1.0, (h.impulse - s * 0.45) / (s * 0.55))
+        part_hp[uid] = hp - dmg
+        if part_hp[uid] <= 0 then
+          break_part(node, uid, d, c, h.x, h.y, h.z)
+        elseif dmg > 0.04 then
+          spawnEffect("Smoke", h.x, h.y, h.z)
+          log(string.format("⚠ %s damaged — %d%% left",
+            d.label or d.id or "part", part_hp[uid] * 100))
+        end
+      end
+    end
+  end
+  -- Damaged parts SMOULDER: a smoke puff re-anchored to the part each beat,
+  -- so the trail follows the flying (or crashed) ship.
+  if time - smoke_t > 0.7 then
+    smoke_t = time
+    local rx, up, rz = basis(node)
+    local bx, by, bz = base_of(node, info)
+    for uid, hp in pairs(part_hp) do
+      if hp > 0 and hp < 0.65 then
+        local d = bp_by_uid[uid]
+        if d then
+          spawnEffect("Smoke",
+            bx + rx.x * d.x + up.x * d.y + rz.x * d.z,
+            by + rx.y * d.x + up.y * d.y + rz.y * d.z,
+            bz + rx.z * d.x + up.z * d.y + rz.z * d.z)
+        end
+      end
+    end
+  end
+end
+
 
 -- ── lifecycle ───────────────────────────────────────────────────────────────
 function start(node)
@@ -405,6 +628,15 @@ function fixedUpdate(node, dt)
     end
   end
 
+  -- ---- damage: what did each part hit last tick, and how hard? -----------
+  -- Runs piloted OR derelict — a parked ship hit by falling wreckage breaks
+  -- all the same. (While clamped/anchored the sim makes no contacts.)
+  if info then damage_tick(node, info) end
+  if destroyed then
+    set_prompt("")
+    return -- a podless derelict: nothing left to board or fly
+  end
+
   local px, py, pz = pod_world(node, info)
   local bx, by, bz = base_of(node, info)
   local rx, up, rz = basis(node)
@@ -474,9 +706,17 @@ function fixedUpdate(node, dt)
     return
   end
 
+  -- ---- the map owns the keyboard while it's open -------------------------
+  -- In map mode WASD/QE tune the planned burn, X zeroes it, arrows slide it,
+  -- SPACE is free for the planner — flying the ship (or STAGING) with those
+  -- same keys mid-planning would be chaos. The SAS keeps holding attitude;
+  -- throttle, stick, stage and warp keys stand down until the map closes.
+  local sc_map = findScript("ship_controller")
+  local map_open = (sc_map and sc_map.map_view) or false
+
   -- ---- time warp (compounds coast on their own Kepler rails now) ---------
   local warp = space.warp()
-  if input.pressed(".") or input.pressed(",") then
+  if not map_open and (input.pressed(".") or input.pressed(",")) then
     local dir = input.pressed(".") and 1 or -1
     local idx = 1
     for i, w in ipairs(WARP_STEPS) do
@@ -507,7 +747,8 @@ function fixedUpdate(node, dt)
     end
   end
   -- Hands on the stick cancel warp — the rails own the ship up there.
-  if warp > 1.001 then
+  -- (Not while the map is open: there WASD are the burn-planning keys.)
+  if warp > 1.001 and not map_open then
     local touched = input.key("shift") or input.key("ctrl") or input.key("z")
       or input.key("w") or input.key("a") or input.key("s") or input.key("d")
       or input.key("q") or input.key("e")
@@ -518,15 +759,17 @@ function fixedUpdate(node, dt)
   end
 
   -- ---- throttle + pooled fuel --------------------------------------------
-  if input.key("shift") then throttle = throttle + params.throttle_rate * dt end
-  if input.key("ctrl") then throttle = throttle - params.throttle_rate * dt end
-  if input.key("x") then throttle = 0.0 end
-  if input.key("z") then throttle = 1.0 end
+  if not map_open then
+    if input.key("shift") then throttle = throttle + params.throttle_rate * dt end
+    if input.key("ctrl") then throttle = throttle - params.throttle_rate * dt end
+    if input.key("x") then throttle = 0.0 end
+    if input.key("z") then throttle = 1.0 end
+  end
   throttle = math.max(0.0, math.min(1.0, throttle))
   if fuel <= 0.0 then throttle = 0.0 end
   local burn_total = 0.0
   for _, e in ipairs(engines) do
-    if e.y < cut - 0.01 then burn_total = burn_total + e.burn end
+    if engine_active(e, cut) then burn_total = burn_total + e.burn end
   end
   local refueling = false
   if info.anchored and fuel < fuel_cap then
@@ -536,21 +779,27 @@ function fixedUpdate(node, dt)
     fuel = math.max(0.0, fuel - throttle * burn_total * dt)
   end
 
-  -- ---- thrust at every ACTIVE engine's offset ----------------------------
+  -- ---- thrust at every ACTIVE engine's offset, along ITS OWN axis --------
   local total_thrust = 0.0
   for _, e in ipairs(engines) do
-    if e.y < cut - 0.01 then total_thrust = total_thrust + e.thrust end
+    if engine_active(e, cut) then total_thrust = total_thrust + e.thrust end
   end
   if throttle > 0 and not info.anchored and fuel > 0 then
     for _, e in ipairs(engines) do
-      if e.y < cut - 0.01 then
+      if engine_active(e, cut) then
         -- Physics-fresh base: thrust lands ON the hull, not a rails-carry
         -- beside it (the old node-pose math was a constant torque bias).
         local ex = bx + rx.x * e.x + up.x * e.y + rz.x * e.z
         local ey = by + rx.y * e.x + up.y * e.y + rz.y * e.z
         local ez = bz + rx.z * e.x + up.z * e.y + rz.z * e.z
+        -- The engine's blueprint orientation IS its thrust axis (its local
+        -- +Y in the vessel frame) — a sideways engine pushes sideways, which
+        -- is what makes rocket cars and lateral thrusters real.
+        local wdx = rx.x * e.dx + up.x * e.dy + rz.x * e.dz
+        local wdy = rx.y * e.dx + up.y * e.dy + rz.y * e.dz
+        local wdz = rx.z * e.dx + up.z * e.dy + rz.z * e.dz
         local f = e.thrust * throttle
-        assembly.forceAt(node, vec3(nx * f, ny * f, nz * f), vec3(ex, ey, ez))
+        assembly.forceAt(node, vec3(wdx * f, wdy * f, wdz * f), vec3(ex, ey, ez))
       end
     end
   end
@@ -560,12 +809,15 @@ function fixedUpdate(node, dt)
   if input.pressed("t") then
     sas_mode = (sas_mode ~= "off") and "off" or sas_last
   end
-  for k, m in pairs(SAS_KEYS) do
-    if input.pressed(k) then setSAS(m) end
+  if not map_open then
+    for k, m in pairs(SAS_KEYS) do
+      if input.pressed(k) then setSAS(m) end
+    end
   end
   local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
   local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
   local r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
+  if map_open then p, y, r = 0, 0, 0 end -- the stick is frozen in the map
   local rgx, rgy, rgz = cross(fx, fy, fz, nx, ny, nz) -- ship right
   local w = info.angVel
   local manual = (p ~= 0 or y ~= 0 or r ~= 0)
@@ -617,8 +869,8 @@ function fixedUpdate(node, dt)
     ))
   end
 
-  -- ---- SPACE: clamps first, then stages ----------------------------------
-  if input.pressed("space") then
+  -- ---- SPACE: clamps first, then boosters, then axial stages -------------
+  if input.pressed("space") and not map_open then
     if info.anchored then
       if assembly_ready(info) then
         released = true
@@ -626,6 +878,41 @@ function fixedUpdate(node, dt)
         log("launch clamps released")
       else
         log(string.format("clamps hold: %d / %d parts assembled", #info.parts, part_total))
+      end
+    elseif #boosters > 0 then
+      -- SIDE BOOSTERS first: every radial branch kicks away laterally at
+      -- once (symmetric pairs leave together, so the ship stays balanced).
+      local groups = boosters
+      boosters = {}
+      for _, g in ipairs(groups) do
+        local parts_nodes = {}
+        for _, child in ipairs(node:children()) do
+          for _, q in ipairs(g.pos) do
+            if math.abs((child.x or 0) - q.x) < 0.05 and math.abs((child.y or 0) - q.y) < 0.05
+              and math.abs((child.z or 0) - q.z) < 0.05 then
+              parts_nodes[#parts_nodes + 1] = child
+              break
+            end
+          end
+        end
+        if #parts_nodes > 0 then
+          drop_branch(g.uid)
+          -- Kick OUTWARD: the branch's radial direction in the vessel frame.
+          local ol = math.sqrt(g.x * g.x + g.z * g.z)
+          local ox, oz = 1, 0
+          if ol > 1e-4 then ox, oz = g.x / ol, g.z / ol end
+          local kx = rx.x * ox + rz.x * oz
+          local ky = rx.y * ox + rz.y * oz
+          local kz = rx.z * ox + rz.z * oz
+          local n_away = #parts_nodes
+          assembly.split(node, parts_nodes, function(stage)
+            local si = assembly.info(stage)
+            if si then
+              assembly.impulseAt(stage, vec3(kx * 4, ky * 4, kz * 4), si.com)
+            end
+            log("boosters away: " .. n_away .. " parts")
+          end)
+        end
       end
     elseif #decouplers > 0 then
       local dec = table.remove(decouplers, 1)
@@ -654,9 +941,9 @@ function fixedUpdate(node, dt)
     hud_t = time
     -- The map owns the screen while it's open (its info panel replaces the
     -- flight HUD) — stand down instead of painting through it.
-    local sc = findScript("ship_controller")
-    if sc and sc.map_view then
+    if map_open then
       set_hud(nil)
+      set_stage_list(nil) -- the list must not stay painted over the map
       return
     end
     local dom = space.dominant(node.x, node.y, node.z)
@@ -668,7 +955,8 @@ function fixedUpdate(node, dt)
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
       SAS_LABEL[sas_mode] or "?", twr,
       info.anchored and "   CLAMPED" or (info.grounded and "   LANDED" or ""),
-      #decouplers > 0 and string.format("   STAGES %d", #decouplers) or "",
+      (#decouplers + (#boosters > 0 and 1 or 0)) > 0
+        and string.format("   STAGES %d", #decouplers + (#boosters > 0 and 1 or 0)) or "",
       warp > 1.001 and string.format("   ⏩ WARP %d×", warp) or "")
     if fuel_cap > 0 then
       local fbars = math.floor(fuel / fuel_cap * 10 + 0.5)
@@ -709,30 +997,57 @@ function fixedUpdate(node, dt)
         lines[#lines + 1] = string.format("assembling…  %d / %d parts", #info.parts, part_total)
       end
     end
+    -- Damage report: the worst-off surviving part (the smoke tells you where).
+    local worst_uid, worst_hp
+    for uid, hp in pairs(part_hp) do
+      if hp > 0 and hp < 1 and (not worst_hp or hp < worst_hp) then
+        worst_uid, worst_hp = uid, hp
+      end
+    end
+    if worst_hp then
+      local d = bp_by_uid[worst_uid]
+      lines[#lines + 1] = string.format("⚠ DAMAGE  %s %d%%",
+        (d and (d.label or d.id)) or "part", worst_hp * 100)
+    end
     lines[#lines + 1] =
       "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold·SPACE stage·./, warp·M map"
     set_hud(table.concat(lines, "\n"))
 
-    -- The stage list (matches the flight model exactly: the window between
-    -- consecutive decouplers, active stage first, SPACE fires the next cut).
-    local sl = { "STAGES — SPACE fires next" }
-    for k = 0, #decouplers do
+    -- The stage list (right edge, ROCKET ORDER): drawn top-down like the
+    -- vehicle itself — upper stages first, the stage that burns NOW at the
+    -- bottom marked ▶. Matches the flight model exactly (the window between
+    -- consecutive decouplers); rows fall off the bottom as you stage.
+    local sl = { "STAGES — SPACE fires next", "" }
+    for k = #decouplers, 0, -1 do
       local lo = (k == 0) and -math.huge or decouplers[k].y
       local hi = decouplers[k + 1] and decouplers[k + 1].y or math.huge
       local n_eng, th = 0, 0
       for _, e in ipairs(engines) do
-        if e.y > lo + 0.01 and e.y < hi - 0.01 then
+        if not e.branch and e.y > lo + 0.01 and e.y < hi - 0.01 then
           n_eng = n_eng + 1
           th = th + e.thrust
         end
       end
-      local tag = (k == 0) and "▶" or " "
+      local tag = (k == 0 and #boosters == 0) and "  ▶" or ""
       if n_eng > 0 then
-        sl[#sl + 1] = string.format("%s S%d   %d engine%s   %d kN",
-          tag, k + 1, n_eng, n_eng == 1 and "" or "s", th)
+        sl[#sl + 1] = string.format("S%d   %d engine%s   %d kN%s",
+          k + 1, n_eng, n_eng == 1 and "" or "s", th, tag)
       else
-        sl[#sl + 1] = string.format("%s S%d   (no engines)", tag, k + 1)
+        sl[#sl + 1] = string.format("S%d   (no engines)%s", k + 1, tag)
       end
+    end
+    -- Side boosters separate FIRST — they sit at the bottom of the list,
+    -- exactly like the rocket's silhouette.
+    if #boosters > 0 then
+      local n_eng, th = 0, 0
+      for _, e in ipairs(engines) do
+        if e.branch then
+          n_eng = n_eng + 1
+          th = th + e.thrust
+        end
+      end
+      sl[#sl + 1] = string.format("BOOSTERS ×%d   %d engine%s   %d kN  ▶",
+        #boosters, n_eng, n_eng == 1 and "" or "s", th)
     end
     set_stage_list(table.concat(sl, "\n"))
   end

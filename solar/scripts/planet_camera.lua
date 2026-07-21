@@ -75,9 +75,14 @@ function lateUpdate(node, dt)
   -- tables per access — equality never matches, which stuck the camera on
   -- the ship after exit).
   if not ship then ship = findScript("ship_controller") end
-  -- Built vessels spawn/despawn at runtime — fetch fresh, never cache.
-  local vessel = findScript("vessel_controller")
-  local vpiloting = (vessel and vessel.piloting) or false
+  -- Built vessels spawn/despawn at runtime — fetch fresh, never cache, and
+  -- scan EVERY instance (several craft can be alive; the piloted one is the
+  -- camera's subject, not whichever findScript happens to return first).
+  local vessel = nil
+  for _, s in ipairs(findScripts("vessel_controller")) do
+    if s.piloting then vessel = s break end
+  end
+  local vpiloting = vessel ~= nil
   local piloting = ((ship and ship.piloting) or false) or vpiloting
   if piloting ~= was_piloting then
     was_piloting = piloting

@@ -43,3 +43,22 @@ fn solar_prefabs_parse() {
     }
     assert!(checked >= 9, "expected the part prefabs, found {checked}");
 }
+
+#[test]
+fn solar_vfx_parse() {
+    // Every bundled effect (`solar/vfx/*.vfx.ron`) must deserialize — a
+    // color-curve typo or renamed enum variant would otherwise only fail
+    // when the effect first spawns in-game (an invisible explosion).
+    let Some(solar) = solar_dir() else { return };
+    let mut checked = 0;
+    for entry in std::fs::read_dir(solar.join("vfx")).expect("solar/vfx") {
+        let path = entry.unwrap().path();
+        if !path.file_name().unwrap().to_string_lossy().ends_with(".vfx.ron") {
+            continue;
+        }
+        let doc = floptle_scene::load_vfx_effect(&path);
+        assert!(doc.is_ok(), "{} failed to parse: {:?}", path.display(), doc.err());
+        checked += 1;
+    }
+    assert!(checked >= 3, "expected the solar effects (Explosion/Flame/Smoke), found {checked}");
+}

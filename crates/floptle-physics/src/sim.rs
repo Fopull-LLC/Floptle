@@ -75,6 +75,10 @@ pub struct Sim {
     /// Events produced by the most recent tick(s), drained by the driver via
     /// [`Self::take_touch_events`] and dispatched to scripts.
     events: Vec<TouchEvent>,
+    /// Every compound contact resolved during the LAST gameplay tick (the
+    /// per-substep lists clear on each `world.step`; this accumulates them
+    /// across the tick) — the raw material for per-part impact attribution.
+    tick_cc: Vec<crate::compound::CompoundContact>,
 }
 
 /// The last known contact between a touching pair (world coordinates, so a
@@ -243,6 +247,7 @@ impl Sim {
             tick_prev: Vec::new(),
             touching: std::collections::HashMap::new(),
             events: Vec::new(),
+            tick_cc: Vec::new(),
         }
     }
 
@@ -696,6 +701,7 @@ impl Sim {
         // own) so a one-substep graze still registers as a touch this tick.
         let mut tick_contacts: Vec<crate::body::Contact> = Vec::new();
         let mut tick_kin: Vec<(usize, u32, Vec3, Vec3)> = Vec::new();
+        self.tick_cc.clear();
         for _ in 0..n {
             // Held forces (scripted thrust/RCS/aero on compounds) act through
             // EVERY substep of this tick — the accumulators clear per step, so
@@ -717,6 +723,7 @@ impl Sim {
             self.world.step(self.fixed_dt);
             tick_contacts.extend(self.world.contacts.iter().copied());
             tick_kin.extend(self.world.kin_contacts.iter().copied());
+            self.tick_cc.extend(self.world.compound_contacts.iter().copied());
         }
         self.held.clear();
         self.detect_touches(&tick_contacts, &tick_kin);
@@ -817,6 +824,34 @@ impl Sim {
                 let up = if g.length_squared() > 1e-6 { -g.normalize() } else { Vec3::Y };
                 (l.entity.index(), c.vel, up, c.grounded || c.anchored)
             })
+            .collect()
+    }
+
+    /// Per-part IMPACT attribution for the last stepped tick: one entry per
+    /// (assembly root, part) that took contact, with the tick's total normal
+    /// impulse on that part and the world point of its hardest contact.
+    /// The raw material for damage/stress systems — a lander's legs report a
+    /// touchdown's impulse; a tank slammed into a cliff reports the slam.
+    pub fn compound_impacts(&self) -> Vec<(u32, u32, f32, DVec3)> {
+        let origin = self.world.origin;
+        let mut agg: std::collections::HashMap<(u32, u32), (f32, f32, Vec3)> =
+            std::collections::HashMap::new();
+        for cc in &self.tick_cc {
+            if cc.impulse <= 0.0 {
+                continue; // purely positional resolves carry no momentum
+            }
+            let Some(l) = self.cmap.iter().find(|l| l.compound == cc.compound) else { continue };
+            let e = agg
+                .entry((l.entity.index(), cc.shape_id as u32))
+                .or_insert((0.0, -1.0, cc.point));
+            e.0 += cc.impulse;
+            if cc.impulse > e.1 {
+                e.1 = cc.impulse;
+                e.2 = cc.point;
+            }
+        }
+        agg.into_iter()
+            .map(|((root, part), (sum, _, p))| (root, part, sum, origin + p.as_dvec3()))
             .collect()
     }
 

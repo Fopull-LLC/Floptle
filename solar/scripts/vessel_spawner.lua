@@ -70,9 +70,9 @@ local function spawn_parts(vessel, bp, pitch, roll)
       -- The engine parents a spawned part by converting its WORLD pose into
       -- the vessel's local frame — which leaves inv(vessel tilt) baked into
       -- the part's local rotation (the "misrotated parts" of every sloped
-      -- launch). Parts are authored UPRIGHT in the vessel frame: zero the
-      -- inherited tilt, keep only the blueprint yaw.
-      part.pitch, part.roll, part.yaw = 0, 0, d.yaw or 0
+      -- launch). Parts are authored in the VESSEL frame: overwrite with the
+      -- blueprint's exact local rotation (v1.2 builds sideways parts too).
+      part.pitch, part.roll, part.yaw = d.pitch or 0, d.roll or 0, d.yaw or 0
       pending = pending - 1
       if pending == 0 and vessel_node then
         rebuilt = true

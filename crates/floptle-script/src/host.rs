@@ -1033,11 +1033,17 @@ impl ScriptHost {
         // assembly mirror in (SC1 ship physics surface).
         let assembly_info: Rc<RefCell<HashMap<u32, crate::assembly_api::AssemblyInfo>>> =
             Rc::new(RefCell::new(HashMap::new()));
+        let assembly_impacts: Rc<
+            RefCell<HashMap<u32, Vec<crate::assembly_api::AssemblyImpact>>>,
+        > = Rc::new(RefCell::new(HashMap::new()));
         let assembly_cmds: Rc<RefCell<Vec<crate::assembly_api::AssemblyCmd>>> =
             Rc::new(RefCell::new(Vec::new()));
-        if let Err(e) =
-            crate::assembly_api::install_assembly_api(&lua, assembly_info.clone(), assembly_cmds.clone())
-        {
+        if let Err(e) = crate::assembly_api::install_assembly_api(
+            &lua,
+            assembly_info.clone(),
+            assembly_impacts.clone(),
+            assembly_cmds.clone(),
+        ) {
             eprintln!("[lua] failed to install the assembly API: {e}");
         }
         // The `camera.*` world→screen API (map click-on-line picking).
@@ -1100,6 +1106,7 @@ impl ScriptHost {
             spawn_effects,
             spawn_requests,
             assembly_info,
+            assembly_impacts,
             assembly_cmds,
             draw_lines,
             destroy_queue,
@@ -1147,6 +1154,7 @@ impl ScriptHost {
         }
         self.destroy_queue.borrow_mut().clear();
         self.assembly_info.borrow_mut().clear();
+        self.assembly_impacts.borrow_mut().clear();
         for cmd in self.assembly_cmds.borrow_mut().drain(..) {
             if let crate::assembly_api::AssemblyCmd::Split { cb: Some(cb), .. } = cmd {
                 let _ = self.lua.remove_registry_value(cb);
@@ -1163,6 +1171,14 @@ impl ScriptHost {
     /// Feed this frame's assembly mirror (`assembly.info` reads it).
     pub fn set_assembly_info(&self, map: HashMap<u32, crate::assembly_api::AssemblyInfo>) {
         *self.assembly_info.borrow_mut() = map;
+    }
+
+    /// Feed the last tick's per-part contact loads (`assembly.impacts` reads it).
+    pub fn set_assembly_impacts(
+        &self,
+        map: HashMap<u32, Vec<crate::assembly_api::AssemblyImpact>>,
+    ) {
+        *self.assembly_impacts.borrow_mut() = map;
     }
 
     /// Drain the `assembly.*` commands scripts queued (held forces, impulses,

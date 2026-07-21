@@ -4,7 +4,7 @@
 
 defaults = { part = 1 }
 
-local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM", "decoupler", "legs" }
+local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM", "decoupler", "legs", "radialDec" }
 
 local el, builder
 

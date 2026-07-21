@@ -43,6 +43,18 @@ pub struct AssemblyInfo {
     pub parts: Vec<u32>,
 }
 
+/// One part's contact load over the last physics tick, refreshed by the editor
+/// each tick (empty between contacts). What damage/stress systems read.
+#[derive(Clone, Copy, Debug)]
+pub struct AssemblyImpact {
+    /// The part's entity index (matches `AssemblyInfo::parts` / child node ids).
+    pub part: u32,
+    /// Total normal impulse the part absorbed this tick (mass·Δv, sim units).
+    pub impulse: f32,
+    /// World point of the part's hardest contact.
+    pub point: [f64; 3],
+}
+
 /// One queued `assembly.*` command, drained by the editor after the script pass.
 pub enum AssemblyCmd {
     /// Hold `force` at world point `at` (`None` = through the CoM) plus a pure
@@ -102,6 +114,7 @@ fn vec3_table(lua: &Lua, v: [f64; 3]) -> mlua::Result<Table> {
 pub(crate) fn install_assembly_api(
     lua: &Lua,
     info: Rc<RefCell<HashMap<u32, AssemblyInfo>>>,
+    impacts: Rc<RefCell<HashMap<u32, Vec<AssemblyImpact>>>>,
     cmds: Rc<RefCell<Vec<AssemblyCmd>>>,
 ) -> mlua::Result<()> {
     let t = lua.create_table()?;
@@ -260,6 +273,32 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("info", f)?;
     }
+    // assembly.impacts(node) — the LAST TICK's per-part contact loads: an
+    // array of { part, impulse, x, y, z } (part = the part node's entity id,
+    // impulse = total normal impulse it absorbed, x/y/z = its hardest contact
+    // point, world space). Empty between contacts. Poll from fixedUpdate and
+    // compare against per-part strength — that's a damage model.
+    {
+        let impacts = impacts.clone();
+        let f = lua.create_function(move |lua, node: Value| {
+            let root = node_eid(&node, "assembly.impacts(node)")?;
+            let out = lua.create_table()?;
+            let map = impacts.borrow();
+            if let Some(list) = map.get(&root) {
+                for (k, i) in list.iter().enumerate() {
+                    let e = lua.create_table()?;
+                    e.set("part", i.part)?;
+                    e.set("impulse", i.impulse as f64)?;
+                    e.set("x", i.point[0])?;
+                    e.set("y", i.point[1])?;
+                    e.set("z", i.point[2])?;
+                    out.set(k + 1, e)?;
+                }
+            }
+            Ok(Value::Table(out))
+        })?;
+        t.set("impacts", f)?;
+    }
 
     lua.globals().set("assembly", t)
 }
@@ -277,8 +316,9 @@ mod tests {
         let lua = Lua::new();
         crate::math_api::install(&lua).unwrap();
         let info = Rc::new(RefCell::new(HashMap::new()));
+        let impacts = Rc::new(RefCell::new(HashMap::new()));
         let cmds: Rc<RefCell<Vec<AssemblyCmd>>> = Rc::new(RefCell::new(Vec::new()));
-        install_assembly_api(&lua, info, cmds.clone()).unwrap();
+        install_assembly_api(&lua, info, impacts, cmds.clone()).unwrap();
         lua.load(
             r#"
             local node = { __id = 7 }
@@ -304,5 +344,35 @@ mod tests {
             AssemblyCmd::Teleport { pos, .. } => assert_eq!(*pos, [10.0, 11.0, 12.0]),
             _ => panic!("expected Teleport"),
         }
+    }
+
+    /// `assembly.impacts(node)` surfaces the fed per-part contact loads as an
+    /// array of { part, impulse, x, y, z }, and reads empty (not nil) for a
+    /// root with no contacts this tick.
+    #[test]
+    fn impacts_surface_fed_contact_loads() {
+        let lua = Lua::new();
+        crate::math_api::install(&lua).unwrap();
+        let info = Rc::new(RefCell::new(HashMap::new()));
+        let impacts = Rc::new(RefCell::new(HashMap::new()));
+        let cmds: Rc<RefCell<Vec<AssemblyCmd>>> = Rc::new(RefCell::new(Vec::new()));
+        install_assembly_api(&lua, info, impacts.clone(), cmds).unwrap();
+        impacts.borrow_mut().insert(
+            7,
+            vec![AssemblyImpact { part: 42, impulse: 18.5, point: [1.0, 2.0, 3.0] }],
+        );
+        lua.load(
+            r#"
+            local hits = assembly.impacts({ __id = 7 })
+            assert(#hits == 1, "one impact expected")
+            assert(hits[1].part == 42, "part id")
+            assert(math.abs(hits[1].impulse - 18.5) < 1e-6, "impulse")
+            assert(hits[1].x == 1.0 and hits[1].y == 2.0 and hits[1].z == 3.0, "point")
+            local quiet = assembly.impacts({ __id = 9 })
+            assert(type(quiet) == "table" and #quiet == 0, "no contacts reads empty, not nil")
+            "#,
+        )
+        .exec()
+        .unwrap();
     }
 }
