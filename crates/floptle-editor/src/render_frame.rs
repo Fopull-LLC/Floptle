@@ -3614,6 +3614,8 @@ impl Editor {
             // Feed sound playback state so scripts can read sound:isPlaying()/
             // :position() this frame.
             self.script_host.set_audio_info(self.audio.script_info());
+            // Feed each assembly's live compound state (`assembly.info`).
+            self.feed_assembly_info();
             self.script_host.run(&mut self.world, &dir, sdt, self.play_t);
             // UI hook events (clicked / hoverStart / …) fire against the run's
             // fresh scene mirror, with their own write flush.
@@ -3692,6 +3694,10 @@ impl Editor {
                     sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
                 }
             }
+            // Assembly commands from the frame pass (`assembly.forceAt` in
+            // `update`, splits from UI handlers): forces arm the coming ticks,
+            // splits happen now.
+            self.drain_assembly_cmds();
             // Terrain edits queued by the frame pass (`terrain.sculpt/dig/...`):
             // applied to the authority field + the sim's collider copy before any
             // tick steps, so physics never disagrees with the surface.
@@ -3797,6 +3803,7 @@ impl Editor {
                             tick_time,
                         );
                     }
+                    self.feed_assembly_info();
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
                     if let Some(sim) = self.sim.as_mut() {
                         sim.world.colliders = self.script_host.take_colliders(); // reclaim
@@ -3812,6 +3819,8 @@ impl Editor {
                             sim.set_body_position(eid, DVec3::new(p[0], p[1], p[2]));
                         }
                     }
+                    // `fixedUpdate`'s assembly thrust arms THIS tick's substeps.
+                    self.drain_assembly_cmds();
                     // This tick's terrain edits (`fixedUpdate` digs) land BEFORE the
                     // step: the tick that dug the hole also falls into it.
                     self.drain_script_terrain_ops();
