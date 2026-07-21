@@ -3547,6 +3547,17 @@ impl Editor {
                         },
                     );
                 }
+                for (eid, vel, up, grounded) in sim.compound_states() {
+                    states.insert(
+                        eid,
+                        floptle_script::BodyState {
+                            vel: [vel.x, vel.y, vel.z],
+                            up: [up.x, up.y, up.z],
+                            grounded,
+                            height: 0.0,
+                        },
+                    );
+                }
                 self.script_host.set_bodies(states);
             }
             // The active camera's view angles ride every input snapshot
@@ -3751,6 +3762,17 @@ impl Editor {
                                 },
                             );
                         }
+                        for (eid, vel, up, grounded) in sim.compound_states() {
+                            states.insert(
+                                eid,
+                                floptle_script::BodyState {
+                                    vel: [vel.x, vel.y, vel.z],
+                                    up: [up.x, up.y, up.z],
+                                    grounded,
+                                    height: 0.0,
+                                },
+                            );
+                        }
                         self.script_host.set_bodies(states);
                         // Lend colliders so `raycast(...)` works inside `fixedUpdate` too.
                         self.script_host.set_colliders(
@@ -3908,8 +3930,6 @@ impl Editor {
             // refreshed too — post-step, so `raycast` hits bodies where they
             // rendered and `node.vx/grounded` reads this frame's final values.
             if let Some(sim) = self.sim.as_mut() {
-                self.script_host
-                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
                 let mut states = HashMap::new();
                 for (e, vel, up, grounded, height) in sim.body_states() {
                     states.insert(
@@ -3922,7 +3942,23 @@ impl Editor {
                         },
                     );
                 }
+                // Compound roots read like bodies too (node.vx / up_x /
+                // grounded on a vessel) — before the collider hand-off, since
+                // their gravity-up needs the collider set.
+                for (eid, vel, up, grounded) in sim.compound_states() {
+                    states.insert(
+                        eid,
+                        floptle_script::BodyState {
+                            vel: [vel.x, vel.y, vel.z],
+                            up: [up.x, up.y, up.z],
+                            grounded,
+                            height: 0.0,
+                        },
+                    );
+                }
                 self.script_host.set_bodies(states);
+                self.script_host
+                    .set_colliders(std::mem::take(&mut sim.world.colliders), sim.world.origin);
             }
             if let Some(sim) = self.sim.as_ref() {
                 self.script_host.set_hulls(sim.body_hulls(&self.world));

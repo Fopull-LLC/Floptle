@@ -234,6 +234,21 @@ celestial's frame. `assembly.setAnchored(node, false)` releases it *from
 rest* (nothing banks up while clamped). `assembly.info(node).anchored`
 reports the state; a `rebuild` preserves it.
 
+**Placing a live assembly:** the compound writeback owns the root node's
+transform, so plain `node.x = …` writes are overwritten every frame —
+`assembly.teleport(node, pos)` is THE way to move one (velocity untouched):
+pad pinning, save restores, cutscene placement.
+
+**Assembly roots read like bodies:** `node.vx/vy/vz`, `node.up_x/y/z`
+(local gravity-up) and `node.grounded` all work on an assembly root, so
+cameras and controllers written for single rigidbodies follow a vessel
+unchanged.
+
+**Surface structures on orbiting worlds:** a `Static`-bodied node parented
+(at any depth) under a celestial body's node rides its orbit — the transform
+hierarchy carries the visuals and the engine carries the baked collider. A
+launchpad parented to its planet stays exactly as solid as the terrain.
+
 **Pausing physics wholesale:** `physics.pause(true)` skips the entire
 physics step each tick while scripts, rails and terrain streaming keep
 running — the tool for loading screens, cutscenes and pause menus

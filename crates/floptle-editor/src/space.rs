@@ -378,6 +378,34 @@ impl Editor {
                     sim.shift_compound(eid, deltas[i]);
                 }
             }
+            // SURFACE STRUCTURES ride their planet: a Static-bodied node
+            // parented (at any depth) under a celestial follows it visually
+            // through the transform hierarchy for free — but its baked
+            // collider blob would stay behind in space. Shift the colliders
+            // by the same rails delta so a launchpad on an orbiting world
+            // stays exactly as solid as the terrain it stands on.
+            let carried: Vec<(Entity, usize)> = self
+                .world
+                .query::<floptle_core::RigidBody>()
+                .filter(|(_, rb)| rb.mode == floptle_core::BodyMode::Static)
+                .filter_map(|(e, _)| {
+                    let mut cur = e;
+                    for _ in 0..64 {
+                        let floptle_core::Parent(p) =
+                            self.world.get::<floptle_core::Parent>(cur).copied()?;
+                        if let Some(j) = cb.iter().position(|(ce, _)| *ce == p) {
+                            return Some((e, j));
+                        }
+                        cur = p;
+                    }
+                    None
+                })
+                .collect();
+            for (e, j) in carried {
+                if deltas[j].length_squared() > 1e-18 {
+                    sim.shift_statics_of(e.index(), deltas[j]);
+                }
+            }
         }
         self.script_host.set_space(floptle_script::SpaceInfo {
             time: t,

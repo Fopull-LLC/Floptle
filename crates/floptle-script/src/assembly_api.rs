@@ -52,6 +52,9 @@ pub enum AssemblyCmd {
     Rebuild { root: u32 },
     /// Pin the compound where it stands / release it (launch clamps).
     Anchor { root: u32, on: bool },
+    /// Teleport the assembly ORIGIN to a world position, velocity untouched
+    /// (re-pinning a clamped vessel to a pad that rides an orbiting planet).
+    Teleport { root: u32, pos: [f64; 3] },
 }
 
 /// A `vec3(...)`-ish argument: any table with `x`/`y`/`z` fields.
@@ -197,6 +200,20 @@ pub(crate) fn install_assembly_api(
             Ok(())
         })?;
         t.set("setAnchored", f)?;
+    }
+    // assembly.teleport(node, pos) — move the assembly origin to a world
+    // position without touching velocity. The compound writeback owns the
+    // root node's transform, so plain node position writes are overwritten —
+    // this is THE way to place a live assembly (pad pinning, save restores).
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, (node, pos): (Value, Value)| {
+            let root = node_eid(&node, "assembly.teleport(node, pos)")?;
+            let pos = v3(&pos, "assembly.teleport: pos")?;
+            q.borrow_mut().push(AssemblyCmd::Teleport { root, pos });
+            Ok(())
+        })?;
+        t.set("teleport", f)?;
     }
     // assembly.info(node) — mass, com (world vec3), vel, angVel (vec3 tables),
     // grounded, anchored, and parts (the part nodes' entity ids). nil for

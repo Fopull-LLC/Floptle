@@ -13,6 +13,10 @@ defaults = { mode = "stability" }
 local el, ship
 
 local function ship_ref()
+  -- A piloted BUILT vessel owns the cluster; otherwise the scout ship does.
+  -- (Vessels spawn/despawn at runtime — fetch fresh, never cache.)
+  local v = findScript("vessel_controller")
+  if v and v.piloting then return v end
   if not ship or not ship.node or not ship.node.valid then
     ship = findScript("ship_controller")
   end

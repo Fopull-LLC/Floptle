@@ -803,6 +803,45 @@ impl Sim {
         self.held.clear();
     }
 
+    /// Every compound root's script-visible body state: (entity index, linear
+    /// velocity, local gravity-up, grounded). Merged into the same node-state
+    /// mirror as single bodies, so `node.vx` / `node.up_x` / `node.grounded`
+    /// read identically on a vessel root — cameras and controllers built for
+    /// bodies work on assemblies unchanged.
+    pub fn compound_states(&self) -> Vec<(u32, Vec3, Vec3, bool)> {
+        self.cmap
+            .iter()
+            .map(|l| {
+                let c = &self.world.compounds[l.compound];
+                let g = self.world.gravity.accel_at(c.pos, &self.world.colliders);
+                let up = if g.length_squared() > 1e-6 { -g.normalize() } else { Vec3::Y };
+                (l.entity.index(), c.vel, up, c.grounded || c.anchored)
+            })
+            .collect()
+    }
+
+    /// TELEPORT a compound so its assembly ORIGIN lands at an absolute world
+    /// position, velocity untouched (pinning a clamped vessel to its pad).
+    pub fn set_compound_origin(&mut self, eid: u32, target: DVec3) {
+        let origin = self.world.origin;
+        let Some(cur) = self.compound_of(eid).map(|c| c.origin().as_dvec3() + origin) else {
+            return;
+        };
+        self.shift_compound(eid, target - cur);
+    }
+
+    /// Shift every baked static collider owned by entity `eid` by a world
+    /// delta — surface structures riding their moving celestial's frame (the
+    /// node itself follows through the transform hierarchy; this moves the
+    /// collision blob with it).
+    pub fn shift_statics_of(&mut self, eid: u32, delta: DVec3) {
+        let origin = self.world.origin;
+        for c in self.world.colliders.iter_mut().filter(|c| c.eid == Some(eid)) {
+            let a = c.anchor + delta;
+            c.re_anchor(a, origin);
+        }
+    }
+
     /// Diff this tick's touching pairs against the last tick's into
     /// enter / stay / exit [`TouchEvent`]s. Three sources, all matrix-gated:
     /// the solver's resolved contacts (body vs solid collider), body-vs-SENSOR

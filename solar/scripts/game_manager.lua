@@ -170,7 +170,7 @@ function update(node, dt)
       loading = false
       physics.pause(false)
       local astro = find("Astronaut")
-      local vp = findScript("vessel_test")
+      local vp = findScript("vessel_controller")
       if (save.get("shipyard.pilot") or 0) == 1 or (vp and vp.piloting) then
         -- Arriving from the builder's LAUNCH: the astronaut starts IN the
         -- vessel's pod (the vessel pilot seats them the moment it spawns) —
