@@ -1,0 +1,10 @@
+astronaut_male.glb / astronaut_female.glb
+Converted from "human.blend" (Blender 2.49, 2009) via Blender 4.5/glTF.
+
+Copyright 2009 Clint Bellanger — http://clintbellanger.net
+Dual-licensed: Creative Commons CC-BY-SA / GPL (as stated in the source file).
+Attribution required; the asset itself remains under CC-BY-SA.
+
+Notes: two 410-vert rigged humans (25-bone armatures), UV-mapped, no textures,
+no animation clips in the source file. Texture/vertex-paint in-engine; clips
+to be authored fresh.
