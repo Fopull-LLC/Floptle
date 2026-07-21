@@ -7,7 +7,7 @@
         (
             name: "Fireball",
             render: Billboard(
-                texture: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/textures/VFXTEX/Fire/3.png"),
+                texture: Some("textures/VFXTEX/Fire/3.png"),
             ),
             blend: Additive,
             space: World,
@@ -65,7 +65,7 @@
         (
             name: "Smoke",
             render: Billboard(
-                texture: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/textures/VFXTEX/Smoke/3.png"),
+                texture: Some("textures/VFXTEX/Smoke/3.png"),
             ),
             blend: Alpha,
             space: World,
@@ -116,7 +116,7 @@
         (
             name: "Shockwave",
             render: Billboard(
-                texture: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/textures/VFXTEX/Shockwaves/12.png"),
+                texture: Some("textures/VFXTEX/Shockwaves/12.png"),
             ),
             blend: Additive,
             space: World,

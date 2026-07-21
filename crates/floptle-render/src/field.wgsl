@@ -593,6 +593,24 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     return mix(color2, G.fog_color.rgb, f);
 }
 
+// The UNCLAMPED voxel edge of the coarsest in-field volume containing `p` —
+// unlike `field_eps` (clamped to 1.0 for step sizing), this reports the truth,
+// so consumers can judge how much detail the field can actually resolve (a
+// planet's 192-cap shadow proxy runs 4+ units per voxel).
+fn vol_voxel_at(p: vec3<f32>) -> f32 {
+    var h = 0.02;
+    let vols = min(u32(G.params.w), 16u);
+    for (var i = 0u; i < vols; i = i + 1u) {
+        if (!vol_in_field(i)) { continue; }
+        let q = abs(p - G.vol_center[i].xyz) - G.vol_half[i].xyz;
+        if (max(q.x, max(q.y, q.z)) < 0.08) {
+            let voxel = 2.0 * G.vol_half[i].xyz / max(G.vol_dims[i].xyz, vec3<f32>(1.0));
+            h = max(h, max(voxel.x, max(voxel.y, voxel.z)));
+        }
+    }
+    return h;
+}
+
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
     let radius = max(G.ao_params.z, 1e-3);
     var occ = 0.0;
@@ -603,7 +621,12 @@ fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 {
         sca = sca * 0.6;
     }
     let ao = clamp(1.0 - 1.5 * occ / radius, 0.0, 1.0);
-    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0));
+    // TRUST falls with field coarseness: sampling a 1.5-unit AO radius out of a
+    // 4-unit-voxel planet proxy reads trilinear mush, not occlusion — it painted
+    // blobby light/dark patches over night-side terrain (2026-07-20). When the
+    // voxel can't resolve the radius, fade toward flat (SSAO covers fine detail).
+    let trust = clamp(radius / vol_voxel_at(p), 0.0, 1.0);
+    return mix(1.0, ao, clamp(G.ao_params.y, 0.0, 1.0) * trust);
 }
 
 // SHADOW-ONLY occluder volumes (vol_center.w = 2): baked static level meshes that
@@ -745,7 +768,10 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // shadows stay tight. (Computed before the relevance sweep: the sweep must
     // test the ACTUAL march ray, which starts at `ro`, not at the surface.)
     let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
-    let lift = base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0);
+    // Absolute cap: the voxel-scaled grazing boost reached 6+ units on coarse
+    // planet proxies — far enough to START the ray past a cave roof or a whole
+    // terrain feature, which lit sealed caves from the inside (2026-07-20).
+    let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
     let ro = p + n * lift;
 
     // ---- Relevance sweep: which pieces can this ray possibly matter for?
@@ -840,8 +866,20 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
         if (t > pen_t0) {
             vis = min(vis, clamp(k * d / t, 0.0, 1.0));
         }
-        t = t + clamp(d, 0.02, 4.0);
+        // Step cap GROWS with distance: a flat 4-unit cap gave the 64-step march
+        // a 256-unit total reach — any longer relevance span (a planet's volume
+        // is 600+) exhausted the loop and returned mostly-LIT, so starlight
+        // leaked through hundreds of units of rock in soft blobs (2026-07-20).
+        // The k·d/t penumbra needs no dense sampling far out (its scale ~t/k
+        // grows too), so geometric growth loses nothing.
+        t = t + clamp(d, 0.02, max(4.0, t * 0.12));
         if (vis < 0.01 || t > t_end) { break; }
+    }
+    if (t < t_end) {
+        // Ran out of steps mid-span. With the growing cap that only happens when
+        // d stayed pinned small for all 64 steps — the ray spent its whole life
+        // hugging matter — so it's occluded, not lit-by-default.
+        vis = 0.0;
     }
     return clamp(vis, 0.0, 1.0);
 }

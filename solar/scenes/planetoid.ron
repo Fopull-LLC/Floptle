@@ -134,7 +134,7 @@
                 color: (0.0, 0.0, 0.0),
                 size: 4000.0,
                 tint: (0.004, 0.005, 0.012),
-                shader: Some("/mnt/disks/3tb/GithubRepositories/Floptle/solar/shaders/examples/nebulaDream.flsl"),
+                shader: Some("shaders/examples/nebulaDream.flsl"),
                 shader_params: {
                     "deep": (0.0, 0.0, 0.0, 1.0),
                     "density": (0.2, 0.0, 0.0, 0.0),

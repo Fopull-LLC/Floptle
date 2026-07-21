@@ -95,7 +95,18 @@ fn main() {
                 }
                 None => line,
             };
-            layers.push(load_layer(tex));
+            // Palette entries are PROJECT-relative (the editor resolves them via
+            // resolve_asset_path); this probe's project root is the cfield dir's
+            // parent (solar/terrain/x.cfield -> solar/). Absolute/legacy spellings
+            // still load as-is when they exist.
+            let root = std::path::Path::new(&path).parent().and_then(|p| p.parent());
+            let resolved = if std::path::Path::new(tex).exists() {
+                tex.to_string()
+            } else {
+                root.map(|r| r.join(tex).to_string_lossy().into_owned())
+                    .unwrap_or_else(|| tex.to_string())
+            };
+            layers.push(load_layer(&resolved));
         }
         println!("palette: {} layers from {} (glow {glow_mask:#b})", layers.len(), ppath.display());
     } else {
@@ -239,7 +250,8 @@ fn main() {
             light_dir,
             light_color: [1.0, 0.96, 0.9, 0.0],
             ambient: [0.16, 0.17, 0.22, 0.0],
-            terrain_mask: [0.0, 0.22, glow_mask as f32, 0.0],
+            terrain_mask: [0.0, 0.22, 0.0, 0.0],
+            terrain_bits: [0, glow_mask, 0, 0],
             ..Default::default()
         };
         let model = Mat4::from_translation(cr);
