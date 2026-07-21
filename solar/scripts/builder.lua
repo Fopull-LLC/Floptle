@@ -94,7 +94,36 @@ local function set_part_pos(p, x, y, z)
   if p.node then p.node.x, p.node.y, p.node.z = x, y, z end
 end
 
--- ── Stats ───────────────────────────────────────────────────────────────────
+-- ── Stats + staging readout ─────────────────────────────────────────────────
+-- Stages mirror the FLIGHT model exactly: SPACE fires the lowest remaining
+-- decoupler and everything at/below it detaches — so stage k is "the stack
+-- above the k-th decoupler", flying on every engine still aboard. Each gets
+-- its honest TWR (thrust / mass·g) and pooled fuel.
+local function stage_lines()
+  local cuts = {}
+  for _, p in pairs(parts) do
+    if p.def.decouple then cuts[#cuts + 1] = p.y end
+  end
+  table.sort(cuts)
+  local out = ""
+  for k = 0, #cuts do
+    local cut = (k == 0) and -math.huge or cuts[k]
+    local m, th, fu = 0.0, 0.0, 0
+    for _, p in pairs(parts) do
+      if p.y > cut + 0.01 then
+        m = m + p.def.mass
+        th = th + (p.def.thrust or 0)
+        fu = fu + (p.def.fuel or 0)
+      end
+    end
+    if k == 0 or th > 0 or fu > 0 then
+      out = out .. string.format("\nSTAGE %d:  TWR %.2f   fuel %d   %.2f t",
+        k + 1, (m > 0 and th > 0) and th / (m * 9.81) or 0, fu, m)
+    end
+  end
+  return out
+end
+
 local function refresh_stats()
   if not stats_node then return end
   local mass, cost, thrust, n = 0.0, 0, 0.0, 0
@@ -110,7 +139,8 @@ local function refresh_stats()
   end
   local twr = (mass > 0) and (thrust / (mass * 9.81)) or 0
   local twr_s = (thrust > 0) and string.format("   TWR %.2f", twr) or ""
-  stats_node.text = string.format("%d parts   %.2f t   $%d%s", n, mass, cost, twr_s)
+  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s",
+    n, mass, cost, twr_s, stage_lines())
 end
 
 -- ── Undo (robust: ops that can't apply yet re-push and wait) ────────────────
@@ -394,7 +424,39 @@ local grab_mode = false
 local grab_last = nil
 local grab_moved = false
 
+-- Engineering markers (in-game draw.* layer): the CENTER OF MASS (amber
+-- sphere + ring) and CENTER OF THRUST (blue sphere + thrust-axis line).
+-- Watching them line up IS the balance tool — an off-axis CoT will pirouette
+-- exactly this way at launch, because flight thrusts at these same offsets.
+local function draw_engineering()
+  if partCount == 0 then return end
+  local m, cx, cy, cz = 0.0, 0.0, 0.0, 0.0
+  local th, tx, ty, tz = 0.0, 0.0, 0.0, 0.0
+  for _, p in pairs(parts) do
+    local pm = p.def.mass
+    m = m + pm
+    cx, cy, cz = cx + p.x * pm, cy + p.y * pm, cz + p.z * pm
+    local t = p.def.thrust or 0
+    if t > 0 then
+      th = th + t
+      tx, ty, tz = tx + p.x * t, ty + p.y * t, tz + p.z * t
+    end
+  end
+  if m <= 0 then return end
+  cx, cy, cz = cx / m, cy / m, cz / m
+  draw.sphere(cx, cy, cz, 0.16, 1.0, 0.8, 0.2, 1.0)
+  draw.ring(cx, cy, cz, 0, 1, 0, 0.34, 1.0, 0.8, 0.2, 0.7)
+  if th > 0 then
+    tx, ty, tz = tx / th, ty / th, tz / th
+    draw.sphere(tx, ty, tz, 0.13, 0.3, 0.7, 1.0, 1.0)
+    -- The thrust axis (builder ships point +Y): CoT up through the CoM
+    -- region — if this line misses the amber ball, the ship will torque.
+    draw.line(tx, ty, tz, tx, ty + 2.2, tz, 0.3, 0.7, 1.0, 0.8)
+  end
+end
+
 function update(node, dt)
+  draw_engineering()
   -- One shared click edge for the whole frame.
   local lmb = input.button(0)
   local clicked = lmb and not lmb_prev and click_cool <= 0
