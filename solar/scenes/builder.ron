@@ -1,14 +1,14 @@
 (
     name: "builder",
     lighting: (
-        direction: (0.3, 0.85, 0.42),
-        color: (1.0, 0.97, 0.9),
-        ambient: (0.34, 0.35, 0.4),
-        intensity: 0.85,
+        direction: (0.25, 0.8, 0.5),
+        color: (0.75, 0.8, 0.95),
+        ambient: (0.16, 0.17, 0.21),
+        intensity: 0.3,
         shadows: true,
-        shadow_softness: 0.5,
-        shadow_strength: 0.55,
-        shadow_tint: (0.05, 0.06, 0.1),
+        shadow_softness: 0.55,
+        shadow_strength: 0.4,
+        shadow_tint: (0.06, 0.07, 0.12),
         shadow_quantize: 0,
         shadow_dither: false,
         shadow_distance: 120.0,
@@ -24,14 +24,14 @@
             matter: PostProcess(
                 enabled: true,
                 bloom: true,
-                bloom_threshold: 0.55,
-                bloom_intensity: 0.22,
+                bloom_threshold: 0.5,
+                bloom_intensity: 0.3,
                 vignette: true,
-                vignette_strength: 0.4,
-                vignette_radius: 0.55,
+                vignette_strength: 0.5,
+                vignette_radius: 0.5,
                 ao: ScreenSpace,
-                ao_strength: 1.1,
-                ao_radius: 0.7,
+                ao_strength: 0.4,
+                ao_radius: 0.6,
                 posterize_bands: 0,
                 posterize_dither: false,
             ),
@@ -65,9 +65,27 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.2, 0.22, 0.26),
+                color: (0.42, 0.44, 0.48),
             ),
             scripts: [],
+            material: Some((
+                color: (0.5, 0.52, 0.55),
+                texture: Some("textures/patterns/solid/pattern_02.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 24.0,
+                specular_strength: 0.25,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.6,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
             name: "Pad",
@@ -78,9 +96,27 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.3, 0.33, 0.38),
+                color: (0.5, 0.52, 0.56),
             ),
             scripts: [],
+            material: Some((
+                color: (0.62, 0.64, 0.68),
+                texture: Some("textures/patterns/solid/pattern_30.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 32.0,
+                specular_strength: 0.3,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.8,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
             name: "Wall Back",
@@ -91,9 +127,27 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.16, 0.19, 0.24),
+                color: (0.3, 0.32, 0.36),
             ),
             scripts: [],
+            material: Some((
+                color: (0.36, 0.38, 0.44),
+                texture: Some("textures/patterns/lines/pattern_0000.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.4,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
             name: "Wall Left",
@@ -104,9 +158,27 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.16, 0.19, 0.24),
+                color: (0.3, 0.32, 0.36),
             ),
             scripts: [],
+            material: Some((
+                color: (0.36, 0.38, 0.44),
+                texture: Some("textures/patterns/lines/pattern_0000.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.4,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
             name: "Wall Right",
@@ -117,9 +189,27 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.16, 0.19, 0.24),
+                color: (0.3, 0.32, 0.36),
             ),
             scripts: [],
+            material: Some((
+                color: (0.36, 0.38, 0.44),
+                texture: Some("textures/patterns/lines/pattern_0000.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.4,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
             name: "Ceiling",
@@ -130,61 +220,186 @@
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.13, 0.15, 0.19),
+                color: (0.2, 0.21, 0.25),
             ),
             scripts: [],
+            material: Some((
+                color: (0.24, 0.25, 0.3),
+                texture: Some("textures/patterns/solid/pattern_43.png"),
+                emissive: (0.0, 0.0, 0.0),
+                emissive_strength: 0.0,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: false,
+                ambient: 1.0,
+                alpha: 1.0,
+                tiling: Some(Triplanar(
+                    scale: 0.35,
+                    blend: 4.0,
+                )),
+            )),
         ),
         (
-            name: "Light Strip",
+            name: "Light Strip A",
             transform: (
-                translation: (0.0, 12.9, 0.0),
+                translation: (-8.0, 12.9, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (30.0, 0.15, 2.2),
+                scale: (1.4, 0.12, 30.0),
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.95, 0.93, 0.85),
+                color: (1.0, 0.97, 0.9),
             ),
             scripts: [],
+            material: Some((
+                color: (1.0, 0.97, 0.9),
+                emissive: (1.0, 0.95, 0.82),
+                emissive_strength: 2.4,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
+            )),
         ),
         (
-            name: "Hangar Light A",
+            name: "Light Strip B",
             transform: (
-                translation: (-9.0, 11.0, -6.0),
+                translation: (8.0, 12.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.4, 0.12, 30.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (1.0, 0.97, 0.9),
+            ),
+            scripts: [],
+            material: Some((
+                color: (1.0, 0.97, 0.9),
+                emissive: (1.0, 0.95, 0.82),
+                emissive_strength: 2.4,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
+            )),
+        ),
+        (
+            name: "Wall Sign",
+            transform: (
+                translation: (0.0, 9.5, -23.4),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (10.0, 1.4, 0.1),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.9, 0.4, 0.2),
+            ),
+            scripts: [],
+            material: Some((
+                color: (0.95, 0.5, 0.25),
+                emissive: (0.95, 0.45, 0.2),
+                emissive_strength: 1.6,
+                specular: (1.0, 1.0, 1.0),
+                shininess: 12.0,
+                specular_strength: 0.15,
+                rim: (0.0, 0.0, 0.0),
+                rim_strength: 0.0,
+                unlit: true,
+                ambient: 1.0,
+                alpha: 1.0,
+            )),
+        ),
+        (
+            name: "Lamp NW",
+            transform: (
+                translation: (-10.0, 10.5, -10.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: PointLight(
-                color: (1.0, 0.96, 0.88),
-                intensity: 1.5,
-                range: 26.0,
+                color: (1.0, 0.93, 0.8),
+                intensity: 2.2,
+                range: 22.0,
             ),
             scripts: [],
         ),
         (
-            name: "Hangar Light B",
+            name: "Lamp NE",
             transform: (
-                translation: (9.0, 11.0, -6.0),
+                translation: (10.0, 10.5, -10.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: PointLight(
-                color: (1.0, 0.96, 0.88),
-                intensity: 1.5,
-                range: 26.0,
+                color: (1.0, 0.93, 0.8),
+                intensity: 2.2,
+                range: 22.0,
             ),
             scripts: [],
         ),
         (
-            name: "Hangar Light C",
+            name: "Lamp SW",
             transform: (
-                translation: (0.0, 9.0, 12.0),
+                translation: (-10.0, 10.5, 10.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
             matter: PointLight(
-                color: (0.85, 0.9, 1.0),
-                intensity: 1.2,
+                color: (1.0, 0.93, 0.8),
+                intensity: 2.0,
+                range: 22.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Lamp SE",
+            transform: (
+                translation: (10.0, 10.5, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (1.0, 0.93, 0.8),
+                intensity: 2.0,
+                range: 22.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Pad Light",
+            transform: (
+                translation: (0.0, 6.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (0.95, 0.98, 1.0),
+                intensity: 1.6,
+                range: 14.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Door Fill",
+            transform: (
+                translation: (0.0, 7.0, 22.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (0.55, 0.65, 0.85),
+                intensity: 1.1,
                 range: 30.0,
             ),
             scripts: [],
@@ -226,6 +441,18 @@
             scripts: [],
         ),
         (
+            name: "Screens B",
+            transform: (
+                translation: (0.0, 11.0, -22.6),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (5.0, 5.0, 5.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/screen-hanging-wide.glb",
+            ),
+            scripts: [],
+        ),
+        (
             name: "Structure Tall",
             transform: (
                 translation: (21.0, 0.1, -12.0),
@@ -238,6 +465,54 @@
             scripts: [],
         ),
         (
+            name: "Structure Yellow",
+            transform: (
+                translation: (-21.0, 0.1, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 3.0, 3.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/structure-yellow-short.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Catwalk A",
+            transform: (
+                translation: (-23.0, 8.0, -6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 4.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/catwalk-straight.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Catwalk B",
+            transform: (
+                translation: (-23.0, 8.0, 2.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 4.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/catwalk-straight.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Catwalk C",
+            transform: (
+                translation: (-23.0, 8.0, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 4.0, 4.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/catwalk-corner.glb",
+            ),
+            scripts: [],
+        ),
+        (
             name: "Pipes",
             transform: (
                 translation: (0.0, 12.2, -22.5),
@@ -246,6 +521,18 @@
             ),
             matter: Mesh(
                 asset_path: "models/factory/pipe-large-long.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Pipes B",
+            transform: (
+                translation: (12.0, 12.2, -22.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.0, 6.0, 6.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/pipe-large-valve.glb",
             ),
             scripts: [],
         ),
@@ -282,6 +569,66 @@
             ),
             matter: Mesh(
                 asset_path: "models/factory/box-large.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Crates B",
+            transform: (
+                translation: (17.5, 0.1, 13.0),
+                rotation: (0.0, 0.259, 0.0, 0.966),
+                scale: (2.8, 2.8, 2.8),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/box-wide.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "EVA Suit Stand",
+            transform: (
+                translation: (-16.5, 1.05, 16.5),
+                rotation: (0.0, 0.924, 0.0, 0.383),
+                scale: (0.028, 0.028, 0.028),
+            ),
+            matter: Mesh(
+                asset_path: "models/nasa/eva_suit.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Canadarm",
+            transform: (
+                translation: (22.5, 9.0, 4.0),
+                rotation: (0.0, 0.707, 0.0, 0.707),
+                scale: (0.012, 0.012, 0.012),
+            ),
+            matter: Mesh(
+                asset_path: "models/nasa/space_shuttle_remote_manipulator_system_canadarm.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Payload Crate",
+            transform: (
+                translation: (19.0, 0.6, -4.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.006, 0.006, 0.006),
+            ),
+            matter: Mesh(
+                asset_path: "models/nasa/payload.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Cubesat Bench",
+            transform: (
+                translation: (-19.6, 1.35, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.09, 0.09, 0.09),
+            ),
+            matter: Mesh(
+                asset_path: "models/nasa/cubesat-2_ru_generic.glb",
             ),
             scripts: [],
         ),
@@ -327,7 +674,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Free(
                     pos: (18, 12),
@@ -352,7 +699,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Free(
                     pos: (18, 40),
@@ -377,7 +724,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Free(
                     pos: (18, 694),
@@ -402,7 +749,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Pin(
                     anchor: Right,
@@ -426,7 +773,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (14, 10),
@@ -457,7 +804,7 @@
                     params: [("part", 1.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 38),
@@ -495,7 +842,7 @@
                     params: [("part", 2.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 90),
@@ -533,7 +880,7 @@
                     params: [("part", 3.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 142),
@@ -571,7 +918,7 @@
                     params: [("part", 4.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 194),
@@ -609,7 +956,7 @@
                     params: [("part", 5.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 246),
@@ -647,7 +994,7 @@
                     params: [("part", 6.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 298),
@@ -685,7 +1032,7 @@
                     params: [("part", 7.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 350),
@@ -723,7 +1070,7 @@
                     params: [("part", 8.0)],
                 ),
             ],
-            parent: Some(25),
+            parent: Some(41),
             ui: Some((
                 place: Free(
                     pos: (12, 402),
@@ -761,7 +1108,7 @@
                     params: [("action", 1.0)],
                 ),
             ],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Free(
                     pos: (18, 620),
@@ -799,7 +1146,7 @@
                     params: [("action", 2.0)],
                 ),
             ],
-            parent: Some(21),
+            parent: Some(37),
             ui: Some((
                 place: Free(
                     pos: (186, 620),

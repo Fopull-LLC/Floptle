@@ -77,6 +77,7 @@ end
 local want_spawn = false
 local bp = nil
 local wait_t = 0.0
+local last_note = 0.0
 
 function start(node)
   if save.get("shipyard.launch") ~= 1 then return end
@@ -94,10 +95,12 @@ local function try_spawn()
   local px, py, pz = 0, 20, 0
   if pad then px, py, pz = pad.x, pad.y, pad.z end
 
-  -- Local up: radial from the dominant body (fallback: world +Y).
+  -- Local up: radial from the dominant body (fallback: world +Y). Keep its
+  -- terrain WARM so the ground actually streams in under us.
   local ux, uy, uz = 0, 1, 0
   local body = dominant_at(px, py, pz)
   if body then
+    if body.name and body.name ~= "" then terrain.warm(body.name) end
     local dx, dy, dz = px - body.x, py - body.y, pz - body.z
     local d = math.sqrt(dx * dx + dy * dy + dz * dz)
     if d > 1e-3 then ux, uy, uz = dx / d, dy / d, dz / d end
@@ -108,33 +111,40 @@ local function try_spawn()
   if sl < 1e-3 then sx, sy, sz, sl = 0, 0, 1, 1 end
   sx, sy, sz = sx / sl, sy / sl, sz / sl
 
-  -- Aim beside the pad; only proceed once the ground actually answers.
-  local ax = px + sx * params.offset + ux * 6
-  local ay = py + sy * params.offset + uy * 6
-  local az = pz + sz * params.offset + uz * 6
-  local hit = raycast(ax, ay, az, -ux, -uy, -uz, 220.0)
+  -- Ground check beside the pad; WAIT (warming) until it answers — spawning
+  -- early drops everything through unstreamed terrain, and the honest SDF
+  -- ejection of a planet-deep object reads as "sucked into space".
+  local ax = px + sx * params.offset + ux * 8
+  local ay = py + sy * params.offset + uy * 8
+  local az = pz + sz * params.offset + uz * 8
+  local hit = raycast(ax, ay, az, -ux, -uy, -uz, 260.0)
   if not (hit and hit.distance) then
-    if wait_t > 15.0 then
-      -- Give up waiting: spawn right at the pad, slightly up — the pad
-      -- itself is solid wherever the Ship node lives.
-      hit = { distance = 6.0 - params.clear }
-      ax, ay, az = px + ux * 6, py + uy * 6, pz + uz * 6
-      log("launch: terrain never answered — spawning AT the pad")
-    else
-      return false
+    if wait_t - (last_note or 0) > 5.0 then
+      last_note = wait_t
+      log(string.format("launch: waiting for terrain… (%.0fs)", wait_t))
     end
+    return false
   end
-  local gx = ax - ux * (hit.distance - params.clear)
-  local gy = ay - uy * (hit.distance - params.clear)
-  local gz = az - uz * (hit.distance - params.clear)
+  local gx = ax - ux * hit.distance
+  local gy = ay - uy * hit.distance
+  local gz = az - uz * hit.distance
 
+  -- A real LAUNCHPAD on the ground, surface-aligned; the vessel assembles on
+  -- its deck (deck top ~1.24 above the pad center).
   local pitch, roll = up_angles(ux, uy, uz)
-  spawn("Vessel", vec3(gx, gy, gz), function(v)
-    v.pitch, v.roll, v.yaw = pitch, roll, 0
-    vessel_node = v
-    spawn_parts(v, bp, pitch, roll)
+  local deck = 1.24
+  spawn("Launchpad", vec3(gx + ux * deck, gy + uy * deck, gz + uz * deck), function(lp)
+    lp.pitch, lp.roll, lp.yaw = pitch, roll, 0
+    local vx = gx + ux * (deck * 2.0 + params.clear)
+    local vy = gy + uy * (deck * 2.0 + params.clear)
+    local vz = gz + uz * (deck * 2.0 + params.clear)
+    spawn("Vessel", vec3(vx, vy, vz), function(v)
+      v.pitch, v.roll, v.yaw = pitch, roll, 0
+      vessel_node = v
+      spawn_parts(v, bp, pitch, roll)
+    end)
   end)
-  log("launch: vessel spawning beside the pad")
+  log("launch: pad down, vessel assembling")
   return true
 end
 
