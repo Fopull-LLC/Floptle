@@ -137,7 +137,14 @@ fn vs(in: VsIn) -> VsOut {
     out.specular = in.specular;
     out.rim = in.rim;
     out.tile = in.tile;
-    out.lpos = in.pos;
+    // Triplanar space is SCALE-AWARE object-local: multiply the mesh-local
+    // position by the model's per-axis scale so texture density stays in
+    // WORLD units. Without this, a unit cube stretched to a 48-unit wall
+    // spreads ONE tile across the whole wall (Triplanar `scale` reads as
+    // "world units per tile"). Terrain chunks bake at scale 1, so their
+    // splat path (which shares lpos) is unchanged.
+    let mscale = vec3<f32>(length(in.m0.xyz), length(in.m1.xyz), length(in.m2.xyz));
+    out.lpos = in.pos * mscale;
     out.lnorm = in.normal;
 
     // --- Vertex paint: unpack params.z, and let the packing DIE HERE. -------------

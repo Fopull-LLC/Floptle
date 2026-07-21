@@ -429,6 +429,14 @@ impl PhysicsWorld {
             let g = self.gravity.accel_at(self.compounds[ci].pos, &self.colliders);
             if g.length_squared() > 1e-6 { Some(-g.normalize()) } else { None }
         };
+        // Per-STEP correction budget across ALL of this compound's contacts:
+        // the per-resolve caps bound each sample, but a many-part assembly
+        // deep inside geometry touches dozens of samples × two passes — the
+        // sum ejected buried vessels at astronautical speed. Once the budget
+        // is spent, remaining penetrations wait for the next step (an
+        // un-burying assembly climbs out at a bounded, sane rate).
+        let mut push_budget = 0.35f32;
+        let mut rot_budget = 0.12f32;
         for _pass in 0..2 {
             // Explicit indices throughout: each resolve moves the body, so the
             // sample position is recomputed fresh for every (shape, sample,
@@ -470,13 +478,15 @@ impl PhysicsWorld {
                         // reads even deeper, and the assembly explodes off
                         // into the sky (Ty's "cloud of scattered parts").
                         let lambda = pen / w;
-                        let push = (lambda / c.mass).min(0.35);
+                        let push = (lambda / c.mass).min(push_budget);
+                        push_budget -= push;
                         c.pos += n * push;
                         let mut rot_corr = inv_i * r.cross(n * lambda);
                         let rc_len = rot_corr.length();
-                        if rc_len > 0.12 {
-                            rot_corr *= 0.12 / rc_len;
+                        if rc_len > rot_budget {
+                            rot_corr *= rot_budget / rc_len.max(1e-9);
                         }
+                        rot_budget -= rot_corr.length();
                         if rot_corr.length_squared() > 1e-14 {
                             c.orient = (Quat::from_scaled_axis(rot_corr) * c.orient).normalize();
                         }

@@ -54,9 +54,25 @@ function start(node)
   load_bp()
 end
 
+local runaway_logged = false
+
 function fixedUpdate(node, dt)
   local info = assembly.info(node)
   if not info then return end
+
+  -- Runaway diagnostic: an UNCONTROLLED vessel has no business exceeding
+  -- 50 u/s — if it does, log everything once so the next report has data.
+  if not controlled and not runaway_logged then
+    local v = info.vel
+    local speed = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+    if speed > 50 then
+      runaway_logged = true
+      log(string.format(
+        "VESSEL RUNAWAY: speed %.0f  pos (%.1f, %.1f, %.1f)  com (%.1f, %.1f, %.1f)  grounded=%s",
+        speed, node.x, node.y, node.z, info.com.x, info.com.y, info.com.z,
+        tostring(info.grounded)))
+    end
+  end
 
   -- Take / release control near the vessel.
   if input.pressed("v") then
