@@ -718,6 +718,98 @@ impl ScriptHost {
                 lua.create_table(),
             ) {
                 let _ = t.set("line", f);
+                // `draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a])` — a circle
+                // around `n` at `c`. `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` —
+                // three rings. `draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a])` —
+                // a yaw-rotated wireframe box. All build on the same always-on
+                // line pass: draw.* is the GAME's visual telegraph layer
+                // (attach markers, selection outlines, range rings), rendered
+                // unconditionally in the game view — unlike `gizmo.*`, the
+                // DEBUG layer the editor's gizmos toggle gates.
+                let ring_segs = |q: &mut Vec<crate::DrawLine>,
+                                 c: glam::DVec3,
+                                 n: glam::DVec3,
+                                 radius: f64,
+                                 color: [f32; 4]| {
+                    let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
+                    let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
+                    let u = (u - n * u.dot(n)).normalize();
+                    let v = n.cross(u);
+                    const N: usize = 28;
+                    let mut prev = c + u * radius;
+                    for k in 1..=N {
+                        let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                        let p = c + u * (radius * t.cos()) + v * (radius * t.sin());
+                        q.push(crate::DrawLine { a: prev.into(), b: p.into(), color });
+                        prev = p;
+                    }
+                };
+                {
+                    let q = draw_lines.clone();
+                    type RingArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (cx, cy, cz, nx, ny, nz, radius, r, g, b, a): RingArgs| {
+                            ring_segs(
+                                &mut q.borrow_mut(),
+                                glam::DVec3::new(cx, cy, cz),
+                                glam::DVec3::new(nx, ny, nz),
+                                radius.max(1e-4),
+                                [r, g, b, a.unwrap_or(1.0)],
+                            );
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("ring", f);
+                    }
+                }
+                {
+                    let q = draw_lines.clone();
+                    type BallArgs = (f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (cx, cy, cz, radius, r, g, b, a): BallArgs| {
+                            let c = glam::DVec3::new(cx, cy, cz);
+                            let col = [r, g, b, a.unwrap_or(1.0)];
+                            let mut q = q.borrow_mut();
+                            for n in [glam::DVec3::X, glam::DVec3::Y, glam::DVec3::Z] {
+                                ring_segs(&mut q, c, n, radius.max(1e-4), col);
+                            }
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("sphere", f);
+                    }
+                }
+                {
+                    let q = draw_lines.clone();
+                    type BoxArgs = (f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (cx, cy, cz, hx, hy, hz, yaw, r, g, b, a): BoxArgs| {
+                            let c = glam::DVec3::new(cx, cy, cz);
+                            let (cy_, sy_) = (yaw.cos(), yaw.sin());
+                            let rot = |p: glam::DVec3| {
+                                glam::DVec3::new(p.x * cy_ + p.z * sy_, p.y, -p.x * sy_ + p.z * cy_)
+                            };
+                            let col = [r, g, b, a.unwrap_or(1.0)];
+                            let corner = |i: usize| {
+                                let sx = if i & 1 == 0 { -hx } else { hx };
+                                let sy = if i & 2 == 0 { -hy } else { hy };
+                                let sz = if i & 4 == 0 { -hz } else { hz };
+                                c + rot(glam::DVec3::new(sx, sy, sz))
+                            };
+                            let mut q = q.borrow_mut();
+                            for (i, j) in [
+                                (0, 1), (2, 3), (4, 5), (6, 7), // x edges
+                                (0, 2), (1, 3), (4, 6), (5, 7), // y edges
+                                (0, 4), (1, 5), (2, 6), (3, 7), // z edges
+                            ] {
+                                q.push(crate::DrawLine { a: corner(i).into(), b: corner(j).into(), color: col });
+                            }
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("box", f);
+                    }
+                }
                 let _ = lua.globals().set("draw", t);
             }
         }

@@ -31,9 +31,9 @@ local REG = {
   chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.88, rx = 0.40, rz = 0.40, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas" },
   tankS     = { prefab = "PartTankS",     label = "FT-S Tank",    h = 1.00, rx = 0.50, rz = 0.50, mass = 1.5,  cost = 120, top = true,  bottom = true,  kind = "tank", fuel = 60 },
   tankM     = { prefab = "PartTankM",     label = "FT-M Tank",    h = 1.50, rx = 0.50, rz = 0.50, mass = 3.0,  cost = 260, top = true,  bottom = true,  kind = "tank", fuel = 150 },
-  engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 0.78, rx = 0.54, rz = 0.54, mass = 0.8,  cost = 150, top = true,  bottom = false, kind = "engine", thrust = 55,  burn = 0.9 },
-  engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.04, rx = 0.59, rz = 0.59, mass = 1.8,  cost = 380, top = true,  bottom = false, kind = "engine", thrust = 130, burn = 2.0 },
-  decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.22, rx = 0.50, rz = 0.50, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
+  engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = false, kind = "engine", thrust = 55,  burn = 0.9 },
+  engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = false, kind = "engine", thrust = 130, burn = 2.0 },
+  decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
   legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = false, kind = "structural", legs = true },
 }
 
@@ -172,6 +172,15 @@ end
 
 local function part_under_cursor(px)
   local mx, my = input.mouse()
+  -- Precise first: a ray through the cursor against the parts' hulls.
+  local ox, oy, oz, dx, dy, dz = camera.screenToRay(mx, my)
+  local hit = raycast(ox, oy, oz, dx, dy, dz, 300.0)
+  if hit and hit.node then
+    for uid, p in pairs(parts) do
+      if p.node and p.node.id == hit.node.id then return uid end
+    end
+  end
+  -- Fallback: nearest projected center (small parts between big ones).
   local best, best_d = nil, px * px
   for uid, p in pairs(parts) do
     local sx, sy, on = screen_of(p.x, p.y, p.z)
@@ -181,6 +190,13 @@ local function part_under_cursor(px)
     end
   end
   return best
+end
+
+-- In-game telegraphs (draw.* — always visible, unlike the editor's debug
+-- gizmo layer). Rings mark attach nodes; boxes outline parts.
+local function outline(p, r, g, b, a)
+  draw.box(p.x, p.y, p.z, p.def.rx + 0.06, p.def.h * 0.5 + 0.06, p.def.rz + 0.06,
+           p.yaw or 0, r, g, b, a or 1.0)
 end
 
 -- The best FREE attach node for the current ghost (nearest to the cursor on
@@ -400,31 +416,73 @@ function update(node, dt)
       ghost.node.x, ghost.node.y, ghost.node.z = x, y, z
     end
 
-    -- Placement legality + telegraph: green = attach, blue = free spot OK
-    -- (first part / ALT), red = refused.
+    -- Telegraphs (in-game draw.* layer): EVERY free attach node shows as a
+    -- ring while a part is in hand; the captured one goes bright green with a
+    -- tie line; carried stacks get amber outlines.
     local exclude = nil
     if ghost.carried then
       exclude = {}
-      for _, m in ipairs(ghost.carried) do exclude[m.uid] = true end
+      for _, m in ipairs(ghost.carried) do
+        exclude[m.uid] = true
+        local cp = parts[m.uid]
+        if cp then outline(cp, 1.0, 0.75, 0.3, 0.9) end
+      end
+    end
+    do
+      local occupied_top, occupied_bottom = {}, {}
+      for _, p in pairs(parts) do
+        if p.parent and parts[p.parent] and not (exclude and exclude[p.parent]) then
+          if p.y >= parts[p.parent].y then occupied_top[p.parent] = true
+          else occupied_bottom[p.parent] = true end
+        end
+      end
+      for uid, p in pairs(parts) do
+        if not (exclude and exclude[uid]) then
+          if p.def.top and ghost.def.bottom and not occupied_top[uid] then
+            draw.ring(p.x, p.y + p.def.h * 0.5, p.z, 0, 1, 0, 0.3, 0.35, 0.85, 1.0, 0.8)
+          end
+          if p.def.bottom and ghost.def.top and not occupied_bottom[uid] then
+            draw.ring(p.x, p.y - p.def.h * 0.5, p.z, 0, 1, 0, 0.3, 0.35, 0.85, 1.0, 0.8)
+          end
+        end
+      end
     end
     local free_ok = (partCount == 0) or (ghost.carried and #ghost.carried >= partCount)
         or input.key("alt")
     local can_place, why
     if snap then
       can_place = true
-      gizmo.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4)
-      gizmo.sphere(snap.x, snap.y, snap.z, 0.16, 0.3, 1.0, 0.4)
+      draw.line(x, y, z, snap.x, snap.y, snap.z, 0.3, 1.0, 0.4, 1.0)
+      draw.ring(snap.x, snap.y, snap.z, 0, 1, 0, 0.4, 0.3, 1.0, 0.4, 1.0)
     elseif free_ok then
       if overlaps(ghost.def, x, y, z, exclude) then
         can_place, why = false, "overlapping — find clear ground"
-        gizmo.sphere(x, y, z, 0.3, 1.0, 0.25, 0.2)
+        draw.sphere(x, y, z, 0.35, 1.0, 0.25, 0.2, 1.0)
       else
         can_place = true
-        gizmo.sphere(x, y, z, 0.2, 0.4, 0.7, 1.0)
+        draw.ring(x, y - ghost.def.h * 0.5, z, 0, 1, 0, 0.35, 0.4, 0.7, 1.0, 1.0)
       end
     else
       can_place, why = false, nil -- routine: aim at an attach node
-      gizmo.sphere(x, y, z, 0.3, 1.0, 0.25, 0.2)
+      draw.sphere(x, y, z, 0.35, 1.0, 0.25, 0.2, 1.0)
+    end
+
+    -- DEL with a part in hand scraps EVERYTHING being carried.
+    if input.pressed("delete") or input.pressed("del") then
+      if ghost.carried then
+        local datas = {}
+        for _, m in ipairs(ghost.carried) do
+          local d = remove_part(m.uid)
+          if d then datas[#datas + 1] = d end
+        end
+        push_undo({ type = "scrap", parts = datas })
+        hint("scrapped " .. #datas .. " carried part(s) — CTRL+Z to undo", 2.5)
+      elseif ghost.node then
+        destroy(ghost.node)
+        hint(HINT_IDLE, 0.0); hint_t = 0
+      end
+      ghost = nil
+      return
     end
 
     if input.pressed("r") then
@@ -473,7 +531,7 @@ function update(node, dt)
         grab_last = { x = gx, z = gz }
       end
     end
-    gizmo.sphere(centerX, centerY, centerZ, 0.35, 0.4, 0.8, 1.0)
+    draw.ring(centerX, params.floor_y + 0.02, centerZ, 0, 1, 0, 1.2, 0.4, 0.8, 1.0, 1.0)
     if (clicked and not cam_busy) or input.pressed("escape") or input.pressed("g") then
       grab_mode = false
       hint(HINT_IDLE, 0.0); hint_t = 0
@@ -485,7 +543,11 @@ function update(node, dt)
   hover_uid = (not cam_busy) and part_under_cursor(70) or nil
   if hover_uid then
     local p = parts[hover_uid]
-    gizmo.sphere(p.x, p.y, p.z, math.max(p.def.rx, p.def.h * 0.5) + 0.12, 0.55, 0.85, 1.0)
+    -- Selection outline: the hovered part bright, the stack it would carry dim.
+    outline(p, 0.55, 0.85, 1.0, 1.0)
+    for u in pairs(subtree(hover_uid)) do
+      if u ~= hover_uid and parts[u] then outline(parts[u], 0.55, 0.85, 1.0, 0.35) end
+    end
     if clicked then
       pickup(hover_uid)
       return

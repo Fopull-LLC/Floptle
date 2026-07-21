@@ -4,11 +4,10 @@
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
-            scale: (1.0, 0.22, 1.0),
+            scale: (1.02, 0.5, 1.02),
         ),
-        matter: Primitive(
-            shape: Cube,
-            color: (0.95, 0.55, 0.15),
+        matter: Mesh(
+            asset_path: "models/space-kit/rocket_fuelA.glb",
         ),
         scripts: [],
         rigidbody: Some((
@@ -16,7 +15,7 @@
             mode: Kinematic,
             radius: 0.5,
             height: 2.0,
-            half_extents: (0.5, 0.11, 0.5),
+            half_extents: (0.51, 0.125, 0.51),
             restitution: 0.05,
             friction: 0.6,
             gravity: true,

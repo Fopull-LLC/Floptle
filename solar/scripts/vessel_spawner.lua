@@ -70,12 +70,26 @@ local function spawn_parts(vessel, bp, pitch, roll)
   end
 end
 
+-- The spawn WAITS for solid ground: at scene start the pad's terrain may not
+-- be streamed in yet — spawning immediately drops the vessel through the
+-- world and it's simply gone (Ty's "didn't bring my ship with me"). We poll a
+-- downward raycast beside the pad until it hits, then assemble.
+local want_spawn = false
+local bp = nil
+local wait_t = 0.0
+
 function start(node)
   if save.get("shipyard.launch") ~= 1 then return end
   save.set("shipyard.launch", 0)
-  local bp = save.get("shipyard.blueprint")
+  bp = save.get("shipyard.blueprint")
   if not bp or not bp.parts then return end
+  want_spawn = true
+  log("launch: vessel blueprint aboard — waiting for the pad terrain…")
+end
 
+local function try_spawn()
+  -- Pad pos read FRESH each attempt (the game manager can relocate things
+  -- while the world loads).
   local pad = find("Ship")
   local px, py, pz = 0, 20, 0
   if pad then px, py, pz = pad.x, pad.y, pad.z end
@@ -94,17 +108,25 @@ function start(node)
   if sl < 1e-3 then sx, sy, sz, sl = 0, 0, 1, 1 end
   sx, sy, sz = sx / sl, sy / sl, sz / sl
 
-  -- Aim point beside the pad, then find the actual ground under it.
+  -- Aim beside the pad; only proceed once the ground actually answers.
   local ax = px + sx * params.offset + ux * 6
   local ay = py + sy * params.offset + uy * 6
   local az = pz + sz * params.offset + uz * 6
-  local gx, gy, gz = ax, ay, az
   local hit = raycast(ax, ay, az, -ux, -uy, -uz, 220.0)
-  if hit and hit.distance then
-    gx = ax - ux * (hit.distance - params.clear)
-    gy = ay - uy * (hit.distance - params.clear)
-    gz = az - uz * (hit.distance - params.clear)
+  if not (hit and hit.distance) then
+    if wait_t > 15.0 then
+      -- Give up waiting: spawn right at the pad, slightly up — the pad
+      -- itself is solid wherever the Ship node lives.
+      hit = { distance = 6.0 - params.clear }
+      ax, ay, az = px + ux * 6, py + uy * 6, pz + uz * 6
+      log("launch: terrain never answered — spawning AT the pad")
+    else
+      return false
+    end
   end
+  local gx = ax - ux * (hit.distance - params.clear)
+  local gy = ay - uy * (hit.distance - params.clear)
+  local gz = az - uz * (hit.distance - params.clear)
 
   local pitch, roll = up_angles(ux, uy, uz)
   spawn("Vessel", vec3(gx, gy, gz), function(v)
@@ -112,4 +134,12 @@ function start(node)
     vessel_node = v
     spawn_parts(v, bp, pitch, roll)
   end)
+  log("launch: vessel spawning beside the pad")
+  return true
+end
+
+function update(node, dt)
+  if not want_spawn then return end
+  wait_t = wait_t + dt
+  if try_spawn() then want_spawn = false end
 end

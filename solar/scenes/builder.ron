@@ -1,5 +1,18 @@
 (
     name: "builder",
+    lighting: (
+        direction: (0.3, 0.85, 0.42),
+        color: (1.0, 0.97, 0.9),
+        ambient: (0.34, 0.35, 0.4),
+        intensity: 0.85,
+        shadows: true,
+        shadow_softness: 0.5,
+        shadow_strength: 0.55,
+        shadow_tint: (0.05, 0.06, 0.1),
+        shadow_quantize: 0,
+        shadow_dither: false,
+        shadow_distance: 120.0,
+    ),
     nodes: [
         (
             name: "Post Processing",
@@ -11,13 +24,13 @@
             matter: PostProcess(
                 enabled: true,
                 bloom: true,
-                bloom_threshold: 0.35,
-                bloom_intensity: 0.3,
+                bloom_threshold: 0.55,
+                bloom_intensity: 0.22,
                 vignette: true,
-                vignette_strength: 0.45,
-                vignette_radius: 0.5,
+                vignette_strength: 0.4,
+                vignette_radius: 0.55,
                 ao: ScreenSpace,
-                ao_strength: 1.0,
+                ao_strength: 1.1,
                 ao_radius: 0.7,
                 posterize_bands: 0,
                 posterize_dither: false,
@@ -27,7 +40,7 @@
         (
             name: "Builder Camera",
             transform: (
-                translation: (0.0, 3.2, 10.0),
+                translation: (0.0, 3.4, 11.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -44,15 +57,15 @@
             ],
         ),
         (
-            name: "Work Floor",
+            name: "Hangar Floor",
             transform: (
-                translation: (0.0, -0.9, 0.0),
+                translation: (0.0, -0.5, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (46.0, 1.0, 46.0),
+                scale: (48.0, 1.0, 48.0),
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.16, 0.18, 0.21),
+                color: (0.2, 0.22, 0.26),
             ),
             scripts: [],
         ),
@@ -61,11 +74,214 @@
             transform: (
                 translation: (0.0, 0.05, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (7.0, 0.12, 7.0),
+                scale: (8.0, 0.12, 8.0),
             ),
             matter: Primitive(
                 shape: Cube,
-                color: (0.24, 0.27, 0.31),
+                color: (0.3, 0.33, 0.38),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Wall Back",
+            transform: (
+                translation: (0.0, 6.5, -24.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (48.0, 14.0, 1.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.16, 0.19, 0.24),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Wall Left",
+            transform: (
+                translation: (-24.0, 6.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 14.0, 48.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.16, 0.19, 0.24),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Wall Right",
+            transform: (
+                translation: (24.0, 6.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 14.0, 48.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.16, 0.19, 0.24),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Ceiling",
+            transform: (
+                translation: (0.0, 13.5, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (48.0, 1.0, 48.0),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.13, 0.15, 0.19),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Light Strip",
+            transform: (
+                translation: (0.0, 12.9, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (30.0, 0.15, 2.2),
+            ),
+            matter: Primitive(
+                shape: Cube,
+                color: (0.95, 0.93, 0.85),
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Hangar Light A",
+            transform: (
+                translation: (-9.0, 11.0, -6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (1.0, 0.96, 0.88),
+                intensity: 1.5,
+                range: 26.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Hangar Light B",
+            transform: (
+                translation: (9.0, 11.0, -6.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (1.0, 0.96, 0.88),
+                intensity: 1.5,
+                range: 26.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Hangar Light C",
+            transform: (
+                translation: (0.0, 9.0, 12.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: PointLight(
+                color: (0.85, 0.9, 1.0),
+                intensity: 1.2,
+                range: 30.0,
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Robot Arm A",
+            transform: (
+                translation: (-18.0, 0.1, -18.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 3.0, 3.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/robot-arm-a.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Robot Arm B",
+            transform: (
+                translation: (18.0, 0.1, -18.0),
+                rotation: (0.0, -0.383, 0.0, 0.924),
+                scale: (3.0, 3.0, 3.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/robot-arm-b.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Screens",
+            transform: (
+                translation: (-21.5, 2.0, -8.0),
+                rotation: (0.0, 0.707, 0.0, 0.707),
+                scale: (4.0, 4.0, 4.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/screen-panel-wide.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Structure Tall",
+            transform: (
+                translation: (21.0, 0.1, -12.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.5, 3.5, 3.5),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/structure-tall.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Pipes",
+            transform: (
+                translation: (0.0, 12.2, -22.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (6.0, 6.0, 6.0),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/pipe-large-long.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Barrels",
+            transform: (
+                translation: (-19.5, 0.1, 10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.5, 2.5, 2.5),
+            ),
+            matter: Mesh(
+                asset_path: "models/space-kit/barrels.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Barrel Rail",
+            transform: (
+                translation: (20.0, 0.1, 6.0),
+                rotation: (0.0, 1.0, 0.0, 0.0),
+                scale: (2.5, 2.5, 2.5),
+            ),
+            matter: Mesh(
+                asset_path: "models/space-kit/barrels_rail.glb",
+            ),
+            scripts: [],
+        ),
+        (
+            name: "Crates",
+            transform: (
+                translation: (-20.0, 0.1, -13.5),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.8, 2.8, 2.8),
+            ),
+            matter: Mesh(
+                asset_path: "models/factory/box-large.glb",
             ),
             scripts: [],
         ),
@@ -111,7 +327,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Free(
                     pos: (18, 12),
@@ -136,7 +352,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Free(
                     pos: (18, 40),
@@ -161,16 +377,16 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Free(
                     pos: (18, 694),
                 ),
-                size: (Fixed(1100), Fixed(20)),
+                size: (Fixed(1160), Fixed(20)),
                 text: Some((
                     text: "click part = pick up   ·   R rotate   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus",
                     size: 12.5,
-                    color: (0.5, 0.6, 0.7, 1.0),
+                    color: (0.55, 0.65, 0.75, 1.0),
                     align: Start,
                     valign: Center,
                     fit: false,
@@ -186,7 +402,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Pin(
                     anchor: Right,
@@ -210,7 +426,7 @@
             ),
             matter: Empty,
             scripts: [],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (14, 10),
@@ -241,7 +457,7 @@
                     params: [("part", 1.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 38),
@@ -279,7 +495,7 @@
                     params: [("part", 2.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 90),
@@ -317,7 +533,7 @@
                     params: [("part", 3.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 142),
@@ -355,7 +571,7 @@
                     params: [("part", 4.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 194),
@@ -393,7 +609,7 @@
                     params: [("part", 5.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 246),
@@ -431,7 +647,7 @@
                     params: [("part", 6.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 298),
@@ -469,7 +685,7 @@
                     params: [("part", 7.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 350),
@@ -507,7 +723,7 @@
                     params: [("part", 8.0)],
                 ),
             ],
-            parent: Some(9),
+            parent: Some(25),
             ui: Some((
                 place: Free(
                     pos: (12, 402),
@@ -545,7 +761,7 @@
                     params: [("action", 1.0)],
                 ),
             ],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Free(
                     pos: (18, 620),
@@ -583,7 +799,7 @@
                     params: [("action", 2.0)],
                 ),
             ],
-            parent: Some(5),
+            parent: Some(21),
             ui: Some((
                 place: Free(
                     pos: (186, 620),

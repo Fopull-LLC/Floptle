@@ -227,6 +227,24 @@ root (`spawn(part, pos, fn, vesselNode)`), then call
 `assembly.rebuild(vesselNode)` once — the compound re-gathers from the
 root's current descendants. That's the whole blueprint-spawner pattern.
 
+### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
+
+They look similar but serve different masters:
+
+- **`draw.*` is part of your GAME** — always rendered in the game view, no
+  editor toggle involved. Attach-point markers, selection outlines, range
+  rings, orbit conics: player-facing linework. Immediate mode (re-issue
+  every frame/tick you want it visible), world space, alpha supported.
+  - `draw.line(x1,y1,z1, x2,y2,z2, r,g,b [,a])`
+  - `draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a])` — a circle around
+    the normal `n`
+  - `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` — three rings
+  - `draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a])` — wireframe box
+- **`gizmo.*` is for DEBUGGING** (`gizmo.line/ray/sphere/point`) — drawn
+  only while the editor's viewport gizmos toggle (and its Script filter)
+  is on, exactly like collider/light overlays. Ground-check rays, AI
+  targets, physics probes: developer eyes only, never the player's.
+
 ## 5. `input` — keyboard & mouse
 
 Available while playing.
