@@ -1,9 +1,10 @@
 //! The collision world: anchored (large-world-safe) static colliders, the
 //! dynamic body set, fixed-step advance, and raycasts.
 
-use floptle_core::math::{DVec3, Vec3};
+use floptle_core::math::{DVec3, Quat, Vec3};
 
 use crate::body::{axis, set_axis, Body, BodyShape, Contact};
+use crate::compound::{Compound, CompoundContact};
 use crate::gravity::{GravityField, GravitySource};
 use crate::shapes::CollisionShape;
 
@@ -87,6 +88,12 @@ pub struct PhysicsWorld {
     /// `(body index, kinematic entity, point, normal)` — cleared each step,
     /// consumed by the sim's touch-event diff.
     pub kin_contacts: Vec<(usize, u32, Vec3, Vec3)>,
+    /// Compound rigid bodies (multi-shape 6-DOF assemblies — see `compound.rs`),
+    /// stepped alongside `bodies` with the same collider set and layer matrix.
+    pub compounds: Vec<Compound>,
+    /// Contacts compounds resolved on the most recent step, attributed to the
+    /// shape that took them (cleared each step, sim frame).
+    pub compound_contacts: Vec<CompoundContact>,
 }
 
 impl Default for PhysicsWorld {
@@ -100,6 +107,8 @@ impl Default for PhysicsWorld {
             matrix: [!0u32; 32],
             kin_hulls: Vec::new(),
             kin_contacts: Vec::new(),
+            compounds: Vec::new(),
+            compound_contacts: Vec::new(),
         }
     }
 }
@@ -319,6 +328,13 @@ impl PhysicsWorld {
             b.prev_pos += delta;
             b.home += delta;
         }
+        for c in &mut self.compounds {
+            c.pos += delta;
+            c.prev_pos += delta;
+        }
+        for cc in &mut self.compound_contacts {
+            cc.point += delta;
+        }
         for c in &mut self.contacts {
             c.point += delta;
         }
@@ -357,8 +373,152 @@ impl PhysicsWorld {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
         self.contacts.clear();
         self.kin_contacts.clear();
+        self.compound_contacts.clear();
         for bi in 0..self.bodies.len() {
             self.step_body(bi, dt);
+        }
+        for ci in 0..self.compounds.len() {
+            self.step_compound(ci, dt);
+        }
+    }
+
+    pub fn add_compound(&mut self, c: Compound) -> usize {
+        self.compounds.push(c);
+        self.compounds.len() - 1
+    }
+
+    /// Step ONE compound by `dt` — same solo-equals-full contract as
+    /// [`Self::step_body`] (compounds couple to nothing dynamic). Does NOT
+    /// clear `compound_contacts`; the frame driver owns that.
+    ///
+    /// Motion model: semi-implicit Euler for both linear and angular state
+    /// (force/torque accumulators + gravity through the CoM), then two
+    /// relaxation passes where every penetrating shape sample applies a
+    /// POSITIONAL correction and a VELOCITY impulse through the generalized
+    /// inverse mass `1/m + ((I⁻¹(r×n))×r)·n` — the standard rigid contact
+    /// response, which is what lets an off-center contact torque the body.
+    pub fn step_compound(&mut self, ci: usize, dt: f32) {
+        let dt = dt.clamp(0.0, 0.1);
+        if !self.compounds[ci].active {
+            return;
+        }
+        {
+            let c = &mut self.compounds[ci];
+            c.prev_pos = c.pos;
+            c.prev_orient = c.orient;
+            let g = if c.use_gravity {
+                self.gravity.accel_at(c.pos, &self.colliders)
+            } else {
+                Vec3::ZERO
+            };
+            c.vel += (g + c.force / c.mass) * dt;
+            let ang_acc = c.world_inv_inertia() * c.torque;
+            c.ang_vel += ang_acc * dt;
+            c.force = Vec3::ZERO;
+            c.torque = Vec3::ZERO;
+
+            c.pos += c.vel * dt;
+            if c.ang_vel.length_squared() > 1e-12 {
+                c.orient = (Quat::from_scaled_axis(c.ang_vel * dt) * c.orient).normalize();
+            }
+            c.grounded = false;
+        }
+
+        let row = self.matrix[self.compounds[ci].layer as usize];
+        let g_dir = {
+            let g = self.gravity.accel_at(self.compounds[ci].pos, &self.colliders);
+            if g.length_squared() > 1e-6 { Some(-g.normalize()) } else { None }
+        };
+        for _pass in 0..2 {
+            // Explicit indices throughout: each resolve moves the body, so the
+            // sample position is recomputed fresh for every (shape, sample,
+            // collider) triple — a corrected corner must not be re-pushed from
+            // its stale pre-correction position.
+            for si in 0..self.compounds[ci].shapes.len() {
+                let n_samples = self.compounds[ci].shape_samples(si).1;
+                for k in 0..n_samples {
+                    for coli in 0..self.colliders.len() {
+                        if (row >> self.colliders[coli].layer) & 1 == 0
+                            || self.colliders[coli].sensor
+                        {
+                            continue;
+                        }
+                        let (centers, _, radius) = self.compounds[ci].shape_samples(si);
+                        let p = centers[k];
+                        let pen = radius - self.colliders[coli].distance(p);
+                        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                        if !(pen > 0.0) {
+                            continue;
+                        }
+                        let n = self.colliders[coli].normal(p);
+                        let c = &mut self.compounds[ci];
+                        let contact_pt = p - n * radius;
+                        let r = contact_pt - c.pos;
+                        let inv_i = c.world_inv_inertia();
+                        let ang = inv_i * r.cross(n);
+                        let w = 1.0 / c.mass + ang.cross(r).dot(n);
+                        // Also rejects NaN (a degenerate collider normal).
+                        if !(w.is_finite() && w > 1e-9) {
+                            continue;
+                        }
+                        // Positional: push the contact point out along n.
+                        let lambda = pen / w;
+                        c.pos += n * (lambda / c.mass);
+                        let rot_corr = inv_i * r.cross(n * lambda);
+                        if rot_corr.length_squared() > 1e-14 {
+                            c.orient = (Quat::from_scaled_axis(rot_corr) * c.orient).normalize();
+                        }
+                        // Velocity: normal impulse (restitution) + friction.
+                        let v_p = c.vel + c.ang_vel.cross(r);
+                        let vn = v_p.dot(n);
+                        let mut j = 0.0;
+                        if vn < 0.0 {
+                            j = -(1.0 + c.restitution) * vn / w;
+                            c.vel += n * (j / c.mass);
+                            c.ang_vel += inv_i * r.cross(n * j);
+                            // Coulomb-clamped tangential impulse.
+                            let v_p = c.vel + c.ang_vel.cross(r);
+                            let vt = v_p - n * v_p.dot(n);
+                            let vt_len = vt.length();
+                            if vt_len > 1e-6 {
+                                let t = vt / vt_len;
+                                let ang_t = inv_i * r.cross(t);
+                                let wt = 1.0 / c.mass + ang_t.cross(r).dot(t);
+                                let jt = (vt_len / wt).min(c.friction * j);
+                                c.vel -= t * (jt / c.mass);
+                                c.ang_vel -= inv_i * r.cross(t * jt);
+                            }
+                        }
+                        if let Some(up) = g_dir
+                            && n.dot(up) > 0.5
+                        {
+                            c.grounded = true;
+                        }
+                        let shape_id = c.shapes[si].id;
+                        self.compound_contacts.push(CompoundContact {
+                            compound: ci,
+                            shape: si,
+                            shape_id,
+                            collider: coli,
+                            point: contact_pt,
+                            normal: n,
+                            impulse: j,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Rest threshold: a grounded compound whose residual motion is below
+        // perceptibility comes fully to rest. Without this, corner-contact
+        // micro-impulses make a parked assembly creep ~cm/s forever. Gravity
+        // re-adds ~g·dt (≈0.08 at 120 Hz) each step BEFORE contacts resolve,
+        // so anything genuinely sliding (a slope, ice) stays above the
+        // threshold and keeps sliding — only true rest gets clamped.
+        let c = &mut self.compounds[ci];
+        if c.grounded && c.vel.length() < 0.05 && c.ang_vel.length() < 0.05 {
+            c.vel = Vec3::ZERO;
+            c.ang_vel = Vec3::ZERO;
         }
     }
 
