@@ -28,6 +28,12 @@ pub struct AssemblyInfo {
     pub mass: f32,
     /// Center of mass, WORLD space.
     pub com: [f64; 3],
+    /// The assembly ORIGIN (the root's authored pose), WORLD space — the
+    /// PHYSICS-fresh anchor for force-application math. Node transforms lag
+    /// a rails carry behind the sim inside `fixedUpdate`; computing engine
+    /// offsets from the node pose applied thrust ~a tick's orbit off the
+    /// real hull (a constant spurious torque on orbiting worlds).
+    pub origin: [f64; 3],
     pub vel: [f32; 3],
     pub ang_vel: [f32; 3],
     pub grounded: bool,
@@ -234,6 +240,7 @@ pub(crate) fn install_assembly_api(
             let out = lua.create_table()?;
             out.set("mass", i.mass as f64)?;
             out.set("com", vec3_table(lua, i.com)?)?;
+            out.set("origin", vec3_table(lua, i.origin)?)?;
             out.set(
                 "vel",
                 vec3_table(lua, [i.vel[0] as f64, i.vel[1] as f64, i.vel[2] as f64])?,

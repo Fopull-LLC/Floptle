@@ -10,7 +10,9 @@
 --   W/S      pitch (S pulls the nose UP)   A/D  yaw   Q/E  roll
 --   T        SAS on/off    1-7  hold: 1 stability · 2 prograde · 3 retrograde
 --            · 4 normal · 5 anti-nml · 6 radial-in · 7 radial-out
---   M        map (the scout ship's map focuses YOU — riding the pod counts)
+--   . / ,    time-warp up / down (KSP rules: coasting or parked only; any
+--            stick input drops to 1×; the vessel rides exact Kepler rails)
+--   M        map (focus + trajectories follow THIS craft while piloted)
 --
 -- Launching from the builder seats you in the pod from the first frame, with
 -- the vessel CLAMPED (anchored) to the launchpad until you release. Fuel pools
@@ -29,10 +31,12 @@ defaults = {
 piloting = false
 throttle = 0.0
 fuel = 0.0
--- Where the camera should orbit: the CAPSULE's WORLD position, republished
--- every tick (the root node sits at the stack base; a gravity-up offset
--- drifts off the hull the moment the vessel pitches). focusHeight is the
--- vessel-local fallback.
+-- Where the camera should orbit: the capsule. podL* is the pod's LOCAL
+-- offset — planet_camera composes it with the node's RENDERED pose in its
+-- own pass, so the orbit center sits on the ship the frame actually draws
+-- (a fixedUpdate world position lags the rails carry: offset + jitter).
+-- focusX/focusHeight stay published for other readers.
+podLX, podLY, podLZ = 0, 1.2, 0
 focusX, focusY, focusZ = nil, nil, nil
 focusHeight = 1.2
 sas_mode = "stability"
@@ -53,7 +57,9 @@ local boarding = false
 local astronaut, hud, hud_prompt
 local hud_t = -10.0
 local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg
-local warp_note = false
+local stage_node
+-- KSP-style warp ladder (matches the scout's).
+local WARP_STEPS = { 1, 5, 10, 50, 100, 1000, 10000 }
 
 -- ── math helpers (same conventions as the scout ship) ───────────────────────
 local function norm(x, y, z)
@@ -100,22 +106,36 @@ local function load_bp()
   table.sort(decouplers, function(a, b) return a.y < b.y end)
   fuel = fuel_cap
   focusHeight = pod.y
+  podLX, podLY, podLZ = pod.x, pod.y, pod.z
 end
 
-local function pod_world(node)
+-- The PHYSICS-FRESH base of the vessel frame. Inside fixedUpdate the node
+-- transform lags this tick's rails carry (the planet moved ~1.5 u since the
+-- node was last written) — using node coords put thrust ~a hull-width off the
+-- real engines (a constant spurious torque the SAS fought forever), and drew
+-- boarding rings beside the ship. `info.origin` is the sim's own anchor.
+local function base_of(node, info)
+  if info and info.origin then
+    return info.origin.x, info.origin.y, info.origin.z
+  end
+  return node.x, node.y, node.z
+end
+
+local function pod_world(node, info)
   local rx, up, rz = basis(node)
-  return node.x + rx.x * pod.x + up.x * pod.y + rz.x * pod.z,
-         node.y + rx.y * pod.x + up.y * pod.y + rz.y * pod.z,
-         node.z + rx.z * pod.x + up.z * pod.y + rz.z * pod.z
+  local bx, by, bz = base_of(node, info)
+  return bx + rx.x * pod.x + up.x * pod.y + rz.x * pod.z,
+         by + rx.y * pod.x + up.y * pod.y + rz.y * pod.z,
+         bz + rx.z * pod.x + up.z * pod.y + rz.z * pod.z
 end
 
 -- Boarding reach: distance to the vessel's SPINE (base → pod), not to the pod
 -- point itself — a pod on top of a tall stack is 6+ units off the ground, and
 -- demanding you touch it made re-boarding physically impossible. Standing at
 -- the rocket counts as climbing the ladder.
-local function board_dist(node, a)
-  local px, py, pz = pod_world(node)
-  local sx, sy, sz = node.x, node.y, node.z -- spine base (stack bottom)
+local function board_dist(node, a, info)
+  local px, py, pz = pod_world(node, info)
+  local sx, sy, sz = base_of(node, info) -- spine base (stack bottom)
   local dx, dy, dz = px - sx, py - sy, pz - sz
   local len2 = dx * dx + dy * dy + dz * dz
   local t = 0.0
@@ -134,6 +154,20 @@ local function set_hud(text)
   local el = hud:getcomponent("UiElement")
   if el then el.visible = text ~= nil end
   if text then hud.text = text end
+end
+
+-- The FLIGHT STAGE LIST (left side): every remaining stage bottom-up with
+-- its engines, the ACTIVE one marked — SPACE fires the next separation.
+local stage_last = nil
+local function set_stage_list(text)
+  if not stage_node then stage_node = find("Stage List") end
+  if not stage_node then return end
+  local el = stage_node:getcomponent("UiElement")
+  if el then el.visible = text ~= nil end
+  if text and text ~= stage_last then
+    stage_node.text = text
+    stage_last = text
+  end
 end
 
 local prompt_last = nil
@@ -371,7 +405,8 @@ function fixedUpdate(node, dt)
     end
   end
 
-  local px, py, pz = pod_world(node)
+  local px, py, pz = pod_world(node, info)
+  local bx, by, bz = base_of(node, info)
   local rx, up, rz = basis(node)
   -- Ship frame: nose = stack axis (+Y), fwd = −Z column, right = fwd × nose.
   local nx, ny, nz = up.x, up.y, up.z
@@ -399,7 +434,8 @@ function fixedUpdate(node, dt)
       astronaut.visible = true
       set_hud(nil)
       set_navball(false)
-    elseif board_dist(node, astronaut) <= params.board_range then
+      set_stage_list(nil)
+    elseif board_dist(node, astronaut, info) <= params.board_range then
       piloting = true
       astronaut.visible = false
       set_navball(true)
@@ -421,9 +457,11 @@ function fixedUpdate(node, dt)
   end
 
   if not piloting then
+    -- (The hatch RING is drawn in lateUpdate — the camera pass — where the
+    -- node pose matches what this frame renders; drawing it here put it a
+    -- rails-carry beside the visible ship.)
     if astronaut and astronaut.visible
-      and board_dist(node, astronaut) <= params.board_range + 1.4 then
-      draw.ring(px, py, pz, up.x, up.y, up.z, 0.75, 0.3, 0.95, 1.0, 0.9)
+      and board_dist(node, astronaut, info) <= params.board_range + 1.4 then
       set_prompt("F — board")
     else
       set_prompt("")
@@ -436,14 +474,46 @@ function fixedUpdate(node, dt)
     return
   end
 
-  -- Assembly vessels fly REALTIME (no warp coasting for compounds yet): if
-  -- anything engaged time-warp while we're aboard, drop it — at warp the
-  -- planet's rails outrun realtime physics and the ship gets left behind.
-  if space.warp() > 1.001 then
-    space.warp(1)
-    if not warp_note then
-      warp_note = true
-      log("time-warp is not available aboard a built vessel yet — dropped to 1×")
+  -- ---- time warp (compounds coast on their own Kepler rails now) ---------
+  local warp = space.warp()
+  if input.pressed(".") or input.pressed(",") then
+    local dir = input.pressed(".") and 1 or -1
+    local idx = 1
+    for i, w in ipairs(WARP_STEPS) do
+      if warp >= w - 0.5 then idx = i end
+    end
+    local nxt = WARP_STEPS[math.max(1, math.min(#WARP_STEPS, idx + dir))]
+    if nxt > warp then
+      -- KSP rules: no thrust, and either parked or high enough that the
+      -- conic can't clip terrain this instant.
+      local alt_ok = info.grounded or info.anchored
+      local d0 = space.dominant(node.x, node.y, node.z)
+      local b0 = d0 and space.body(d0)
+      if not alt_ok and b0 then
+        local rr = math.sqrt((bx - b0.x) ^ 2 + (by - b0.y) ^ 2 + (bz - b0.z) ^ 2)
+        alt_ok = rr - b0.radius > 40.0
+      end
+      if throttle > 0.01 then
+        log("warp locked: cut throttle first")
+        nxt = warp
+      elseif not alt_ok then
+        log("warp locked: too low")
+        nxt = warp
+      end
+    end
+    if nxt ~= warp then
+      space.warp(nxt)
+      warp = nxt
+    end
+  end
+  -- Hands on the stick cancel warp — the rails own the ship up there.
+  if warp > 1.001 then
+    local touched = input.key("shift") or input.key("ctrl") or input.key("z")
+      or input.key("w") or input.key("a") or input.key("s") or input.key("d")
+      or input.key("q") or input.key("e")
+    if touched then
+      space.warp(1)
+      warp = 1
     end
   end
 
@@ -474,9 +544,11 @@ function fixedUpdate(node, dt)
   if throttle > 0 and not info.anchored and fuel > 0 then
     for _, e in ipairs(engines) do
       if e.y < cut - 0.01 then
-        local ex = node.x + rx.x * e.x + up.x * e.y + rz.x * e.z
-        local ey = node.y + rx.y * e.x + up.y * e.y + rz.y * e.z
-        local ez = node.z + rx.z * e.x + up.z * e.y + rz.z * e.z
+        -- Physics-fresh base: thrust lands ON the hull, not a rails-carry
+        -- beside it (the old node-pose math was a constant torque bias).
+        local ex = bx + rx.x * e.x + up.x * e.y + rz.x * e.z
+        local ey = by + rx.y * e.x + up.y * e.y + rz.y * e.z
+        local ez = bz + rx.z * e.x + up.z * e.y + rz.z * e.z
         local f = e.thrust * throttle
         assembly.forceAt(node, vec3(nx * f, ny * f, nz * f), vec3(ex, ey, ez))
       end
@@ -537,7 +609,7 @@ function fixedUpdate(node, dt)
       dwx, dwy, dwz = 0, 0, 0
     end
   end
-  if not info.anchored then
+  if not info.anchored and warp <= 1.001 then
     assembly.torque(node, vec3(
       (dwx - w.x) * params.torque,
       (dwy - w.y) * params.torque,
@@ -592,11 +664,12 @@ function fixedUpdate(node, dt)
     local lines = {}
     local bars = math.floor(throttle * 10 + 0.5)
     local twr = (info.mass > 0) and total_thrust / (info.mass * 9.81) or 0
-    lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   TWR %.2f%s%s",
+    lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   TWR %.2f%s%s%s",
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
       SAS_LABEL[sas_mode] or "?", twr,
       info.anchored and "   CLAMPED" or (info.grounded and "   LANDED" or ""),
-      #decouplers > 0 and string.format("   STAGES %d", #decouplers) or "")
+      #decouplers > 0 and string.format("   STAGES %d", #decouplers) or "",
+      warp > 1.001 and string.format("   ⏩ WARP %d×", warp) or "")
     if fuel_cap > 0 then
       local fbars = math.floor(fuel / fuel_cap * 10 + 0.5)
       local ftag = ""
@@ -637,7 +710,44 @@ function fixedUpdate(node, dt)
       end
     end
     lines[#lines + 1] =
-      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold modes·SPACE stage·M map"
+      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold·SPACE stage·./, warp·M map"
     set_hud(table.concat(lines, "\n"))
+
+    -- The stage list (matches the flight model exactly: the window between
+    -- consecutive decouplers, active stage first, SPACE fires the next cut).
+    local sl = { "STAGES — SPACE fires next" }
+    for k = 0, #decouplers do
+      local lo = (k == 0) and -math.huge or decouplers[k].y
+      local hi = decouplers[k + 1] and decouplers[k + 1].y or math.huge
+      local n_eng, th = 0, 0
+      for _, e in ipairs(engines) do
+        if e.y > lo + 0.01 and e.y < hi - 0.01 then
+          n_eng = n_eng + 1
+          th = th + e.thrust
+        end
+      end
+      local tag = (k == 0) and "▶" or " "
+      if n_eng > 0 then
+        sl[#sl + 1] = string.format("%s S%d   %d engine%s   %d kN",
+          tag, k + 1, n_eng, n_eng == 1 and "" or "s", th)
+      else
+        sl[#sl + 1] = string.format("%s S%d   (no engines)", tag, k + 1)
+      end
+    end
+    set_stage_list(table.concat(sl, "\n"))
   end
+end
+
+-- Camera-pass drawing: the hatch ring must sit on the ship THE FRAME RENDERS
+-- (lateUpdate reads post-writeback poses) — drawn from fixedUpdate it floats
+-- a rails-carry beside the hull on any orbiting world.
+function lateUpdate(node, dt)
+  if piloting or not astronaut or not astronaut.visible then return end
+  local info = assembly.info(node)
+  if board_dist(node, astronaut, info) > params.board_range + 1.4 then return end
+  local rx, up, rz = basis(node)
+  local px = node.x + rx.x * pod.x + up.x * pod.y + rz.x * pod.z
+  local py = node.y + rx.y * pod.x + up.y * pod.y + rz.y * pod.z
+  local pz = node.z + rx.z * pod.x + up.z * pod.y + rz.z * pod.z
+  draw.ring(px, py, pz, up.x, up.y, up.z, 0.75, 0.3, 0.95, 1.0, 0.9)
 end

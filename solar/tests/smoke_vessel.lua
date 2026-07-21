@@ -144,9 +144,13 @@ end
 API.assembly = {
   info = function(node)
     if not (asm and asm.root == node) then return nil end
+    -- `origin` is the PHYSICS-fresh pose: model the rails-carry gap by
+    -- reporting the node pos PLUS this tick's carry delta — controllers must
+    -- base force/pod math on it, never on the (stale) node coords.
     return {
       mass = 8.0,
-      com = { x = node.x, y = node.y, z = node.z },
+      com = { x = node.x + asm.carry_dx, y = node.y, z = node.z },
+      origin = { x = node.x + asm.carry_dx, y = node.y, z = node.z },
       vel = { x = asm.vel.x, y = asm.vel.y, z = asm.vel.z },
       angVel = { x = 0, y = 0, z = 0 },
       grounded = asm.anchored,
@@ -157,7 +161,8 @@ API.assembly = {
   rebuild = function(node)
     local parts = {}
     for _, k in ipairs(node.kids) do parts[#parts + 1] = k.__id end
-    asm = { root = node, parts = parts, anchored = false, vel = { x = 0, y = 0, z = 0 } }
+    asm = { root = node, parts = parts, anchored = false,
+            vel = { x = 0, y = 0, z = 0 }, carry_dx = 0 }
   end,
   setAnchored = function(node, on)
     assert(asm and asm.root == node, "setAnchored before rebuild")
@@ -167,7 +172,20 @@ API.assembly = {
     assert(asm and asm.root == node, "teleport before rebuild")
     node.x, node.y, node.z = pos.x, pos.y, pos.z
   end,
-  forceAt = function() force_calls = force_calls + 1 end,
+  forceAt = function(node, force, at)
+    force_calls = force_calls + 1
+    -- The application point must be PHYSICS-consistent: computed from
+    -- info.origin (node pos + carry), never the stale node pose. An offset
+    -- of a carry-delta here was the constant SAS torque bias of round 10.
+    if asm and asm.root == node and asm.carry_dx ~= 0 then
+      local expect_x = node.x + asm.carry_dx
+      if math.abs(at.x - expect_x) > 0.5 then
+        error(string.format(
+          "forceAt point off the physics hull: at.x=%.2f, expected ~%.2f (stale node pose?)",
+          at.x, expect_x))
+      end
+    end
+  end,
   force = function() force_calls = force_calls + 1 end,
   torque = function() torque_calls = torque_calls + 1 end,
   impulseAt = function() end,
@@ -253,12 +271,20 @@ local function step(n)
     local dx = 90 * TICK
     planet.x = planet.x + dx
     planet_node.x = planet_node.x + dx
-    if asm and asm.anchored and not asm.root.parent then
-      asm.root.x = asm.root.x + dx
-    end
+    -- Model the fixedUpdate rails-carry gap: the sim carries the compound at
+    -- the TOP of the tick but the node writes back after scripts run —
+    -- info.origin is ahead of node.x by one carry delta during the script
+    -- pass, and the post-tick writeback closes it.
+    if asm then asm.carry_dx = dx end
     deliver_spawns()
     if spawner_env then call(spawner_env, "update", spawner_env.__node, TICK) end
     if controller_env then call(controller_env, "fixedUpdate", controller_env.__node, TICK) end
+    -- Post-tick writeback closes the gap, then the camera pass runs.
+    if asm then
+      asm.root.x = asm.root.x + asm.carry_dx
+      asm.carry_dx = 0
+    end
+    if controller_env then call(controller_env, "lateUpdate", controller_env.__node, TICK) end
     API.KEYS.edge = {}
   end
 end

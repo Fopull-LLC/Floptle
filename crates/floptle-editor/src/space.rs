@@ -426,6 +426,97 @@ impl Editor {
                     sim.shift_statics_of(e.index(), deltas[j]);
                 }
             }
+            let dom_of = |p: DVec3| -> Option<usize> {
+                let mut best: Option<(usize, f64)> = None;
+                for (i, sb) in sys.bodies.iter().enumerate() {
+                    if (p - DVec3::from(bodies[i].pos)).length() <= sb.soi
+                        && best.is_none_or(|(_, s)| sb.soi < s)
+                    {
+                        best = Some((i, sb.soi));
+                    }
+                }
+                best.map(|(i, _)| i)
+            };
+            // COMPOUND WARP COASTING: while warp > 1, every LIVE in-flight
+            // compound (the piloted vessel above all) snaps to its own Kepler
+            // conic, exactly like single bodies — captured on engage,
+            // evaluated analytically at rails time, velocity kept current so
+            // dropping to 1× resumes physics on-conic. Grounded/anchored
+            // craft stay realtime (contacts pin them — warping while parked
+            // is safe). SOI handoffs are tick-sampled (no bisect yet): fine
+            // at gameplay warps, noted for the exact-crossing upgrade.
+            if warping {
+                for (eid, com) in sim.compound_positions() {
+                    if self.compound_lod.contains_key(&eid) {
+                        continue; // far craft: the LOD's own conic drives it
+                    }
+                    let Some(c) = sim.compound_of(eid) else { continue };
+                    if c.anchored || c.grounded || c.vel.length_squared() < 0.01 {
+                        self.compound_coast.remove(&eid);
+                        continue;
+                    }
+                    let vel = c.vel.as_dvec3();
+                    let Some(i0) = dom_of(com) else { continue };
+                    if cb[i0].1.mu <= 0.0 {
+                        continue;
+                    }
+                    let (dk, k) = *self.compound_coast.entry(eid).or_insert_with(|| {
+                        (
+                            cb[i0].0.index(),
+                            Kepler::from_state(
+                                com - DVec3::from(bodies[i0].pos),
+                                vel,
+                                cb[i0].1.mu,
+                                t,
+                            ),
+                        )
+                    });
+                    let Some(j) = cb.iter().position(|(e, _)| e.index() == dk) else {
+                        self.compound_coast.remove(&eid);
+                        continue;
+                    };
+                    let (r, v) = k.pos_vel(cb[j].1.mu, t);
+                    // Surface proximity kills warp (the KSP rule) — resume
+                    // realtime physics from the last on-conic state.
+                    if r.length() < cb[j].1.body_radius + 25.0 {
+                        self.space_warp = 1.0;
+                        self.compound_coast.remove(&eid);
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            "time-warp dropped to 1× — surface proximity".into(),
+                            None,
+                        );
+                        continue;
+                    }
+                    let target = DVec3::from(bodies[j].pos) + r;
+                    sim.shift_compound(eid, target - com);
+                    sim.set_compound_velocity(eid, v.as_vec3());
+                    // Tick-sampled SOI seam: recapture in the new dominant
+                    // frame with the WORLD velocity kept continuous.
+                    if let Some(nj) = dom_of(target)
+                        && nj != j
+                        && cb[nj].1.mu > 0.0
+                    {
+                        let wv = v + DVec3::from(bodies[j].vel);
+                        let nk = Kepler::from_state(
+                            target - DVec3::from(bodies[nj].pos),
+                            wv - DVec3::from(bodies[nj].vel),
+                            cb[nj].1.mu,
+                            t,
+                        );
+                        self.compound_coast.insert(eid, (cb[nj].0.index(), nk));
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            format!("entered {}'s sphere of influence", names[nj]),
+                            None,
+                        );
+                    }
+                }
+            } else if !self.compound_coast.is_empty() {
+                // Warp ended: velocities were kept on-conic every tick, so
+                // realtime physics resumes exactly where the rails left off.
+                self.compound_coast.clear();
+            }
             // DISTANT-CRAFT LOD (hundreds of deployed craft, cheaply): far
             // compounds leave live physics — landed/slow ones freeze in the
             // carried frame, in-flight ones snap to their own Kepler rails —
@@ -435,18 +526,10 @@ impl Editor {
                     .then(|| floptle_core::world_transform(&self.world, e).translation)
             });
             if let Some(cam) = cam {
-                let dom_of = |p: DVec3| -> Option<usize> {
-                    let mut best: Option<(usize, f64)> = None;
-                    for (i, sb) in sys.bodies.iter().enumerate() {
-                        if (p - DVec3::from(bodies[i].pos)).length() <= sb.soi
-                            && best.is_none_or(|(_, s)| sb.soi < s)
-                        {
-                            best = Some((i, sb.soi));
-                        }
-                    }
-                    best.map(|(i, _)| i)
-                };
                 for (eid, com) in sim.compound_positions() {
+                    if self.compound_coast.contains_key(&eid) {
+                        continue; // warp rails own it this tick
+                    }
                     let d = (com - cam).length();
                     match self.compound_lod.get(&eid).copied() {
                         None => {

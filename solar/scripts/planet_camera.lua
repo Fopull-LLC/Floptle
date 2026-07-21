@@ -166,12 +166,20 @@ function lateUpdate(node, dt)
   local fz = rz * cp + uz * sp
 
   -- Look-at point: the character's head (along LOCAL up, not world Y). A
-  -- piloted VESSEL publishes its capsule's WORLD position — use it directly:
-  -- any local-height guess drifts off the hull once the vessel pitches over
-  -- (the "orbit center runs away as I rotate" bug).
+  -- piloted VESSEL's center is its CAPSULE, composed HERE from the node's
+  -- rendered pose + the published pod-local offset: computed in the camera
+  -- pass it sits exactly on the ship this frame draws — a fixedUpdate world
+  -- position lags the rails carry (offset + jitter), and a gravity-up height
+  -- guess slides off the hull the moment the vessel pitches.
   local hx, hy, hz
-  if vpiloting and vessel and vessel.focusX then
-    hx, hy, hz = vessel.focusX, vessel.focusY, vessel.focusZ
+  if vpiloting and vessel and vessel.podLY and target then
+    local cy, sy = math.cos(target.yaw), math.sin(target.yaw)
+    local cx2, sx2 = math.cos(target.pitch), math.sin(target.pitch)
+    local cz, sz = math.cos(target.roll), math.sin(target.roll)
+    local lx, ly, lz = vessel.podLX or 0, vessel.podLY, vessel.podLZ or 0
+    hx = target.x + (cy * cz + sy * sx2 * sz) * lx + (-cy * sz + sy * sx2 * cz) * ly + (sy * cx2) * lz
+    hy = target.y + (cx2 * sz) * lx + (cx2 * cz) * ly + (-sx2) * lz
+    hz = target.z + (-sy * cz + cy * sx2 * sz) * lx + (sy * sz + cy * sx2 * cz) * ly + (cy * cx2) * lz
   else
     hx = target.x + ux * params.height
     hy = target.y + uy * params.height

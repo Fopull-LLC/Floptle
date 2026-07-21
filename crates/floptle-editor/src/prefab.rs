@@ -324,6 +324,7 @@ impl Editor {
         let origin = sim.world.origin;
         let mut map = std::collections::HashMap::new();
         for (eid, c) in sim.assemblies() {
+            let o = c.origin();
             map.insert(
                 eid,
                 floptle_script::AssemblyInfo {
@@ -332,6 +333,11 @@ impl Editor {
                         origin.x + c.pos.x as f64,
                         origin.y + c.pos.y as f64,
                         origin.z + c.pos.z as f64,
+                    ],
+                    origin: [
+                        origin.x + o.x as f64,
+                        origin.y + o.y as f64,
+                        origin.z + o.z as f64,
                     ],
                     vel: [c.vel.x, c.vel.y, c.vel.z],
                     ang_vel: [c.ang_vel.x, c.ang_vel.y, c.ang_vel.z],

@@ -1716,6 +1716,10 @@ struct Editor {
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).
     compound_lod: std::collections::HashMap<u32, crate::space::CompoundLod>,
+    /// Warp-coasting rails for LIVE compounds (root eid → dominant celestial
+    /// eid + captured conic): while warp > 1 an in-flight vessel is driven
+    /// analytically, exactly like single bodies' `space_coast` (see space.rs).
+    compound_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
     /// Real hosting (QUIC): Predicted nodes owned by REMOTE peers — each runs
     /// its scripts with its owner's replayed input in the tick loop (the
     /// one-script model, server side). Empty on the loopback harness.
