@@ -262,6 +262,10 @@ pub struct ScriptHost {
     view_info: Rc<RefCell<view_api::ViewInfo>>,
     /// A pending `space.warp(m)` request the editor drains + applies.
     warp_request: Rc<RefCell<Option<f64>>>,
+    /// A pending `physics.pause(on)` request the editor drains + applies.
+    physics_pause_request: Rc<RefCell<Option<bool>>>,
+    /// Mirror of the editor's physics-paused state (`physics.isPaused()`).
+    physics_paused: Rc<std::cell::Cell<bool>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.

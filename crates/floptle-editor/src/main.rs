@@ -1693,6 +1693,10 @@ struct Editor {
     space_time: f64,
     /// Current time-warp multiplier (`space.warp(m)` requests land here).
     space_warp: f64,
+    /// `physics.pause(on)`: while true the sim's step is skipped entirely each
+    /// tick (scripts, rails, streaming all keep running) — loading screens,
+    /// cutscenes, pause menus. Reset to false when Play starts.
+    physics_paused: bool,
     /// Warp-coasting rails (S4): body eid → (dominant celestial eid, captured
     /// Kepler conic). While warp > 1 each in-flight body is driven analytically
     /// from its cached conic — drift-free at any warp; cleared at warp 1.

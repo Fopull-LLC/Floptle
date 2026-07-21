@@ -402,6 +402,20 @@ impl PhysicsWorld {
         if !self.compounds[ci].active {
             return;
         }
+        if self.compounds[ci].anchored {
+            // Pinned in place (launch clamps, docking latches): the pose holds,
+            // accumulated forces drop, and velocities stay zero so release
+            // resumes from rest — no impulse builds up while clamped.
+            let c = &mut self.compounds[ci];
+            c.prev_pos = c.pos;
+            c.prev_orient = c.orient;
+            c.vel = Vec3::ZERO;
+            c.ang_vel = Vec3::ZERO;
+            c.force = Vec3::ZERO;
+            c.torque = Vec3::ZERO;
+            c.grounded = true;
+            return;
+        }
         {
             let c = &mut self.compounds[ci];
             c.prev_pos = c.pos;

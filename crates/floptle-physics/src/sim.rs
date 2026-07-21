@@ -746,6 +746,63 @@ impl Sim {
         self.cmap.iter().map(|l| (l.entity.index(), &self.world.compounds[l.compound]))
     }
 
+    /// Every compound's root entity index + ABSOLUTE world CoM position (the
+    /// rails carry pass — same contract as [`Self::body_positions`]).
+    pub fn compound_positions(&self) -> Vec<(u32, DVec3)> {
+        self.cmap
+            .iter()
+            .map(|l| {
+                (
+                    l.entity.index(),
+                    self.world.compounds[l.compound].pos.as_dvec3() + self.world.origin,
+                )
+            })
+            .collect()
+    }
+
+    /// SHIFT a compound by a world-space delta with no velocity change (the
+    /// dominant-frame carry: ride the orbiting planet). The render anchor
+    /// moves with it so the shift doesn't smear across interpolation.
+    pub fn shift_compound(&mut self, eid: u32, delta: DVec3) {
+        for l in &self.cmap {
+            if l.entity.index() == eid {
+                let d = delta.as_vec3();
+                let c = &mut self.world.compounds[l.compound];
+                c.pos += d;
+                c.prev_pos += d;
+                if let Some(p) = self.tick_prev_c.get_mut(l.compound) {
+                    p.0 += d;
+                }
+                return;
+            }
+        }
+    }
+
+    /// Overwrite a compound's linear velocity (SOI-seam frame handoffs).
+    pub fn set_compound_velocity(&mut self, eid: u32, vel: Vec3) {
+        if let Some(c) = self.compound_of_mut(eid) {
+            c.vel = vel;
+        }
+    }
+
+    /// Anchor / release a compound (see [`Compound::anchored`]). Anchoring
+    /// also zeroes its velocities so a later release starts from rest.
+    pub fn set_compound_anchored(&mut self, eid: u32, on: bool) {
+        if let Some(c) = self.compound_of_mut(eid) {
+            c.anchored = on;
+            if on {
+                c.vel = Vec3::ZERO;
+                c.ang_vel = Vec3::ZERO;
+            }
+        }
+    }
+
+    /// Drop any queued tick-held forces without applying them (a paused
+    /// physics tick must not bank thrust for the unpause).
+    pub fn clear_held_forces(&mut self) {
+        self.held.clear();
+    }
+
     /// Diff this tick's touching pairs against the last tick's into
     /// enter / stay / exit [`TouchEvent`]s. Three sources, all matrix-gated:
     /// the solver's resolved contacts (body vs solid collider), body-vs-SENSOR

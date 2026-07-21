@@ -227,6 +227,19 @@ root (`spawn(part, pos, fn, vesselNode)`), then call
 `assembly.rebuild(vesselNode)` once — the compound re-gathers from the
 root's current descendants. That's the whole blueprint-spawner pattern.
 
+**Anchoring (launch clamps, latches, cranes):** `assembly.setAnchored(node,
+true)` pins the vessel exactly where it stands — no gravity, no contacts,
+velocities read zero, held forces are ignored — and it still rides a moving
+celestial's frame. `assembly.setAnchored(node, false)` releases it *from
+rest* (nothing banks up while clamped). `assembly.info(node).anchored`
+reports the state; a `rebuild` preserves it.
+
+**Pausing physics wholesale:** `physics.pause(true)` skips the entire
+physics step each tick while scripts, rails and terrain streaming keep
+running — the tool for loading screens, cutscenes and pause menus
+(`physics.pause(false)` resumes; `physics.isPaused()` reads it; queued
+thrust is dropped, never banked, while paused).
+
 ### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
 
 They look similar but serve different masters:

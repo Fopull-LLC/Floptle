@@ -126,6 +126,12 @@ pub struct Compound {
     pub use_gravity: bool,
     /// Inactive compounds are skipped entirely (networked-client authority).
     pub active: bool,
+    /// An anchored compound is pinned where it stands: no gravity, no
+    /// integration, no contact response — velocities read zero and the pose
+    /// only moves when something external teleports it (launch clamps, docking
+    /// latches, cranes, construction holds). Held forces are ignored while
+    /// anchored; releasing resumes normal dynamics from rest.
+    pub anchored: bool,
     /// Collision-layer bit index (same matrix semantics as [`crate::Body`]).
     pub layer: u8,
     /// Set each step when any contact opposes gravity.
@@ -175,6 +181,7 @@ impl Compound {
             friction: 0.4,
             use_gravity: true,
             active: true,
+            anchored: false,
             layer: 0,
             grounded: false,
             force: Vec3::ZERO,
@@ -534,6 +541,34 @@ mod tests {
         // Degenerate splits refuse.
         assert!(c.split(&[999]).is_none());
         assert!(c.split(&[1]).is_none(), "can't detach the last shape");
+    }
+
+    #[test]
+    fn anchored_compound_holds_until_released() {
+        // Launch clamps: an anchored compound ignores gravity AND applied
+        // forces, reads zero velocity, and resumes normal dynamics from rest
+        // the moment it's released — no banked impulse from the clamped span.
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let ci = w.add_compound(Compound::new(
+            Vec3::new(0.0, 10.0, 0.0),
+            Quat::IDENTITY,
+            vec![boxs(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.5, 0.5, 0.5), 2.0, 1)],
+        ));
+        w.compounds[ci].anchored = true;
+        let start = w.compounds[ci].pos;
+        for _ in 0..120 {
+            w.compounds[ci].apply_force(Vec3::new(50.0, 0.0, 0.0)); // clamped thrust
+            w.step(1.0 / 120.0);
+        }
+        let c = &w.compounds[ci];
+        assert_eq!(c.pos, start, "anchored compound must not move");
+        assert_eq!(c.vel, Vec3::ZERO, "anchored velocity reads zero");
+        // Release: it falls from rest — one step of gravity only, no burst.
+        w.compounds[ci].anchored = false;
+        w.step(1.0 / 120.0);
+        let c = &w.compounds[ci];
+        assert!(c.vel.length() < 9.81 / 120.0 + 1e-4, "released from rest, vel={:?}", c.vel);
+        assert!(c.pos.y < start.y, "gravity resumed");
     }
 
     #[test]

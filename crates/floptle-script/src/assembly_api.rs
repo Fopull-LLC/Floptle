@@ -31,6 +31,8 @@ pub struct AssemblyInfo {
     pub vel: [f32; 3],
     pub ang_vel: [f32; 3],
     pub grounded: bool,
+    /// Pinned in place by `assembly.setAnchored` (launch clamps, latches).
+    pub anchored: bool,
     /// Part entity indices (the compound's shape ids).
     pub parts: Vec<u32>,
 }
@@ -48,6 +50,8 @@ pub enum AssemblyCmd {
     /// Re-gather the compound from the root's current descendants — call
     /// after script-assembling a vessel (spawning parts under the root).
     Rebuild { root: u32 },
+    /// Pin the compound where it stands / release it (launch clamps).
+    Anchor { root: u32, on: bool },
 }
 
 /// A `vec3(...)`-ish argument: any table with `x`/`y`/`z` fields.
@@ -182,8 +186,21 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("rebuild", f)?;
     }
+    // assembly.setAnchored(node, on) — pin the vessel where it stands (launch
+    // clamps, docking latches, construction holds): no gravity, no contacts,
+    // velocities zero. setAnchored(node, false) releases it from rest.
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, (node, on): (Value, bool)| {
+            let root = node_eid(&node, "assembly.setAnchored(node, on)")?;
+            q.borrow_mut().push(AssemblyCmd::Anchor { root, on });
+            Ok(())
+        })?;
+        t.set("setAnchored", f)?;
+    }
     // assembly.info(node) — mass, com (world vec3), vel, angVel (vec3 tables),
-    // grounded, and parts (the part nodes' entity ids). nil for non-assemblies.
+    // grounded, anchored, and parts (the part nodes' entity ids). nil for
+    // non-assemblies.
     {
         let info = info.clone();
         let f = lua.create_function(move |lua, node: Value| {
@@ -202,6 +219,7 @@ pub(crate) fn install_assembly_api(
                 vec3_table(lua, [i.ang_vel[0] as f64, i.ang_vel[1] as f64, i.ang_vel[2] as f64])?,
             )?;
             out.set("grounded", i.grounded)?;
+            out.set("anchored", i.anchored)?;
             let parts = lua.create_table()?;
             for (k, p) in i.parts.iter().enumerate() {
                 parts.set(k + 1, *p)?;

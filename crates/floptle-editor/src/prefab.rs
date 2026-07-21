@@ -336,6 +336,7 @@ impl Editor {
                     vel: [c.vel.x, c.vel.y, c.vel.z],
                     ang_vel: [c.ang_vel.x, c.ang_vel.y, c.ang_vel.z],
                     grounded: c.grounded,
+                    anchored: c.anchored,
                     parts: c.shapes.iter().map(|s| s.id as u32).collect(),
                 },
             );
@@ -376,6 +377,10 @@ impl Editor {
                 }
                 floptle_script::AssemblyCmd::Rebuild { root } => {
                     if let Some(sim) = self.sim.as_mut() {
+                        // A rebuild must not silently release launch clamps:
+                        // the fresh compound inherits the old one's anchor.
+                        let was_anchored =
+                            sim.compound_of(root).map(|c| c.anchored).unwrap_or(false);
                         sim.remove_compound(root);
                         let ent = self
                             .world
@@ -385,6 +390,14 @@ impl Editor {
                         if let Some(e) = ent {
                             sim.add_compound_for(e, &self.world);
                         }
+                        if was_anchored {
+                            sim.set_compound_anchored(root, true);
+                        }
+                    }
+                }
+                floptle_script::AssemblyCmd::Anchor { root, on } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.set_compound_anchored(root, on);
                     }
                 }
                 floptle_script::AssemblyCmd::Split { root, parts, cb } => {

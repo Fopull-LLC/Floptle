@@ -902,6 +902,18 @@ function tween(seconds, fn, ease) end
 ---@field soi number Sphere-of-influence radius (-1 = infinite, the root).
 
 ---Orbital mechanics readouts (scenes with Celestial Body components): planets
+---Sim-wide physics controls.
+---@class Physics
+physics = {}
+---Pause / resume the whole physics step (scripts, rails and streaming keep
+---running) — loading screens, cutscenes, pause menus. Queued thrust is
+---dropped, never banked, while paused.
+---@param on boolean
+function physics.pause(on) end
+---Whether the physics step is currently paused.
+---@return boolean
+function physics.isPaused() end
+
 ---ride exact Kepler rails; one dominant body pulls µ/r² (patched conics).
 ---@class Space
 space = {}

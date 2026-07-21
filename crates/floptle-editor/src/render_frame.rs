@@ -3829,8 +3829,21 @@ impl Editor {
                     if self.game_tick_no.is_multiple_of(300) {
                         self.script_host.flush_save();
                     }
+                    // `physics.pause(on)` gates the WHOLE physics step (scripts,
+                    // rails and streaming keep running — loading screens hold
+                    // the world still while it assembles). Queued held forces
+                    // are dropped, not banked: unpausing must not fire a burst
+                    // of accumulated thrust.
+                    if let Some(on) = self.script_host.take_physics_pause_request() {
+                        self.physics_paused = on;
+                        self.script_host.set_physics_paused(on);
+                    }
                     if let Some(sim) = self.sim.as_mut() {
-                        sim.step_tick(self.game_tick.step, focus);
+                        if self.physics_paused {
+                            sim.clear_held_forces();
+                        } else {
+                            sim.step_tick(self.game_tick.step, focus);
+                        }
                     }
                     // Collision / trigger events from THIS tick, dispatched to
                     // BOTH nodes' scripts: `onCollisionEnter/Stay/Exit(node,

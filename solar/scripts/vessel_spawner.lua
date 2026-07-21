@@ -64,7 +64,13 @@ local function spawn_parts(vessel, bp, pitch, roll)
       pending = pending - 1
       if pending == 0 and vessel_node then
         assembly.rebuild(vessel_node)
-        log("vessel assembled: " .. total .. " parts on the pad")
+        -- CLAMPED to the pad from the first physics tick: the compound is
+        -- anchored (no gravity, no contacts, rides the planet's frame) until
+        -- the pilot releases the launch clamps — nothing can fling a vessel
+        -- that is not yet simulating. Queued after rebuild, so the drain
+        -- order is rebuild → anchor on the same tick.
+        assembly.setAnchored(vessel_node, true)
+        log("vessel assembled: " .. total .. " parts — clamped to the pad")
       end
     end, vessel)
   end
@@ -80,7 +86,10 @@ local wait_t = 0.0
 local last_note = 0.0
 
 function start(node)
-  if save.get("shipyard.launch") ~= 1 then return end
+  if save.get("shipyard.launch") ~= 1 then
+    save.set("shipyard.pilot", 0) -- a stale handoff flag must not park the walker
+    return
+  end
   save.set("shipyard.launch", 0)
   bp = save.get("shipyard.blueprint")
   if not bp or not bp.parts then return end
