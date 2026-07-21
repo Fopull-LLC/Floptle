@@ -67,7 +67,12 @@ local function spawn_parts(vessel, bp, pitch, roll)
     local wy = vy + rxv.y * d.x + upv.y * d.y + rzv.y * d.z
     local wz = vz + rxv.z * d.x + upv.z * d.y + rzv.z * d.z
     spawn(d.prefab, vec3(wx, wy, wz), function(part)
-      part.yaw = d.yaw or 0
+      -- The engine parents a spawned part by converting its WORLD pose into
+      -- the vessel's local frame — which leaves inv(vessel tilt) baked into
+      -- the part's local rotation (the "misrotated parts" of every sloped
+      -- launch). Parts are authored UPRIGHT in the vessel frame: zero the
+      -- inherited tilt, keep only the blueprint yaw.
+      part.pitch, part.roll, part.yaw = 0, 0, d.yaw or 0
       pending = pending - 1
       if pending == 0 and vessel_node then
         rebuilt = true
@@ -160,9 +165,13 @@ local function try_spawn()
   spawn("Launchpad", vec3(gx + ux * deck, gy + uy * deck, gz + uz * deck), function(lp)
     lp.pitch, lp.roll, lp.yaw = pitch, roll, 0
     if planet_node and relg then
-      lp.x = planet_node.x + relg.x + ux * deck
-      lp.y = planet_node.y + relg.y + uy * deck
-      lp.z = planet_node.z + relg.z + uz * deck
+      -- Node coordinates are PARENT-LOCAL: for a pad parented to its planet,
+      -- local IS the body-relative offset. (Adding the planet position here
+      -- put the pad on the far side of the star system — round 7's missing
+      -- launchpad.)
+      lp.x = relg.x + ux * deck
+      lp.y = relg.y + uy * deck
+      lp.z = relg.z + uz * deck
     end
     -- The vessel assembles on the deck (deck top ~1.24 above the pad center),
     -- positioned from the LIVE body so no orbit-drift creeps in between the
