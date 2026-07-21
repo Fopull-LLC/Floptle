@@ -39,6 +39,14 @@ function update(node, dt)
   -- Hands off while flying the ship (it parks + carries this body itself).
   if not ship then ship = findScript("ship_controller") end
   if ship and ship.piloting then return end
+  -- …or a BUILT vessel (fetched fresh: vessels spawn and despawn at runtime),
+  -- or while a launch handoff is waiting to seat us in the pod.
+  local vessel = findScript("vessel_test")
+  if vessel and vessel.piloting then return end
+  if (save.get("shipyard.pilot") or 0) == 1 then return end
+  -- Nothing is piloting us anywhere: we must be walkable AND visible (a
+  -- destroyed vessel can't un-hide the astronaut it seated — self-heal here).
+  if not node.visible then node.visible = true end
 
   -- Local up: the body's −gravity axis (fallback: radially out from origin).
   local ux, uy, uz = node.up_x, node.up_y, node.up_z

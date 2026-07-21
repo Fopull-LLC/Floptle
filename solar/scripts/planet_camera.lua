@@ -75,10 +75,13 @@ function lateUpdate(node, dt)
   -- tables per access — equality never matches, which stuck the camera on
   -- the ship after exit).
   if not ship then ship = findScript("ship_controller") end
-  local piloting = (ship and ship.piloting) or false
+  -- Built vessels spawn/despawn at runtime — fetch fresh, never cache.
+  local vessel = findScript("vessel_test")
+  local vpiloting = (vessel and vessel.piloting) or false
+  local piloting = ((ship and ship.piloting) or false) or vpiloting
   if piloting ~= was_piloting then
     was_piloting = piloting
-    target = piloting and ship.node or acquire()
+    target = (vpiloting and vessel.node) or (piloting and ship and ship.node) or acquire()
   end
   if not (target and target.valid) then
     target = acquire()

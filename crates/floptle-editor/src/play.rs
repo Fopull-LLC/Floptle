@@ -558,6 +558,8 @@ impl Editor {
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
             self.space_time = 0.0; // rails restart from the authored epoch
             self.space_warp = 1.0;
+            self.physics_paused = false; // a fresh run starts unpaused
+            self.script_host.set_physics_paused(false);
             self.space_coast.clear();
             self.space_frame.clear(); // dominant-frame tracking restarts too
             self.script_lines.clear(); // no stale map lines across runs

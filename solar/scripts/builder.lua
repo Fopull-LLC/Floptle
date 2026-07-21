@@ -34,7 +34,9 @@ local REG = {
   engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = true,  kind = "engine", thrust = 55,  burn = 0.9 },
   engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = true,  kind = "engine", thrust = 130, burn = 2.0 },
   decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
-  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = false, kind = "structural", legs = true },
+  -- Legs pass the stack THROUGH (top AND bottom nodes): tank → legs → engine
+  -- is the classic lander sandwich — bottom=false made that unbuildable.
+  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = true,  kind = "structural", legs = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
@@ -615,6 +617,7 @@ function doLaunch()
   if partCount == 0 then hint("nothing to launch — build something first", 2.5) return end
   save_blueprint()
   save.set("shipyard.launch", 1)
+  save.set("shipyard.pilot", 1) -- you launch IN the pod, not beside it
   save.flush()
   scene.load("system")
 end

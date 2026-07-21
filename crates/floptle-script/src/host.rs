@@ -1008,6 +1008,27 @@ impl ScriptHost {
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
         let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
+        // The `physics.*` sim controls: pause/resume the whole physics step
+        // while scripts keep running (loading screens, cutscenes, pause menus).
+        let physics_pause_request: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+        let physics_paused: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        {
+            let t = lua.create_table().expect("physics table");
+            let req = physics_pause_request.clone();
+            let f = lua
+                .create_function(move |_, on: bool| {
+                    *req.borrow_mut() = Some(on);
+                    Ok(())
+                })
+                .expect("physics.pause");
+            t.set("pause", f).expect("physics.pause");
+            let mirror = physics_paused.clone();
+            let f = lua
+                .create_function(move |_, ()| Ok(mirror.get()))
+                .expect("physics.isPaused");
+            t.set("isPaused", f).expect("physics.isPaused");
+            lua.globals().set("physics", t).expect("physics global");
+        }
         // The `assembly.*` API: compound-vessel forces/splits out, per-frame
         // assembly mirror in (SC1 ship physics surface).
         let assembly_info: Rc<RefCell<HashMap<u32, crate::assembly_api::AssemblyInfo>>> =
@@ -1063,6 +1084,8 @@ impl ScriptHost {
             space_info,
             view_info,
             warp_request,
+            physics_pause_request,
+            physics_paused,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
@@ -1162,6 +1185,16 @@ impl ScriptHost {
     /// Drain a pending `space.warp(m)` request (the editor applies + clamps it).
     pub fn take_warp_request(&self) -> Option<f64> {
         self.warp_request.borrow_mut().take()
+    }
+
+    /// Drain a pending `physics.pause(on)` request (the editor gates its step).
+    pub fn take_physics_pause_request(&self) -> Option<bool> {
+        self.physics_pause_request.borrow_mut().take()
+    }
+
+    /// Mirror the editor's physics-paused state into `physics.isPaused()`.
+    pub fn set_physics_paused(&self, on: bool) {
+        self.physics_paused.set(on);
     }
 
     /// Drain the animator commands scripts queued this frame — the editor applies

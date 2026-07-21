@@ -336,6 +336,48 @@ impl Editor {
                     }
                 }
             }
+            // COMPOUNDS ride their dominant frame too. Skipping them was the
+            // launch-day fling: the spawn planet orbits its star at ~90 u/s,
+            // every carried body (the astronaut) rode along, and the freshly
+            // assembled vessel — never shifted — watched its planet sail away,
+            // which read as "my ship got sucked into space the moment it
+            // spawned". Same containment-vs-old-center rule, same SOI-seam
+            // velocity step; no warp coasting yet (v0 vessels fly realtime —
+            // grounded compounds are contact-pinned, which is what makes
+            // warping while parked safe, same as single bodies).
+            for (eid, pos) in sim.compound_positions() {
+                let mut dom: Option<(usize, f64)> = None;
+                for (i, sb) in sys.bodies.iter().enumerate() {
+                    let old_center = DVec3::from(bodies[i].pos) - deltas[i];
+                    if (pos - old_center).length() <= sb.soi
+                        && dom.is_none_or(|(_, s)| sb.soi < s)
+                    {
+                        dom = Some((i, sb.soi));
+                    }
+                }
+                let Some((i, _)) = dom else { continue };
+                let dom_key = cb[i].0.index();
+                let prev = self.space_frame.insert(eid, dom_key);
+                if let Some(p) = prev
+                    && p != dom_key
+                    && let Some(j) = cb.iter().position(|(e, _)| e.index() == p)
+                {
+                    let dv = DVec3::from(bodies[j].vel) - DVec3::from(bodies[i].vel);
+                    let vel = sim
+                        .compound_of(eid)
+                        .map(|c| (c.vel.as_dvec3() + dv).as_vec3())
+                        .unwrap_or_default();
+                    sim.set_compound_velocity(eid, vel);
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!("entered {}'s sphere of influence", names[i]),
+                        None,
+                    );
+                }
+                if deltas[i].length_squared() > 1e-18 {
+                    sim.shift_compound(eid, deltas[i]);
+                }
+            }
         }
         self.script_host.set_space(floptle_script::SpaceInfo {
             time: t,

@@ -92,6 +92,11 @@ function start(node)
   seed = save.get("g_seed") or 0
   loading = true
   load_t = time
+  -- Nothing simulates until the world is actually there: physics is paused
+  -- for the whole loading screen (scripts, rails and terrain streaming keep
+  -- running), so nothing can fall through half-streamed terrain or get
+  -- ejected before the ground exists. Resumed when the crew is placed.
+  physics.pause(true)
   for _, nm in ipairs({ "Loading Screen", "Loading Text" }) do
     local _, el = ui_of(nm)
     if el then el.visible = true end
@@ -163,8 +168,19 @@ function update(node, dt)
     local d = terrain.query(sx, sy + spawn_r, sz)
     if d and math.abs(d) < spawn_r * 0.5 and time - load_t > 1.0 then
       loading = false
+      physics.pause(false)
       local astro = find("Astronaut")
-      if astro and not restore_pos_of(astro, "p") then
+      local vp = findScript("vessel_test")
+      if (save.get("shipyard.pilot") or 0) == 1 or (vp and vp.piloting) then
+        -- Arriving from the builder's LAUNCH: the astronaut starts IN the
+        -- vessel's pod (the vessel pilot seats them the moment it spawns) —
+        -- never standing on the surface next to their own rocket.
+        if astro then
+          astro.visible = false
+          astro.x, astro.y, astro.z = sx, sy + spawn_r + 6, sz
+          astro.vx, astro.vy, astro.vz = 0, 0, 0
+        end
+      elseif astro and not restore_pos_of(astro, "p") then
         astro.x, astro.y, astro.z = sx, sy + spawn_r + 6, sz
         astro.vx, astro.vy, astro.vz = 0, 0, 0
       end
