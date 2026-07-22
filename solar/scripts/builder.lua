@@ -46,9 +46,8 @@ defaults = {
   nudge = 0.1,        -- precise-edit step (SHIFT = a quarter of this)
 }
 
--- ── Builder audio (non-spatial UI clicks + a hangar bed) ─────────────────────
--- Every build action gets a crisp click on the UI mixer bus; a low machine hum
--- on the Ambient bus fills the hangar. Kenney CC0 clips.
+-- ── Builder audio (non-spatial UI clicks) ────────────────────────────────────
+-- Every build action gets a crisp click on the UI mixer bus. Kenney CC0 clips.
 local UI_SFX = {
   place  = "audio/kenney/interface/click_001.ogg",
   pickup = "audio/kenney/interface/pluck_001.ogg",
@@ -56,9 +55,7 @@ local UI_SFX = {
   tool   = "audio/kenney/interface/tick_001.ogg",
   save   = "audio/kenney/interface/confirmation_001.ogg",
   launch = "audio/kenney/interface/confirmation_003.ogg",
-  bed    = "audio/kenney/sci-fi/computerNoise_001.ogg",
 }
-local hangar_bed = nil
 -- Take a KEY (into UI_SFX), not a clip path, so callers don't each capture
 -- UI_SFX as an upvalue — `update` is already near LuaJIT's 60-upvalue ceiling.
 local function ui(key, vol)
@@ -1150,9 +1147,6 @@ function start(node)
   hint_node = find("BuildHint")
   load_blueprint()
   refresh_stats()
-  if audio and not hangar_bed then
-    hangar_bed = audio.play(UI_SFX.bed, { track = "Ambient", loop = true, volume = 0.7 })
-  end
 end
 
 local grab_mode = false
@@ -1720,7 +1714,6 @@ function doLaunch()
   if partCount == 0 then hint("nothing to launch — build something first", 2.5) return end
   save_blueprint()
   ui("launch", 1.0)
-  if hangar_bed then hangar_bed:stop(); hangar_bed = nil end
   save.set("shipyard.launch", 1)
   save.set("shipyard.pilot", 1) -- you launch IN the pod, not beside it
   save.flush()

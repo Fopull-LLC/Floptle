@@ -51,6 +51,12 @@ impl AnchoredCollider {
         self.shape.normal(p - self.offset)
     }
 
+    /// The outward normal only where the field resolves one (`None` deep inside
+    /// a saturated SDF interior — see [`CollisionShape::normal_reliable`]).
+    pub fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
+        self.shape.normal_reliable(p - self.offset)
+    }
+
     /// Move the collider: a body ON RAILS (an orbiting planet) re-anchors its
     /// terrain every tick. `origin` must be the owning world's current origin.
     pub fn re_anchor(&mut self, anchor: DVec3, origin: DVec3) {
@@ -472,7 +478,21 @@ impl PhysicsWorld {
                         if !(pen > 0.0) {
                             continue;
                         }
-                        let n = self.colliders[coli].normal(p);
+                        // A reliable surface normal where the field resolves one;
+                        // deep in a saturated SDF interior (a fast ram that
+                        // tunnelled past the narrow band) the gradient is zero, so
+                        // fall back to the body's OWN travel direction at this
+                        // point. That makes the contact report the true closing
+                        // speed (and shove it back the way it came) instead of the
+                        // bogus straight-up normal that read a lithobrake as ~0 m/s.
+                        let n = match self.colliders[coli].normal_reliable(p) {
+                            Some(n) => n,
+                            None => {
+                                let cc = &self.compounds[ci];
+                                let vp = cc.vel + cc.ang_vel.cross(p - cc.pos);
+                                (-vp).try_normalize().unwrap_or(Vec3::Y)
+                            }
+                        };
                         let c = &mut self.compounds[ci];
                         let contact_pt = p - n * radius;
                         let r = contact_pt - c.pos;
