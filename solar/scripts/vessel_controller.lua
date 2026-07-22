@@ -40,7 +40,35 @@ podLX, podLY, podLZ = 0, 1.2, 0
 focusX, focusY, focusZ = nil, nil, nil
 focusHeight = 1.2
 sas_mode = "stability"
+-- Peripheral state (published: damage tolerance + HUD read it).
+gear_deployed = true
+-- Current reentry-heating rate (dmg/s at the nose; published for the HUD).
+heating = 0.0
+local heat_fx_t = -10.0
 local sas_last = "stability"
+
+-- ── ship peripherals ────────────────────────────────────────────────────────
+-- Attached DEVICES the pilot can actuate, detected from the blueprint by
+-- part capability. Each device kind carries its key, its part set and its
+-- actuation (an animation applied to the live child nodes). Adding a new
+-- peripheral (lights, solar panels, wheels…) is one more registry entry —
+-- the detection, keybind, HUD tag and per-tick actuation all come along.
+local DEVICES = {
+  gear = {
+    key = "g", label = "GEAR",
+    detect = function(d) return (d.legs or 0) == 1 end,
+    parts = {},      -- blueprint uids, filled by load_bp
+    on = true,       -- legs spawn deployed (the pad handshake needs them)
+    anim = 1.0,      -- 0 tucked … 1 deployed
+    speed = 1.6,     -- anim units per second
+    pose = {},       -- uid → cached authored child pose
+    -- Tuck the leg up beside the hull; f = 0 tucked … 1 deployed.
+    apply = function(dev, child, pose, f)
+      child.y = pose.y * f + (pose.y + 0.28) * (1 - f)
+      child.scale_y = pose.sy * (0.3 + 0.7 * f)
+    end,
+  },
+}
 
 local bp = nil
 local launch_mode = false -- arrived via the builder's LAUNCH (clamp lifecycle)
@@ -49,8 +77,11 @@ local info_seen = false   -- first sighting of the live compound (diagnostics)
 local no_info_t = 0.0     -- how long we've piloted WITHOUT a compound
 local engines = {}     -- { {x,y,z, dx,dy,dz, thrust, burn, branch} } vessel-local, live only
 local tanks = {}       -- { {y, fuel, branch} } vessel-local, live only
-local decouplers = {}  -- AXIAL cuts { {uid, y} } sorted bottom-up, fired in order
-local boosters = {}    -- radial-decoupler branches { {uid, x,y,z, uids={...}} }
+-- SEPARATION EVENTS in firing order (the builder's STAGING panel decides):
+-- {kind="axial", uid, y} splits everything below the cut; {kind="ring",
+-- branches={...}} kicks a whole booster ring away laterally. SPACE fires
+-- events[1]; an axial cut prunes events that depart with the lower stack.
+local events = {}
 local pod = { x = 0, y = 0.5, z = 0 }
 -- Damage model (assembly.impacts → per-part strength): see the block after
 -- the staging helpers.
@@ -103,7 +134,8 @@ end
 
 local function load_bp()
   bp = save.get("shipyard.blueprint")
-  engines, tanks, decouplers, boosters, part_total, fuel_cap = {}, {}, {}, {}, 0, 0.0
+  engines, tanks, events, part_total, fuel_cap = {}, {}, {}, 0, 0.0
+  local decouplers, boosters = {}, {}
   if not bp or not bp.parts then return end
   -- Parent links → radial-decoupler BRANCHES (each = the decoupler + its
   -- whole outboard subtree; they separate laterally as one group).
@@ -137,8 +169,15 @@ local function load_bp()
                                   uids = uids, pos = pos }
     end
   end
+  for _, dev in pairs(DEVICES) do
+    dev.parts, dev.nodes, dev.pose = {}, {}, {}
+    dev.on, dev.anim, dev.anim_applied = true, 1.0, nil
+  end
   for _, d in pairs(bp.parts) do
     part_total = part_total + 1
+    for _, dev in pairs(DEVICES) do
+      if dev.detect(d) then dev.parts[#dev.parts + 1] = d.uid end
+    end
     if (d.thrust or 0) > 0 then
       local ax, ay, az = part_axis(d)
       engines[#engines + 1] = { x = d.x, y = d.y, z = d.z, dx = ax, dy = ay, dz = az,
@@ -155,6 +194,38 @@ local function load_bp()
     if d.kind == "crewed" then pod = { x = d.x, y = d.y, z = d.z } end
   end
   table.sort(decouplers, function(a, b) return a.y < b.y end)
+  -- Build the ordered EVENT list: booster branches group into ring events by
+  -- symmetry group (a lone radial decoupler is its own ring), axial cuts are
+  -- one event each. Order = the builder's saved stages; parts without one
+  -- fall back to the classic default (rings first, then axial bottom-up).
+  local rings = {}
+  for _, g in ipairs(boosters) do
+    local dd = by_uid[g.uid]
+    local key = (dd and dd.sym and dd.sym ~= 0) and ("g" .. dd.sym) or ("u" .. g.uid)
+    local ev = rings[key]
+    if not ev then
+      ev = { kind = "ring", branches = {}, stage = 1e9, y = g.y }
+      rings[key] = ev
+      events[#events + 1] = ev
+    end
+    ev.branches[#ev.branches + 1] = g
+    local st = dd and (dd.stage or 0) or 0
+    if st > 0 and st < ev.stage then ev.stage = st end
+    ev.y = math.min(ev.y, g.y)
+  end
+  for _, dec in ipairs(decouplers) do
+    local dd = by_uid[dec.uid]
+    local st = dd and (dd.stage or 0) or 0
+    events[#events + 1] = { kind = "axial", uid = dec.uid, y = dec.y,
+                            stage = st > 0 and st or 1e9 }
+  end
+  for _, ev in ipairs(events) do
+    if ev.stage >= 1e9 then
+      -- default rank: rings ahead of axial, lower first, after staged items
+      ev.stage = 1e6 + (ev.kind == "ring" and 0 or 1e3) + ev.y
+    end
+  end
+  table.sort(events, function(a, b) return a.stage < b.stage end)
   fuel = fuel_cap
   focusHeight = pod.y
   podLX, podLY, podLZ = pod.x, pod.y, pod.z
@@ -428,15 +499,25 @@ end
 -- ── damage / destruction ────────────────────────────────────────────────────
 -- `assembly.impacts()` reports how hard each PART hit something last tick
 -- (the engine attributes every contact's impulse to the part that took it).
--- Under ~half the part's strength a hit is just a landing; past that, damage
--- accumulates (the part smoulders); a full-strength blow — or worn-out HP —
--- BREAKS the part: explosion, the part shears off as tumbling wreckage, and
--- losing the pod loses the ship.
-local STRENGTH = { crewed = 26, tank = 10, engine = 16, structural = 22, canvas = 6 }
-local function part_strength(d)
-  if (d.legs or 0) == 1 then return 40 end -- legs exist to hit the ground
-  return STRENGTH[d.kind or "structural"] or 18
+-- Tolerances are IMPACT SPEEDS (m/s), like KSP's crash tolerance: the felt
+-- Δv is the impulse divided by the vessel's mass, so a 40-tonne ship and a
+-- 4-tonne ship judge the same touchdown the same way (absolute impulse
+-- thresholds made big ships shred themselves just settling on the pad).
+-- Under ~half a part's tolerance a hit is just a landing; past that, damage
+-- accumulates (the part smoulders); a full-tolerance blow — or worn-out HP
+-- — BREAKS the part: explosion, the part shears off as wreckage, and losing
+-- the pod loses the ship. Fuel tanks go up in a real BLAST (see break_part).
+local TOLERANCE = { crewed = 9, tank = 6, engine = 7, structural = 10, canvas = 4 }
+local function part_tolerance(d)
+  if (d.legs or 0) == 1 then
+    -- Legs exist to hit the ground — but only DEPLOYED ones absorb it.
+    return gear_deployed and 14 or 5
+  end
+  return TOLERANCE[d.kind or "structural"] or 8
 end
+-- Damage stays DISARMED while clamped/assembling and for a settle window
+-- after release — the pad handshake is not a crash.
+local damage_arm = 0.0
 
 -- The live child node (and blueprint uid) behind a reported part entity id.
 local function uid_of_child(node, eid)
@@ -470,11 +551,116 @@ local function drop_part(uid)
   fuel = cap * frac
 end
 
-local function break_part(node, uid, d, c, hx, hy, hz)
+-- Per-tick peripheral actuation: ease each device toward its on/off state
+-- and drive its live child nodes (leg struts tuck up beside the hull).
+-- Visual-only for now — the compound's baked collision keeps the deployed
+-- footprint; the retracted state's fragility comes from part_tolerance.
+local function update_peripherals(node, dt)
+  for _, dev in pairs(DEVICES) do
+    local target = dev.on and 1.0 or 0.0
+    if dev.anim ~= target then
+      local step = dev.speed * dt
+      dev.anim = (dev.anim < target) and math.min(target, dev.anim + step)
+        or math.max(target, dev.anim - step)
+    end
+    if #dev.parts > 0 and dev.anim_applied ~= dev.anim then
+      dev.anim_applied = dev.anim
+      for _, uid in ipairs(dev.parts) do
+        local ch = dev.nodes[uid]
+        if not (ch and ch.valid) then
+          ch = nil
+          local d = bp_by_uid[uid]
+          if d then
+            for _, c in ipairs(node:children()) do
+              if math.abs((c.x or 0) - d.x) < 0.05 and math.abs((c.z or 0) - d.z) < 0.05
+                and math.abs((c.y or 0) - d.y) < 0.45 then
+                ch = c
+                break
+              end
+            end
+          end
+          dev.nodes[uid] = ch
+        end
+        if ch then
+          local pose = dev.pose[uid]
+          if not pose then
+            pose = { x = ch.x, y = ch.y, z = ch.z, sy = ch.scale_y or 1.0 }
+            dev.pose[uid] = pose
+          end
+          dev.apply(dev, ch, pose, dev.anim)
+        end
+      end
+    end
+  end
+end
+
+-- Departing parts take their plumes with them: stop any engine flame on the
+-- nodes about to split away (nothing owns them afterwards — un-quenched,
+-- a dropped booster's plume burned forever).
+local function quench(parts_nodes)
+  for _, pn in ipairs(parts_nodes) do
+    for _, f in ipairs(pn:children()) do
+      if f.name == "Engine Flame" then
+        local ps = f:particles()
+        if ps and ps:isPlaying() then ps:stop() end
+        local light = f:getcomponent("PointLight")
+        if light then light.intensity = 0.0 end
+      end
+    end
+  end
+end
+
+-- Forward-declared: a tank blast can chain into neighbors breaking.
+local break_part
+
+break_part = function(node, uid, d, c, hx, hy, hz, depth)
+  depth = (depth or 0) + 1
   part_hp[uid] = 0
   spawnEffect("Explosion", hx, hy, hz)
   drop_part(uid)
   log("💥 " .. (d.label or d.id or "part") .. " destroyed!")
+  -- FUEL TANKS BLOW UP: a real blast — extra fireballs, a shove on the
+  -- whole vessel, a CRATER if it happens against the ground, and chain
+  -- damage into neighboring parts (which can cook off in turn).
+  if (d.fuel or 0) > 0 and depth <= 4 then
+    spawnEffect("Explosion", hx + 0.7, hy + 0.5, hz - 0.4)
+    spawnEffect("Explosion", hx - 0.5, hy + 0.9, hz + 0.6)
+    local blast = 1.6 + math.min(2.4, (d.fuel or 0) / 80)
+    local sd = terrain.query(hx, hy, hz)
+    if sd and sd < blast then
+      terrain.dig(hx, hy, hz, blast, 1.0)
+    end
+    local i0 = assembly.info(node)
+    if i0 then
+      assembly.impulseAt(node, vec3(0, i0.mass * 1.5, 0), vec3(hx, hy, hz))
+    end
+    -- Chain: neighbors STILL ATTACHED to this vessel take blast damage
+    -- (staged-away parts are no longer children — the blast can't reach
+    -- bookkeeping ghosts).
+    for u2, d2 in pairs(bp_by_uid) do
+      local hp2 = part_hp[u2]
+      if u2 ~= uid and hp2 and hp2 > 0 then
+        local dx2, dy2, dz2 = d2.x - d.x, d2.y - d.y, d2.z - d.z
+        local dist = math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2)
+        if dist < blast then
+          local c2 = nil -- the live child for u2, matched by position
+          for _, ch in ipairs(node:children()) do
+            if math.abs((ch.x or 0) - d2.x) < 0.05 and math.abs((ch.y or 0) - d2.y) < 0.05
+              and math.abs((ch.z or 0) - d2.z) < 0.05 then
+              c2 = ch
+              break
+            end
+          end
+          if c2 then
+            part_hp[u2] = hp2 - (1.0 - dist / blast) * 0.8
+            if part_hp[u2] <= 0 then
+              break_part(node, u2, d2, c2, hx, hy, hz, depth)
+            end
+          end
+        end
+      end
+    end
+  end
   if d.kind == "crewed" then
     -- The POD is the ship. Its pilot is thrown clear of the wreck.
     destroyed = true
@@ -500,6 +686,7 @@ local function break_part(node, uid, d, c, hx, hy, hz)
   -- from the impact point.
   local i2 = assembly.info(node)
   if c and c.valid and i2 and #i2.parts > 1 then
+    quench({ c })
     assembly.split(node, { c }, function(junk)
       local ji = assembly.info(junk)
       if ji then
@@ -514,21 +701,31 @@ local function break_part(node, uid, d, c, hx, hy, hz)
 end
 
 local function damage_tick(node, info)
+  -- Disarmed while clamped or still assembling; release starts a settle
+  -- window — the pad handshake must never read as a crash (big ships were
+  -- shredding themselves the moment they spawned).
+  if info.anchored or (launch_mode and not released) then
+    damage_arm = time
+    return
+  end
+  if time - damage_arm < 2.5 then return end
+  local m = math.max(info.mass, 0.1)
   for _, h in ipairs(assembly.impacts(node)) do
     local uid, c = uid_of_child(node, h.part)
     local d = uid and bp_by_uid[uid]
     local hp = uid and part_hp[uid]
     if d and hp and hp > 0 then
-      local s = part_strength(d)
-      if h.impulse >= s * 0.45 then
-        local dmg = math.min(1.0, (h.impulse - s * 0.45) / (s * 0.55))
+      local tol = part_tolerance(d)
+      local dv = h.impulse / m -- felt Δv: mass-normalized, ship-size-fair
+      if dv >= tol * 0.5 then
+        local dmg = math.min(1.0, (dv - tol * 0.5) / (tol * 0.5))
         part_hp[uid] = hp - dmg
         if part_hp[uid] <= 0 then
           break_part(node, uid, d, c, h.x, h.y, h.z)
         elseif dmg > 0.04 then
           spawnEffect("Smoke", h.x, h.y, h.z)
-          log(string.format("⚠ %s damaged — %d%% left",
-            d.label or d.id or "part", part_hp[uid] * 100))
+          log(string.format("⚠ %s damaged — %d%% left (hit %.1f m/s)",
+            d.label or d.id or "part", part_hp[uid] * 100, dv))
         end
       end
     end
@@ -648,8 +845,11 @@ function fixedUpdate(node, dt)
   -- the moment the vessel pitches — world-exact is the only stable center).
   focusX, focusY, focusZ = px, py, pz
   -- Only the BOTTOM live stage burns: everything above the next decoupler
-  -- waits its turn. No decouplers left = every remaining engine fires.
-  local cut = decouplers[1] and decouplers[1].y or math.huge
+  -- waits its turn. No axial cuts left = every remaining engine fires.
+  local cut = math.huge
+  for _, ev in ipairs(events) do
+    if ev.kind == "axial" and ev.y < cut then cut = ev.y end
+  end
 
   -- ---- board / exit -------------------------------------------------------
   if input.pressed("f") and astronaut then
@@ -805,6 +1005,75 @@ function fixedUpdate(node, dt)
   end
   set_flames(node, (info.anchored or fuel <= 0) and 0 or throttle, cut)
 
+  -- ---- reentry / atmospheric heating -------------------------------------
+  -- Below the atmo band (alt < 35% of the body's radius) speed turns into
+  -- heat: flux ~ density^1.5 · v³. The WINDWARD parts take it — fire licks
+  -- off them as they cook, and a part that reaches zero breaks up in flight.
+  -- (No drag yet: bleeding speed is the pilot's problem — burn retrograde
+  -- or come in shallower.)
+  heating = 0.0
+  do
+    local db2 = space.body(space.dominant(node.x, node.y, node.z))
+    if db2 and not info.anchored and not info.grounded then
+      local dxh, dyh, dzh = node.x - db2.x, node.y - db2.y, node.z - db2.z
+      local alt = math.sqrt(dxh * dxh + dyh * dyh + dzh * dzh) - db2.radius
+      local band = db2.radius * 0.35
+      local v = info.vel
+      local spd = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+      if alt < band and alt > 0 and spd > 35.0 then
+        local density = (1.0 - alt / band)
+        heating = density ^ 1.5 * (spd / 40.0) ^ 3 * 0.06 -- dmg/sec at the nose
+        local ivx, ivy, ivz = v.x / spd, v.y / spd, v.z / spd
+        local rx2, up2, rz2 = basis(node)
+        -- Rank parts by how far forward they sit along the velocity.
+        local best_proj = -math.huge
+        for uid2, d2 in pairs(bp_by_uid) do
+          if part_hp[uid2] and part_hp[uid2] > 0 then
+            local wx = rx2.x * d2.x + up2.x * d2.y + rz2.x * d2.z
+            local wy = rx2.y * d2.x + up2.y * d2.y + rz2.y * d2.z
+            local wz = rx2.z * d2.x + up2.z * d2.y + rz2.z * d2.z
+            local proj = wx * ivx + wy * ivy + wz * ivz
+            if proj > best_proj then best_proj = proj end
+          end
+        end
+        for uid2, d2 in pairs(bp_by_uid) do
+          local hp2 = part_hp[uid2]
+          if hp2 and hp2 > 0 then
+            local wx = rx2.x * d2.x + up2.x * d2.y + rz2.x * d2.z
+            local wy = rx2.y * d2.x + up2.y * d2.y + rz2.y * d2.z
+            local wz = rx2.z * d2.x + up2.z * d2.y + rz2.z * d2.z
+            local proj = wx * ivx + wy * ivy + wz * ivz
+            -- Windward third takes the flux; leeward parts ride in the wake.
+            if proj > best_proj - 1.0 then
+              part_hp[uid2] = hp2 - heating * dt
+              if part_hp[uid2] <= 0 then
+                local px2, py2, pz2 = bx + wx, by + wy, bz + wz
+                local c2 = nil
+                for _, ch in ipairs(node:children()) do
+                  if math.abs((ch.x or 0) - d2.x) < 0.05 and math.abs((ch.y or 0) - d2.y) < 0.05
+                    and math.abs((ch.z or 0) - d2.z) < 0.05 then
+                    c2 = ch
+                    break
+                  end
+                end
+                break_part(node, uid2, d2, c2, px2, py2, pz2)
+                log("🔥 burned up on reentry: " .. (d2.label or d2.id or "part"))
+              end
+            end
+          end
+        end
+        -- Fire streams off the hot side (re-anchored each beat).
+        if heating > 0.02 and time - heat_fx_t > 0.35 then
+          heat_fx_t = time
+          spawnEffect("Heat",
+            bx + ivx * 1.2 + up2.x * 0.8,
+            by + ivy * 1.2 + up2.y * 0.8,
+            bz + ivz * 1.2 + up2.z * 0.8)
+        end
+      end
+    end
+  end
+
   -- ---- attitude: rate-commanded, the KSP feel ----------------------------
   if input.pressed("t") then
     sas_mode = (sas_mode ~= "off") and "off" or sas_last
@@ -813,7 +1082,16 @@ function fixedUpdate(node, dt)
     for k, m in pairs(SAS_KEYS) do
       if input.pressed(k) then setSAS(m) end
     end
+    -- Peripherals: each device kind has its key (G = landing gear).
+    for _, dev in pairs(DEVICES) do
+      if #dev.parts > 0 and input.pressed(dev.key) then
+        dev.on = not dev.on
+        log(dev.label .. (dev.on and " deployed" or " retracted"))
+      end
+    end
   end
+  gear_deployed = DEVICES.gear.on
+  update_peripherals(node, dt)
   local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
   local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
   local r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
@@ -879,12 +1157,11 @@ function fixedUpdate(node, dt)
       else
         log(string.format("clamps hold: %d / %d parts assembled", #info.parts, part_total))
       end
-    elseif #boosters > 0 then
-      -- SIDE BOOSTERS first: every radial branch kicks away laterally at
+    elseif #events > 0 and events[1].kind == "ring" then
+      -- A BOOSTER RING: every branch in the ring kicks away laterally at
       -- once (symmetric pairs leave together, so the ship stays balanced).
-      local groups = boosters
-      boosters = {}
-      for _, g in ipairs(groups) do
+      local ev = table.remove(events, 1)
+      for _, g in ipairs(ev.branches) do
         local parts_nodes = {}
         for _, child in ipairs(node:children()) do
           for _, q in ipairs(g.pos) do
@@ -905,6 +1182,7 @@ function fixedUpdate(node, dt)
           local ky = rx.y * ox + rz.y * oz
           local kz = rx.z * ox + rz.z * oz
           local n_away = #parts_nodes
+          quench(parts_nodes)
           assembly.split(node, parts_nodes, function(stage)
             local si = assembly.info(stage)
             if si then
@@ -914,15 +1192,38 @@ function fixedUpdate(node, dt)
           end)
         end
       end
-    elseif #decouplers > 0 then
-      local dec = table.remove(decouplers, 1)
+    elseif #events > 0 then
+      local dec = table.remove(events, 1) -- an AXIAL cut
       local parts_nodes = {}
       for _, child in ipairs(node:children()) do
         if child.y <= dec.y + 0.01 then parts_nodes[#parts_nodes + 1] = child end
       end
       if #parts_nodes > 0 then
         drop_below(dec.y)
+        -- Everything that departs takes its own unfired events with it:
+        -- lower axial cuts, and any ring whose branches sat below the cut.
+        local keep = {}
+        for _, e2 in ipairs(events) do
+          if e2.kind == "axial" then
+            if e2.y > dec.y + 0.01 then keep[#keep + 1] = e2 end
+          else
+            local bs = {}
+            for _, g in ipairs(e2.branches) do
+              if g.y > dec.y + 0.01 then
+                bs[#bs + 1] = g
+              else
+                drop_branch(g.uid) -- its engines/tanks left with the stack
+              end
+            end
+            if #bs > 0 then
+              e2.branches = bs
+              keep[#keep + 1] = e2
+            end
+          end
+        end
+        events = keep
         local n_away = #parts_nodes
+        quench(parts_nodes)
         assembly.split(node, parts_nodes, function(stage)
           local si = assembly.info(stage)
           if si then
@@ -954,9 +1255,9 @@ function fixedUpdate(node, dt)
     lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   TWR %.2f%s%s%s",
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
       SAS_LABEL[sas_mode] or "?", twr,
-      info.anchored and "   CLAMPED" or (info.grounded and "   LANDED" or ""),
-      (#decouplers + (#boosters > 0 and 1 or 0)) > 0
-        and string.format("   STAGES %d", #decouplers + (#boosters > 0 and 1 or 0)) or "",
+      (info.anchored and "   CLAMPED" or (info.grounded and "   LANDED" or ""))
+        .. ((#DEVICES.gear.parts > 0 and not gear_deployed) and "   GEAR UP" or ""),
+      #events > 0 and string.format("   STAGES %d", #events) or "",
       warp > 1.001 and string.format("   ⏩ WARP %d×", warp) or "")
     if fuel_cap > 0 then
       local fbars = math.floor(fuel / fuel_cap * 10 + 0.5)
@@ -997,6 +1298,10 @@ function fixedUpdate(node, dt)
         lines[#lines + 1] = string.format("assembling…  %d / %d parts", #info.parts, part_total)
       end
     end
+    if heating > 0.02 then
+      lines[#lines + 1] = string.format("🔥 REENTRY HEATING %s— slow down or climb",
+        heating > 0.12 and "(SEVERE) " or "")
+    end
     -- Damage report: the worst-off surviving part (the smoke tells you where).
     local worst_uid, worst_hp
     for uid, hp in pairs(part_hp) do
@@ -1010,44 +1315,38 @@ function fixedUpdate(node, dt)
         (d and (d.label or d.id)) or "part", worst_hp * 100)
     end
     lines[#lines + 1] =
-      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold·SPACE stage·./, warp·M map"
+      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold·SPACE stage·G gear·./, warp·M map"
     set_hud(table.concat(lines, "\n"))
 
-    -- The stage list (right edge, ROCKET ORDER): drawn top-down like the
-    -- vehicle itself — upper stages first, the stage that burns NOW at the
-    -- bottom marked ▶. Matches the flight model exactly (the window between
-    -- consecutive decouplers); rows fall off the bottom as you stage.
-    local sl = { "STAGES — SPACE fires next", "" }
-    for k = #decouplers, 0, -1 do
-      local lo = (k == 0) and -math.huge or decouplers[k].y
-      local hi = decouplers[k + 1] and decouplers[k + 1].y or math.huge
-      local n_eng, th = 0, 0
-      for _, e in ipairs(engines) do
-        if not e.branch and e.y > lo + 0.01 and e.y < hi - 0.01 then
-          n_eng = n_eng + 1
-          th = th + e.thrust
-        end
-      end
-      local tag = (k == 0 and #boosters == 0) and "  ▶" or ""
-      if n_eng > 0 then
-        sl[#sl + 1] = string.format("S%d   %d engine%s   %d kN%s",
-          k + 1, n_eng, n_eng == 1 and "" or "s", th, tag)
-      else
-        sl[#sl + 1] = string.format("S%d   (no engines)%s", k + 1, tag)
+    -- The stage list (right edge): SEPARATION EVENTS in the builder's
+    -- firing order, drawn bottom-up — the NEXT one sits at the bottom
+    -- marked ▶ (SPACE fires it); rows fall off as you stage. A header
+    -- shows what's burning right now.
+    local n_act, th_act = 0, 0
+    for _, e in ipairs(engines) do
+      if engine_active(e, cut) then
+        n_act = n_act + 1
+        th_act = th_act + e.thrust
       end
     end
-    -- Side boosters separate FIRST — they sit at the bottom of the list,
-    -- exactly like the rocket's silhouette.
-    if #boosters > 0 then
-      local n_eng, th = 0, 0
-      for _, e in ipairs(engines) do
-        if e.branch then
-          n_eng = n_eng + 1
-          th = th + e.thrust
+    local sl = { "STAGES — SPACE fires next",
+      string.format("burning: %d engine%s  %d kN", n_act, n_act == 1 and "" or "s", th_act), "" }
+    for i = #events, 1, -1 do
+      local ev = events[i]
+      local tag = (i == 1) and "  ▶" or ""
+      if ev.kind == "ring" then
+        local n_eng, th = 0, 0
+        for _, e in ipairs(engines) do
+          if e.branch then
+            n_eng = n_eng + 1
+            th = th + e.thrust
+          end
         end
+        sl[#sl + 1] = string.format("BOOSTER RING ×%d   %d eng  %d kN%s",
+          #ev.branches, n_eng, th, tag)
+      else
+        sl[#sl + 1] = string.format("STAGE SEP   (below y %.1f)%s", ev.y, tag)
       end
-      sl[#sl + 1] = string.format("BOOSTERS ×%d   %d engine%s   %d kN  ▶",
-        #boosters, n_eng, n_eng == 1 and "" or "s", th)
     end
     set_stage_list(table.concat(sl, "\n"))
   end
