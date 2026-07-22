@@ -264,17 +264,17 @@ thrust is dropped, never banked, while paused).
 
 **Per-part impact attribution — `assembly.impacts(node)`:** the engine
 attributes every contact a compound resolves to the PART that took it. Each
-tick the call returns an array of `{ part, impulse, x, y, z }` — `part` is
-the part node's entity id (match `child.id` over `node:children()` or
-`info.parts`), `impulse` the total normal impulse that part absorbed this
-tick (mass·Δv), `x/y/z` its hardest contact point in world space. Empty
-between contacts; anchored assemblies make no contacts at all. Poll it from
-`fixedUpdate` and compare against per-part strength — that is a damage
-model in ten lines:
+tick the call returns an array of `{ part, impulse, speed, x, y, z }` —
+`part` is the part node's entity id (match `child.id` over `node:children()`
+or `info.parts`), `impulse` the total normal impulse that part absorbed this
+tick (mass·Δv), `speed` the peak closing speed it hit at this tick (m/s),
+`x/y/z` its hardest contact point in world space. Empty between contacts;
+anchored assemblies make no contacts at all. Poll it from `fixedUpdate` and
+compare against per-part strength — that is a damage model in ten lines:
 
 ```lua
 for _, hit in ipairs(assembly.impacts(node)) do
-  if hit.impulse > strengthOf(hit.part) then
+  if hit.speed > crashToleranceOf(hit.part) then   -- m/s, KSP-style
     spawnEffect("Explosion", hit.x, hit.y, hit.z)
     -- shear the part off as wreckage:
     assembly.split(node, { childById(node, hit.part) }, function(junk) end)
@@ -282,9 +282,16 @@ for _, hit in ipairs(assembly.impacts(node)) do
 end
 ```
 
-A soft landing on legs reads as a few small impulses on the leg parts; a
-nose-first crash reads as one huge impulse on the nose. The solar demo's
-vessels break exactly this way (`solar/scripts/vessel_controller.lua`).
+Prefer `speed` over `impulse` for a crash test: the contact solver's
+depenetration is BUDGETED (so a deep or fast spawn un-buries at a sane rate
+instead of catapulting), which spreads a high-speed crash's impulse over many
+ticks — the per-tick `impulse` plateaus and understates the hit. `speed` is
+the pre-resolution normal closing velocity and is NOT capped, so it faithfully
+reports how hard something struck (and it needs no mass normalization: a
+40-tonne ship and a 4-tonne ship judge the same touchdown the same way). A
+soft landing on legs reads as a low `speed` on the leg parts; a nose-first
+lithobrake reads as a high `speed` on the nose. The solar demo's vessels break
+exactly this way (`solar/scripts/vessel_controller.lua`).
 
 ### 4.2 Two telegraph layers: `draw.*` (game) vs `gizmo.*` (debug)
 

@@ -142,6 +142,100 @@ local function basis(node)
   return rx, up, rz
 end
 
+-- ── audio ────────────────────────────────────────────────────────────────────
+-- Spatial SFX ride the world through the SFX mixer bus (a short reverb +
+-- compressor there sell scale and stop a stack of engines swamping the mix);
+-- the ambient drone sits on the Ambient bus. Persistent LOOPS (engine, reentry,
+-- bed) keep ONE voice and ride its volume/pitch with throttle/heat instead of
+-- restarting — no clicks, no voice churn. All clips are Kenney CC0.
+local SFX = {
+  engine   = "audio/kenney/sci-fi/spaceEngineLarge_000.ogg",
+  ignite   = "audio/kenney/sci-fi/thrusterFire_000.ogg",
+  stage    = "audio/kenney/impact/impactMetal_heavy_000.ogg",
+  boosters = "audio/kenney/sci-fi/impactMetal_000.ogg",
+  clamp    = "audio/kenney/impact/impactMetal_medium_000.ogg",
+  explode  = "audio/kenney/sci-fi/explosionCrunch_000.ogg",
+  boom     = "audio/kenney/sci-fi/lowFrequency_explosion_000.ogg",
+  chute    = "audio/kenney/interface/open_001.ogg",
+  reentry  = "audio/kenney/sci-fi/forceField_000.ogg",
+  gear     = "audio/kenney/sci-fi/doorOpen_000.ogg",
+  bed      = "audio/kenney/sci-fi/computerNoise_000.ogg",
+}
+local engine_sfx, reentry_sfx, ambient_sfx = nil, nil, nil
+local throttle_prev = 0.0
+
+-- A one-shot spatial hit at a world point (KSP-scale falloff, SFX bus).
+local function sfx3(clip, x, y, z, vol, pitch)
+  if not audio then return end
+  audio.play(clip, x, y, z, {
+    track = "SFX", volume = vol or 1.0, pitch = pitch or 1.0,
+    mode = "spatial", falloff = "inverse", minDistance = 4.0, maxDistance = 800.0,
+  })
+end
+
+-- Dig a crater where a blast meets the ground (only if terrain is close).
+local function make_crater(x, y, z, r)
+  local sd = terrain.query(x, y, z)
+  if sd and sd < r then terrain.dig(x, y, z, r, 1.0) end
+end
+
+-- The engine LOOP follows the vessel and rides the throttle; born on the first
+-- burn, muted (not stopped) when idle so there's no restart pop.
+local function update_engine_audio(node, burning, thr)
+  if not audio then return end
+  if burning then
+    if not engine_sfx then
+      engine_sfx = audio.play(SFX.engine, node, {
+        track = "SFX", loop = true, mode = "spatial", falloff = "inverse",
+        minDistance = 6.0, maxDistance = 900.0, volume = 0.0 })
+    end
+    if engine_sfx then
+      engine_sfx:setVolume(0.35 + thr * 0.8)
+      engine_sfx:setPitch(0.82 + thr * 0.5)
+    end
+  elseif engine_sfx then
+    engine_sfx:setVolume(0.0)
+  end
+end
+
+-- The reentry ROAR: a loop whose volume tracks the heating flux; silenced when
+-- the air thins out.
+local function update_reentry_audio(node, flux)
+  if not audio then return end
+  if flux > 0.015 then
+    if not reentry_sfx then
+      reentry_sfx = audio.play(SFX.reentry, node, {
+        track = "SFX", loop = true, mode = "spatial", falloff = "inverse",
+        minDistance = 8.0, maxDistance = 1200.0, volume = 0.0 })
+    end
+    if reentry_sfx then reentry_sfx:setVolume(math.min(1.0, 0.3 + flux * 4.0)) end
+  elseif reentry_sfx then
+    reentry_sfx:setVolume(0.0)
+  end
+end
+
+-- The AMBIENT BED: a low machine-drone on the Ambient bus (rolled-off up top so
+-- it sits UNDER everything), non-spatial — the felt hum of being aboard. Only
+-- the piloted vessel runs it, so there's never a stack of beds.
+local function update_ambient(on)
+  if not audio then return end
+  if on then
+    if not ambient_sfx then
+      ambient_sfx = audio.play(SFX.bed, { track = "Ambient", loop = true, volume = 0.8 })
+    end
+  elseif ambient_sfx then
+    ambient_sfx:stop()
+    ambient_sfx = nil
+  end
+end
+
+-- Stop the vessel's persistent loops (EVA, breakup) — silence, don't leak.
+local function silence_loops()
+  if engine_sfx then engine_sfx:stop(); engine_sfx = nil end
+  if reentry_sfx then reentry_sfx:stop(); reentry_sfx = nil end
+  if ambient_sfx then ambient_sfx:stop(); ambient_sfx = nil end
+end
+
 -- ── blueprint ───────────────────────────────────────────────────────────────
 -- The part's local +Y (its thrust/stack axis) in the VESSEL frame, from the
 -- blueprint's YXZ rotation — a sideways-mounted engine pushes sideways.
@@ -690,19 +784,23 @@ break_part = function(node, uid, d, c, hx, hy, hz, depth)
   depth = (depth or 0) + 1
   part_hp[uid] = 0
   spawnEffect("Explosion", hx, hy, hz)
+  local is_tank = (d.fuel or 0) > 0
+  -- A boom at the break, spatial through the SFX bus; tanks go off deeper and
+  -- louder. Slight per-part pitch spread so a chain of breaks doesn't machine-gun.
+  sfx3(is_tank and SFX.boom or SFX.explode, hx, hy, hz,
+    is_tank and 1.0 or 0.8, 0.92 + (uid % 5) * 0.03)
   drop_part(uid)
+  -- Any part failing against the ground leaves a scar; a fuel tank tears a real
+  -- crater (bigger with more fuel).
+  local crater_r = is_tank and (1.6 + math.min(2.4, (d.fuel or 0) / 80)) or 1.0
+  make_crater(hx, hy, hz, crater_r)
   log("💥 " .. (d.label or d.id or "part") .. " destroyed!")
   -- FUEL TANKS BLOW UP: a real blast — extra fireballs, a shove on the
-  -- whole vessel, a CRATER if it happens against the ground, and chain
-  -- damage into neighboring parts (which can cook off in turn).
-  if (d.fuel or 0) > 0 and depth <= 4 then
+  -- whole vessel, and chain damage into neighboring parts (which cook off too).
+  if is_tank and depth <= 4 then
     spawnEffect("Explosion", hx + 0.7, hy + 0.5, hz - 0.4)
     spawnEffect("Explosion", hx - 0.5, hy + 0.9, hz + 0.6)
-    local blast = 1.6 + math.min(2.4, (d.fuel or 0) / 80)
-    local sd = terrain.query(hx, hy, hz)
-    if sd and sd < blast then
-      terrain.dig(hx, hy, hz, blast, 1.0)
-    end
+    local blast = crater_r
     local i0 = assembly.info(node)
     if i0 then
       assembly.impulseAt(node, vec3(0, i0.mass * 1.5, 0), vec3(hx, hy, hz))
@@ -737,6 +835,7 @@ break_part = function(node, uid, d, c, hx, hy, hz, depth)
   if d.kind == "crewed" then
     -- The POD is the ship. Its pilot is thrown clear of the wreck.
     destroyed = true
+    silence_loops()
     if piloting then
       piloting = false
       if astronaut then
@@ -773,6 +872,65 @@ break_part = function(node, uid, d, c, hx, hy, hz, depth)
   end
 end
 
+-- A CATASTROPHIC hit doesn't just crush the contact parts — the airframe FAILS
+-- and the ship comes apart. Every surviving part shears into its own tumbling
+-- wreck kicked away from the impact, over a big crater and a low boom. Latched
+-- by `destroyed` so it fires exactly once.
+local function shatter(node, hx, hy, hz, spd, info)
+  if destroyed then return end
+  destroyed = true
+  log("💥 CATASTROPHIC BREAKUP")
+  spawnEffect("Explosion", hx, hy, hz)
+  spawnEffect("Explosion", hx + 0.8, hy + 0.6, hz - 0.5)
+  spawnEffect("Explosion", hx - 0.6, hy + 0.3, hz + 0.7)
+  sfx3(SFX.boom, hx, hy, hz, 1.0, 0.85)
+  sfx3(SFX.explode, hx, hy, hz, 0.9, 1.05)
+  make_crater(hx, hy, hz, 2.6)
+  silence_loops()
+  -- Throw the pilot clear of the wreck.
+  if piloting then
+    piloting = false
+    if astronaut then
+      astronaut.visible = true
+      astronaut.x, astronaut.y, astronaut.z = hx, hy + 2.0, hz
+      if info then
+        astronaut.vx = info.vel.x
+        astronaut.vy = info.vel.y + 3.0
+        astronaut.vz = info.vel.z
+      end
+    end
+    set_hud(nil)
+    set_navball(false)
+    set_stage_list(nil)
+    set_prompt("")
+  end
+  -- Shear every part loose (leave the last one so the compound stays valid).
+  local live = {}
+  for _, ch in ipairs(node:children()) do live[#live + 1] = ch end
+  local kick = math.min(9.0, spd * 0.18)
+  for i = 1, #live - 1 do
+    local ch = live[i]
+    if ch and ch.valid then
+      quench({ ch })
+      assembly.split(node, { ch }, function(junk)
+        local ji = assembly.info(junk)
+        if ji then
+          local dxk, dyk, dzk = ji.com.x - hx, ji.com.y - hy, ji.com.z - hz
+          local l = math.sqrt(dxk * dxk + dyk * dyk + dzk * dzk)
+          if l < 1e-3 then dxk, dyk, dzk, l = 0, 1, 0, 1 end
+          assembly.impulseAt(junk,
+            vec3(dxk / l * kick, dyk / l * kick + 2.5, dzk / l * kick), ji.com)
+        end
+      end)
+    end
+  end
+  for uid in pairs(part_hp) do part_hp[uid] = 0 end
+end
+
+-- Impact speed (m/s) above which a hit fails the whole airframe, not just the
+-- parts it touched — a genuine lithobrake, not a hard landing.
+local SHATTER_SPEED = 20.0
+
 local function damage_tick(node, info)
   -- Disarmed while clamped or still assembling; release starts a settle
   -- window — the pad handshake must never read as a crash (big ships were
@@ -782,27 +940,48 @@ local function damage_tick(node, info)
     return
   end
   if time - damage_arm < 2.5 then return end
-  local m = math.max(info.mass, 0.1)
+  -- IMPACT SPEED is the honest crash metric: the contact solver's depenetration
+  -- is budgeted (so a fast/deep spawn un-buries instead of catapulting), which
+  -- spreads a crash's IMPULSE over many ticks — it plateaus and understated the
+  -- hit, which is why ramming a planet used to barely scratch the ship. `speed`
+  -- is the pre-resolution closing velocity (m/s) and isn't capped, so it reads
+  -- true; tolerances are plain crash speeds, no mass normalization needed.
+  -- Pre-scan the live parts' hits (and the worst) BEFORE applying anything, so a
+  -- catastrophic blow fails the whole airframe even if it landed on the pod.
+  local hits = {}
+  local worst, wx, wy, wz = 0.0, nil, nil, nil
   for _, h in ipairs(assembly.impacts(node)) do
     local uid, c = uid_of_child(node, h.part)
     local d = uid and bp_by_uid[uid]
     local hp = uid and part_hp[uid]
     if d and hp and hp > 0 then
-      local tol = part_tolerance(d)
-      local dv = h.impulse / m -- felt Δv: mass-normalized, ship-size-fair
-      if dv >= tol * 0.5 then
-        local dmg = math.min(1.0, (dv - tol * 0.5) / (tol * 0.5))
-        part_hp[uid] = hp - dmg
-        if part_hp[uid] <= 0 then
-          break_part(node, uid, d, c, h.x, h.y, h.z)
-        elseif dmg > 0.04 then
-          spawnEffect("Smoke", h.x, h.y, h.z)
-          log(string.format("⚠ %s damaged — %d%% left (hit %.1f m/s)",
-            d.label or d.id or "part", part_hp[uid] * 100, dv))
-        end
-      end
+      local v = h.speed or 0
+      hits[#hits + 1] = { uid = uid, c = c, d = d, hp = hp, v = v, x = h.x, y = h.y, z = h.z }
+      if v > worst then worst, wx, wy, wz = v, h.x, h.y, h.z end
     end
   end
+  -- A genuinely violent strike fails the WHOLE airframe — the ship bursts apart.
+  if not destroyed and worst >= SHATTER_SPEED and wx then
+    shatter(node, wx, wy, wz, worst, info)
+    return
+  end
+  for _, h in ipairs(hits) do
+    local tol = part_tolerance(h.d)
+    if h.v >= tol * 0.5 then
+      local dmg = math.min(1.0, (h.v - tol * 0.5) / (tol * 0.5))
+      part_hp[h.uid] = h.hp - dmg
+      if part_hp[h.uid] <= 0 then
+        break_part(node, h.uid, h.d, h.c, h.x, h.y, h.z)
+      elseif dmg > 0.04 then
+        spawnEffect("Smoke", h.x, h.y, h.z)
+        sfx3(SFX.stage, h.x, h.y, h.z, 0.4, 1.25) -- a metal bang it survived
+        log(string.format("⚠ %s damaged — %d%% left (hit %.1f m/s)",
+          h.d.label or h.d.id or "part", part_hp[h.uid] * 100, h.v))
+      end
+    end
+    if destroyed then break end
+  end
+  if destroyed then return end
   -- Damaged parts SMOULDER: a smoke puff re-anchored to the part each beat,
   -- so the trail follows the flying (or crashed) ship.
   if time - smoke_t > 0.7 then
@@ -882,6 +1061,7 @@ function fixedUpdate(node, dt)
     piloting = true
     astronaut.visible = false
     set_navball(true)
+    update_ambient(true) -- the cockpit hum comes up
     sas_mode, sas_last = "stability", "stability"
     log("vessel: you're in the pod — SHIFT throttle, SPACE releases the clamps")
   end
@@ -930,6 +1110,8 @@ function fixedUpdate(node, dt)
       piloting = false
       throttle = 0.0
       set_flames(node, 0)
+      silence_loops() -- engine/reentry/bed all stand down when you step out
+      throttle_prev = 0.0
       astronaut.x = px + rx.x * 2.2 + up.x * 0.4
       astronaut.y = py + rx.y * 2.2 + up.y * 0.4
       astronaut.z = pz + rx.z * 2.2 + up.z * 0.4
@@ -944,6 +1126,7 @@ function fixedUpdate(node, dt)
       piloting = true
       astronaut.visible = false
       set_navball(true)
+      update_ambient(true) -- the cockpit hum comes back up
       -- Board in a stability hold — never inherit a velocity-pointing mode
       -- into a takeoff (a vertical climb's "retrograde" points at the core).
       sas_mode, sas_last = "stability", "stability"
@@ -1081,6 +1264,15 @@ function fixedUpdate(node, dt)
   end
   set_flames(node, (info.anchored or fuel <= 0) and 0 or throttle, cut)
 
+  -- ---- engine audio: ignition crack + a loop that rides the throttle ------
+  local burning = throttle > 0.02 and not info.anchored and fuel > 0 and total_thrust > 0
+  if burning and throttle_prev <= 0.02 then
+    -- The ignition crack fires at the base of the stack.
+    sfx3(SFX.ignite, bx, by, bz, 0.9, 1.0)
+  end
+  update_engine_audio(node, burning, throttle)
+  throttle_prev = burning and throttle or 0.0
+
   -- ---- reentry / atmospheric heating -------------------------------------
   -- Below the atmo band (alt < 35% of the body's radius) speed turns into
   -- heat: flux ~ density^1.5 · v³. The WINDWARD parts take it — fire licks
@@ -1170,6 +1362,8 @@ function fixedUpdate(node, dt)
       chute_anim = 0.0
     end
   end
+  -- The reentry roar rides the heating flux (silent once the air thins out).
+  update_reentry_audio(node, heating)
 
   -- ---- attitude: rate-commanded, the KSP feel ----------------------------
   if input.pressed("t") then
@@ -1183,6 +1377,8 @@ function fixedUpdate(node, dt)
     for _, dev in pairs(DEVICES) do
       if #dev.parts > 0 and input.pressed(dev.key) then
         dev.on = not dev.on
+        local bx2, by2, bz2 = base_of(node, info)
+        sfx3(SFX.gear, bx2, by2, bz2, 0.7, dev.on and 1.0 or 0.9)
         log(dev.label .. (dev.on and " deployed" or " retracted"))
       end
     end
@@ -1251,6 +1447,7 @@ function fixedUpdate(node, dt)
       if assembly_ready(info) then
         released = true
         assembly.setAnchored(node, false)
+        sfx3(SFX.clamp, bx, by, bz, 0.9, 1.0) -- the clamps let go with a clank
         log("launch clamps released")
       else
         log(string.format("clamps hold: %d / %d parts assembled", #info.parts, part_total))
@@ -1260,6 +1457,7 @@ function fixedUpdate(node, dt)
       -- below) as soon as they're in thick enough air.
       table.remove(events, 1)
       chutes_deployed = true
+      sfx3(SFX.chute, bx, by, bz, 0.8, 1.0) -- the canopy cracks open
       log("parachutes deployed")
     elseif #events > 0 and events[1].kind == "ring" then
       -- A BOOSTER RING: every branch in the ring kicks away laterally at
@@ -1287,6 +1485,7 @@ function fixedUpdate(node, dt)
           local kz = rx.z * ox + rz.z * oz
           local n_away = #parts_nodes
           quench(parts_nodes)
+          sfx3(SFX.boosters, bx, by, bz, 0.85, 1.0) -- the separation charge fires
           assembly.split(node, parts_nodes, function(stage)
             local si = assembly.info(stage)
             if si then
@@ -1330,6 +1529,7 @@ function fixedUpdate(node, dt)
         events = keep
         local n_away = #parts_nodes
         quench(parts_nodes)
+        sfx3(SFX.stage, bx, by, bz, 0.9, 1.0) -- the decoupler bangs
         assembly.split(node, parts_nodes, function(stage)
           local si = assembly.info(stage)
           if si then

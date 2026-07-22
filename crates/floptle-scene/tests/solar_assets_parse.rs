@@ -10,6 +10,19 @@ fn solar_dir() -> Option<PathBuf> {
 }
 
 #[test]
+fn solar_project_config_parses() {
+    // project.ron carries the mixer (tracks + effects) — a bad track/effect
+    // spelling should fail HERE, not silently drop the audio bus at runtime.
+    let Some(solar) = solar_dir() else { return };
+    let cfg = floptle_scene::try_load_project(&solar.join("project.ron"));
+    let cfg = cfg.expect("project.ron parse error").expect("project.ron missing");
+    assert!(
+        cfg.mixer.tracks.iter().any(|t| t.name == "SFX"),
+        "the solar mixer defines an SFX bus"
+    );
+}
+
+#[test]
 fn solar_scenes_parse() {
     let Some(solar) = solar_dir() else { return };
     let mut checked = 0;

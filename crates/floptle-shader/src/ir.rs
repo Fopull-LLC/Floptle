@@ -119,6 +119,12 @@ pub enum Input {
     /// CAMERA-RELATIVE position (`vec3`) — the engine's floating-origin space
     /// (ADR-0015): the camera sits at the origin. Both stages.
     WorldPos,
+    /// SURFACE-LOCKED object position (`vec3`) — the mesh-local position scaled
+    /// to world units (`in.pos * modelScale`), the same coordinate triplanar
+    /// projects along. Unlike `worldPos` it does NOT ride the floating origin,
+    /// so procedural detail (panel seams, rivets, weathering) STICKS to the
+    /// surface instead of swimming/rescaling as the camera moves. Fragment only.
+    ObjectPos,
     /// Unit vector from the surface toward the camera (`vec3`). Fragment only.
     ViewDir,
     /// Scene time in seconds (`float`). Both stages.
@@ -137,6 +143,7 @@ impl Input {
             Input::Uv => "uv",
             Input::Normal => "normal",
             Input::WorldPos => "worldPos",
+            Input::ObjectPos => "objectPos",
             Input::ViewDir => "viewDir",
             Input::Time => "time",
             Input::InstanceColor => "instanceColor",
@@ -147,7 +154,9 @@ impl Input {
     pub fn ty(self) -> Ty {
         match self {
             Input::Uv => Ty::Vec2,
-            Input::Normal | Input::WorldPos | Input::ViewDir | Input::SkyDir => Ty::Vec3,
+            Input::Normal | Input::WorldPos | Input::ObjectPos | Input::ViewDir | Input::SkyDir => {
+                Ty::Vec3
+            }
             Input::Time => Ty::Float,
             Input::InstanceColor => Ty::Vec4,
         }
@@ -158,6 +167,7 @@ impl Input {
             Input::Uv,
             Input::Normal,
             Input::WorldPos,
+            Input::ObjectPos,
             Input::ViewDir,
             Input::Time,
             Input::InstanceColor,

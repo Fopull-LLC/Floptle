@@ -94,6 +94,13 @@ pub struct CompoundContact {
     /// Normal impulse magnitude applied (kg·m/s in sim units) — 0 for a
     /// purely positional resolve of an already-separating contact.
     pub impulse: f32,
+    /// Closing SPEED along the contact normal at the instant of contact, before
+    /// this contact was resolved (m/s in sim units, always ≥ 0). This is the
+    /// honest crash-tolerance metric (KSP measures impact speed, not impulse):
+    /// budgeted depenetration spreads a fast crash's impulse over many ticks so
+    /// the per-tick impulse plateaus, but the incoming normal velocity is not
+    /// capped, so `speed` faithfully reports how hard something actually hit.
+    pub speed: f32,
 }
 
 /// A compound rigid body. Positions/velocities are sim-frame (origin-relative,

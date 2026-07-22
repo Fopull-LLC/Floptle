@@ -146,8 +146,10 @@ Each op = a signature (typed inputs/outputs + params) and a WGSL snippet templat
 starting set, per ADR-0007's "usable subset":
 
 - **Inputs** — `uv`, `worldPos` (**camera-relative** — floating origin, ADR-0015; document
-  loudly), `normal`, `viewDir`, `time`, `instanceColor` (the node's fixed material tint, so
-  IR shaders compose with per-node tinting), `screenUv`.
+  loudly), `objectPos` (**surface-locked** — object-local scaled to world units, the coord
+  triplanar rides; use this for procedural detail that must STICK to the hull instead of
+  swimming as the camera moves), `normal`, `viewDir`, `time`, `instanceColor` (the node's
+  fixed material tint, so IR shaders compose with per-node tinting), `screenUv`.
 - **Math** — arithmetic, `dot/cross/normalize/length`, `mix/clamp/smoothstep/step`,
   `sin/cos/pow/abs/floor/fract`, swizzle/split/combine.
 - **Noise** — `valueNoise`, `simplex`, `worley`, `fbm(octaves, lacunarity, gain)`.
