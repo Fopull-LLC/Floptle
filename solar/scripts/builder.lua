@@ -46,6 +46,26 @@ defaults = {
   nudge = 0.1,        -- precise-edit step (SHIFT = a quarter of this)
 }
 
+-- ── Builder audio (non-spatial UI clicks + a hangar bed) ─────────────────────
+-- Every build action gets a crisp click on the UI mixer bus; a low machine hum
+-- on the Ambient bus fills the hangar. Kenney CC0 clips.
+local UI_SFX = {
+  place  = "audio/kenney/interface/click_001.ogg",
+  pickup = "audio/kenney/interface/pluck_001.ogg",
+  scrap  = "audio/kenney/interface/close_001.ogg",
+  tool   = "audio/kenney/interface/tick_001.ogg",
+  save   = "audio/kenney/interface/confirmation_001.ogg",
+  launch = "audio/kenney/interface/confirmation_003.ogg",
+  bed    = "audio/kenney/sci-fi/computerNoise_001.ogg",
+}
+local hangar_bed = nil
+-- Take a KEY (into UI_SFX), not a clip path, so callers don't each capture
+-- UI_SFX as an upvalue — `update` is already near LuaJIT's 60-upvalue ceiling.
+local function ui(key, vol)
+  if not audio then return end
+  audio.play(UI_SFX[key] or key, { track = "UI", volume = vol or 1.0 })
+end
+
 -- ── Part registry (builder-side only; blueprints embed everything) ──────────
 -- h = FULL visual stack height (measured from the mesh AABB × prefab scale,
 -- so stacked parts sit flush); rx/rz = half-widths for overlap tests.
@@ -58,7 +78,10 @@ local REG = {
   tankM     = { prefab = "PartTankM",     label = "FT-M Tank",    h = 1.50, rx = 0.50, rz = 0.50, mass = 3.0,  cost = 260, top = true,  bottom = true,  kind = "tank", fuel = 150, side = true },
   engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = true,  kind = "engine", thrust = 55,  burn = 0.9 },
   engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = true,  kind = "engine", thrust = 130, burn = 2.0 },
-  fins      = { prefab = "PartFins",      label = "Aero Fins",    h = 0.80, rx = 0.95, rz = 0.95, mass = 0.5,  cost = 110, top = false, bottom = true,  kind = "structural", aero = true, side = true },
+  -- A fin is a SIDE-MOUNT blade: no axial nodes (never centred), not a side
+  -- host itself — it can only attach to another part's flank, where it self-
+  -- orients to point outward. Ring it with X symmetry for a proper fin set.
+  fins      = { prefab = "PartFins",      label = "Aero Fin",     h = 0.95, rx = 0.35, rz = 0.03, mass = 0.5,  cost = 110, top = false, bottom = false, kind = "structural", aero = true, radial_orient = true },
   battery   = { prefab = "PartBattery",   label = "Battery",      h = 1.00, rx = 0.50, rz = 0.50, mass = 0.6,  cost = 130, top = true,  bottom = true,  kind = "structural", power = true, side = true },
   dish      = { prefab = "PartDish",      label = "Comms Dish",   h = 0.80, rx = 0.40, rz = 0.40, mass = 0.2,  cost = 120, top = true,  bottom = true,  kind = "structural", comms = true, side = true },
   decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
@@ -253,6 +276,7 @@ local function outward_orient(ux, uy, uz)
   local pitch = math.atan2(uz, uy)
   return pitch, roll
 end
+
 
 -- The EDIT SET for a part: its subtree — and, for a symmetry-ring member,
 -- every member's subtree. Rings pick up, scrap and highlight as ONE.
@@ -849,32 +873,65 @@ local function draw_gizmo(p, tool)
 end
 
 -- Which handle is under the cursor for `tool`? → kind, axis index (nil none).
+-- Generously sampled: a big rotate ring at a shallow angle projects to a long
+-- screen arc, so we walk it densely and use a fat pixel radius — aiming at a
+-- ring should GRAB it, never fall through to a deselect.
+local GIZ_HIT_PX = 22
 local function gizmo_hit(p, tool, len, rad)
   local mx, my = input.mouse()
+  local best, best_kind, best_d = nil, nil, GIZ_HIT_PX * GIZ_HIT_PX
   if tool == "rotate" then
     for ai, a in ipairs(GIZ_AXES) do
       local ux, uy, uz, vx2, vy2, vz2 = ring_basis(a)
-      for k = 0, 23 do
-        local t = k * (2 * math.pi / 24)
+      for k = 0, 47 do
+        local t = k * (2 * math.pi / 48)
         local cx = p.x + (ux * math.cos(t) + vx2 * math.sin(t)) * rad
         local cy2 = p.y + (uy * math.cos(t) + vy2 * math.sin(t)) * rad
         local cz = p.z + (uz * math.cos(t) + vz2 * math.sin(t)) * rad
         local sx, sy, on = screen_of(cx, cy2, cz)
-        if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 16 * 16 then return "turn", ai end
+        if on then
+          local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+          if d < best_d then best, best_kind, best_d = ai, "turn", d end
+        end
       end
     end
   else
     for ai, a in ipairs(GIZ_AXES) do
-      -- Test several points along the shaft so grabbing anywhere on the arrow
+      -- Test many points along the shaft so grabbing anywhere on the arrow
       -- (not just the tip) works — much more forgiving.
-      for s = 4, 10 do
-        local f = len * s / 10
+      for s = 2, 11 do
+        local f = len * s / 11
         local sx, sy, on = screen_of(p.x + a.x * f, p.y + a.y * f, p.z + a.z * f)
-        if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 16 * 16 then return "move", ai end
+        if on then
+          local d = (sx - mx) ^ 2 + (sy - my) ^ 2
+          if d < best_d then best, best_kind, best_d = ai, "move", d end
+        end
       end
     end
   end
+  if best then return best_kind, best end
   return nil
+end
+
+-- The screen-space bounding radius of the selection's gizmo (center + max
+-- reach to any handle tip, in pixels). A click INSIDE this footprint that
+-- misses a handle must NOT deselect — the player was aiming at the gizmo.
+local function gizmo_footprint_px(p, tool, len, rad)
+  local cx, cy, on = screen_of(p.x, p.y, p.z)
+  if not on then return nil end
+  local reach = (tool == "rotate") and rad or len
+  local maxr = 26 -- always swallow a near-center miss
+  for _, a in ipairs(GIZ_AXES) do
+    for _, s in ipairs({ 1, -1 }) do
+      local sx, sy, o2 = screen_of(p.x + a.x * reach * s, p.y + a.y * reach * s,
+        p.z + a.z * reach * s)
+      if o2 then
+        local d = math.sqrt((sx - cx) ^ 2 + (sy - cy) ^ 2)
+        if d > maxr then maxr = d end
+      end
+    end
+  end
+  return cx, cy, maxr
 end
 
 -- ── The catalogue calls this (findScript("builder").pick) ───────────────────
@@ -907,6 +964,7 @@ local function pickup(uid)
   root.parent = nil
   push_undo({ type = "move", moved = moved })
   click_cool = 0.18
+  ui("pickup", 0.8) -- lifted off the stack
   hint(HINT_GHOST, 6.0)
 end
 
@@ -941,6 +999,7 @@ local function place_ghost(x, y, z, parent, att, sym)
   end
   ghost = nil
   click_cool = 0.15
+  ui("place", 0.9) -- the part snaps home
   hint(HINT_IDLE, 0.0); hint_t = 0
   publish_center(); refresh_stats()
   return placed_uid
@@ -963,6 +1022,11 @@ local function symmetry_slots(hub, gdef, gyaw, gpitch, groll, x, y, z, n)
         pitch2, roll2 = outward_orient(vx / ol, vy / ol, vz / ol)
         yaw2 = 0
       end
+    elseif gdef.radial_orient then
+      -- A fin blade must self-orient from its ACTUAL rotated slot: rot_about
+      -- turns the position one way while gyaw+a turns the blade the other, so
+      -- only the base fin would point out. Recompute yaw from (slot − hub).
+      yaw2, pitch2, roll2 = math.atan2(-vz, vx), 0, 0
     end
     out[#out + 1] = { x = px, y = py, z = pz, yaw = yaw2, pitch = pitch2, roll = roll2 }
   end
@@ -996,6 +1060,9 @@ local function mirror_onto_ring(host_uid, placed_uid)
           pitch2, roll2 = outward_orient(ox / ol, oy / ol, oz / ol)
           yaw2 = 0
         end
+      elseif src.def.radial_orient and src.att == "radial" then
+        -- A fin mirrored onto another flank: re-face its blade outward there.
+        yaw2, pitch2, roll2 = math.atan2(-(pz - parts[m].z), px - parts[m].x), 0, 0
       end
       uids[#uids + 1] = spawn_part(src.id, px, py, pz, yaw2, m, nil,
                                    pitch2, roll2, src.att, gid)
@@ -1056,6 +1123,7 @@ local function save_blueprint()
   end
   save.set("shipyard.blueprint", bp)
   save.flush()
+  ui("save", 0.9)
   hint("blueprint saved  ·  " .. i .. " parts", 2.5)
 end
 
@@ -1082,6 +1150,9 @@ function start(node)
   hint_node = find("BuildHint")
   load_blueprint()
   refresh_stats()
+  if audio and not hangar_bed then
+    hangar_bed = audio.play(UI_SFX.bed, { track = "Ambient", loop = true, volume = 0.7 })
+  end
 end
 
 local grab_mode = false
@@ -1119,56 +1190,12 @@ local function draw_engineering()
   end
 end
 
-function update(node, dt)
-  draw_engineering()
-  -- One shared click edge for the whole frame.
-  local lmb = input.button(0)
-  local clicked = lmb and not lmb_prev and click_cool <= 0
-  lmb_prev = lmb
-  if click_cool > 0 then click_cool = click_cool - dt end
-  if hint_t > 0 then
-    hint_t = hint_t - dt
-    if hint_t <= 0 and hint_node and not ghost and not grab_mode then
-      hint_node.text = HINT_IDLE
-    end
-  end
-  local cam_busy = input.button(1) -- RMB = the camera's; never build through it
-
-  -- TOOL switch (1 Move · 2 Rotate · 3 Stage · 4 Grab) — never while placing
-  -- a part or holding a gizmo. The active tool decides what the SELECTION's
-  -- gizmo does; switching tools keeps the selection.
-  if not ghost and not gizmo_drag then
-    for i, tname in ipairs(TOOLS) do
-      if input.pressed(tostring(i)) then
-        tool = tname
-        hint("tool: " .. TOOL_LABEL[tool] .. (tool == "grab"
-          and " — click a part to pick it up" or ""), 2.0)
-        refresh_stats()
-      end
-    end
-  end
-
-  -- SYMMETRY mode: X cycles ×1 ×2 ×3 ×4 ×6 ×8 (SHIFT+X cycles back).
-  -- Applies to radial placements; stacking on a ring always auto-mirrors.
-  if input.pressed("x") then
-    local idx = 1
-    for i, n in ipairs(SYM_STEPS) do
-      if n == sym_n then idx = i end
-    end
-    idx = input.key("shift") and ((idx - 2) % #SYM_STEPS + 1) or (idx % #SYM_STEPS + 1)
-    sym_n = SYM_STEPS[idx]
-    hint(sym_n > 1
-      and ("symmetry ×" .. sym_n .. " — a radial placement rings the hull")
-      or "symmetry off", 2.0)
-    refresh_stats()
-  end
-
-  -- ── STAGING panel (STAGE tool): drag rows to reorder the firing sequence ──
-  -- Hit-tested against the panel's ACTUAL solved rect (node:uiRect — physical
-  -- pixels, same space as the mouse), so a click lands on the row you point
-  -- at — no more guessed geometry drifting from the rendered panel. Rows are
-  -- laid out under STAGE_HEADER_LINES header lines; the panel's text size sets
-  -- the line height, read back from the rect.
+-- The STAGING panel (STAGE tool): draw the numbered decoupler badges, then
+-- hit-test the panel against its REAL solved rect (node:uiRect — physical px,
+-- the mouse's space) and drag rows to reorder the firing sequence. Returns true
+-- when the panel owns the mouse this frame. Lives OUTSIDE `update` so that huge
+-- function stays under LuaJIT's 60-upvalue-per-function ceiling.
+local function handle_staging(clicked, lmb, grab_mode)
   local in_panel = false
   draw_stage_badges()
   stage_hover = nil
@@ -1219,9 +1246,59 @@ function update(node, dt)
       paint_stages() -- refresh the ▸ hover marker
     end
   end
-  -- While the cursor is over the panel (or a row is in hand) it owns the
-  -- mouse — no picking, placing or scrapping through it.
-  if stage_drag or in_panel then return end
+  return stage_drag or in_panel
+end
+
+function update(node, dt)
+  draw_engineering()
+  -- One shared click edge for the whole frame.
+  local lmb = input.button(0)
+  local clicked = lmb and not lmb_prev and click_cool <= 0
+  lmb_prev = lmb
+  if click_cool > 0 then click_cool = click_cool - dt end
+  if hint_t > 0 then
+    hint_t = hint_t - dt
+    if hint_t <= 0 and hint_node and not ghost and not grab_mode then
+      hint_node.text = HINT_IDLE
+    end
+  end
+  local cam_busy = input.button(1) -- RMB = the camera's; never build through it
+
+  -- TOOL switch (1 Move · 2 Rotate · 3 Stage · 4 Grab) — never while placing
+  -- a part or holding a gizmo. The active tool decides what the SELECTION's
+  -- gizmo does; switching tools keeps the selection.
+  if not ghost and not gizmo_drag then
+    for i, tname in ipairs(TOOLS) do
+      if input.pressed(tostring(i)) then
+        tool = tname
+        ui("tool", 0.7)
+        hint("tool: " .. TOOL_LABEL[tool] .. (tool == "grab"
+          and " — click a part to pick it up" or ""), 2.0)
+        refresh_stats()
+      end
+    end
+  end
+
+  -- SYMMETRY mode: X cycles ×1 ×2 ×3 ×4 ×6 ×8 (SHIFT+X cycles back).
+  -- Applies to radial placements; stacking on a ring always auto-mirrors.
+  if input.pressed("x") then
+    local idx = 1
+    for i, n in ipairs(SYM_STEPS) do
+      if n == sym_n then idx = i end
+    end
+    idx = input.key("shift") and ((idx - 2) % #SYM_STEPS + 1) or (idx % #SYM_STEPS + 1)
+    sym_n = SYM_STEPS[idx]
+    hint(sym_n > 1
+      and ("symmetry ×" .. sym_n .. " — a radial placement rings the hull")
+      or "symmetry off", 2.0)
+    refresh_stats()
+  end
+
+  -- ── STAGING panel (STAGE tool): drag rows to reorder the firing sequence ──
+  -- Extracted to handle_staging() (below) so this enormous `update` stays under
+  -- LuaJIT's 60-upvalue-per-function ceiling. Returns true when the panel owns
+  -- the mouse this frame — no picking, placing or scrapping through it.
+  if handle_staging(clicked, lmb, grab_mode) then return end
 
   -- Self-heal: never let a bad ghost wedge the builder.
   if ghost then
@@ -1252,6 +1329,15 @@ function update(node, dt)
         ghost.yaw = 0
         ghost.roll = math.asin(math.max(-1, math.min(1, -snap.dx)))
         ghost.pitch = math.atan2(snap.dz, snap.dy)
+        local gex, gey, gez = eff_extents(ghost.def, ghost.yaw, ghost.pitch, ghost.roll)
+        local g = math.abs(snap.dx) * gex + math.abs(snap.dy) * gey + math.abs(snap.dz) * gez
+        x = snap.x + snap.dx * g
+        y = snap.y + snap.dy * g
+        z = snap.z + snap.dz * g
+      elseif snap.side == "radial" and ghost.def.radial_orient then
+        -- A fin: yaw its blade to face outward (horizontal), upright, re-seat.
+        ghost.yaw = math.atan2(-snap.dz, snap.dx)
+        ghost.pitch, ghost.roll = 0, 0
         local gex, gey, gez = eff_extents(ghost.def, ghost.yaw, ghost.pitch, ghost.roll)
         local g = math.abs(snap.dx) * gex + math.abs(snap.dy) * gey + math.abs(snap.dz) * gez
         x = snap.x + snap.dx * g
@@ -1366,6 +1452,7 @@ function update(node, dt)
           if d then datas[#datas + 1] = d end
         end
         push_undo({ type = "scrap", parts = datas })
+        ui("scrap", 0.8)
         hint("scrapped " .. #datas .. " carried part(s) — CTRL+Z to undo", 2.5)
       elseif ghost.node then
         destroy(ghost.node)
@@ -1524,15 +1611,16 @@ function update(node, dt)
   if not sel then selected_uid = nil end
 
   -- The selected part: bright outline + (in Move/Rotate) its tool gizmo.
+  local giz_len, giz_rad = nil, nil
   if sel then
     outline(sel, 0.4, 0.95, 0.7, 1.0)
     for u in pairs(edit_set(selected_uid)) do
       if u ~= selected_uid and parts[u] then outline(parts[u], 0.4, 0.95, 0.7, 0.3) end
     end
     if tool == "move" or tool == "rotate" then
-      local glen, grad = draw_gizmo(sel, tool)
+      giz_len, giz_rad = draw_gizmo(sel, tool)
       if clicked and not cam_busy then
-        local kind, ai = gizmo_hit(sel, tool, glen, grad)
+        local kind, ai = gizmo_hit(sel, tool, giz_len, giz_rad)
         if kind then
           local mx, my = input.mouse()
           gizmo_drag = { uid = selected_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
@@ -1547,8 +1635,10 @@ function update(node, dt)
     outline(parts[hover_uid], 0.8, 0.88, 1.0, 0.45)
   end
 
-  -- Click: SELECT the hovered part, or (GRAB tool) pick it up to re-attach,
-  -- or click empty space to deselect. Never moves anything.
+  -- Click: SELECT the hovered part, or (GRAB tool) pick it up to re-attach.
+  -- Clicking empty space deselects — EXCEPT a click that lands on the active
+  -- gizmo's footprint (a missed handle grab), which keeps the selection so
+  -- fiddling with the Move/Rotate gizmo never drops what you're editing.
   if clicked and not cam_busy then
     if hover_uid then
       if tool == "grab" then
@@ -1557,9 +1647,16 @@ function update(node, dt)
       else
         selected_uid = hover_uid
       end
-    else
-      selected_uid = nil -- clicked the empty canvas
+      return
     end
+    if sel and giz_len then
+      local gx, gy, gr = gizmo_footprint_px(sel, tool, giz_len, giz_rad)
+      if gx then
+        local mx, my = input.mouse()
+        if (mx - gx) ^ 2 + (my - gy) ^ 2 <= gr * gr then return end -- keep selection
+      end
+    end
+    selected_uid = nil -- clicked the empty canvas, clear of the gizmo
     return
   end
 
@@ -1603,6 +1700,7 @@ function update(node, dt)
         if d then datas[#datas + 1] = d end
       end
       push_undo({ type = "scrap", parts = datas })
+      ui("scrap", 0.8)
       hint("scrapped " .. #datas .. " part(s) — CTRL+Z to undo", 2.5)
       selected_uid = nil
     end
@@ -1621,6 +1719,8 @@ function doSave() save_blueprint() end
 function doLaunch()
   if partCount == 0 then hint("nothing to launch — build something first", 2.5) return end
   save_blueprint()
+  ui("launch", 1.0)
+  if hangar_bed then hangar_bed:stop(); hangar_bed = nil end
   save.set("shipyard.launch", 1)
   save.set("shipyard.pilot", 1) -- you launch IN the pod, not beside it
   save.flush()

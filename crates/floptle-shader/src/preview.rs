@@ -278,6 +278,7 @@ fn target_vis(
                 }
                 (Stage::Fragment, Input::Normal) => "normalize(in.normal)",
                 (Stage::Fragment, Input::WorldPos) => "in.view_pos",
+                (Stage::Fragment, Input::ObjectPos) => "in.lpos",
                 (Stage::Fragment, Input::ViewDir) => "normalize(-in.view_pos)",
                 (_, Input::Time) => "fract(G.params.x * 0.25)",
                 (Stage::Fragment, Input::InstanceColor) => "in.color",

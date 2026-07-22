@@ -51,6 +51,11 @@ pub struct AssemblyImpact {
     pub part: u32,
     /// Total normal impulse the part absorbed this tick (mass·Δv, sim units).
     pub impulse: f32,
+    /// Peak closing SPEED the part hit at this tick (m/s) — the honest crash
+    /// metric. Budgeted depenetration flattens `impulse` on a fast crash, but
+    /// this reports the true impact speed, so `speed >= tolerance` is a clean
+    /// KSP-style crash test (compare directly, no mass normalization needed).
+    pub speed: f32,
     /// World point of the part's hardest contact.
     pub point: [f64; 3],
 }
@@ -274,10 +279,11 @@ pub(crate) fn install_assembly_api(
         t.set("info", f)?;
     }
     // assembly.impacts(node) — the LAST TICK's per-part contact loads: an
-    // array of { part, impulse, x, y, z } (part = the part node's entity id,
-    // impulse = total normal impulse it absorbed, x/y/z = its hardest contact
-    // point, world space). Empty between contacts. Poll from fixedUpdate and
-    // compare against per-part strength — that's a damage model.
+    // array of { part, impulse, speed, x, y, z } (part = the part node's entity
+    // id, impulse = total normal impulse it absorbed, speed = peak closing speed
+    // in m/s — the honest crash metric, x/y/z = its hardest contact point, world
+    // space). Empty between contacts. Poll from fixedUpdate and compare `speed`
+    // against a per-part crash tolerance — that's a damage model in ten lines.
     {
         let impacts = impacts.clone();
         let f = lua.create_function(move |lua, node: Value| {
@@ -289,6 +295,7 @@ pub(crate) fn install_assembly_api(
                     let e = lua.create_table()?;
                     e.set("part", i.part)?;
                     e.set("impulse", i.impulse as f64)?;
+                    e.set("speed", i.speed as f64)?;
                     e.set("x", i.point[0])?;
                     e.set("y", i.point[1])?;
                     e.set("z", i.point[2])?;
@@ -347,8 +354,8 @@ mod tests {
     }
 
     /// `assembly.impacts(node)` surfaces the fed per-part contact loads as an
-    /// array of { part, impulse, x, y, z }, and reads empty (not nil) for a
-    /// root with no contacts this tick.
+    /// array of { part, impulse, speed, x, y, z }, and reads empty (not nil) for
+    /// a root with no contacts this tick.
     #[test]
     fn impacts_surface_fed_contact_loads() {
         let lua = Lua::new();
@@ -359,7 +366,7 @@ mod tests {
         install_assembly_api(&lua, info, impacts.clone(), cmds).unwrap();
         impacts.borrow_mut().insert(
             7,
-            vec![AssemblyImpact { part: 42, impulse: 18.5, point: [1.0, 2.0, 3.0] }],
+            vec![AssemblyImpact { part: 42, impulse: 18.5, speed: 12.5, point: [1.0, 2.0, 3.0] }],
         );
         lua.load(
             r#"
@@ -367,6 +374,7 @@ mod tests {
             assert(#hits == 1, "one impact expected")
             assert(hits[1].part == 42, "part id")
             assert(math.abs(hits[1].impulse - 18.5) < 1e-6, "impulse")
+            assert(math.abs(hits[1].speed - 12.5) < 1e-6, "impact speed")
             assert(hits[1].x == 1.0 and hits[1].y == 2.0 and hits[1].z == 3.0, "point")
             local quiet = assembly.impacts({ __id = 9 })
             assert(type(quiet) == "table" and #quiet == 0, "no contacts reads empty, not nil")

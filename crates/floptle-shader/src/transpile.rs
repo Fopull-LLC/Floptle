@@ -327,6 +327,10 @@ impl<'a> Writer<'a> {
                     "facing_normal(normalize(in.normal), front)".into()
                 }
                 (EmitCtx::Fragment, Input::WorldPos) => "in.view_pos".into(),
+                // Object-local position scaled to world units — surface-locked
+                // (the same varying triplanar rides), so it doesn't swim under
+                // the floating origin the way `worldPos`/`view_pos` does.
+                (EmitCtx::Fragment, Input::ObjectPos) => "in.lpos".into(),
                 (EmitCtx::Fragment, Input::ViewDir) => "normalize(-in.view_pos)".into(),
                 // The UI pass has no field globals `G`; time rides its own
                 // globals' spare lane (see UiGlobals in floptle-render/ui.rs).

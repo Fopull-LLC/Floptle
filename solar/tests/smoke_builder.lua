@@ -97,6 +97,26 @@ API.save = {
 }
 API.scene = { load = function() end }
 
+-- Audio: the builder plays UI clicks + a hangar bed; hand back a handle with
+-- the SoundHandle surface (stop() is used on the bed) so it all no-ops here.
+API.SOUNDS = {}
+API.audio = {
+  play = function(clip)
+    API.SOUNDS[#API.SOUNDS + 1] = clip
+    return {
+      stop = function() end, pause = function() end, resume = function() end,
+      setVolume = function() end, setPitch = function() end, setPan = function() end,
+      setTrack = function() end, setPosition = function() end, seek = function() end,
+      isPlaying = function() return true end, position = function() return 0.0 end,
+    }
+  end,
+  track = function()
+    return { setVolume = function() end, setPan = function() end,
+      setMuted = function() end, setSoloed = function() end }
+  end,
+  stopAll = function() end,
+}
+
 -- ── load the builder ─────────────────────────────────────────────────────────
 make_node("BuildStats", 0, 0, 0)
 make_node("BuildHint", 0, 0, 0)
@@ -361,9 +381,43 @@ check(stages1.radialDec == 2 and stages1.decoupler == 1,
   string.format("dragging row #1 below row #2 swaps the firing order (ring=%s, axial=%s)",
     tostring(stages1.radialDec), tostring(stages1.decoupler)))
 
+-- 8. FINS are SIDE-MOUNT blades now (no axial nodes) that self-orient outward
+--    and ring with symmetry — Ty's "a side mount fin you attach with symmetry".
+--    Symmetry is still ×4 from step 3; drop a fin on the pod's free +Z flank and
+--    the ring must place four, each blade's local +X pointing radially OUTWARD.
+press("1") step(2) -- back to the Move tool (Stage tool owns the panel)
+local n_before = env.partCount
+env.pick("fins")
+step(12)
+mouse_to_world(pod_node.x, pod_node.y, pod_node.z + 0.5) -- the pod's +Z flank node
+step(1)
+click()
+step(2)
+check(env.partCount == n_before + 4, string.format(
+  "a fin placed with ×4 symmetry rings four blades (partCount %d→%d)", n_before, env.partCount))
+local fins, pod_bp = {}, nil
+for _, d in ipairs(saved_parts()) do
+  if d.id == "fins" then fins[#fins + 1] = d end
+  if d.id == "pod" then pod_bp = d end
+end
+check(#fins == 4, "blueprint carries four fins (" .. #fins .. ")")
+-- The fins ring the POD (their host), so outward is measured from the pod's XZ.
+local all_outward = #fins == 4 and pod_bp ~= nil
+for _, f in ipairs(fins) do
+  -- blade local +X under yaw (pitch/roll 0): (cos yaw, 0, -sin yaw).
+  local lx, lz = math.cos(f.yaw), -math.sin(f.yaw)
+  local ox, oz = f.x - pod_bp.x, f.z - pod_bp.z
+  local ol = math.sqrt(ox * ox + oz * oz)
+  if ol > 1e-4 then
+    local dot = (lx * ox + lz * oz) / ol
+    if dot < 0.9 then all_outward = false end
+  end
+end
+check(all_outward, "every fin blade points radially outward from its flank")
+
 -- ── verdict ──────────────────────────────────────────────────────────────────
 if #failures == 0 then
-  print("BUILDER SMOKE OK — select+tools, symmetry, auto-mirror, gizmo drag, stage reorder")
+  print("BUILDER SMOKE OK — select+tools, symmetry, auto-mirror, gizmo drag, stage reorder, side fins")
   os.exit(0)
 else
   print("BUILDER SMOKE FAILURES:")

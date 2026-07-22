@@ -804,14 +804,17 @@ mod tests {
             StaticTag { layer: 0, eid: 0, sensor: false },
         );
         let mut engine_hit = 0.0f32;
+        let mut engine_speed = 0.0f32;
         let mut nose_hit = 0.0f32;
         for _ in 0..600 {
             sim.step_tick(1.0 / 60.0, None); // the editor's Play loop driver
-            for (r, part, j, point) in sim.compound_impacts() {
+            for (r, part, j, speed, point) in sim.compound_impacts() {
                 assert_eq!(r, root.index(), "impacts attribute to the assembly root");
                 assert!(point.y < 1.5, "contact points sit near the pad, y={}", point.y);
+                assert!(speed >= 0.0, "impact speed is non-negative, got {speed}");
                 if part == engine.index() {
                     engine_hit = engine_hit.max(j);
+                    engine_speed = engine_speed.max(speed);
                 }
                 if part == nose.index() {
                     nose_hit = nose_hit.max(j);
@@ -819,6 +822,8 @@ mod tests {
             }
         }
         assert!(engine_hit > 0.5, "the bottom part takes the landing, impulse={engine_hit}");
+        // A ~4 m drop touches down at several m/s — the honest crash metric.
+        assert!(engine_speed > 1.0, "the landing reports a real impact speed, got {engine_speed}");
         assert_eq!(nose_hit, 0.0, "the nose never touches anything");
     }
 

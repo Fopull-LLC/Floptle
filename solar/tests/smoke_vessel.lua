@@ -162,6 +162,30 @@ API.draw = {
 }
 API.physics = { pause = function() end, isPaused = function() return false end }
 
+-- Audio: record every clip played so we could assert on it; hand back a handle
+-- with the full SoundHandle/TrackHandle surface the real API exposes so the
+-- vessel's engine/reentry/bed loops and one-shots all no-op cleanly here.
+API.SOUNDS = {}
+local function sound_handle()
+  return {
+    stop = function() end, pause = function() end, resume = function() end,
+    setVolume = function() end, setPitch = function() end, setPan = function() end,
+    setTrack = function() end, setPosition = function() end, seek = function() end,
+    isPlaying = function() return true end, position = function() return 0.0 end,
+  }
+end
+API.audio = {
+  play = function(clip)
+    API.SOUNDS[#API.SOUNDS + 1] = clip
+    return sound_handle()
+  end,
+  track = function()
+    return { setVolume = function() end, setPan = function() end,
+      setMuted = function() end, setSoloed = function() end }
+  end,
+  stopAll = function() end,
+}
+
 function API.raycast(ox, oy, oz)
   local dx, dy, dz = ox - planet.x, oy - planet.y, oz - planet.z
   local d = math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -640,11 +664,12 @@ for _, n in ipairs(nodes) do
 end
 check(tank_node ~= nil and pod_node ~= nil, "tank + pod children located")
 
--- Damage ARMS 2.5s after clamp release — inject nothing until then, and a
--- survivable hit must divide by vessel mass (8): 30 impulse = 3.75 m/s felt.
+-- Damage ARMS 2.5s after clamp release. The crash metric is IMPACT SPEED (m/s)
+-- now (assembly.impacts .speed), not a mass-scaled impulse — inject `speed`. A
+-- hard-but-survivable knock on the tank (tolerance 6): speed 3.75 → ~25% damage.
 step(160)
 local n_fx = #API.EFFECTS
-API.IMPACTS = { { part = tank_node.id, impulse = 30.0,
+API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 3.75,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(9)
 check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
@@ -652,9 +677,11 @@ check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
 check(hudn.text:find("DAMAGE") ~= nil,
   "HUD reports the damaged part (got: " .. tostring(hudn.text) .. ")")
 
+-- A killing blow on the tank (>= tol 6, < shatter 20): it explodes, shears off
+-- as its own single-part wreck, and — a fuel tank against the ground — craters.
 local n_split = #split_calls
 local n_crater = #API.CRATERS
-API.IMPACTS = { { part = tank_node.id, impulse = 60.0,
+API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 8.0,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(2)
 local exploded = false
@@ -666,10 +693,19 @@ check(#split_calls == n_split + 1 and split_calls[#split_calls] == 1,
   "the broken part shears off as its own wreck")
 check(#API.CRATERS > n_crater, "a tank blast against the ground digs a crater")
 
-API.IMPACTS = { { part = pod_node.id, impulse = 100.0,
+-- A CATASTROPHIC strike (>= shatter speed 20) fails the WHOLE airframe: every
+-- surviving part bursts loose as wreckage (many splits, not one), a big crater,
+-- and the pilot is thrown clear. A plain pod-break never splits anything, so any
+-- split increase here proves the shatter path fired.
+local n_split2 = #split_calls
+local n_crater2 = #API.CRATERS
+API.IMPACTS = { { part = pod_node.id, impulse = 0.0, speed = 26.0,
                   x = pod_node.x, y = pod_node.y, z = pod_node.z } }
 step(2)
-check(controller_env.piloting == false, "losing the pod ends the flight")
+check(#split_calls - n_split2 >= 2, string.format(
+  "a catastrophic hit shatters the ship into pieces (splits: %d)", #split_calls - n_split2))
+check(#API.CRATERS > n_crater2, "the breakup leaves a crater")
+check(controller_env.piloting == false, "the breakup ends the flight")
 check(astro.visible == true, "the pilot is thrown clear (astronaut visible)")
 
 -- ── verdict ─────────────────────────────────────────────────────────────────

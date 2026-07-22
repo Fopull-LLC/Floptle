@@ -507,6 +507,10 @@ impl PhysicsWorld {
                         // Velocity: normal impulse (restitution) + friction.
                         let v_p = c.vel + c.ang_vel.cross(r);
                         let vn = v_p.dot(n);
+                        // Incoming closing speed, captured BEFORE the impulse is
+                        // applied (negative vn = approaching). Not subject to the
+                        // depenetration budget, so it reports true crash speed.
+                        let speed = (-vn).max(0.0);
                         let mut j = 0.0;
                         if vn < 0.0 {
                             j = -(1.0 + c.restitution) * vn / w;
@@ -539,6 +543,7 @@ impl PhysicsWorld {
                             point: contact_pt,
                             normal: n,
                             impulse: j,
+                            speed,
                         });
                     }
                 }

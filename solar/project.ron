@@ -16,9 +16,96 @@
             pan: 0.0,
             muted: false,
             soloed: false,
-            effects: [],
+            effects: [
+                // A ceiling so a full ship — engines + boosters + explosions +
+                // UI all at once — never clips.
+                (
+                    effect: Limiter(
+                        ceiling_db: -0.5,
+                        release_ms: 100.0,
+                    ),
+                    bypass: false,
+                ),
+            ],
             output: None,
         ),
-        tracks: [],
+        tracks: [
+            // Spatial world SFX (engines, staging, explosions, gear). A short
+            // reverb gives the scene scale/air; a compressor keeps a stack of
+            // engines from swamping everything else.
+            (
+                name: "SFX",
+                gain_db: 0.0,
+                pan: 0.0,
+                muted: false,
+                soloed: false,
+                effects: [
+                    (
+                        effect: Reverb(
+                            room_size: 0.45,
+                            damping: 0.55,
+                            width: 1.0,
+                            mix: 0.16,
+                            pre_delay_ms: 12.0,
+                        ),
+                        bypass: false,
+                    ),
+                    (
+                        effect: Compressor(
+                            threshold_db: -16.0,
+                            ratio: 2.5,
+                            attack_ms: 8.0,
+                            release_ms: 140.0,
+                            makeup_db: 1.0,
+                        ),
+                        bypass: false,
+                    ),
+                ],
+                output: None,
+            ),
+            // UI clicks (builder): dry and a touch quieter than the world.
+            (
+                name: "UI",
+                gain_db: -3.0,
+                pan: 0.0,
+                muted: false,
+                soloed: false,
+                effects: [],
+                output: None,
+            ),
+            // The ambient bed (machine hum / space drone): low and rolled-off
+            // at the top so it sits UNDER everything as a felt presence.
+            (
+                name: "Ambient",
+                gain_db: -9.0,
+                pan: 0.0,
+                muted: false,
+                soloed: false,
+                effects: [
+                    (
+                        effect: ParametricEq(
+                            bands: [
+                                (
+                                    kind: LowShelf,
+                                    freq_hz: 140.0,
+                                    gain_db: 3.0,
+                                    q: 0.71,
+                                    enabled: true,
+                                ),
+                                (
+                                    kind: HighShelf,
+                                    freq_hz: 2600.0,
+                                    gain_db: -14.0,
+                                    q: 0.71,
+                                    enabled: true,
+                                ),
+                            ],
+                        ),
+                        bypass: false,
+                    ),
+                ],
+                output: None,
+            ),
+        ],
     ),
 )

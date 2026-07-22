@@ -829,12 +829,15 @@ impl Sim {
 
     /// Per-part IMPACT attribution for the last stepped tick: one entry per
     /// (assembly root, part) that took contact, with the tick's total normal
-    /// impulse on that part and the world point of its hardest contact.
+    /// impulse on that part, the PEAK closing speed it saw (m/s — the honest
+    /// crash metric), and the world point of its hardest contact.
     /// The raw material for damage/stress systems — a lander's legs report a
     /// touchdown's impulse; a tank slammed into a cliff reports the slam.
-    pub fn compound_impacts(&self) -> Vec<(u32, u32, f32, DVec3)> {
+    /// Tuple: `(root entity index, part = shape_id, sum impulse, peak speed, world point)`.
+    pub fn compound_impacts(&self) -> Vec<(u32, u32, f32, f32, DVec3)> {
         let origin = self.world.origin;
-        let mut agg: std::collections::HashMap<(u32, u32), (f32, f32, Vec3)> =
+        // Value = (sum_impulse, max_impulse, hardest_point, max_speed).
+        let mut agg: std::collections::HashMap<(u32, u32), (f32, f32, Vec3, f32)> =
             std::collections::HashMap::new();
         for cc in &self.tick_cc {
             if cc.impulse <= 0.0 {
@@ -843,15 +846,21 @@ impl Sim {
             let Some(l) = self.cmap.iter().find(|l| l.compound == cc.compound) else { continue };
             let e = agg
                 .entry((l.entity.index(), cc.shape_id as u32))
-                .or_insert((0.0, -1.0, cc.point));
+                .or_insert((0.0, -1.0, cc.point, 0.0));
             e.0 += cc.impulse;
             if cc.impulse > e.1 {
                 e.1 = cc.impulse;
                 e.2 = cc.point;
             }
+            // Peak incoming speed across the tick's contacts on this part: the
+            // first (hardest) contact carries the true approach velocity before
+            // it's cancelled, so the max is the crash speed.
+            if cc.speed > e.3 {
+                e.3 = cc.speed;
+            }
         }
         agg.into_iter()
-            .map(|((root, part), (sum, _, p))| (root, part, sum, origin + p.as_dvec3()))
+            .map(|((root, part), (sum, _, p, spd))| (root, part, sum, spd, origin + p.as_dvec3()))
             .collect()
     }
 
