@@ -147,7 +147,9 @@ API.space = {
   end,
 }
 
-API.terrain = { warm = function() end, query = function() return 0.1 end }
+API.CRATERS = {}
+API.terrain = { warm = function() end, query = function() return 0.1 end,
+  dig = function(x, y, z, r) API.CRATERS[#API.CRATERS + 1] = { x = x, y = y, z = z, r = r } end }
 -- Line recorder: update_map3d draws the subject craft's conic in cyan
 -- (0.35, 0.85, 1.0) — the map assertions look for it here. Cleared per tick.
 local tick_lines = {}
@@ -227,7 +229,28 @@ API.assembly = {
   force = function() force_calls = force_calls + 1 end,
   torque = function() torque_calls = torque_calls + 1 end,
   impulseAt = function() end,
-  split = function(node, parts, cb) split_calls[#split_calls + 1] = #parts end,
+  -- Faithful split: departing nodes leave the root's children (the engine
+  -- re-parents them under a fresh stage root) and the compound's part list.
+  split = function(node, parts, cb)
+    split_calls[#split_calls + 1] = #parts
+    for _, pn in ipairs(parts) do
+      for i, k in ipairs(node.kids) do
+        if k == pn then table.remove(node.kids, i) break end
+      end
+      pn.parent = nil
+    end
+    if asm and asm.root == node then
+      local keep = {}
+      for _, id in ipairs(asm.parts) do
+        local gone = false
+        for _, pn in ipairs(parts) do
+          if pn.__id == id then gone = true break end
+        end
+        if not gone then keep[#keep + 1] = id end
+      end
+      asm.parts = keep
+    end
+  end,
   -- Injectable per-part contact loads (the engine's per-tick attribution):
   -- push { part=, impulse=, x=, y=, z= } into API.IMPACTS to simulate a slam.
   impacts = function(node)
@@ -380,6 +403,10 @@ save_store["shipyard.blueprint"] = { parts = {
   { uid = 7, id = "engineS", prefab = "PartEngineS", x = 2.0, y = 2.1, z = 0, yaw = 0,
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 40, burn = 0.7,
     fuel = 0, decouple = 0, legs = 0, parent = 6 },
+  -- LANDING LEGS: the first peripheral device — G toggles them in flight.
+  { uid = 8, id = "legs", prefab = "PartLegs", x = 0, y = 0.65, z = 0.8, yaw = 0,
+    h = 0.7, mass = 0.3, cost = 90, kind = "structural", thrust = 0, burn = 0,
+    fuel = 0, decouple = 0, legs = 1 },
 } }
 save_store["shipyard.launch"] = 1
 save_store["shipyard.pilot"] = 1
@@ -474,6 +501,33 @@ check(flame_lo and flame_lo.components["PointLight"].intensity > 0, "plume light
 check(flame_hi and not flame_hi.particles_state.playing, "upper-stage plume stays COLD before staging")
 check(flame_boost and flame_boost.particles_state.playing, "side-booster plume burns from ignition")
 
+-- The flight stage list: separation EVENTS in firing order, next marked ▶ —
+-- the booster ring fires first by default.
+local stagen = find_node("Stage List")
+check(stagen.components["UiElement"].visible ~= false and stagen.text:find("▶") ~= nil,
+  "stage list paints in flight with the next event marked")
+check(stagen.text:find("BOOSTER RING") ~= nil,
+  "booster ring is the next event (got: " .. tostring(stagen.text) .. ")")
+
+-- PERIPHERALS: G retracts the landing gear (the leg node tucks up), G again
+-- redeploys it.
+local leg_node
+for _, n in ipairs(nodes) do
+  if n.name == "PartLegs" then leg_node = n end
+end
+check(leg_node ~= nil, "legs part spawned")
+local authored_sy = leg_node and (leg_node.scale_y or 1.0)
+press("g")
+step(90)
+check(controller_env.gear_deployed == false, "G retracts the gear")
+check(leg_node and (leg_node.scale_y or 1.0) < (authored_sy or 1.0) - 0.2,
+  string.format("leg tucks when retracted (scale_y %.2f)", leg_node and leg_node.scale_y or -1))
+press("g")
+step(90)
+check(controller_env.gear_deployed == true, "G redeploys the gear")
+check(leg_node and math.abs((leg_node.scale_y or 1.0) - (authored_sy or 1.0)) < 0.05,
+  "leg returns to its authored pose")
+
 -- SPACE #2: side boosters kick away FIRST — the whole radial branch (its
 -- decoupler + engine) leaves as one lateral group.
 press("space")
@@ -526,11 +580,6 @@ asm.root.vx, asm.root.vy, asm.root.vz = 47, 0, 0
 asm.root.grounded = false
 step(9)
 
--- The stage list: painted on the RIGHT in rocket order while flying…
-local stagen = find_node("Stage List")
-check(stagen.components["UiElement"].visible ~= false and stagen.text:find("▶") ~= nil,
-  "stage list paints in flight with the active stage marked")
-
 press("m")
 step(9) -- past the 10 Hz map-HUD throttle
 
@@ -568,8 +617,11 @@ for _, n in ipairs(nodes) do
 end
 check(tank_node ~= nil and pod_node ~= nil, "tank + pod children located")
 
+-- Damage ARMS 2.5s after clamp release — inject nothing until then, and a
+-- survivable hit must divide by vessel mass (8): 30 impulse = 3.75 m/s felt.
+step(160)
 local n_fx = #API.EFFECTS
-API.IMPACTS = { { part = tank_node.id, impulse = 7.0,
+API.IMPACTS = { { part = tank_node.id, impulse = 30.0,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(9)
 check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
@@ -578,7 +630,8 @@ check(hudn.text:find("DAMAGE") ~= nil,
   "HUD reports the damaged part (got: " .. tostring(hudn.text) .. ")")
 
 local n_split = #split_calls
-API.IMPACTS = { { part = tank_node.id, impulse = 25.0,
+local n_crater = #API.CRATERS
+API.IMPACTS = { { part = tank_node.id, impulse = 60.0,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(2)
 local exploded = false
@@ -588,8 +641,9 @@ end
 check(exploded, "a full-strength hit explodes the part")
 check(#split_calls == n_split + 1 and split_calls[#split_calls] == 1,
   "the broken part shears off as its own wreck")
+check(#API.CRATERS > n_crater, "a tank blast against the ground digs a crater")
 
-API.IMPACTS = { { part = pod_node.id, impulse = 40.0,
+API.IMPACTS = { { part = pod_node.id, impulse = 100.0,
                   x = pod_node.x, y = pod_node.y, z = pod_node.z } }
 step(2)
 check(controller_env.piloting == false, "losing the pod ends the flight")

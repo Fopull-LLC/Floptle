@@ -96,12 +96,23 @@ local SYM_STEPS = { 1, 2, 3, 4, 6, 8 }
 local sym_n = 1
 local next_sym = 0
 
+-- ── Staging order ───────────────────────────────────────────────────────────
+-- Stage ITEMS are separation events: each axial decoupler is one; a radial-
+-- decoupler RING (symmetry group) is ONE bundled item. `stage_order` lists
+-- item keys in FIRING order (row 1 fires first); drag rows in the STAGING
+-- panel to reorder. Persisted per-part (`stage`) in the blueprint — flight
+-- fires the events in exactly this order.
+local stage_order = {}   -- array of keys: "u<uid>" | "g<sym gid>"
+local stage_drag = nil   -- { key, row } while a row is being dragged
+local stage_node2 = nil  -- the StagePanel UI node
+local saved_stage = {}   -- uid → stage index from a loaded blueprint
+
 local function hint(msg, secs)
   if hint_node then hint_node.text = msg end
   hint_t = secs or 2.5
 end
 
-local HINT_IDLE = "click part = pick up   ·   hover: arrows nudge, R/T/Y rotate   ·   X symmetry   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
+local HINT_IDLE = "click part = pick up   ·   hover: drag gizmo arrows/rings (or arrows nudge, R/T/Y)   ·   X symmetry   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
 local HINT_GHOST = "click an attach node to place (green = stack, amber = radial)   ·   ALT = place free   ·   R yaw · T pitch · Y roll   ·   X symmetry ×N   ·   ESC cancel"
 local HINT_GRAB = "move the mouse to slide the whole ship   ·   click to set it down"
 
@@ -296,7 +307,95 @@ local function stage_lines()
   return out
 end
 
+-- The current stage items: key → { label, uids = {decoupler uids} }.
+local function stage_items()
+  local items = {}
+  for uid, p in pairs(parts) do
+    if p.def.decouple then
+      if p.def.radial then
+        local key = p.sym and ("g" .. p.sym) or ("u" .. uid)
+        local it = items[key]
+        if not it then
+          it = { key = key, uids = {}, ring = true, y = p.y }
+          items[key] = it
+        end
+        it.uids[#it.uids + 1] = uid
+        it.y = math.min(it.y, p.y)
+      else
+        items["u" .. uid] = { key = "u" .. uid, uids = { uid }, ring = false, y = p.y }
+      end
+    end
+  end
+  return items
+end
+
+-- Reconcile stage_order with the live items: stale keys drop, new keys slot
+-- in by the classic default (rings first, then axial bottom-up).
+local function sync_stage_order()
+  local items = stage_items()
+  local kept = {}
+  for _, key in ipairs(stage_order) do
+    if items[key] then
+      kept[#kept + 1] = key
+      items[key].placed = true
+    end
+  end
+  local fresh = {}
+  for _, it in pairs(items) do
+    if not it.placed then fresh[#fresh + 1] = it end
+  end
+  -- New items slot by their SAVED stage when reloading a blueprint, else by
+  -- the classic default: rings first, axial bottom-up.
+  local function saved_of(it)
+    local s = nil
+    for _, u in ipairs(it.uids) do
+      local su = saved_stage[u]
+      if su and su > 0 and (not s or su < s) then s = su end
+    end
+    return s or 1e9
+  end
+  table.sort(fresh, function(a, b)
+    local sa, sb = saved_of(a), saved_of(b)
+    if sa ~= sb then return sa < sb end
+    if a.ring ~= b.ring then return a.ring end
+    return a.y < b.y
+  end)
+  for _, it in ipairs(fresh) do kept[#kept + 1] = it.key end
+  stage_order = kept
+  return items
+end
+
+-- Paint the STAGING panel (row 1 fires first; ▶ marks the dragged row's
+-- would-be slot while dragging).
+local function paint_stages()
+  if not stage_node2 then stage_node2 = find("StagePanel") end
+  if not stage_node2 then return end
+  local items = sync_stage_order()
+  if #stage_order == 0 then
+    stage_node2.text = ""
+    local el = stage_node2:getcomponent("UiElement")
+    if el then el.visible = false end
+    return
+  end
+  local el = stage_node2:getcomponent("UiElement")
+  if el then el.visible = true end
+  local lines = { "STAGING — drag rows to reorder", "fires top to bottom", "" }
+  for i, key in ipairs(stage_order) do
+    local it = items[key]
+    local tag = (stage_drag and stage_drag.key == key) and "▶ " or ""
+    if it then
+      if it.ring then
+        lines[#lines + 1] = string.format("%s%d ·  BOOSTER RING ×%d", tag, i, #it.uids)
+      else
+        lines[#lines + 1] = string.format("%s%d ·  DECOUPLER  (y %.1f)", tag, i, it.y)
+      end
+    end
+  end
+  stage_node2.text = table.concat(lines, "\n")
+end
+
 local function refresh_stats()
+  paint_stages()
   if not stats_node then return end
   local mass, cost, thrust, n = 0.0, 0, 0.0, 0
   for _, p in pairs(parts) do
@@ -582,6 +681,116 @@ local function rot_input(obj)
   return turned
 end
 
+-- The part a precise-edit undo op is already open for (one op per streak,
+-- shared by the arrow keys AND the drag gizmo).
+local nudge_uid = nil
+
+-- Apply a precise edit to `uid`: displacement + rotation deltas, with the
+-- ring rules (a symmetry member edits every member, displacement rotated to
+-- each angle) and ONE undo op per editing streak. The keybinds and the drag
+-- gizmo both land here.
+local function apply_edit(uid, ddx, ddy, ddz, dyaw, dpitch, droll)
+  local p = parts[uid]
+  if not p then return end
+  if nudge_uid ~= uid then
+    nudge_uid = uid
+    local moved = {}
+    for u in pairs(edit_set(uid)) do
+      local q = parts[u]
+      moved[#moved + 1] = { uid = u, x = q.x, y = q.y, z = q.z,
+                            yaw = q.yaw, pitch = q.pitch, roll = q.roll, parent = q.parent }
+    end
+    push_undo({ type = "move", moved = moved })
+  end
+  local turned = dyaw ~= 0 or dpitch ~= 0 or droll ~= 0
+  local hub = p.sym and group_hub(p.sym) or nil
+  if hub then
+    local a0 = angle_about(hub, p)
+    for _, m in ipairs(group_members(p.sym)) do
+      local q = parts[m]
+      if q then
+        local da = angle_about(hub, q) - a0
+        local rdx, rdy, rdz = rot_about(hub, ddx, ddy, ddz, da)
+        for u in pairs(subtree(m)) do
+          local sub = parts[u]
+          if sub then set_part_pos(sub, sub.x + rdx, sub.y + rdy, sub.z + rdz) end
+        end
+        if turned then
+          set_part_rot(q, wrap_angle((q.yaw or 0) + dyaw),
+                       wrap_angle((q.pitch or 0) + dpitch),
+                       wrap_angle((q.roll or 0) + droll))
+        end
+      end
+    end
+  else
+    if turned then
+      set_part_rot(p, wrap_angle((p.yaw or 0) + dyaw),
+                   wrap_angle((p.pitch or 0) + dpitch),
+                   wrap_angle((p.roll or 0) + droll))
+    end
+    if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 then
+      for u in pairs(subtree(uid)) do
+        local q = parts[u]
+        if q then set_part_pos(q, q.x + ddx, q.y + ddy, q.z + ddz) end
+      end
+    end
+  end
+  publish_center()
+  refresh_stats()
+end
+
+-- ── Drag gizmo (editor-style handles on the hovered part) ───────────────────
+-- Three MOVE arrows (world X/Y/Z) with tip knobs, three ROTATE rings about
+-- those axes. Grab a tip and drag along the arrow; grab a ring and drag to
+-- turn (SHIFT snaps to 15°). Rings map to yaw (Y), pitch (X), roll (Z).
+local GIZ_AXES = {
+  { x = 1, y = 0, z = 0, r = 0.95, g = 0.35, b = 0.3 },  -- X: pitch ring
+  { x = 0, y = 1, z = 0, r = 0.4,  g = 0.9,  b = 0.4 },  -- Y: yaw ring
+  { x = 0, y = 0, z = 1, r = 0.35, g = 0.55, b = 1.0 },  -- Z: roll ring
+}
+local GIZ_LEN = 1.35
+local GIZ_RAD = 0.95
+local gizmo_drag = nil -- { uid, kind = "move"|"turn", axis, lmx, lmy, acc }
+local gizmo_uid = nil  -- latched: handles stay grabbable after the cursor
+                       -- leaves the part body (they sit OUTSIDE it)
+
+local function draw_gizmo(p)
+  local ex, ey, ez = part_extents(p)
+  local len = GIZ_LEN + math.max(ex, ey, ez) * 0.4
+  local rad = GIZ_RAD + math.max(ex, ez) * 0.35
+  for _, a in ipairs(GIZ_AXES) do
+    draw.line(p.x, p.y, p.z, p.x + a.x * len, p.y + a.y * len, p.z + a.z * len,
+      a.r, a.g, a.b, 0.9)
+    draw.sphere(p.x + a.x * len, p.y + a.y * len, p.z + a.z * len, 0.11,
+      a.r, a.g, a.b, 1.0)
+    draw.ring(p.x, p.y, p.z, a.x, a.y, a.z, rad, a.r, a.g, a.b, 0.5)
+  end
+  return len, rad
+end
+
+-- Which handle is under the cursor? → kind, axis index (nil = none).
+local function gizmo_hit(p, len, rad)
+  local mx, my = input.mouse()
+  for ai, a in ipairs(GIZ_AXES) do
+    local sx, sy, on = screen_of(p.x + a.x * len, p.y + a.y * len, p.z + a.z * len)
+    if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 18 * 18 then return "move", ai end
+  end
+  for ai, a in ipairs(GIZ_AXES) do
+    -- two in-plane basis vectors for this axis's ring
+    local ux, uy, uz = a.z, a.x, a.y -- cyclic: ⊥ to the axis
+    local vx2, vy2, vz2 = a.y, a.z, a.x
+    for k = 0, 19 do
+      local t = k * (2 * math.pi / 20)
+      local cx = p.x + (ux * math.cos(t) + vx2 * math.sin(t)) * rad
+      local cy2 = p.y + (uy * math.cos(t) + vy2 * math.sin(t)) * rad
+      local cz = p.z + (uz * math.cos(t) + vz2 * math.sin(t)) * rad
+      local sx, sy, on = screen_of(cx, cy2, cz)
+      if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 12 * 12 then return "turn", ai end
+    end
+  end
+  return nil
+end
+
 -- ── The catalogue calls this (findScript("builder").pick) ───────────────────
 function pick(id)
   if ghost or not REG[id] then return end
@@ -733,6 +942,15 @@ local function save_blueprint()
   local ref_y = math.huge
   for _, p in pairs(parts) do ref_y = math.min(ref_y, p.y - p.def.h * 0.5) end
   if ref_y == math.huge then ref_y = 0 end
+  -- Firing order: each decoupler carries its stage-event index.
+  local items = sync_stage_order()
+  local stage_of = {}
+  for i2, key in ipairs(stage_order) do
+    local it = items[key]
+    if it then
+      for _, u in ipairs(it.uids) do stage_of[u] = i2 end
+    end
+  end
   local i = 0
   for uid, p in pairs(parts) do
     i = i + 1
@@ -742,6 +960,7 @@ local function save_blueprint()
       x = p.x - centerX, y = p.y - ref_y, z = p.z - centerZ,
       yaw = p.yaw, pitch = p.pitch or 0, roll = p.roll or 0,
       parent = p.parent or 0, att = p.att or "", sym = p.sym or 0,
+      stage = stage_of[uid] or 0,
       h = d.h, mass = d.mass, cost = d.cost, kind = d.kind,
       thrust = d.thrust or 0, burn = d.burn or 0, fuel = d.fuel or 0,
       decouple = d.decouple and 1 or 0, legs = d.legs and 1 or 0,
@@ -758,7 +977,9 @@ local function load_blueprint()
   if not bp or not bp.parts then return end
   for uid in pairs(parts) do remove_part(uid) end
   undo_stack = {}
+  stage_order, saved_stage = {}, {}
   for _, d in pairs(bp.parts) do
+    if (d.stage or 0) > 0 then saved_stage[d.uid] = d.stage end
     spawn_part(d.id, d.x, d.y + params.floor_y, d.z, d.yaw,
                d.parent ~= 0 and d.parent or nil, d.uid, d.pitch, d.roll,
                d.att ~= "" and d.att or nil,
@@ -779,7 +1000,6 @@ end
 local grab_mode = false
 local grab_last = nil
 local grab_moved = false
-local nudge_uid = nil -- the part a precise-edit undo op is already open for
 
 -- Engineering markers (in-game draw.* layer): the CENTER OF MASS (amber
 -- sphere + ring) and CENTER OF THRUST (blue sphere + thrust-axis line).
@@ -842,6 +1062,48 @@ function update(node, dt)
     refresh_stats()
   end
 
+  -- ── STAGING panel: drag rows to reorder the firing sequence ──
+  local in_panel = false
+  do
+    local W, H = camera.screenSize()
+    if W and #stage_order > 0 then
+      local pw, ph = 250, 320
+      local x0, y0 = 16, (H - ph) * 0.5
+      local mx, my = input.mouse()
+      in_panel = mx >= x0 and mx <= x0 + pw and my >= y0 and my <= y0 + ph
+      local function row_of(y)
+        local r = math.floor((y - y0 - 8 - 3 * 18) / 18) + 1
+        if r < 1 or r > #stage_order then return nil end
+        return r
+      end
+      if stage_drag then
+        local r = row_of(my)
+        if r and r ~= stage_drag.row then
+          -- Live reorder: the row follows the cursor.
+          table.remove(stage_order, stage_drag.row)
+          table.insert(stage_order, r, stage_drag.key)
+          stage_drag.row = r
+          paint_stages()
+        end
+        if not lmb then
+          stage_drag = nil
+          click_cool = 0.2
+          paint_stages()
+          hint("staging order set — it fires top to bottom in flight", 2.5)
+        end
+      elseif in_panel and clicked and not grab_mode then
+        local r = row_of(my)
+        if r then
+          stage_drag = { key = stage_order[r], row = r }
+          paint_stages()
+        end
+      end
+    end
+  end
+  -- While the cursor is over the panel (or a row is in hand) it owns the
+  -- mouse — no picking, placing or scrapping through it.
+  if stage_drag or in_panel then return end
+
   -- Self-heal: never let a bad ghost wedge the builder.
   if ghost then
     if ghost.carried and not parts[ghost.from_uid] then
@@ -863,8 +1125,12 @@ function update(node, dt)
     if snap then
       x, y, z = snap.cx, snap.cy, snap.cz -- the ghost-center this node implies
       -- A RADIAL DECOUPLER self-orients on a flank: its disc axis turns to
-      -- face outward (that's the direction its branch will kick away).
+      -- face outward (that's the direction its branch will kick away). The
+      -- pitch/roll solve assumes yaw 0 — leftover ghost yaw (R presses)
+      -- skewed the disc up to 90° off, so it is ZEROED here: the disc is
+      -- rotationally symmetric, a yaw spin changes nothing you can see.
       if snap.side == "radial" and ghost.def.radial then
+        ghost.yaw = 0
         ghost.roll = math.asin(math.max(-1, math.min(1, -snap.dx)))
         ghost.pitch = math.atan2(snap.dz, snap.dy)
         local gex, gey, gez = eff_extents(ghost.def, ghost.yaw, ghost.pitch, ghost.roll)
@@ -1080,6 +1346,57 @@ function update(node, dt)
     return
   end
 
+  -- ── Gizmo drag in progress: it owns the mouse until release ──
+  if gizmo_drag then
+    local p = parts[gizmo_drag.uid]
+    if not lmb or not p then
+      gizmo_drag = nil
+      click_cool = 0.15
+      hint(HINT_IDLE, 0.0); hint_t = 0
+    else
+      local mx, my = input.mouse()
+      local dmx, dmy = mx - gizmo_drag.lmx, my - gizmo_drag.lmy
+      gizmo_drag.lmx, gizmo_drag.lmy = mx, my
+      local a = GIZ_AXES[gizmo_drag.axis]
+      draw_gizmo(p)
+      outline(p, 0.55, 0.85, 1.0, 1.0)
+      if gizmo_drag.kind == "move" then
+        -- Mouse motion projected onto the arrow's screen direction.
+        local sx0, sy0 = screen_of(p.x, p.y, p.z)
+        local sx1, sy1 = screen_of(p.x + a.x, p.y + a.y, p.z + a.z)
+        local vx2, vy2 = sx1 - sx0, sy1 - sy0
+        local l2 = vx2 * vx2 + vy2 * vy2
+        if l2 > 1e-3 and (dmx ~= 0 or dmy ~= 0) then
+          local t2 = (dmx * vx2 + dmy * vy2) / l2
+          if input.key("shift") then t2 = t2 * 0.25 end -- fine control
+          apply_edit(gizmo_drag.uid, a.x * t2, a.y * t2, a.z * t2, 0, 0, 0)
+        end
+        hint("drag along the arrow  ·  SHIFT fine  ·  release to set", 1.0)
+      else
+        -- Ring turn: horizontal+vertical drag turns about the ring's axis;
+        -- SHIFT snaps the accumulated angle to 15° notches.
+        local dang = (dmx - dmy) * 0.01
+        if dang ~= 0 then
+          if input.key("shift") then
+            gizmo_drag.acc = (gizmo_drag.acc or 0) + dang
+            local notch = math.pi / 12
+            local steps = math.floor(gizmo_drag.acc / notch + 0.5)
+            dang = steps * notch - (gizmo_drag.snapped or 0)
+            gizmo_drag.snapped = steps * notch
+          end
+          if dang ~= 0 then
+            local dy2 = (gizmo_drag.axis == 2) and dang or 0
+            local dp2 = (gizmo_drag.axis == 1) and dang or 0
+            local dr2 = (gizmo_drag.axis == 3) and dang or 0
+            apply_edit(gizmo_drag.uid, 0, 0, 0, dy2, dp2, dr2)
+          end
+        end
+        hint("drag to turn  ·  SHIFT snaps 15°  ·  release to set", 1.0)
+      end
+    end
+    return
+  end
+
   -- ── Hover / precise edit / pickup / scrap ──
   hover_uid = (not cam_busy) and part_under_cursor(70) or nil
   if hover_uid then
@@ -1089,6 +1406,19 @@ function update(node, dt)
     outline(p, 0.55, 0.85, 1.0, 1.0)
     for u in pairs(edit_set(hover_uid)) do
       if u ~= hover_uid and parts[u] then outline(parts[u], 0.55, 0.85, 1.0, 0.35) end
+    end
+
+    -- The DRAG GIZMO: arrows move (with the stack / the whole ring), rings
+    -- rotate in place — grab a handle instead of remembering keybinds.
+    gizmo_uid = hover_uid
+    local glen, grad = draw_gizmo(p)
+    if clicked then
+      local kind, ai = gizmo_hit(p, glen, grad)
+      if kind then
+        local mx, my = input.mouse()
+        gizmo_drag = { uid = hover_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
+        return
+      end
     end
 
     -- PRECISE EDIT: arrows nudge the part + its stack from where it sits
@@ -1117,52 +1447,10 @@ function update(node, dt)
     local rot = { yaw = p.yaw or 0, pitch = p.pitch or 0, roll = p.roll or 0 }
     local turned = rot_input(rot)
     if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 or turned then
-      if nudge_uid ~= hover_uid then
-        nudge_uid = hover_uid
-        local moved = {}
-        for u in pairs(edit_set(hover_uid)) do
-          local q = parts[u]
-          moved[#moved + 1] = { uid = u, x = q.x, y = q.y, z = q.z,
-                                yaw = q.yaw, pitch = q.pitch, roll = q.roll, parent = q.parent }
-        end
-        push_undo({ type = "move", moved = moved })
-      end
-      local dyaw = turned and (rot.yaw - (p.yaw or 0)) or 0
-      local dpitch = turned and (rot.pitch - (p.pitch or 0)) or 0
-      local droll = turned and (rot.roll - (p.roll or 0)) or 0
-      -- A ring member edits SYMMETRICALLY: each member gets the displacement
-      -- rotated to its own angle (nudge one booster outward, they all move
-      -- outward) and the same local rotation delta.
-      local hub = p.sym and group_hub(p.sym) or nil
-      if hub then
-        local a0 = angle_about(hub, p)
-        for _, m in ipairs(group_members(p.sym)) do
-          local q = parts[m]
-          if q then
-            local da = angle_about(hub, q) - a0
-            local rdx, rdy, rdz = rot_about(hub, ddx, ddy, ddz, da)
-            for u in pairs(subtree(m)) do
-              local sub = parts[u]
-              if sub then set_part_pos(sub, sub.x + rdx, sub.y + rdy, sub.z + rdz) end
-            end
-            if turned then
-              set_part_rot(q, wrap_angle((q.yaw or 0) + dyaw),
-                           wrap_angle((q.pitch or 0) + dpitch),
-                           wrap_angle((q.roll or 0) + droll))
-            end
-          end
-        end
-      else
-        if turned then set_part_rot(p, rot.yaw, rot.pitch, rot.roll) end
-        if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 then
-          for u in pairs(subtree(hover_uid)) do
-            local q = parts[u]
-            if q then set_part_pos(q, q.x + ddx, q.y + ddy, q.z + ddz) end
-          end
-        end
-      end
-      publish_center()
-      refresh_stats()
+      apply_edit(hover_uid, ddx, ddy, ddz,
+        turned and (rot.yaw - (p.yaw or 0)) or 0,
+        turned and (rot.pitch - (p.pitch or 0)) or 0,
+        turned and (rot.roll - (p.roll or 0)) or 0)
       hint(string.format("precise edit  ·  step %.2g (SHIFT fine)  ·  ALT+←/→ depth  ·  CTRL+Z undoes it all", step), 2.0)
     end
 
@@ -1182,6 +1470,25 @@ function update(node, dt)
     end
   else
     nudge_uid = nil -- next hover streak opens a fresh undo op
+    -- The gizmo LATCH: its handles reach outside the part, so it stays live
+    -- (drawn + grabbable) while the cursor is near it — else it lets go.
+    local lp = gizmo_uid and parts[gizmo_uid]
+    if lp then
+      local glen, grad = draw_gizmo(lp)
+      local sx0, sy0, on0 = screen_of(lp.x, lp.y, lp.z)
+      local mx, my = input.mouse()
+      if not on0 or (sx0 - mx) ^ 2 + (sy0 - my) ^ 2 > 300 * 300 then
+        gizmo_uid = nil
+      elseif clicked then
+        local kind, ai = gizmo_hit(lp, glen, grad)
+        if kind then
+          gizmo_drag = { uid = gizmo_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
+          return
+        end
+      end
+    else
+      gizmo_uid = nil
+    end
   end
 
   -- ── Shortcuts ──

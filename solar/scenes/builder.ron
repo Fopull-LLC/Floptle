@@ -1133,6 +1133,40 @@
             )),
         ),
         (
+            name: "StagePanel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(37),
+            ui: Some((
+                place: Pin(
+                    anchor: Left,
+                    offset: (16.0, 0.0),
+                ),
+                size: (Fixed(250.0), Fixed(320.0)),
+                shape: Some((
+                    fill: (0.05, 0.07, 0.1, 0.82),
+                    radius: 10.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.5, 0.62, 0.5),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.85, 0.9, 1.0, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 0.95,
+            )),
+        ),
+        (
             name: "SaveBtn",
             transform: (
                 translation: (0.0, 0.0, 0.0),
