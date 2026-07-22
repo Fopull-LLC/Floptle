@@ -756,7 +756,7 @@
                     anchor: Right,
                     offset: (-12.0, 0.0),
                 ),
-                size: (Fixed(190.0), Fixed(530.0)),
+                size: (Fixed(190.0), Fixed(730.0)),
                 shape: Some((
                     fill: (0.05, 0.07, 0.1, 0.88),
                     radius: 10.0,
@@ -1123,6 +1123,158 @@
                 )),
                 text: Some((
                     text: "Radial Decoupler",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Nose Cone",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 10.0)],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12, 506),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Nose Cone",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Aero Fins",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 11.0)],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12, 558),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Aero Fins",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Battery",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 12.0)],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12, 610),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Battery",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+            )),
+        ),
+        (
+            name: "Cat Comms Dish",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [("part", 13.0)],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12, 662),
+                ),
+                size: (Fixed(166), Fixed(44)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Comms Dish",
                     size: 15.0,
                     color: (0.8, 0.9, 1.0, 1.0),
                     align: Center,

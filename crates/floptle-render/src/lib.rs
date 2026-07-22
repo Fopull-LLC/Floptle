@@ -33,6 +33,7 @@ pub mod post;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;
+pub mod tris;
 pub mod ui;
 
 pub use camera::{FlyCamera, Input};
@@ -40,6 +41,7 @@ pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
 pub use lines::{LineVertex, Lines};
+pub use tris::{TriVertex, Tris};
 pub use mesh::{
     capsule, chunk_mesh_data, cone, cube, cylinder, plane, pyramid, uv_sphere, GpuMesh, MeshData,
     MeshId, TextureData, Vertex,

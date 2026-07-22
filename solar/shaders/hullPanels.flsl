@@ -1,0 +1,30 @@
+// hullPanels — a procedural spaceship-hull surface: a panel-seam grid plus
+// low-frequency weathering, sampled from WORLD POSITION (no UVs, no texture
+// assets), then run through the engine's real lighting. Every uniform is a
+// live Inspector knob. Give each part a `baseColor` param for its two-tone.
+shader hullPanels {
+  stage fragment
+  uniform baseColor: color = #8A8F9C
+  uniform panelSize: float = 0.16 range(0.03, 1)
+  uniform lineWidth: float = 0.04 range(0.005, 0.25)
+  uniform grime:     float = 0.35 range(0, 1)
+  uniform sheen:     float = 0.5  range(0, 1)
+
+  // Panel seams: distance to the nearest grid boundary along any axis.
+  let f    = fract(worldPos / panelSize)
+  let db   = min(f, vec3(1.0) - f)
+  let line = min(min(db.x, db.y), db.z)
+  let seam = smoothstep(0.0, lineWidth, line)         // 0 in the groove, 1 on the plate
+
+  // Weathering: low-frequency fractal noise darkens plates unevenly.
+  let dirt      = fbm(worldPos * 2.5, octaves: 4.0) * 0.5 + 0.5
+  let plate     = baseColor.rgb * instanceColor.rgb
+  let weathered = plate * mix(1.0 - grime, 1.0, dirt)
+
+  // Seams read as darker recessed metal; a fresnel sheen on the plate faces.
+  let albedo = weathered * mix(0.45, 1.0, seam)
+  let rim    = pow(1.0 - saturate(dot(normal, viewDir)), 4.0) * sheen
+  let lit    = litSurface(albedo + vec3(rim))
+
+  output color = vec4(lit, 1.0)
+}

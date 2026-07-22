@@ -9,6 +9,13 @@
         matter: Mesh(
             asset_path: "models/space-kit/rocket_topA.glb",
         ),
+        material: Some((
+            color: (1.0, 0.63, 0.2),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (1.0, 0.63, 0.2, 1.0),
+            },
+        )),
         scripts: [],
         rigidbody: Some((
             boxed: true,

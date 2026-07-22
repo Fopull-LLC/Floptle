@@ -1,19 +1,19 @@
 [
     (
-        name: "PartLegs",
+        name: "PartFins",
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
             scale: (1.0, 1.0, 1.0),
         ),
         matter: Mesh(
-            asset_path: "models/space-kit/rocket_finsA.glb",
+            asset_path: "models/space-kit/rocket_finsB.glb",
         ),
         material: Some((
-            color: (0.52, 0.55, 0.6),
+            color: (0.5, 0.53, 0.58),
             shader: Some("shaders/hullPanels.flsl"),
             shader_params: {
-                "baseColor": (0.52, 0.55, 0.6, 1.0),
+                "baseColor": (0.5, 0.53, 0.58, 1.0),
             },
         )),
         scripts: [],
@@ -22,13 +22,13 @@
             mode: Kinematic,
             radius: 0.5,
             height: 2.0,
-            half_extents: (0.6, 0.35, 0.6),
+            half_extents: (0.95, 0.4, 0.95),
             restitution: 0.05,
             friction: 0.6,
             gravity: true,
             lock_pos: (false, false, false),
             lock_rot: (false, false, false),
-            mass: 0.3,
+            mass: 0.5,
         )),
     ),
 ]

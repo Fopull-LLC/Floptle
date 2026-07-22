@@ -1,19 +1,19 @@
 [
     (
-        name: "PartLegs",
+        name: "PartNose",
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
             scale: (1.0, 1.0, 1.0),
         ),
         matter: Mesh(
-            asset_path: "models/space-kit/rocket_finsA.glb",
+            asset_path: "models/space-kit/rocket_topB.glb",
         ),
         material: Some((
-            color: (0.52, 0.55, 0.6),
+            color: (0.86, 0.87, 0.92),
             shader: Some("shaders/hullPanels.flsl"),
             shader_params: {
-                "baseColor": (0.52, 0.55, 0.6, 1.0),
+                "baseColor": (0.86, 0.87, 0.92, 1.0),
             },
         )),
         scripts: [],
@@ -22,13 +22,13 @@
             mode: Kinematic,
             radius: 0.5,
             height: 2.0,
-            half_extents: (0.6, 0.35, 0.6),
+            half_extents: (0.5, 0.55, 0.5),
             restitution: 0.05,
             friction: 0.6,
             gravity: true,
             lock_pos: (false, false, false),
             lock_rot: (false, false, false),
-            mass: 0.3,
+            mass: 0.4,
         )),
     ),
 ]

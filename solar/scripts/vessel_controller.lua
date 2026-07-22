@@ -45,6 +45,12 @@ gear_deployed = true
 -- Current reentry-heating rate (dmg/s at the nose; published for the HUD).
 heating = 0.0
 local heat_fx_t = -10.0
+-- Parachutes: armed in staging, deployed on their stage; while open + in
+-- atmosphere they drag hard against velocity (a soft descent). Ripped off if
+-- opened too fast/high (they only bite in thick air).
+chutes = {}                -- { {x,y,z, uid} } from the blueprint
+chutes_deployed = false    -- published for the HUD
+local chute_anim = 0.0     -- 0 packed … 1 fully open (canopy grows)
 local sas_last = "stability"
 
 -- ── ship peripherals ────────────────────────────────────────────────────────
@@ -66,6 +72,20 @@ local DEVICES = {
     apply = function(dev, child, pose, f)
       child.y = pose.y * f + (pose.y + 0.28) * (1 - f)
       child.scale_y = pose.sy * (0.3 + 0.7 * f)
+    end,
+  },
+  comms = {
+    key = "u", label = "COMMS DISH",
+    detect = function(d) return (d.comms or 0) == 1 end,
+    parts = {},
+    on = false,      -- dishes stow for launch, deploy in space (U)
+    anim = 0.0,
+    speed = 1.2,
+    pose = {},
+    -- Tip the dish up to point at the sky when deployed.
+    apply = function(dev, child, pose, f)
+      child.pitch = (pose.pitch or 0) - (1 - f) * 1.4
+      child.scale_y = pose.sy * (0.5 + 0.5 * f)
     end,
   },
 }
@@ -219,10 +239,32 @@ local function load_bp()
     events[#events + 1] = { kind = "axial", uid = dec.uid, y = dec.y,
                             stage = st > 0 and st or 1e9 }
   end
+  -- PARACHUTES: every chute part on board is armed as ONE deploy event
+  -- (staging it opens all of them). Defaults LAST (you pull the chutes on
+  -- the way down, after everything else has separated).
+  chutes = {}
+  local chute_uids = {}
+  local chute_stage = 1e9
+  for _, d in pairs(bp.parts) do
+    if (d.chute or 0) == 1 then
+      chutes[#chutes + 1] = { x = d.x, y = d.y, z = d.z, uid = d.uid }
+      chute_uids[#chute_uids + 1] = d.uid
+      local st = d.stage or 0
+      if st > 0 and st < chute_stage then chute_stage = st end
+    end
+  end
+  if #chutes > 0 then
+    events[#events + 1] = { kind = "chute", uids = chute_uids,
+                            stage = chute_stage < 1e9 and chute_stage or 2e9 }
+  end
   for _, ev in ipairs(events) do
     if ev.stage >= 1e9 then
-      -- default rank: rings ahead of axial, lower first, after staged items
-      ev.stage = 1e6 + (ev.kind == "ring" and 0 or 1e3) + ev.y
+      -- default rank: rings ahead of axial, lower first; chutes dead last.
+      if ev.kind == "chute" then
+        ev.stage = 3e6
+      else
+        ev.stage = 1e6 + (ev.kind == "ring" and 0 or 1e3) + ev.y
+      end
     end
   end
   table.sort(events, function(a, b) return a.stage < b.stage end)
@@ -234,6 +276,7 @@ local function load_bp()
   part_hp = {}
   for _, d in pairs(bp.parts) do part_hp[d.uid] = 1.0 end
   destroyed = false
+  chutes_deployed = false
 end
 
 
@@ -584,12 +627,42 @@ local function update_peripherals(node, dt)
         if ch then
           local pose = dev.pose[uid]
           if not pose then
-            pose = { x = ch.x, y = ch.y, z = ch.z, sy = ch.scale_y or 1.0 }
+            pose = { x = ch.x, y = ch.y, z = ch.z, sy = ch.scale_y or 1.0,
+                     pitch = ch.pitch or 0 }
             dev.pose[uid] = pose
           end
           dev.apply(dev, ch, pose, dev.anim)
         end
       end
+    end
+  end
+end
+
+-- Canopy visual: an open chute node balloons out (scale up); packed it sits
+-- flush. Advances chute_anim whenever deployed and scales the chute nodes.
+local chute_nodes = nil
+local function update_chutes(node, dt)
+  if not chutes_deployed then return end
+  chute_anim = math.min(1.0, chute_anim + dt / 0.8)
+  if not chute_nodes then
+    chute_nodes = {}
+    for _, c in ipairs(chutes) do
+      for _, ch in ipairs(node:children()) do
+        if math.abs((ch.x or 0) - c.x) < 0.05 and math.abs((ch.y or 0) - c.y) < 0.05
+          and math.abs((ch.z or 0) - c.z) < 0.05 then
+          chute_nodes[#chute_nodes + 1] = { node = ch,
+            sx = ch.scale_x or 1.0, sy = ch.scale_y or 1.0, sz = ch.scale_z or 1.0 }
+          break
+        end
+      end
+    end
+  end
+  local grow = 1.0 + chute_anim * 2.2 -- canopy blooms to ~3× when full
+  for _, c in ipairs(chute_nodes) do
+    if c.node.valid then
+      c.node.scale_x = c.sx * grow
+      c.node.scale_y = c.sy * (1.0 + chute_anim * 0.6)
+      c.node.scale_z = c.sz * grow
     end
   end
 end
@@ -910,13 +983,15 @@ function fixedUpdate(node, dt)
   -- In map mode WASD/QE tune the planned burn, X zeroes it, arrows slide it,
   -- SPACE is free for the planner — flying the ship (or STAGING) with those
   -- same keys mid-planning would be chaos. The SAS keeps holding attitude;
-  -- throttle, stick, stage and warp keys stand down until the map closes.
+  -- throttle, stick and stage keys stand down until the map closes. TIME
+  -- WARP stays live in the map (./, don't collide with planning keys, and
+  -- warping to a maneuver node is exactly what you open the map to do).
   local sc_map = findScript("ship_controller")
   local map_open = (sc_map and sc_map.map_view) or false
 
   -- ---- time warp (compounds coast on their own Kepler rails now) ---------
   local warp = space.warp()
-  if not map_open and (input.pressed(".") or input.pressed(",")) then
+  if input.pressed(".") or input.pressed(",") then
     local dir = input.pressed(".") and 1 or -1
     local idx = 1
     for i, w in ipairs(WARP_STEPS) do
@@ -947,7 +1022,8 @@ function fixedUpdate(node, dt)
     end
   end
   -- Hands on the stick cancel warp — the rails own the ship up there.
-  -- (Not while the map is open: there WASD are the burn-planning keys.)
+  -- (Not while the map is open: there WASD are the burn-planning keys, so
+  -- they mustn't kick you out of warp — you cancel with , or by closing.)
   if warp > 1.001 and not map_open then
     local touched = input.key("shift") or input.key("ctrl") or input.key("z")
       or input.key("w") or input.key("a") or input.key("s") or input.key("d")
@@ -1071,6 +1147,27 @@ function fixedUpdate(node, dt)
             bz + ivz * 1.2 + up2.z * 0.8)
         end
       end
+
+      -- ---- PARACHUTE DRAG: the reason the atmosphere is here -------------
+      -- An open canopy in thick air drags HARD against velocity, opposing
+      -- your fall — a soft touchdown instead of a lithobraking. Drag scales
+      -- with air density and v² (real aero), pooled across every open chute,
+      -- applied through the CoM so it just decelerates (no tumble).
+      if chutes_deployed and #chutes > 0 and alt < band and alt > 0 then
+        -- Drag ∝ air density · v² (real aero), pooled across every open chute
+        -- and scaled by how full the canopy is (chute_anim, driven by
+        -- update_chutes). Through the CoM so it decelerates without tumbling.
+        local density = 1.0 - alt / band
+        local drag_k = 0.9 * #chutes * chute_anim
+        local fx3 = -v.x * spd * density * drag_k
+        local fy3 = -v.y * spd * density * drag_k
+        local fz3 = -v.z * spd * density * drag_k
+        if not info.anchored then
+          assembly.force(node, vec3(fx3, fy3, fz3))
+        end
+      end
+    else
+      chute_anim = 0.0
     end
   end
 
@@ -1092,6 +1189,7 @@ function fixedUpdate(node, dt)
   end
   gear_deployed = DEVICES.gear.on
   update_peripherals(node, dt)
+  update_chutes(node, dt)
   local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
   local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
   local r = (input.key("e") and 1 or 0) - (input.key("q") and 1 or 0)
@@ -1157,6 +1255,12 @@ function fixedUpdate(node, dt)
       else
         log(string.format("clamps hold: %d / %d parts assembled", #info.parts, part_total))
       end
+    elseif #events > 0 and events[1].kind == "chute" then
+      -- PARACHUTES: pop them open. They start dragging (see the drag pass
+      -- below) as soon as they're in thick enough air.
+      table.remove(events, 1)
+      chutes_deployed = true
+      log("parachutes deployed")
     elseif #events > 0 and events[1].kind == "ring" then
       -- A BOOSTER RING: every branch in the ring kicks away laterally at
       -- once (symmetric pairs leave together, so the ship stays balanced).
@@ -1206,6 +1310,8 @@ function fixedUpdate(node, dt)
         for _, e2 in ipairs(events) do
           if e2.kind == "axial" then
             if e2.y > dec.y + 0.01 then keep[#keep + 1] = e2 end
+          elseif e2.kind == "chute" then
+            keep[#keep + 1] = e2 -- chutes ride the surviving stack
           else
             local bs = {}
             for _, g in ipairs(e2.branches) do
@@ -1240,10 +1346,13 @@ function fixedUpdate(node, dt)
   -- ---- HUD (10 Hz, the scout ship's format) ------------------------------
   if time - hud_t >= 0.1 then
     hud_t = time
-    -- The map owns the screen while it's open (its info panel replaces the
-    -- flight HUD) — stand down instead of painting through it.
+    -- The map owns the screen while it's open: its info panel IS the shared
+    -- "Ship HUD Text" node, repainted by the scout's map on its own 10 Hz
+    -- clock. We must NOT also write that node — a `set_hud(nil)` here every
+    -- 0.1 s fought the scout's `set_hud(text)` every 0.1 s, and the two
+    -- independent clocks flip-flopped the node's visibility (Ty's map-HUD
+    -- flicker). Leave the HUD to the scout; only hide OUR stage list.
     if map_open then
-      set_hud(nil)
       set_stage_list(nil) -- the list must not stay painted over the map
       return
     end
@@ -1302,6 +1411,9 @@ function fixedUpdate(node, dt)
       lines[#lines + 1] = string.format("🔥 REENTRY HEATING %s— slow down or climb",
         heating > 0.12 and "(SEVERE) " or "")
     end
+    if chutes_deployed then
+      lines[#lines + 1] = string.format("🪂 CHUTES OPEN  %d%%", chute_anim * 100)
+    end
     -- Damage report: the worst-off surviving part (the smoke tells you where).
     local worst_uid, worst_hp
     for uid, hp in pairs(part_hp) do
@@ -1344,6 +1456,8 @@ function fixedUpdate(node, dt)
         end
         sl[#sl + 1] = string.format("BOOSTER RING ×%d   %d eng  %d kN%s",
           #ev.branches, n_eng, th, tag)
+      elseif ev.kind == "chute" then
+        sl[#sl + 1] = string.format("🪂 PARACHUTES ×%d%s", #ev.uids, tag)
       else
         sl[#sl + 1] = string.format("STAGE SEP   (below y %.1f)%s", ev.y, tag)
       end

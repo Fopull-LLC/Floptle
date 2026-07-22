@@ -349,6 +349,10 @@ impl Editor {
         // wheel so gameplay zoom never fights a menu scroll.
         let wheel = self.input_scroll;
         let mut wheel_target: Option<(u32, f32)> = None;
+        // Solved screen-space rects in physical px, published to scripts after
+        // this pass (`node:uiRect()`): a script can hit-test the mouse against
+        // a panel's real position instead of guessing.
+        let mut solved_rects: HashMap<u32, [f32; 4]> = HashMap::new();
         if let Some((ptr_px, viewport)) = pointer
             && viewport[0] > 1.0
             && viewport[1] > 1.0
@@ -402,8 +406,10 @@ impl Editor {
             layers.sort_by_key(|(z, ..)| *z);
             if let Some(uir) = self.ui_render.as_ref() {
                 for (_, roots, layer, e) in &layers {
-                    // Design viewport + the pointer's position within it.
-                    let (design_vp, ptr_design) = if layer.is_world() {
+                    // Design viewport + the pointer's position within it +, for
+                    // screen-space layers, the design→physical-pixel scale so
+                    // solved rects can be published to scripts (`node:uiRect()`).
+                    let (design_vp, ptr_design, screen_scale) = if layer.is_world() {
                         // Ray → panel plane; design coords along right/down axes.
                         let dh = layer.design_height;
                         let dvp = [dh * aspect.max(0.1), dh];
@@ -433,16 +439,32 @@ impl Editor {
                         } else {
                             None // ray parallel to the panel
                         };
-                        (dvp, pd)
+                        (dvp, pd, None)
                     } else {
                         let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
                         (
                             [viewport[0] / scale, viewport[1] / scale],
                             Some([ptr_px[0] / scale, ptr_px[1] / scale]),
+                            Some(scale),
                         )
                     };
                     let measure = |t: &TextSpec| uir.measure_spec(t);
                     let placed = floptle_ui::solve(roots, design_vp, &measure);
+                    // Publish each screen-space element's SOLVED rect in physical
+                    // pixels (design rect × scale) — `node:uiRect()` reads it.
+                    if let Some(scale) = screen_scale {
+                        for pl in &placed {
+                            solved_rects.insert(
+                                pl.id,
+                                [
+                                    pl.rect[0] * scale,
+                                    pl.rect[1] * scale,
+                                    pl.rect[2] * scale,
+                                    pl.rect[3] * scale,
+                                ],
+                            );
+                        }
+                    }
                     fn specs<'a>(n: &'a floptle_ui::Node, m: &mut HashMap<u32, &'a ElementSpec>) {
                         m.insert(n.id, &n.spec);
                         for c in &n.children {
@@ -556,6 +578,10 @@ impl Editor {
         if pointer.is_none() && !down {
             self.ui_active = None;
         }
+        // Publish this frame's solved screen rects for `node:uiRect()` — fed
+        // here (right before scripts run) so a script's mouse hit-test uses
+        // the panel's ACTUAL rendered position.
+        self.script_host.set_ui_rects(solved_rects);
     }
 
     /// Add ⏵ UI: an Empty node carrying the UI components. Elements land

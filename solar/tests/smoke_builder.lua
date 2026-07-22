@@ -19,8 +19,16 @@ local next_id = 1
 local function make_node(name, x, y, z)
   local n = { __id = next_id, id = next_id, name = name, valid = true,
               visible = true, x = x or 0, y = y or 0, z = z or 0,
-              pitch = 0, roll = 0, yaw = 0, text = "", components = {} }
+              pitch = 0, roll = 0, yaw = 0, text = "", components = {},
+              ui_rect = nil }
   n.getcomponent = function(self, kind) return self.components[kind] end
+  -- node:uiRect() → x,y,w,h physical px (0,0,0,0 when it has no rect). The
+  -- StagePanel gets a real rect so the panel hit-test can be exercised.
+  n.uiRect = function(self)
+    local r = self.ui_rect
+    if not r then return 0, 0, 0, 0 end
+    return r[1], r[2], r[3], r[4]
+  end
   next_id = next_id + 1
   nodes[#nodes + 1] = n
   return n
@@ -72,10 +80,15 @@ API.camera = {
   end,
 }
 
+-- Raycast returns nothing — the builder's part_under_cursor then falls back
+-- to the nearest projected part center, which the ortho camera resolves
+-- exactly (worldToScreen carries z), so aiming the mouse at a part's
+-- projected center selects it.
 function API.raycast() return nil end
 API.draw = {
   line = function() end, ring = function() end,
   sphere = function() end, box = function() end,
+  cone = function() end, disc = function() end, tri = function() end,
 }
 API.save = {
   get = function(k) return save_store[k] end,
@@ -87,6 +100,10 @@ API.scene = { load = function() end }
 -- ── load the builder ─────────────────────────────────────────────────────────
 make_node("BuildStats", 0, 0, 0)
 make_node("BuildHint", 0, 0, 0)
+local stage_panel = make_node("StagePanel", 0, 0, 0)
+stage_panel.components["UiElement"] = { visible = false }
+-- The panel's solved screen rect (physical px) — what node:uiRect() returns.
+stage_panel.ui_rect = { 16, 200, 250, 320 }
 
 local env = setmetatable({}, { __index = function(_, k)
   if k == "time" then return T end
@@ -254,16 +271,20 @@ if #engines == 4 then
   check(ok, "mirrored engines form their own ring, one per decoupler")
 end
 
--- 5. Ring scrap: DEL on one engine takes all four; CTRL+Z brings them back.
+-- 5. SELECT then DEL: click one engine to SELECT it (click no longer grabs),
+--    DEL scraps its whole ring; CTRL+Z brings them back.
 local eng_node
 for _, n in ipairs(nodes) do
   if n.valid and n.name == "PartEngineS" then eng_node = n break end
 end
 mouse_to_world(eng_node.x, eng_node.y, eng_node.z)
-step(1)
+click() -- selects the engine (no grab)
+check(eng_node.x == (function()
+  for _, n in ipairs(nodes) do if n.name == "PartEngineS" then return n.x end end
+end)(), "clicking a part does not move it")
 press("delete")
 step(2)
-check(env.partCount == 6, "DEL on a ring member scraps the whole ring (partCount=" .. tostring(env.partCount) .. ")")
+check(env.partCount == 6, "DEL on a selected ring member scraps the whole ring (partCount=" .. tostring(env.partCount) .. ")")
 API.KEYS.down["ctrl"] = true
 press("z")
 step(2)
@@ -271,36 +292,38 @@ API.KEYS.down["ctrl"] = false
 step(2)
 check(env.partCount == 10, "CTRL+Z restores the scrapped ring (partCount=" .. tostring(env.partCount) .. ")")
 
--- 6. GIZMO drag: grab the pod's green Y-arrow tip and pull up 60px — the
---    pod (and its stack) rises; CTRL+Z restores it.
+-- 6. GIZMO drag (Move tool): SELECT the pod, then grab its green Y-arrow and
+--    pull up — the pod (and its stack) rises; CTRL+Z restores it.
 local pod_node
 for _, n in ipairs(nodes) do
   if n.valid and n.name == "PartPod" then pod_node = n end
 end
-local y_before = pod_node.y
+press("1") step(1) -- Move tool (default, but be explicit)
 mouse_to_world(pod_node.x, pod_node.y, pod_node.z)
-step(1) -- hover the pod (gizmo appears)
--- The Y-arrow tip sits ~1.7 world units above the part center.
-local glen = 1.35 + 0.4 * 0.4
-mouse_to_world(pod_node.x, pod_node.y + glen, pod_node.z)
+click() -- SELECT the pod (gizmo now shows on it)
+local y_before = pod_node.y
+-- Aim mid-shaft of the Y arrow (len ≈ 1.15 + 0.5·reach; grab-tested s=4..10).
+local glen = 1.15 + 0.5 * 0.5
+mouse_to_world(pod_node.x, pod_node.y + glen * 0.7, pod_node.z)
 step(1)
 MOUSE.lmb = true
-step(1) -- grab the tip
-MOUSE.y = MOUSE.y - 60 -- drag up (screen y is flipped: up = smaller y)
+step(1) -- grab the arrow
+MOUSE.y = MOUSE.y - 60 -- drag up (screen y flipped: up = smaller y)
 step(1)
 MOUSE.lmb = false
 step(14)
 check(pod_node.y > y_before + 0.3,
-  string.format("gizmo Y-arrow drag lifts the part (%.2f → %.2f)", y_before, pod_node.y))
+  string.format("Move-tool Y-arrow drag lifts the part (%.2f → %.2f)", y_before, pod_node.y))
 API.KEYS.down["ctrl"] = true
 press("z")
 step(2)
 API.KEYS.down["ctrl"] = false
 check(math.abs(pod_node.y - y_before) < 0.01, "CTRL+Z undoes the gizmo drag")
 
--- 7. STAGING panel: an axial decoupler under the tank makes a second event;
---    default order = ring first — dragging row 1 onto row 2 swaps them, and
---    the saved blueprint carries the stages.
+-- 7. STAGING (Stage tool): an axial decoupler under the tank makes a second
+--    event; default order = ring first. Enter the Stage tool, drag row #1
+--    below row #2 via the panel's REAL uiRect, and the saved blueprint
+--    carries the swapped order.
 env.pick("decoupler")
 step(12)
 mouse_to_world(tank_x, tank_y - 0.5, tank_z) -- tank's bottom node
@@ -313,11 +336,16 @@ end
 check(stages0.radialDec == 1 and stages0.decoupler == 2,
   string.format("default staging: ring first (ring=%s, axial=%s)",
     tostring(stages0.radialDec), tostring(stages0.decoupler)))
--- Drag panel row 1 (the ring) down to row 2. Panel x0=16, y0=(1080-320)/2;
--- rows start after 8px pad + 3 header lines of 18px.
-local y0 = (1080 - 320) * 0.5
-local row_y = function(r) return y0 + 8 + 3 * 18 + (r - 1) * 18 + 9 end
-MOUSE.x, MOUSE.y = 100, row_y(1)
+press("3") step(2) -- Stage tool: the panel appears + becomes interactive
+check(stage_panel.components["UiElement"].visible == true,
+  "the staging panel shows in the Stage tool")
+-- Rows laid out under 3 header lines inside the rect {16,200,250,320}.
+local rx, ry, rw, rh = 16, 200, 250, 320
+local n_rows = 3 + 2
+local pad = rh * 0.03
+local pitch = (rh - pad * 2) / n_rows
+local row_y = function(r) return ry + pad + (3 + r - 1) * pitch + pitch * 0.5 end
+MOUSE.x, MOUSE.y = rx + 40, row_y(1)
 step(1)
 MOUSE.lmb = true
 step(1)
@@ -330,12 +358,12 @@ for _, d in ipairs(saved_parts()) do
   if d.decouple == 1 then stages1[d.id] = d.stage end
 end
 check(stages1.radialDec == 2 and stages1.decoupler == 1,
-  string.format("dragging the ring row below the axial row swaps the firing order (ring=%s, axial=%s)",
+  string.format("dragging row #1 below row #2 swaps the firing order (ring=%s, axial=%s)",
     tostring(stages1.radialDec), tostring(stages1.decoupler)))
 
 -- ── verdict ──────────────────────────────────────────────────────────────────
 if #failures == 0 then
-  print("BUILDER SMOKE OK — symmetry, auto-mirror, ring edit, gizmo drag, stage reorder")
+  print("BUILDER SMOKE OK — select+tools, symmetry, auto-mirror, gizmo drag, stage reorder")
   os.exit(0)
 else
   print("BUILDER SMOKE FAILURES:")

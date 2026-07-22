@@ -226,7 +226,10 @@ API.assembly = {
       end
     end
   end,
-  force = function() force_calls = force_calls + 1 end,
+  force = function(node, f)
+    force_calls = force_calls + 1
+    API.LAST_FORCE = { x = f.x, y = f.y, z = f.z } -- through-CoM (chute drag)
+  end,
   torque = function() torque_calls = torque_calls + 1 end,
   impulseAt = function() end,
   -- Faithful split: departing nodes leave the root's children (the engine
@@ -407,6 +410,10 @@ save_store["shipyard.blueprint"] = { parts = {
   { uid = 8, id = "legs", prefab = "PartLegs", x = 0, y = 0.65, z = 0.8, yaw = 0,
     h = 0.7, mass = 0.3, cost = 90, kind = "structural", thrust = 0, burn = 0,
     fuel = 0, decouple = 0, legs = 1 },
+  -- A PARACHUTE on the nose: armed in staging, deploys to drag in atmosphere.
+  { uid = 9, id = "chute", prefab = "PartChute", x = 0, y = 3.7, z = 0, yaw = 0,
+    h = 0.61, mass = 0.1, cost = 80, kind = "canvas", thrust = 0, burn = 0,
+    fuel = 0, decouple = 0, legs = 0, chute = 1 },
 } }
 save_store["shipyard.launch"] = 1
 save_store["shipyard.pilot"] = 1
@@ -545,6 +552,22 @@ check(flame_boost and not flame_boost.particles_state.playing,
 press("space")
 step(2)
 check(#split_calls == 2, "axial stage fires after the boosters are gone")
+
+-- SPACE #4: PARACHUTES — the last staging event. It doesn't split; it opens
+-- the canopy, which then drags against velocity in the atmosphere. Put the
+-- ship in a descent and check the drag force opposes the fall.
+check(controller_env.chutes_deployed == false, "chutes start packed")
+asm.vel = { x = 0, y = -40, z = 0 } -- falling toward the planet (which is +X)
+API.LAST_FORCE = nil
+press("space")
+step(2)
+check(controller_env.chutes_deployed == true, "SPACE deploys the parachutes")
+step(30) -- canopy fills, drag builds
+check(API.LAST_FORCE ~= nil and API.LAST_FORCE.y > 0,
+  string.format("chute drag opposes the fall (Fy=%s)",
+    API.LAST_FORCE and string.format("%.1f", API.LAST_FORCE.y) or "nil"))
+check(hudn.text:find("CHUTES OPEN") ~= nil, "HUD shows the open chutes")
+asm.vel = { x = 0, y = 0, z = 0 } -- settle before the EVA checks
 
 -- EVA: F steps out (flames off, HUD hides); board again FROM THE GROUND —
 -- the pod is ~3 units up, so boarding must measure to the vessel's spine.

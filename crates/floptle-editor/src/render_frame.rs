@@ -281,6 +281,7 @@ impl Editor {
             Some(outline),
             Some(grid_render),
             Some(line_layer),
+            Some(tri_layer),
             Some(particles),
             Some(post),
             Some(egui),
@@ -293,6 +294,7 @@ impl Editor {
             self.outline.as_ref(),
             self.grid_render.as_mut(),
             self.line_layer.as_mut(),
+            self.tri_layer.as_mut(),
             self.particles.as_mut(),
             self.post.as_mut(),
             self.egui.as_mut(),
@@ -2871,6 +2873,24 @@ impl Editor {
                         .collect();
                     line_layer.draw(gpu, color, depth, view_proj, &verts);
                 }
+                // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
+                if !self.script_tris.is_empty() {
+                    let verts: Vec<floptle_render::TriVertex> = self
+                        .script_tris
+                        .iter()
+                        .flat_map(|t| {
+                            let a = (DVec3::from(t.a) - cam.world_position).as_vec3();
+                            let b = (DVec3::from(t.b) - cam.world_position).as_vec3();
+                            let c = (DVec3::from(t.c) - cam.world_position).as_vec3();
+                            [
+                                floptle_render::TriVertex { pos: [a.x, a.y, a.z], color: t.color },
+                                floptle_render::TriVertex { pos: [b.x, b.y, b.z], color: t.color },
+                                floptle_render::TriVertex { pos: [c.x, c.y, c.z], color: t.color },
+                            ]
+                        })
+                        .collect();
+                    tri_layer.draw(gpu, color, depth, view_proj, &verts);
+                }
                 // The reference grid is an editor aid — Scene view only.
                 if self.grid.show && !game_view {
                     let c = self.grid.color;
@@ -3984,6 +4004,7 @@ impl Editor {
             // camera it positioned — draining per tick left the lines a frame
             // behind an interpolated camera.
             self.script_lines = self.script_host.take_draw_lines();
+            self.script_tris = self.script_host.take_draw_tris();
             // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
             // drained once here (drawn by the viewport overlay), plus the multiplayer
             // harness's ghost-client markers.
@@ -5291,12 +5312,20 @@ impl Editor {
         let vfx_mesh_draws = self.vfx.collect_mesh_draws(&self.world, cam, vfx_preview_on);
         resolve_mesh_particles(&self.mesh_registry, &vfx_mesh_draws, &mut instances);
 
-        if let (Some(gpu), Some(raster), Some(raymarch), Some(particles), Some(line_layer)) = (
+        if let (
+            Some(gpu),
+            Some(raster),
+            Some(raymarch),
+            Some(particles),
+            Some(line_layer),
+            Some(tri_layer),
+        ) = (
             self.gpu.as_ref(),
             self.raster.as_mut(),
             self.raymarch.as_mut(),
             self.particles.as_mut(),
             self.line_layer.as_mut(),
+            self.tri_layer.as_mut(),
         ) {
             let raster_clear = if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
@@ -5326,6 +5355,24 @@ impl Editor {
                     })
                     .collect();
                 line_layer.draw(gpu, color, depth, view_proj, &verts);
+            }
+            // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
+            if !self.script_tris.is_empty() {
+                let verts: Vec<floptle_render::TriVertex> = self
+                    .script_tris
+                    .iter()
+                    .flat_map(|t| {
+                        let a = (DVec3::from(t.a) - cam.world_position).as_vec3();
+                        let b = (DVec3::from(t.b) - cam.world_position).as_vec3();
+                        let c = (DVec3::from(t.c) - cam.world_position).as_vec3();
+                        [
+                            floptle_render::TriVertex { pos: [a.x, a.y, a.z], color: t.color },
+                            floptle_render::TriVertex { pos: [b.x, b.y, b.z], color: t.color },
+                            floptle_render::TriVertex { pos: [c.x, c.y, c.z], color: t.color },
+                        ]
+                    })
+                    .collect();
+                tri_layer.draw(gpu, color, depth, view_proj, &verts);
             }
             if !vfx_batches.is_empty() {
                 particles.draw(
