@@ -1,0 +1,68 @@
+// The gas puff a decoupler/separator fires when it lets go — a quick pale ring
+// of pressurised gas plus a tiny spark or two. Spawned at each separation in
+// vessel_controller (staging).
+(
+    name: "SepPuff",
+    lifetime: 0.8,
+    playback: OneShot,
+    end: Destroy,
+    tracks: [
+        (
+            name: "Gas",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Circles/3.png"),
+            ),
+            blend: Additive,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.2,
+                    emit: Some(Burst(count: 12, count_jitter: 0.2)),
+                ),
+            ],
+            shape: Ring(radius: 0.5),
+            velocity: Range(Vec3((-5.0, -0.5, -5.0)), Vec3((5.0, 0.5, 5.0))),
+            size: Range(F32(0.8), F32(1.6)),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((0.85, 0.88, 0.95, 0.7)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((0.6, 0.63, 0.7, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 3.0,
+        ),
+        (
+            name: "Sparks",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Flare/9.png"),
+            ),
+            blend: Additive,
+            orient: Velocity,
+            stretch: 2.0,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.12,
+                    emit: Some(Burst(count: 8, count_jitter: 0.3)),
+                ),
+            ],
+            shape: Sphere(radius: 0.2, shell: true),
+            velocity: Range(Vec3((-6.0, -1.0, -6.0)), Vec3((6.0, 3.0, 6.0))),
+            size: Range(F32(0.2), F32(0.45)),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((1.0, 0.9, 0.6, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((1.0, 0.5, 0.15, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 6.0,
+            drag: 0.5,
+        ),
+    ],
+    seed: 9,
+)

@@ -991,6 +991,15 @@ impl Raymarch {
     ) {
         self.upload_globals(gpu, globals);
 
+        // Clear to the SKY colour, never black. The full-screen sky fragment is
+        // meant to repaint every background pixel, but at orbital scale a grazing
+        // ray can hit an f32 edge (catastrophic cancellation in the atmosphere
+        // shell math) and emit a NaN — which resolves to 0 (black) and shows the
+        // clear through, an intermittent black flash confined to the sky that only
+        // appears windowed (the camera moves every frame; a fixed-pose headless
+        // probe never hits it). Clearing to the sky colour makes that fallback the
+        // sky instead of black, so the flicker is impossible by construction.
+        let bg = globals.bg;
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raymarch") });
@@ -1002,7 +1011,12 @@ impl Raymarch {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: bg[3] as f64,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

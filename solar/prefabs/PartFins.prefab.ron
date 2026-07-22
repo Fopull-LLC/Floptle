@@ -4,23 +4,29 @@
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
-            // A single fin BLADE: thin in Z, tall in Y (along the hull), reaching
-            // out in +X. It mounts on a part's flank and, with symmetry, rings the
-            // base — a real aero fin, not the centred cluster it used to be.
-            scale: (0.7, 0.95, 0.06),
+            scale: (1.0, 1.0, 1.0),
         ),
-        matter: Primitive(
-            shape: Cube,
+        // A real SWEPT AERO FIN (procedural mesh, models/parts/fin.glb): the root
+        // edge is flush on the hull at x=0, tapering and sweeping back as it reaches
+        // out +X — a shaped fin, not a rectangle. radial_orient yaws +X outward and
+        // symmetry rings them around the base.
+        matter: Mesh(
+            asset_path: "models/parts/fin.glb",
+        ),
+        material: Some((
             color: (0.55, 0.57, 0.62),
-        ),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.55, 0.57, 0.62, 1.0),
+            },
+        )),
         scripts: [],
         rigidbody: Some((
             boxed: true,
             mode: Kinematic,
             radius: 0.4,
             height: 1.0,
-            // PRE-scale half-extents × node scale → the collider is the blade.
-            half_extents: (0.5, 0.5, 0.5),
+            half_extents: (0.4, 0.5, 0.08),
             restitution: 0.05,
             friction: 0.6,
             gravity: true,

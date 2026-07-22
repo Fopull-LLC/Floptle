@@ -563,6 +563,7 @@ impl Editor {
             self.space_coast.clear();
             self.space_frame.clear(); // dominant-frame tracking restarts too
             self.compound_lod.clear(); // distant-craft LOD restarts with them
+            self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
             self.compound_coast.clear();
             self.script_lines.clear(); // no stale map lines across runs
             // Every Play is a FRESH RUN: drop all script instances so top-level

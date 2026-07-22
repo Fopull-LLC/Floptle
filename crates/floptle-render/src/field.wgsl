@@ -510,7 +510,14 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
         }
         let Ra = R + H;
         let b = dot(rd, c);
-        let d2 = dot(c, c) - b * b;
+        // Perpendicular distance² from the body centre to the ray. Computed as the
+        // squared length of c's REJECTION onto rd (c - b·rd), NOT `dot(c,c)-b·b`:
+        // at orbital scale |c| reaches ~6e5, so dot(c,c) and b·b are both ~3.6e11
+        // and their difference loses all precision (catastrophic f32 cancellation),
+        // jittering NaNs into the sky every frame as the camera moves. The
+        // rejection form is stable at any distance.
+        let perp = c - rd * b;
+        let d2 = dot(perp, perp);
         if (d2 > Ra * Ra || (b < 0.0 && dot(c, c) > Ra * Ra)) {
             continue; // misses the shell, or the shell is entirely behind us
         }
@@ -569,6 +576,11 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
             let sd = max(dot(rd, sun_dir_at(vec3<f32>(0.0))), 0.0);
             out += gcol * (pow(sd, 180.0) * 1.4 + pow(sd, 10.0) * 0.12) * a * daylight;
         }
+    }
+    // Never emit a NaN: a single bad component resolves to 0 (black) in the
+    // attachment and flickers the sky. Fall back to the un-scattered base.
+    if (!all(out == out)) {
+        return base;
     }
     return out;
 }

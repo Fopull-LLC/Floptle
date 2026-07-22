@@ -75,6 +75,10 @@ pub enum AssemblyCmd {
     Rebuild { root: u32 },
     /// Pin the compound where it stands / release it (launch clamps).
     Anchor { root: u32, on: bool },
+    /// Exempt the compound from distant-craft LOD / release it: a kept-live
+    /// craft stays in full physics however far the camera roams (so you can
+    /// fly it from the map view, where the camera pulls far back).
+    KeepLive { root: u32, on: bool },
     /// Teleport the assembly ORIGIN to a world position, velocity untouched
     /// (re-pinning a clamped vessel to a pad that rides an orbiting planet).
     Teleport { root: u32, pos: [f64; 3] },
@@ -231,6 +235,20 @@ pub(crate) fn install_assembly_api(
             Ok(())
         })?;
         t.set("setAnchored", f)?;
+    }
+    // assembly.keepLive(node, on) — exempt this compound from distant-craft LOD
+    // so it stays in full physics no matter how far the active camera roams.
+    // A piloted vessel sets this while the MAP is open (the map camera pulls
+    // hundreds of metres back, which would otherwise freeze the craft on rails
+    // and kill your throttle/steering). keepLive(node, false) rejoins the LOD.
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, (node, on): (Value, bool)| {
+            let root = node_eid(&node, "assembly.keepLive(node, on)")?;
+            q.borrow_mut().push(AssemblyCmd::KeepLive { root, on });
+            Ok(())
+        })?;
+        t.set("keepLive", f)?;
     }
     // assembly.teleport(node, pos) — move the assembly origin to a world
     // position without touching velocity. The compound writeback owns the

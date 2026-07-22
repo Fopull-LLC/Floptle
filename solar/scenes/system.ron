@@ -428,10 +428,9 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
-            matter: Primitive(
-                shape: Capsule,
-                color: (0.85, 0.59999996, 0.24999999),
-            ),
+            // The physics capsule is invisible; the animated character rides as
+            // the "AstroModel" child (planet_walker drives its animator + facing).
+            matter: Empty,
             scripts: [
                 (
                     kind: "planet_walker",
@@ -1478,6 +1477,20 @@
                 visible: true,
                 opacity: 0.95,
             )),
+        ),
+        (
+            name: "AstroModel",
+            transform: (
+                translation: (0.0, -0.05, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (0.5, 0.5, 0.5),
+            ),
+            matter: Mesh(
+                asset_path: "models/characters/character_retro.glb",
+            ),
+            scripts: [],
+            parent: Some(13),
+            anim_controller: Some("animation_controllers/character"),
         ),
     ],
 

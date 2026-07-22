@@ -234,6 +234,15 @@ celestial's frame. `assembly.setAnchored(node, false)` releases it *from
 rest* (nothing banks up while clamped). `assembly.info(node).anchored`
 reports the state; a `rebuild` preserves it.
 
+**Staying live when the camera roams:** distant compounds drop out of full
+physics into a cheap LOD (landed ones freeze, in-flight ones coast on analytic
+Kepler rails) and wake on approach — great for hundreds of deployed craft, but
+a craft you're flying from a far-off view (e.g. a map camera pulled hundreds of
+metres back) would freeze under you. `assembly.keepLive(node, true)` exempts a
+compound from that LOD so it stays in full physics — live throttle, steering
+and orbital velocity — however far the camera is; `assembly.keepLive(node,
+false)` rejoins the LOD.
+
 **Placing a live assembly:** the compound writeback owns the root node's
 transform, so plain `node.x = …` writes are overwritten every frame —
 `assembly.teleport(node, pos)` is THE way to move one (velocity untouched):

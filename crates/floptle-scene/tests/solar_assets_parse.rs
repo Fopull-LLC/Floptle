@@ -75,3 +75,35 @@ fn solar_vfx_parse() {
     }
     assert!(checked >= 3, "expected the solar effects (Explosion/Flame/Smoke), found {checked}");
 }
+
+#[test]
+fn solar_anims_parse() {
+    // Baked clips (`*.anim.ron`) + controllers (`*.actl.ron`) discovered anywhere
+    // under solar/ must deserialize — a bad channel/track (e.g. the generated
+    // character cycles) would otherwise fail only when the animator first binds.
+    let Some(solar) = solar_dir() else { return };
+    fn walk(dir: &std::path::Path, clips: &mut u32, ctls: &mut u32) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, clips, ctls);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.ends_with(".anim.ron") {
+                let d = floptle_scene::load_anim_clip(&path);
+                assert!(d.is_ok(), "{} failed to parse: {:?}", path.display(), d.err());
+                *clips += 1;
+            } else if name.ends_with(".actl.ron") {
+                let d = floptle_scene::load_anim_controller(&path);
+                assert!(d.is_ok(), "{} failed to parse: {:?}", path.display(), d.err());
+                *ctls += 1;
+            }
+        }
+    }
+    let (mut clips, mut ctls) = (0, 0);
+    walk(&solar, &mut clips, &mut ctls);
+    assert!(clips >= 3, "expected the character clips (idle/run/jump), found {clips}");
+    assert!(ctls >= 1, "expected the character controller, found {ctls}");
+}

@@ -828,11 +828,16 @@ impl Sim {
     }
 
     /// Per-part IMPACT attribution for the last stepped tick: one entry per
-    /// (assembly root, part) that took contact, with the tick's total normal
+    /// (assembly root, part) that TOUCHED anything, with the tick's total normal
     /// impulse on that part, the PEAK closing speed it saw (m/s — the honest
     /// crash metric), and the world point of its hardest contact.
     /// The raw material for damage/stress systems — a lander's legs report a
     /// touchdown's impulse; a tank slammed into a cliff reports the slam.
+    /// EVERY penetrating contact is reported, even a purely tangential SCRAPE
+    /// that carried no normal impulse (its speed reads ~0): a body dragging along
+    /// terrain must still show up as "in contact" so a damage system can grind it
+    /// down by the craft's own slide speed. (Filtering by impulse hid scrapes
+    /// entirely — Ty could belly-slide a ship along a planet with zero effect.)
     /// Tuple: `(root entity index, part = shape_id, sum impulse, peak speed, world point)`.
     pub fn compound_impacts(&self) -> Vec<(u32, u32, f32, f32, DVec3)> {
         let origin = self.world.origin;
@@ -840,9 +845,6 @@ impl Sim {
         let mut agg: std::collections::HashMap<(u32, u32), (f32, f32, Vec3, f32)> =
             std::collections::HashMap::new();
         for cc in &self.tick_cc {
-            if cc.impulse <= 0.0 {
-                continue; // purely positional resolves carry no momentum
-            }
             let Some(l) = self.cmap.iter().find(|l| l.compound == cc.compound) else { continue };
             let e = agg
                 .entry((l.entity.index(), cc.shape_id as u32))

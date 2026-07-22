@@ -743,7 +743,12 @@ fn fs(in: VOut) -> FsOut {
         }
     }
     if (!drawn) {
-        out.color = vec4<f32>(sky_color(rd), 1.0);
+        // Sanitize the sky: a NaN from a grazing-ray edge in the atmosphere math
+        // resolves to 0 (black) in the attachment and flickers the sky. Any NaN
+        // component falls back to the sky void colour, and negatives are clamped.
+        var sky = sky_color(rd);
+        sky = select(G.bg.rgb, sky, sky == sky);
+        out.color = vec4<f32>(max(sky, vec3<f32>(0.0)), 1.0);
         out.depth = 1.0;
     }
     return out;

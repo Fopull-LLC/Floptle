@@ -123,7 +123,20 @@ make_node("BuildHint", 0, 0, 0)
 local stage_panel = make_node("StagePanel", 0, 0, 0)
 stage_panel.components["UiElement"] = { visible = false }
 -- The panel's solved screen rect (physical px) — what node:uiRect() returns.
-stage_panel.ui_rect = { 16, 200, 250, 320 }
+stage_panel.ui_rect = { 16, 200, 256, 384 }
+-- STAGING is now a POOL of per-row nodes (each with its OWN solved rect) plus a
+-- floating drag ghost — the builder hit-tests each row's real uiRect instead of
+-- guessing a pitch off the whole panel. Lay 14 rows under a 34px title + 10 pad,
+-- 24px tall on a 27px pitch (matches builder.ron's stack), x = panel + 10 pad.
+local STAGE_ROW_TOP = 200 + 10 + 34 + 3
+for k = 1, 14 do
+  local rn = make_node(string.format("StageRow%02d", k), 0, 0, 0)
+  rn.components["UiElement"] = { visible = false }
+  rn.ui_rect = { 26, STAGE_ROW_TOP + (k - 1) * 27, 232, 24 }
+end
+local stage_ghost = make_node("StageDragGhost", 0, 0, 0)
+stage_ghost.components["UiElement"] = { visible = false }
+local function stage_row_center(k) return STAGE_ROW_TOP + (k - 1) * 27 + 12 end
 
 local env = setmetatable({}, { __index = function(_, k)
   if k == "time" then return T end
@@ -359,20 +372,20 @@ check(stages0.radialDec == 1 and stages0.decoupler == 2,
 press("3") step(2) -- Stage tool: the panel appears + becomes interactive
 check(stage_panel.components["UiElement"].visible == true,
   "the staging panel shows in the Stage tool")
--- Rows laid out under 3 header lines inside the rect {16,200,250,320}.
-local rx, ry, rw, rh = 16, 200, 250, 320
-local n_rows = 3 + 2
-local pad = rh * 0.03
-local pitch = (rh - pad * 2) / n_rows
-local row_y = function(r) return ry + pad + (3 + r - 1) * pitch + pitch * 0.5 end
-MOUSE.x, MOUSE.y = rx + 40, row_y(1)
+-- Grab row #1 by its REAL solved rect and drag it down onto row #2's rect —
+-- exercises the per-row uiRect hit-test + the drag ghost following the cursor.
+MOUSE.x, MOUSE.y = 40, stage_row_center(1)
 step(1)
 MOUSE.lmb = true
 step(1)
-MOUSE.y = row_y(2)
+check(stage_ghost.components["UiElement"].visible == true,
+  "grabbing a stage row shows the floating drag ghost")
+MOUSE.y = stage_row_center(2)
 step(1)
 MOUSE.lmb = false
 step(16)
+check(stage_ghost.components["UiElement"].visible == false,
+  "dropping the row hides the drag ghost")
 local stages1 = {}
 for _, d in ipairs(saved_parts()) do
   if d.decouple == 1 then stages1[d.id] = d.stage end

@@ -1056,50 +1056,57 @@ local function update_map3d(node, dt)
     local vref = math.sqrt(node.vx ^ 2 + node.vy ^ 2 + node.vz ^ 2)
     local dvrate = math.max(0.5, vref * 0.12)
 
-    -- CLICK-ON-ORBIT placement (KSP): hover the current-orbit line, LEFT-click or
-    -- drag to create/move the burn at that exact point (RMB is the camera, so LMB
-    -- is free). Picks against the cached forward path, whose points carry a time —
-    -- so the click lands the node at the right spot on the orbit.
-    local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, bodies)
-    if pk_k then hover_x, hover_y, hover_z = px, py, pz end
-    if pk_t and input.button(0) then
-      -- Store the node as an ABSOLUTE instant (now + the clicked point's lead) so it
-      -- stays fixed on the orbit as you coast toward it instead of running ahead.
-      local t0 = space.time() + pk_t
-      if mnv then mnv.t0, mnv.burned = t0, 0.0
-      else mnv = { t0 = t0, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 } end
-    end
+    -- MANEUVER-NODE PLANNING is the SCOUT's job only: a built vessel FLIES from
+    -- the map (WASD/throttle/stage go to vessel_controller), so we must NOT also
+    -- grab those keys to tune a burn when a vessel is the subject — the two would
+    -- fight. The trajectory (recompute below) still draws for a vessel; it just
+    -- can't place/execute a node yet. (`piloting` = the scout is flying.)
+    if piloting then
+      -- CLICK-ON-ORBIT placement (KSP): hover the current-orbit line, LEFT-click or
+      -- drag to create/move the burn at that exact point (RMB is the camera, so LMB
+      -- is free). Picks against the cached forward path, whose points carry a time —
+      -- so the click lands the node at the right spot on the orbit.
+      local pk_k, px, py, pz, pk_t = pick_traj_point(traj_now, bodies)
+      if pk_k then hover_x, hover_y, hover_z = px, py, pz end
+      if pk_t and input.button(0) then
+        -- Store the node as an ABSOLUTE instant (now + the clicked point's lead) so it
+        -- stays fixed on the orbit as you coast toward it instead of running ahead.
+        local t0 = space.time() + pk_t
+        if mnv then mnv.t0, mnv.burned = t0, 0.0
+        else mnv = { t0 = t0, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 } end
+      end
 
-    -- N still works as a keyboard fallback (create at a lead / clear).
-    if input.pressed("n") then
+      -- N still works as a keyboard fallback (create at a lead / clear).
+      if input.pressed("n") then
+        if mnv then
+          mnv = nil
+        else
+          local lead = (oe and oe.period and oe.period * 0.25) or 60.0
+          mnv = { t0 = space.time() + lead, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 }
+        end
+      end
       if mnv then
-        mnv = nil
-      else
-        local lead = (oe and oe.period and oe.period * 0.25) or 60.0
-        mnv = { t0 = space.time() + lead, pro = 0.0, nor = 0.0, rad = 0.0, burned = 0.0 }
+        -- ←/→ fine-tune the node time; W/S/A/D/Q/E tune the ΔV; X zeroes it.
+        local tref = (oe and oe.period) or 600.0
+        local horizon = (oe and oe.period and oe.period * 1.5) or (tref * 6)
+        local sliding = input.key("left") or input.key("right")
+        if input.key("left") then mnv.t0 = mnv.t0 - tref * 0.15 * dt end
+        if input.key("right") then mnv.t0 = mnv.t0 + tref * 0.15 * dt end
+        -- Clamp ONLY while actively sliding (keep the handle ahead of you and inside
+        -- the horizon) — never during the passive countdown, so the lead can fall to
+        -- 0 and past as you coast up to the node.
+        if sliding then
+          local now = space.time()
+          mnv.t0 = math.max(now + 1.0, math.min(mnv.t0, now + horizon))
+        end
+        if input.key("w") then mnv.pro = mnv.pro + dvrate * dt end
+        if input.key("s") then mnv.pro = mnv.pro - dvrate * dt end
+        if input.key("d") then mnv.rad = mnv.rad + dvrate * dt end
+        if input.key("a") then mnv.rad = mnv.rad - dvrate * dt end
+        if input.key("q") then mnv.nor = mnv.nor + dvrate * dt end
+        if input.key("e") then mnv.nor = mnv.nor - dvrate * dt end
+        if input.pressed("x") then mnv.pro, mnv.nor, mnv.rad = 0, 0, 0 end
       end
-    end
-    if mnv then
-      -- ←/→ fine-tune the node time; W/S/A/D/Q/E tune the ΔV; X zeroes it.
-      local tref = (oe and oe.period) or 600.0
-      local horizon = (oe and oe.period and oe.period * 1.5) or (tref * 6)
-      local sliding = input.key("left") or input.key("right")
-      if input.key("left") then mnv.t0 = mnv.t0 - tref * 0.15 * dt end
-      if input.key("right") then mnv.t0 = mnv.t0 + tref * 0.15 * dt end
-      -- Clamp ONLY while actively sliding (keep the handle ahead of you and inside
-      -- the horizon) — never during the passive countdown, so the lead can fall to
-      -- 0 and past as you coast up to the node.
-      if sliding then
-        local now = space.time()
-        mnv.t0 = math.max(now + 1.0, math.min(mnv.t0, now + horizon))
-      end
-      if input.key("w") then mnv.pro = mnv.pro + dvrate * dt end
-      if input.key("s") then mnv.pro = mnv.pro - dvrate * dt end
-      if input.key("d") then mnv.rad = mnv.rad + dvrate * dt end
-      if input.key("a") then mnv.rad = mnv.rad - dvrate * dt end
-      if input.key("q") then mnv.nor = mnv.nor + dvrate * dt end
-      if input.key("e") then mnv.nor = mnv.nor - dvrate * dt end
-      if input.pressed("x") then mnv.pro, mnv.nor, mnv.rad = 0, 0, 0 end
     end
     if time - traj_t >= 0.15 then
       traj_t = time

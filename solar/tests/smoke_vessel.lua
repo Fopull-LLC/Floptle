@@ -227,6 +227,10 @@ API.assembly = {
     assert(asm and asm.root == node, "setAnchored before rebuild")
     asm.anchored = on
   end,
+  keepLive = function(node, on)
+    assert(asm and asm.root == node, "keepLive before rebuild")
+    asm.kept_live = on
+  end,
   teleport = function(node, pos)
     assert(asm and asm.root == node, "teleport before rebuild")
     node.x, node.y, node.z = pos.x, pos.y, pos.z
@@ -354,6 +358,12 @@ local function deliver_spawns()
       x, y, z = x - pwx, y - pwy, z - pwz
     end
     local n = make_node(req.prefab, x, y, z, req.parent)
+    -- The landing-leg prefab is a hierarchy: the gear device rolls the two
+    -- EMPTY pivot nodes (hip → knee), so the harness must spawn them too.
+    if req.prefab == "PartLegs" then
+      local up = make_node("LegUpperPivot", 0.12, 0.0, 0.0, n)
+      make_node("LegKneePivot", 0.0, -0.84, 0.0, up)
+    end
     -- Engine part prefabs carry an "Engine Flame" vfx child.
     if req.prefab:find("PartEngine") then
       local fl = make_node("Engine Flame", 0, -0.7, 0, n)
@@ -540,24 +550,31 @@ check(stagen.components["UiElement"].visible ~= false and stagen.text:find("▶"
 check(stagen.text:find("BOOSTER RING") ~= nil,
   "booster ring is the next event (got: " .. tostring(stagen.text) .. ")")
 
--- PERIPHERALS: G retracts the landing gear (the leg node tucks up), G again
--- redeploys it.
-local leg_node
+-- PERIPHERALS: G folds the MULTI-JOINTED landing legs up (both pivots roll
+-- toward the stowed pose), G again folds them back down to the deployed pose.
+local leg_node, hip_pivot, knee_pivot
 for _, n in ipairs(nodes) do
   if n.name == "PartLegs" then leg_node = n end
+  if n.name == "LegUpperPivot" then hip_pivot = n end
+  if n.name == "LegKneePivot" then knee_pivot = n end
 end
 check(leg_node ~= nil, "legs part spawned")
-local authored_sy = leg_node and (leg_node.scale_y or 1.0)
+check(hip_pivot ~= nil and knee_pivot ~= nil, "leg spawned its hip + knee pivots")
+step(2) -- let the device apply the initial (deployed) pose
+local dep_hip, dep_knee = hip_pivot.roll or 0.0, knee_pivot.roll or 0.0
 press("g")
 step(90)
 check(controller_env.gear_deployed == false, "G retracts the gear")
-check(leg_node and (leg_node.scale_y or 1.0) < (authored_sy or 1.0) - 0.2,
-  string.format("leg tucks when retracted (scale_y %.2f)", leg_node and leg_node.scale_y or -1))
+check(math.abs((hip_pivot.roll or 0.0) - dep_hip) > 1.0
+    and math.abs((knee_pivot.roll or 0.0) - dep_knee) > 1.0,
+  string.format("both joints fold when retracted (hip %.2f, knee %.2f)",
+    hip_pivot.roll or 0, knee_pivot.roll or 0))
 press("g")
 step(90)
 check(controller_env.gear_deployed == true, "G redeploys the gear")
-check(leg_node and math.abs((leg_node.scale_y or 1.0) - (authored_sy or 1.0)) < 0.05,
-  "leg returns to its authored pose")
+check(math.abs((hip_pivot.roll or 0.0) - dep_hip) < 0.05
+    and math.abs((knee_pivot.roll or 0.0) - dep_knee) < 0.05,
+  "both joints fold back to the deployed pose")
 
 -- SPACE #2: side boosters kick away FIRST — the whole radial branch (its
 -- decoupler + engine) leaves as one lateral group.
@@ -666,10 +683,11 @@ check(tank_node ~= nil and pod_node ~= nil, "tank + pod children located")
 
 -- Damage ARMS 2.5s after clamp release. The crash metric is IMPACT SPEED (m/s)
 -- now (assembly.impacts .speed), not a mass-scaled impulse — inject `speed`. A
--- hard-but-survivable knock on the tank (tolerance 6): speed 3.75 → ~25% damage.
+-- hard-but-survivable knock on the tank (fragile tolerance 3.5): speed 2.0 →
+-- ~40% damage — enough to smoulder, not enough to break.
 step(160)
 local n_fx = #API.EFFECTS
-API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 3.75,
+API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 2.0,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(9)
 check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
@@ -677,8 +695,10 @@ check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
 check(hudn.text:find("DAMAGE") ~= nil,
   "HUD reports the damaged part (got: " .. tostring(hudn.text) .. ")")
 
--- A killing blow on the tank (>= tol 6, < shatter 20): it explodes, shears off
+-- A killing blow on the tank (>= tol 3.5, < shatter 13): it explodes, shears off
 -- as its own single-part wreck, and — a fuel tank against the ground — craters.
+-- (The tank's blast concusses neighbours but doesn't destroy them here, so it's
+-- still exactly one split.)
 local n_split = #split_calls
 local n_crater = #API.CRATERS
 API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 8.0,

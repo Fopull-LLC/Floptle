@@ -530,6 +530,28 @@ impl Editor {
                     if self.compound_coast.contains_key(&eid) {
                         continue; // warp rails own it this tick
                     }
+                    // Kept live (assembly.keepLive — the piloted vessel in the map
+                    // view): stay in full physics however far the camera roams. If
+                    // it was already LOD'd when the exemption came in, wake it now —
+                    // an in-flight craft ON its conic (its real vel was zeroed by the
+                    // anchor, so resuming from rest would drop it out of orbit), a
+                    // landed one at rest (respecting a prior clamp).
+                    if self.lod_keep_live.contains(&eid) {
+                        match self.compound_lod.remove(&eid) {
+                            Some(CompoundLod::Coast { dom, k }) => {
+                                sim.set_compound_anchored(eid, false);
+                                if let Some(i) = cb.iter().position(|(e, _)| e.index() == dom) {
+                                    let (_r, v) = k.pos_vel(cb[i].1.mu, t);
+                                    sim.set_compound_velocity(eid, v.as_vec3());
+                                }
+                            }
+                            Some(CompoundLod::Frozen { was_anchored }) if !was_anchored => {
+                                sim.set_compound_anchored(eid, false);
+                            }
+                            Some(CompoundLod::Frozen { .. }) | None => {}
+                        }
+                        continue;
+                    }
                     let d = (com - cam).length();
                     match self.compound_lod.get(&eid).copied() {
                         None => {
@@ -573,10 +595,20 @@ impl Editor {
                             let (r, v) = k.pos_vel(cb[i].1.mu, t);
                             let target = DVec3::from(bodies[i].pos) + r;
                             sim.shift_compound(eid, target - com);
+                            // Keep the REPORTED velocity on the conic every tick
+                            // (not only on wake): a LOD-anchored craft has its
+                            // real linvel zeroed, but `assembly.info().vel` — read
+                            // by the map/HUD to draw the vessel's orbit — must stay
+                            // the true orbital velocity, or the trajectory vanishes
+                            // the instant the map camera pulls back past LOD_FAR
+                            // (Ty's "trajectory only shows while I'm moving"). This
+                            // runs at tick start, before `feed_assembly_info`
+                            // publishes it and before the physics step re-zeroes
+                            // the anchored body — so the value survives to scripts.
+                            sim.set_compound_velocity(eid, v.as_vec3());
                             if d < LOD_NEAR {
                                 self.compound_lod.remove(&eid);
                                 sim.set_compound_anchored(eid, false);
-                                sim.set_compound_velocity(eid, v.as_vec3());
                             }
                         }
                         Some(CompoundLod::Frozen { was_anchored }) => {

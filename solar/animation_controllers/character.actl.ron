@@ -1,0 +1,50 @@
+// The on-foot astronaut's animation controller. planet_walker drives it:
+// node:animator():crossfade("run"/"idle") by speed, play("jump") on a jump.
+// Clips are the procedurally-authored cycles in solar/animations/character_retro/.
+(
+    default_fade: 0.18,
+    sample_fps: None,
+    layers: [
+        (
+            name: "Base",
+            weight: 1.0,
+            states: [
+                (
+                    name: "idle",
+                    clip: "animations/character_retro/idle",
+                    speed: 1.0,
+                    looped: true,
+                    pos: (600.0, 400.0),
+                ),
+                (
+                    name: "run",
+                    clip: "animations/character_retro/run",
+                    speed: 1.0,
+                    looped: true,
+                    pos: (300.0, 400.0),
+                ),
+                (
+                    name: "jump",
+                    clip: "animations/character_retro/jump",
+                    speed: 1.0,
+                    looped: false,
+                    fade_in: Some(0.12),
+                    pos: (450.0, 200.0),
+                ),
+            ],
+            default_state: Some("idle"),
+            transitions: [
+                (
+                    from: "run",
+                    to: "idle",
+                    fade: 0.2,
+                ),
+                (
+                    from: "idle",
+                    to: "run",
+                    fade: 0.15,
+                ),
+            ],
+        ),
+    ],
+)

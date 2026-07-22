@@ -720,6 +720,7 @@ fn animated_entities(world: &World, mesh_registry: &HashMap<String, MeshAsset>) 
 fn needs_bind(
     system: &AnimSystem,
     world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
     e: Entity,
 ) -> bool {
     let cur_key = world.get::<AnimController>(e).map(|c| c.asset.clone());
@@ -730,9 +731,28 @@ fn needs_bind(
     match system.instances.get(&e) {
         None => true,
         Some(inst) => {
-            inst.revision != system.revision
+            if inst.revision != system.revision
                 || inst.asset != cur_key
                 || inst.mesh_path != mesh_path
+            {
+                return true;
+            }
+            // Rig-load race: a controller can bind the very first play frame,
+            // BEFORE its rigged mesh finished importing — falling back to a
+            // node-skeleton binding (a static bind-pose T-pose that never
+            // animates, since the clips are keyed by BONE name). None of the
+            // keys above change when the rig later lands in the registry, so
+            // upgrade a Nodes binding to the real Rig binding the moment the
+            // mesh's skeleton is available.
+            if matches!(inst.binding, AnimBinding::Nodes { .. })
+                && mesh_path
+                    .as_ref()
+                    .and_then(|p| mesh_registry.get(p))
+                    .is_some_and(|a| a.rig.is_some())
+            {
+                return true;
+            }
+            false
         }
     }
 }
@@ -755,7 +775,7 @@ pub fn advance_animators(
 
     // Pass 1: (re)bind whatever is missing, stale, or re-keyed.
     for &e in &wanted {
-        if needs_bind(system, world, e) {
+        if needs_bind(system, world, mesh_registry, e) {
             match bind_entity(system, world, mesh_registry, e) {
                 Some(inst) => {
                     system.instances.insert(e, inst);
@@ -921,7 +941,7 @@ pub fn preview_pose(
     state: &str,
     t: f32,
 ) {
-    if needs_bind(system, world, e) {
+    if needs_bind(system, world, mesh_registry, e) {
         match bind_entity(system, world, mesh_registry, e) {
             Some(inst) => {
                 system.instances.insert(e, inst);
@@ -1092,7 +1112,7 @@ pub fn apply_net_states(
         else {
             continue;
         };
-        if needs_bind(system, world, e) {
+        if needs_bind(system, world, mesh_registry, e) {
             match bind_entity(system, world, mesh_registry, e) {
                 Some(inst) => {
                     system.instances.insert(e, inst);
