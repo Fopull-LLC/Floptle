@@ -219,6 +219,18 @@ function lateUpdate(node, dt)
   local px = hx - fx * back
   local py = hy - fy * back
   local pz = hz - fz * back
+  -- SCREEN SHAKE: the vessel publishes cam.shake (liftoff rumble, buffeting,
+  -- crashes). Jitter the camera position along its right/up so the view rattles
+  -- while the look target holds steady. Squared for an ease-in (small = subtle).
+  local sh = save.get("cam.shake") or 0.0
+  if sh > 0.002 then
+    local amp = sh * sh * 0.5
+    local jr = (math.random() * 2 - 1) * amp
+    local ju = (math.random() * 2 - 1) * amp
+    px = px + rx * jr + ux * ju
+    py = py + ry * jr + uy * ju
+    pz = pz + rz * jr + uz * ju
+  end
   node.x, node.y, node.z = px, py, pz
 
   -- Orient the camera node: engine Euler order is YXZ (yaw, pitch, roll).

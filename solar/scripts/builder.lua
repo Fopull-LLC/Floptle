@@ -86,9 +86,11 @@ local REG = {
   -- away at staging (side boosters). It is itself a side host: booster
   -- stacks attach to its outer face.
   radialDec = { prefab = "PartDecoupler", label = "Radial Decoupler", h = 0.25, rx = 0.51, rz = 0.51, mass = 0.12, cost = 70, top = false, bottom = false, kind = "structural", decouple = true, radial = true, side = true },
-  -- Legs pass the stack THROUGH (top AND bottom nodes): tank → legs → engine
-  -- is the classic lander sandwich — bottom=false made that unbuildable.
-  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.70, rx = 0.60, rz = 0.60, mass = 0.3,  cost = 90,  top = true,  bottom = true,  kind = "structural", legs = true },
+  -- Landing legs are RADIAL now (like fins): mount on the flank of a tank/engine
+  -- with symmetry (X = ×N), each strut self-orients outward, and they fold down
+  -- to deploy / up to stow as ONE symmetry ring (G in flight). No more stack
+  -- sandwich — bolt three or four around the base and they splay out to land.
+  legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.90, rx = 0.40, rz = 0.18, mass = 0.3,  cost = 90,  top = false, bottom = false, kind = "structural", legs = true, radial_orient = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
@@ -127,10 +129,13 @@ local next_sym = 0
 -- panel to reorder. Persisted per-part (`stage`) in the blueprint — flight
 -- fires the events in exactly this order.
 local stage_order = {}   -- array of keys: "u<uid>" | "g<sym gid>"
-local stage_drag = nil   -- { key, row } while a row is being dragged
+local stage_drag = nil   -- { key, row, grab_dy } while a row is being dragged
 local stage_hover = nil  -- stage-panel row the cursor is over (world highlight)
 local stage_node2 = nil  -- the StagePanel UI node
+local stage_rows = nil   -- cached array of the StageRow## UI nodes
+local stage_ghost = nil  -- the StageDragGhost UI node (follows the cursor)
 local saved_stage = {}   -- uid → stage index from a loaded blueprint
+local STAGE_MAX_ROWS = 14 -- size of the StageRow## pool authored in builder.ron
 
 -- ── Tools & selection ───────────────────────────────────────────────────────
 -- Clicking a part SELECTS it (it doesn't grab/move) — hovering only previews
@@ -403,40 +408,79 @@ local function sync_stage_order()
   return items
 end
 
--- The number of header lines in the panel (title + subtitle + blank) — the
--- staging-row hit-test skips these. Kept in one place so the panel text and
--- the click math never disagree.
-local STAGE_HEADER_LINES = 3
+-- Lazily resolve (and cache) the pool of StageRow## UI nodes authored in
+-- builder.ron. Each stage event gets its OWN node so `node:uiRect()` gives an
+-- exact per-row rect to hit-test against — no font-metric guessing.
+local function stage_row_node(i)
+  if not stage_rows then
+    stage_rows = {}
+    for k = 1, STAGE_MAX_ROWS do
+      stage_rows[k] = find(string.format("StageRow%02d", k))
+    end
+  end
+  return stage_rows[i]
+end
 
--- Paint the STAGING panel: each separation event is a numbered STAGE (#1
+-- The label for stage #k (its firing order) given its separation-event item.
+local function stage_label(k, it)
+  if it.ring then
+    return string.format("#%d   BOOSTER RING ×%d", k, #it.uids)
+  end
+  return string.format("#%d   DECOUPLER", k)
+end
+
+-- Paint the STAGING panel: each separation event is a numbered STAGE row (#1
 -- fires first), named by what it does. Visible only while the STAGE tool is
--- active (it declutters otherwise). The hovered row is marked ▸ and its
--- decoupler(s) light up in the world (see draw_stage_badges).
+-- active (it declutters otherwise). The hovered row lights up; the dragged row
+-- fades to a placeholder while its floating ghost rides the cursor.
 local function paint_stages()
   if not stage_node2 then stage_node2 = find("StagePanel") end
   if not stage_node2 then return end
   local items = sync_stage_order()
-  local el = stage_node2:getcomponent("UiElement")
+  local panel = stage_node2:getcomponent("UiElement")
   local show = (tool == "stage") and #stage_order > 0
-  if not show then
-    if el then el.visible = false end
-    return
-  end
-  if el then el.visible = true end
-  local lines = { "STAGING  ·  #1 fires first", "drag a row to reorder", "" }
-  for i, key in ipairs(stage_order) do
-    local it = items[key]
-    if it then
-      local marker = (stage_drag and stage_drag.key == key) and "▶"
-        or (stage_hover == key and "▸") or " "
-      if it.ring then
-        lines[#lines + 1] = string.format("%s #%d   BOOSTER RING ×%d", marker, i, #it.uids)
-      else
-        lines[#lines + 1] = string.format("%s #%d   DECOUPLER", marker, i)
+  if panel then panel.visible = show end
+  -- One row node per stage event; extras hide (the pool is fixed-size).
+  for k = 1, STAGE_MAX_ROWS do
+    local rn = stage_row_node(k)
+    if rn then
+      local el = rn:getcomponent("UiElement")
+      local key = stage_order[k]
+      local it = key and items[key]
+      if show and it then
+        if el then el.visible = true end
+        rn.text = stage_label(k, it)
+        local dragged = stage_drag and stage_drag.key == key
+        local hot = (stage_hover == key)
+        if el then
+          if dragged then         -- gap left behind by the picked-up row
+            el.fillA, el.textA = 0.06, 0.30
+          elseif hot then         -- cursor is over this row
+            el.fillA, el.textA = 0.55, 1.0
+          else
+            el.fillA, el.textA = 0.16, 1.0
+          end
+        end
+      elseif el then
+        el.visible = false
       end
     end
   end
-  stage_node2.text = table.concat(lines, "\n")
+  -- The floating ghost mirrors the dragged row's live label (its number updates
+  -- as the order changes); handle_staging positions it on the cursor.
+  if not stage_ghost then stage_ghost = find("StageDragGhost") end
+  if stage_ghost then
+    local gel = stage_ghost:getcomponent("UiElement")
+    if stage_drag then
+      local row = nil
+      for k, key in ipairs(stage_order) do if key == stage_drag.key then row = k end end
+      local it = items[stage_drag.key]
+      if row and it then stage_ghost.text = stage_label(row, it) end
+      if gel then gel.visible = true end
+    elseif gel then
+      gel.visible = false
+    end
+  end
 end
 
 -- Draw a numbered badge (a filled disc + the number over it) at each stage's
@@ -1189,55 +1233,67 @@ end
 -- the mouse's space) and drag rows to reorder the firing sequence. Returns true
 -- when the panel owns the mouse this frame. Lives OUTSIDE `update` so that huge
 -- function stays under LuaJIT's 60-upvalue-per-function ceiling.
+-- Which stage row (1-based) the mouse-Y is over, hit-tested against each row
+-- node's REAL solved rect (physical px, the mouse's own space) — exact
+-- regardless of font metrics, viewport docking, or panel size.
+local function stage_row_at(my)
+  for k = 1, #stage_order do
+    local rn = stage_row_node(k)
+    if rn then
+      -- NB: `a and f()` truncates a multi-return — call uiRect on its own line.
+      local rx, ry, rw, rh = rn:uiRect()
+      if rx and rw > 1 and my >= ry and my <= ry + rh then return k, ry end
+    end
+  end
+  return nil
+end
+
 local function handle_staging(clicked, lmb, grab_mode)
   local in_panel = false
   draw_stage_badges()
   stage_hover = nil
   if tool == "stage" and #stage_order > 0 then
     if not stage_node2 then stage_node2 = find("StagePanel") end
-    -- NB: `a and f()` truncates f's multi-return to one value — call uiRect
-    -- on its own line so all four components survive.
-    local rx, ry, rw, rh = 0, 0, 0, 0
-    if stage_node2 then rx, ry, rw, rh = stage_node2:uiRect() end
-    if rx and rw > 1 then
+    local prx, pry, prw, prh = 0, 0, 0, 0
+    if stage_node2 then prx, pry, prw, prh = stage_node2:uiRect() end
+    if prx and prw > 1 then
       local mx, my = input.mouse()
-      in_panel = mx >= rx and mx <= rx + rw and my >= ry and my <= ry + rh
-      -- Row pitch: total rows (header + events) share the panel's inner
-      -- height minus a small pad, so the math tracks the real render.
-      local pad = rh * 0.03
-      local n_rows = STAGE_HEADER_LINES + #stage_order
-      local pitch = (rh - pad * 2) / n_rows
-      local function row_of(y)
-        local r = math.floor((y - ry - pad) / pitch) - STAGE_HEADER_LINES + 1
-        if r < 1 or r > #stage_order then return nil end
-        return r
-      end
-      if in_panel then
-        local r = row_of(my)
-        if r then stage_hover = stage_order[r] end
-      end
+      in_panel = mx >= prx and mx <= prx + prw and my >= pry and my <= pry + prh
+      local row = stage_row_at(my)
+      if in_panel and row and not stage_drag then stage_hover = stage_order[row] end
       if stage_drag then
-        local r = row_of(my)
-        if r and r ~= stage_drag.row then
-          table.remove(stage_order, stage_drag.row)
-          table.insert(stage_order, r, stage_drag.key)
-          stage_drag.row = r
-          paint_stages()
+        -- Ghost tracks the cursor: design_y = (mouse_y - grab_dy) / scale, and
+        -- the layer origin cancels because the ghost is drawn origin+pos*scale
+        -- while the cursor sits at origin+mouse_y (see builder.ron ghost node).
+        if not stage_ghost then stage_ghost = find("StageDragGhost") end
+        if stage_ghost then
+          local gel = stage_ghost:getcomponent("UiElement")
+          if gel then
+            local _, sh = camera.screenSize()
+            local scale = (sh and sh > 1) and (sh / 720.0) or 1.0
+            gel.posY = (my - stage_drag.grab_dy) / scale
+          end
         end
+        -- Reorder as the cursor crosses into another row's rect.
+        if row and row ~= stage_drag.row then
+          table.remove(stage_order, stage_drag.row)
+          table.insert(stage_order, row, stage_drag.key)
+          stage_drag.row = row
+        end
+        paint_stages()
         if not lmb then
           stage_drag = nil
           click_cool = 0.2
           paint_stages()
-          hint("staging order set — it fires #1 first in flight", 2.5)
+          hint("staging order set — #1 fires first in flight", 2.5)
         end
-      elseif in_panel and clicked and not grab_mode then
-        local r = row_of(my)
-        if r then
-          stage_drag = { key = stage_order[r], row = r }
-          paint_stages()
-        end
+      elseif in_panel and clicked and not grab_mode and row then
+        local _, ry = stage_row_at(my)
+        stage_drag = { key = stage_order[row], row = row, grab_dy = my - (ry or my) }
+        paint_stages()
+      else
+        paint_stages() -- refresh the hover highlight
       end
-      paint_stages() -- refresh the ▸ hover marker
     end
   end
   return stage_drag or in_panel

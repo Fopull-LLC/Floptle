@@ -1,0 +1,75 @@
+// A short shower of metal sparks for scrapes and sub-lethal impacts — struck
+// steel, grinding a leg over rock. Spawned at the contact point in
+// vessel_controller when a hit is hard enough to hurt but not to break.
+(
+    name: "Sparks",
+    lifetime: 0.9,
+    playback: OneShot,
+    end: Destroy,
+    tracks: [
+        (
+            name: "Sparks",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Flare/9.png"),
+            ),
+            blend: Additive,
+            orient: Velocity,
+            stretch: 2.8,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.15,
+                    emit: Some(Burst(count: 20, count_jitter: 0.25)),
+                ),
+            ],
+            shape: Sphere(radius: 0.2, shell: true),
+            velocity: Range(Vec3((-9.0, 1.0, -9.0)), Vec3((9.0, 11.0, 9.0))),
+            size: Range(F32(0.25), F32(0.6)),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((1.0, 0.97, 0.8, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 0.5, v: Rgba((1.0, 0.72, 0.3, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((1.0, 0.4, 0.1, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 14.0,
+            drag: 0.4,
+        ),
+        (
+            name: "Flash",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Flare/1.png"),
+            ),
+            blend: Additive,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.16,
+                    emit: Some(Burst(count: 1)),
+                ),
+            ],
+            shape: Point,
+            velocity: Const(Vec3((0.0, 0.0, 0.0))),
+            size: Curve((
+                keys: [
+                    (t: 0.0, v: F32(1.6), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: F32(0.4), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((1.0, 0.95, 0.75, 0.9)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((1.0, 0.6, 0.2, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 0.0,
+            drag: 0.0,
+        ),
+    ],
+    seed: 3,
+)

@@ -419,6 +419,13 @@ impl Editor {
                         sim.set_compound_anchored(root, on);
                     }
                 }
+                floptle_script::AssemblyCmd::KeepLive { root, on } => {
+                    if on {
+                        self.lod_keep_live.insert(root);
+                    } else {
+                        self.lod_keep_live.remove(&root);
+                    }
+                }
                 floptle_script::AssemblyCmd::Teleport { root, pos } => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.set_compound_origin(root, DVec3::new(pos[0], pos[1], pos[2]));

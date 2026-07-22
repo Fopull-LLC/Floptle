@@ -1721,6 +1721,10 @@ struct Editor {
     /// camera, landed craft freeze in the carried frame and in-flight craft
     /// coast on analytic Kepler rails; both wake on approach (see space.rs).
     compound_lod: std::collections::HashMap<u32, crate::space::CompoundLod>,
+    /// Compounds exempt from distant-craft LOD (`assembly.keepLive`): they stay
+    /// in full physics however far the camera roams — the piloted vessel sets
+    /// this while the map view is open so it remains controllable (see space.rs).
+    lod_keep_live: std::collections::HashSet<u32>,
     /// Warp-coasting rails for LIVE compounds (root eid → dominant celestial
     /// eid + captured conic): while warp > 1 an in-flight vessel is driven
     /// analytically, exactly like single bodies' `space_coast` (see space.rs).

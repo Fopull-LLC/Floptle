@@ -1,3 +1,18 @@
+// A MULTI-JOINTED folding landing leg. The engine recenters every mesh on its
+// own AABB centre, so a mesh can't carry its own pivot — instead the leg is a
+// hierarchy of EMPTY pivot nodes with the segment meshes offset beneath them:
+//
+//   PartLegs (hinge mesh + the part rigidbody)
+//     LegUpperPivot  (rolls at the HIP)      ── the gear device drives this
+//       LegUpper     (thigh strut + piston, offset to hang from the hip)
+//       LegKneePivot (rolls at the KNEE)     ── …and this
+//         LegLower   (shin + foot pad, offset to hang from the knee)
+//
+// Deployed (gear on) the thigh swings out+down and the knee unfolds so the leg
+// reaches out and down; retracted it folds the thigh up and jack-knifes the shin
+// against it. The mesh offsets are each segment's AABB centre (gen_parts.py); the
+// fold angles + geometry were tuned in crates/floptle-assets/examples/leg_probe.rs.
+// The rigidbody is the baked DEPLOYED footprint (you land on deployed legs).
 [
     (
         name: "PartLegs",
@@ -7,13 +22,17 @@
             scale: (1.0, 1.0, 1.0),
         ),
         matter: Mesh(
-            asset_path: "models/space-kit/rocket_finsA.glb",
+            asset_path: "models/parts/leg_hinge.glb",
         ),
+        // The deployed-footprint collider is a big box that overlaps the hull; as
+        // a sun-shadow PROXY it would cast flickering acne onto the parts it
+        // overlaps. The thin legs don't need to cast a crisp shadow, so opt out.
+        cast_shadow: false,
         material: Some((
-            color: (0.52, 0.55, 0.6),
+            color: (0.42, 0.45, 0.5),
             shader: Some("shaders/hullPanels.flsl"),
             shader_params: {
-                "baseColor": (0.52, 0.55, 0.6, 1.0),
+                "baseColor": (0.42, 0.45, 0.5, 1.0),
             },
         )),
         scripts: [],
@@ -21,14 +40,82 @@
             boxed: true,
             mode: Kinematic,
             radius: 0.5,
-            height: 2.0,
-            half_extents: (0.6, 0.35, 0.6),
+            height: 1.0,
+            // Covers the DEPLOYED foot's reach (out ~1.15, down ~1.08 from the
+            // hinge) so the ship rests on its feet, not on a hidden box.
+            half_extents: (0.95, 1.05, 0.45),
             restitution: 0.05,
-            friction: 0.6,
+            friction: 0.7,
             gravity: true,
             lock_pos: (false, false, false),
             lock_rot: (false, false, false),
             mass: 0.3,
         )),
+    ),
+    (
+        name: "LegUpperPivot",
+        transform: (
+            translation: (0.12, 0.0, 0.0),
+            // Deployed roll (0.5 rad about Z). The gear device overrides this.
+            rotation: (0.0, 0.0, 0.247404, 0.968912),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Empty,
+        scripts: [],
+        parent: Some(0),
+    ),
+    (
+        name: "LegUpper",
+        transform: (
+            // Offset by the mesh's AABB centre so its authored hip lands on the pivot.
+            translation: (0.02, -0.46, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/parts/leg_upper.glb",
+        ),
+        material: Some((
+            color: (0.5, 0.53, 0.58),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.5, 0.53, 0.58, 1.0),
+            },
+        )),
+        scripts: [],
+        parent: Some(1),
+    ),
+    (
+        name: "LegKneePivot",
+        transform: (
+            // The knee sits at the bottom of the thigh (design y = -0.84).
+            translation: (0.0, -0.84, 0.0),
+            // Deployed roll (0.4 rad about Z, relative to the thigh).
+            rotation: (0.0, 0.0, 0.198669, 0.980067),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Empty,
+        scripts: [],
+        parent: Some(1),
+    ),
+    (
+        name: "LegLower",
+        transform: (
+            translation: (0.12, -0.355, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/parts/leg_lower.glb",
+        ),
+        material: Some((
+            color: (0.5, 0.53, 0.58),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.5, 0.53, 0.58, 1.0),
+            },
+        )),
+        scripts: [],
+        parent: Some(3),
     ),
 ]
