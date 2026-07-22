@@ -159,9 +159,8 @@ local SFX = {
   chute    = "audio/kenney/interface/open_001.ogg",
   reentry  = "audio/kenney/sci-fi/forceField_000.ogg",
   gear     = "audio/kenney/sci-fi/doorOpen_000.ogg",
-  bed      = "audio/kenney/sci-fi/computerNoise_000.ogg",
 }
-local engine_sfx, reentry_sfx, ambient_sfx = nil, nil, nil
+local engine_sfx, reentry_sfx = nil, nil
 local throttle_prev = 0.0
 
 -- A one-shot spatial hit at a world point (KSP-scale falloff, SFX bus).
@@ -214,26 +213,10 @@ local function update_reentry_audio(node, flux)
   end
 end
 
--- The AMBIENT BED: a low machine-drone on the Ambient bus (rolled-off up top so
--- it sits UNDER everything), non-spatial — the felt hum of being aboard. Only
--- the piloted vessel runs it, so there's never a stack of beds.
-local function update_ambient(on)
-  if not audio then return end
-  if on then
-    if not ambient_sfx then
-      ambient_sfx = audio.play(SFX.bed, { track = "Ambient", loop = true, volume = 0.8 })
-    end
-  elseif ambient_sfx then
-    ambient_sfx:stop()
-    ambient_sfx = nil
-  end
-end
-
 -- Stop the vessel's persistent loops (EVA, breakup) — silence, don't leak.
 local function silence_loops()
   if engine_sfx then engine_sfx:stop(); engine_sfx = nil end
   if reentry_sfx then reentry_sfx:stop(); reentry_sfx = nil end
-  if ambient_sfx then ambient_sfx:stop(); ambient_sfx = nil end
 end
 
 -- ── blueprint ───────────────────────────────────────────────────────────────
@@ -1061,7 +1044,6 @@ function fixedUpdate(node, dt)
     piloting = true
     astronaut.visible = false
     set_navball(true)
-    update_ambient(true) -- the cockpit hum comes up
     sas_mode, sas_last = "stability", "stability"
     log("vessel: you're in the pod — SHIFT throttle, SPACE releases the clamps")
   end
@@ -1126,7 +1108,6 @@ function fixedUpdate(node, dt)
       piloting = true
       astronaut.visible = false
       set_navball(true)
-      update_ambient(true) -- the cockpit hum comes back up
       -- Board in a stability hold — never inherit a velocity-pointing mode
       -- into a takeoff (a vertical climb's "retrograde" points at the core).
       sas_mode, sas_last = "stability", "stability"

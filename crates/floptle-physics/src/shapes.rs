@@ -13,6 +13,17 @@ pub trait CollisionShape {
     fn distance(&self, p: Vec3) -> f32;
     /// Outward unit surface normal at `p` (direction of increasing distance).
     fn normal(&self, p: Vec3) -> Vec3;
+    /// The outward normal ONLY where it's reliable — `None` when the field
+    /// cannot resolve a direction here (a point DEEP inside a saturated SDF
+    /// interior, where the gradient is zero). `normal()` masks that with a
+    /// `Vec3::Y` fallback, which silently misreads a fast, deeply-tunneled
+    /// impact's closing speed as its +Y component (≈ 0 for a side/vertical
+    /// lithobrake). Contact resolution uses this instead and substitutes a
+    /// motion-based normal when it's `None`, so the true crash speed survives.
+    /// Analytic shapes are always reliable (the default).
+    fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
+        Some(self.normal(p))
+    }
     /// Downcast to the sculptable terrain field, if this collider is one — the runtime
     /// terrain API (Lua `terrain.sculpt/dig`) edits the sim's own copy through this so
     /// collision keeps agreeing with the authority field it was cloned from.
@@ -181,7 +192,13 @@ impl CollisionShape for ChunkTerrain {
         self.field.d(self.to_local(p)) * self.scale.max(1e-6)
     }
     fn normal(&self, p: Vec3) -> Vec3 {
-        (self.rot * self.field.grad(self.to_local(p))).try_normalize().unwrap_or(Vec3::Y)
+        self.normal_reliable(p).unwrap_or(Vec3::Y)
+    }
+    fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
+        // `try_normalize` yields None where the gradient is zero — i.e. deep in
+        // a fully-solid (Uniform(-band)) interior, exactly where a fast ram
+        // tunnels to. There the caller falls back to the body's travel axis.
+        (self.rot * self.field.grad(self.to_local(p))).try_normalize()
     }
     fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
         Some(self)

@@ -828,6 +828,43 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_ram_into_solid_terrain_reports_its_true_impact_speed() {
+        // A fast lithobrake into a PLANET used to read as ~0 m/s (Ty: "rammed a
+        // planet really fast, nothing broke"). At high speed the stack tunnels
+        // past the SDF's narrow band in one substep into the SATURATED interior,
+        // where the gradient — and so the contact normal — is zero; `normal()`
+        // masked that with a straight-up Vec3::Y, which is orthogonal to a
+        // horizontal ram, collapsing the reported closing speed to ~0. The
+        // motion-based fallback normal must now recover the true speed.
+        let mut terrain = floptle_field::ChunkField::new(1.0);
+        // A fully SOLID block: top_y far above the box, so nothing in it is air.
+        terrain.fill_slab(
+            Vec3::new(-8.0, -8.0, -8.0),
+            Vec3::new(8.0, 8.0, 8.0),
+            100.0,
+            [0.4, 0.5, 0.6],
+        );
+        let mut ecs = World::default();
+        // The rocket sits just off the block's -X face and rams straight in.
+        let (root, ..) = spawn_rocket(&mut ecs, DVec3::new(-10.0, 0.0, 0.0));
+        let mut sim =
+            Sim::build(&ecs, &[(DVec3::ZERO, &terrain)], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+        // ~1200 u/s: one substep jumps the stack ~10 units — clear past the band
+        // (4 units) into the saturated interior on the first contact.
+        sim.set_compound_velocity(root.index(), Vec3::new(1200.0, 0.0, 0.0));
+        let mut peak = 0.0f32;
+        for _ in 0..3 {
+            sim.step_tick(1.0 / 60.0, None);
+            for (_r, _part, _j, speed, _p) in sim.compound_impacts() {
+                peak = peak.max(speed);
+            }
+        }
+        // Without the fallback the +Y normal reads a +X ram as ~0; with it the
+        // full closing speed comes through (well above any crash tolerance).
+        assert!(peak > 400.0, "a 1200 u/s ram must report a high impact speed, got {peak}");
+    }
+
+    #[test]
     fn runtime_spawned_assembly_registers_via_add_compound_for() {
         let mut ecs = World::default();
         let mut sim =
