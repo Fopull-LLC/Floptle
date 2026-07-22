@@ -690,6 +690,7 @@ impl ScriptHost {
         // tick and are re-drawn every fixedUpdate while wanted (the S6 v2 map
         // screen draws its orbit conics this way). Depth-tested in the scene.
         let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
+        let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let q = draw_lines.clone();
             if let (Ok(f), Ok(t)) = (
@@ -810,6 +811,121 @@ impl ScriptHost {
                         let _ = t.set("box", f);
                     }
                 }
+                // ── FILLED triangle layer: solid gizmos & world markers ──
+                // `draw.tri(x1..z3, r,g,b[,a])` — one raw triangle.
+                {
+                    let q = draw_tris.clone();
+                    type TriArgs =
+                        (f64, f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_,
+                              (x1, y1, z1, x2, y2, z2, x3, y3, z3, r, g, b, a): TriArgs| {
+                            q.borrow_mut().push(crate::DrawTri {
+                                a: [x1, y1, z1],
+                                b: [x2, y2, z2],
+                                c: [x3, y3, z3],
+                                color: [r, g, b, a.unwrap_or(1.0)],
+                            });
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("tri", f);
+                    }
+                }
+                // A basis ⊥ to a direction, for fan-tessellating cones/discs.
+                let basis = |n: glam::DVec3| {
+                    let n = n.try_normalize().unwrap_or(glam::DVec3::Y);
+                    let u = if n.x.abs() < 0.9 { glam::DVec3::X } else { glam::DVec3::Z };
+                    let u = (u - n * u.dot(n)).normalize();
+                    (u, n.cross(u), n)
+                };
+                // `draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b[,a])` — a
+                // solid cone: base disc at (bx,by,bz), apex `height` along the
+                // unit dir. Gizmo arrowheads, thruster nozzles, markers.
+                {
+                    let q = draw_tris.clone();
+                    type ConeArgs =
+                        (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_,
+                              (bx, by, bz, dx, dy, dz, radius, height, r, g, b, a): ConeArgs| {
+                            let base = glam::DVec3::new(bx, by, bz);
+                            let (u, v, n) = basis(glam::DVec3::new(dx, dy, dz));
+                            let apex = base + n * height;
+                            let col = [r, g, b, a.unwrap_or(1.0)];
+                            const N: usize = 20;
+                            let mut q = q.borrow_mut();
+                            let rim = |k: usize| {
+                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                                base + u * (radius * t.cos()) + v * (radius * t.sin())
+                            };
+                            for k in 0..N {
+                                let p0 = rim(k);
+                                let p1 = rim(k + 1);
+                                // side
+                                q.push(crate::DrawTri {
+                                    a: p0.into(),
+                                    b: p1.into(),
+                                    c: apex.into(),
+                                    color: col,
+                                });
+                                // base cap
+                                q.push(crate::DrawTri {
+                                    a: p1.into(),
+                                    b: p0.into(),
+                                    c: base.into(),
+                                    color: col,
+                                });
+                            }
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("cone", f);
+                    }
+                }
+                // `draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b[,a])` — a filled
+                // annulus (r0=inner, r1=outer) around normal n: solid rotation
+                // gizmo bands, ring markers. r0=0 gives a full disc.
+                {
+                    let q = draw_tris.clone();
+                    type DiscArgs =
+                        (f64, f64, f64, f64, f64, f64, f64, f64, f32, f32, f32, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_,
+                              (cx, cy, cz, nx, ny, nz, r0, r1, r, g, b, a): DiscArgs| {
+                            let c = glam::DVec3::new(cx, cy, cz);
+                            let (u, v, _) = basis(glam::DVec3::new(nx, ny, nz));
+                            let col = [r, g, b, a.unwrap_or(1.0)];
+                            const N: usize = 36;
+                            let mut q = q.borrow_mut();
+                            let at = |rad: f64, k: usize| {
+                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                                c + u * (rad * t.cos()) + v * (rad * t.sin())
+                            };
+                            for k in 0..N {
+                                let o0 = at(r1, k);
+                                let o1 = at(r1, k + 1);
+                                let i0 = at(r0, k);
+                                let i1 = at(r0, k + 1);
+                                q.push(crate::DrawTri {
+                                    a: i0.into(),
+                                    b: o0.into(),
+                                    c: o1.into(),
+                                    color: col,
+                                });
+                                q.push(crate::DrawTri {
+                                    a: i0.into(),
+                                    b: o1.into(),
+                                    c: i1.into(),
+                                    color: col,
+                                });
+                            }
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("disc", f);
+                    }
+                }
                 let _ = lua.globals().set("draw", t);
             }
         }
@@ -921,6 +1037,7 @@ impl ScriptHost {
             destroy_queue: destroy_queue.clone(),
             scene: Rc::new(RefCell::new(SceneMirror::default())),
             bodies: Rc::new(RefCell::new(HashMap::new())),
+            ui_rects: Rc::new(RefCell::new(HashMap::new())),
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -1059,6 +1176,7 @@ impl ScriptHost {
             logs,
             input,
             bodies: shared.bodies.clone(),
+            ui_rects: shared.ui_rects.clone(),
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
@@ -1109,6 +1227,7 @@ impl ScriptHost {
             assembly_impacts,
             assembly_cmds,
             draw_lines,
+            draw_tris,
             destroy_queue,
             net,
             synced_stores,
@@ -1307,6 +1426,17 @@ impl ScriptHost {
     /// replaces its line list with each tick's drain, so an idle script clears).
     pub fn take_draw_lines(&self) -> Vec<crate::DrawLine> {
         std::mem::take(&mut *self.draw_lines.borrow_mut())
+    }
+
+    /// Drain this tick's filled triangles (`draw.tri/cone/disc`).
+    pub fn take_draw_tris(&self) -> Vec<crate::DrawTri> {
+        std::mem::take(&mut *self.draw_tris.borrow_mut())
+    }
+
+    /// Feed this frame's solved UI element rects in game-viewport PHYSICAL
+    /// pixels (entity index → [x, y, w, h]); `node:uiRect()` reads it.
+    pub fn set_ui_rects(&self, map: HashMap<u32, [f32; 4]>) {
+        *self.ui_rects.borrow_mut() = map;
     }
 
     /// Drain the nodes scripts asked to remove via `destroy(...)` (entity indices).

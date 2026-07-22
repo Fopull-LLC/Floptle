@@ -1348,8 +1348,13 @@ struct Editor {
     grid_render: Option<Grid>,
     /// The runtime 3D line layer (script `draw.line` — the map's orbit conics).
     line_layer: Option<floptle_render::Lines>,
+    /// The runtime 3D FILLED-triangle layer (script `draw.tri/cone/disc` —
+    /// solid gizmos, world markers), drawn alongside the lines.
+    tri_layer: Option<floptle_render::Tris>,
     /// This tick's script-drawn line segments (world space, immediate mode).
     script_lines: Vec<floptle_script::DrawLine>,
+    /// This tick's script-drawn filled triangles (world space, immediate mode).
+    script_tris: Vec<floptle_script::DrawTri>,
     /// Billboard particle pass (the VFX sim's draw arm).
     particles: Option<floptle_render::Particles>,
     egui: Option<Egui>,
@@ -2185,6 +2190,7 @@ impl ApplicationHandler for Editor {
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
         self.line_layer = Some(floptle_render::Lines::new(&gpu));
+        self.tri_layer = Some(floptle_render::Tris::new(&gpu));
         self.particles = Some(floptle_render::Particles::new(&gpu));
         self.ui_render = Some(floptle_render::Ui::new(&gpu));
 

@@ -53,6 +53,17 @@ pub struct DrawLine {
     pub color: [f32; 4],
 }
 
+/// One world-space FILLED triangle a script queued via `draw.tri` / `draw.cone`
+/// / `draw.disc` this tick (immediate mode). Drawn by the runtime triangle
+/// layer alongside the lines — solid gizmo geometry, world markers.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawTri {
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+    pub c: [f64; 3],
+    pub color: [f32; 4],
+}
+
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
@@ -171,6 +182,11 @@ pub struct ScriptHost {
     /// This frame's physics body state per entity index (velocity + grounded), fed in
     /// before `run` so scripts can read `node.vx/vy/vz/grounded`.
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
+    /// This frame's solved UI element rects in game-viewport PHYSICAL pixels
+    /// (entity index → [x, y, w, h]); `node:uiRect()` reads it so scripts can
+    /// hit-test the mouse against a panel's ACTUAL rendered position instead
+    /// of guessing its geometry.
+    ui_rects: Rc<RefCell<HashMap<u32, [f32; 4]>>>,
     /// Velocities scripts wrote this frame (entity index → new velocity), drained by
     /// the editor and applied to the physics sim.
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
@@ -315,6 +331,8 @@ pub struct ScriptHost {
     spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
     /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
+    /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
+    draw_tris: Rc<RefCell<Vec<DrawTri>>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
     /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
@@ -568,6 +586,7 @@ pub enum RichSet {
 struct Shared {
     scene: Rc<RefCell<SceneMirror>>,
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
+    ui_rects: Rc<RefCell<HashMap<u32, [f32; 4]>>>,
     body_changes: Rc<RefCell<HashMap<u32, [f32; 3]>>>,
     body_height_changes: Rc<RefCell<HashMap<u32, f32>>>,
     /// Cross-node POSITION writes onto entities that HAVE a physics body —

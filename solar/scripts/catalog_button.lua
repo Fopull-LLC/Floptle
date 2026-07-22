@@ -4,7 +4,11 @@
 
 defaults = { part = 1 }
 
-local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM", "decoupler", "legs", "radialDec" }
+-- Append-only order: existing catalogue buttons keep their numbers, new parts
+-- get the next indices (their buttons are added at the end of the panel).
+local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM",
+              "decoupler", "legs", "radialDec",
+              "nose", "fins", "battery", "dish" }
 
 local el, builder
 

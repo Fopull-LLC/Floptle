@@ -52,11 +52,15 @@ defaults = {
 -- side = true exposes 4 radial attach nodes on the part's flanks.
 local REG = {
   pod       = { prefab = "PartPod",       label = "Pod Mk1",      h = 0.80, rx = 0.50, rz = 0.50, mass = 1.2,  cost = 400, top = true,  bottom = true,  kind = "crewed", side = true },
-  chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.61, rx = 0.28, rz = 0.28, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas" },
+  nose      = { prefab = "PartNose",      label = "Nose Cone",    h = 0.90, rx = 0.50, rz = 0.50, mass = 0.4,  cost = 90,  top = false, bottom = true,  kind = "structural", aero = true },
+  chute     = { prefab = "PartChute",     label = "Parachute",    h = 0.61, rx = 0.28, rz = 0.28, mass = 0.1,  cost = 80,  top = false, bottom = true,  kind = "canvas", chute = true, side = true },
   tankS     = { prefab = "PartTankS",     label = "FT-S Tank",    h = 1.00, rx = 0.50, rz = 0.50, mass = 1.5,  cost = 120, top = true,  bottom = true,  kind = "tank", fuel = 60,  side = true },
   tankM     = { prefab = "PartTankM",     label = "FT-M Tank",    h = 1.50, rx = 0.50, rz = 0.50, mass = 3.0,  cost = 260, top = true,  bottom = true,  kind = "tank", fuel = 150, side = true },
   engineS   = { prefab = "PartEngineS",   label = "Sputter",      h = 1.30, rx = 0.90, rz = 0.90, mass = 0.8,  cost = 150, top = true,  bottom = true,  kind = "engine", thrust = 55,  burn = 0.9 },
   engineM   = { prefab = "PartEngineM",   label = "Anvil",        h = 1.60, rx = 0.90, rz = 0.90, mass = 1.8,  cost = 380, top = true,  bottom = true,  kind = "engine", thrust = 130, burn = 2.0 },
+  fins      = { prefab = "PartFins",      label = "Aero Fins",    h = 0.80, rx = 0.95, rz = 0.95, mass = 0.5,  cost = 110, top = false, bottom = true,  kind = "structural", aero = true, side = true },
+  battery   = { prefab = "PartBattery",   label = "Battery",      h = 1.00, rx = 0.50, rz = 0.50, mass = 0.6,  cost = 130, top = true,  bottom = true,  kind = "structural", power = true, side = true },
+  dish      = { prefab = "PartDish",      label = "Comms Dish",   h = 0.80, rx = 0.40, rz = 0.40, mass = 0.2,  cost = 120, top = true,  bottom = true,  kind = "structural", comms = true, side = true },
   decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
   -- The RADIAL decoupler mounts on a flank and kicks its outboard branch
   -- away at staging (side boosters). It is itself a side host: booster
@@ -104,15 +108,28 @@ local next_sym = 0
 -- fires the events in exactly this order.
 local stage_order = {}   -- array of keys: "u<uid>" | "g<sym gid>"
 local stage_drag = nil   -- { key, row } while a row is being dragged
+local stage_hover = nil  -- stage-panel row the cursor is over (world highlight)
 local stage_node2 = nil  -- the StagePanel UI node
 local saved_stage = {}   -- uid → stage index from a loaded blueprint
+
+-- ── Tools & selection ───────────────────────────────────────────────────────
+-- Clicking a part SELECTS it (it doesn't grab/move) — hovering only previews
+-- what a click would select. The active TOOL decides what the selection's
+-- gizmo does: 1 = Move (arrows), 2 = Rotate (rings), 3 = Stage (numbered
+-- decoupler badges + the staging panel), 4 = Grab (pick the part up to
+-- re-attach it elsewhere). Switching tools never changes the selection, and
+-- editing never changes the selection — no more "moving the wrong thing".
+local TOOLS = { "move", "rotate", "stage", "grab" }
+local TOOL_LABEL = { move = "MOVE", rotate = "ROTATE", stage = "STAGE", grab = "GRAB" }
+local tool = "move"
+local selected_uid = nil
 
 local function hint(msg, secs)
   if hint_node then hint_node.text = msg end
   hint_t = secs or 2.5
 end
 
-local HINT_IDLE = "click part = pick up   ·   hover: drag gizmo arrows/rings (or arrows nudge, R/T/Y)   ·   X symmetry   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus"
+local HINT_IDLE = "click a part = select   ·   1 Move · 2 Rotate · 3 Stage · 4 Grab   ·   drag the gizmo to edit   ·   X symmetry   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo · CTRL+S save   ·   RMB+WASD fly"
 local HINT_GHOST = "click an attach node to place (green = stack, amber = radial)   ·   ALT = place free   ·   R yaw · T pitch · Y roll   ·   X symmetry ×N   ·   ESC cancel"
 local HINT_GRAB = "move the mouse to slide the whole ship   ·   click to set it down"
 
@@ -365,33 +382,69 @@ local function sync_stage_order()
   return items
 end
 
--- Paint the STAGING panel (row 1 fires first; ▶ marks the dragged row's
--- would-be slot while dragging).
+-- The number of header lines in the panel (title + subtitle + blank) — the
+-- staging-row hit-test skips these. Kept in one place so the panel text and
+-- the click math never disagree.
+local STAGE_HEADER_LINES = 3
+
+-- Paint the STAGING panel: each separation event is a numbered STAGE (#1
+-- fires first), named by what it does. Visible only while the STAGE tool is
+-- active (it declutters otherwise). The hovered row is marked ▸ and its
+-- decoupler(s) light up in the world (see draw_stage_badges).
 local function paint_stages()
   if not stage_node2 then stage_node2 = find("StagePanel") end
   if not stage_node2 then return end
   local items = sync_stage_order()
-  if #stage_order == 0 then
-    stage_node2.text = ""
-    local el = stage_node2:getcomponent("UiElement")
+  local el = stage_node2:getcomponent("UiElement")
+  local show = (tool == "stage") and #stage_order > 0
+  if not show then
     if el then el.visible = false end
     return
   end
-  local el = stage_node2:getcomponent("UiElement")
   if el then el.visible = true end
-  local lines = { "STAGING — drag rows to reorder", "fires top to bottom", "" }
+  local lines = { "STAGING  ·  #1 fires first", "drag a row to reorder", "" }
   for i, key in ipairs(stage_order) do
     local it = items[key]
-    local tag = (stage_drag and stage_drag.key == key) and "▶ " or ""
     if it then
+      local marker = (stage_drag and stage_drag.key == key) and "▶"
+        or (stage_hover == key and "▸") or " "
       if it.ring then
-        lines[#lines + 1] = string.format("%s%d ·  BOOSTER RING ×%d", tag, i, #it.uids)
+        lines[#lines + 1] = string.format("%s #%d   BOOSTER RING ×%d", marker, i, #it.uids)
       else
-        lines[#lines + 1] = string.format("%s%d ·  DECOUPLER  (y %.1f)", tag, i, it.y)
+        lines[#lines + 1] = string.format("%s #%d   DECOUPLER", marker, i)
       end
     end
   end
   stage_node2.text = table.concat(lines, "\n")
+end
+
+-- Draw a numbered badge (a filled disc + the number over it) at each stage's
+-- decoupler(s), in the STAGE tool — so the row and the physical part are
+-- unmistakably the same one. The hovered row's badges glow.
+local function draw_stage_badges()
+  if tool ~= "stage" then return end
+  local items = sync_stage_order()
+  for i, key in ipairs(stage_order) do
+    local it = items[key]
+    if it then
+      local hot = (stage_hover == key) or (stage_drag and stage_drag.key == key)
+      local r, g, b = 1.0, 0.75, 0.25
+      if hot then r, g, b = 0.3, 1.0, 0.5 end
+      for _, uid in ipairs(it.uids) do
+        local p = parts[uid]
+        if p then
+          -- A camera-facing badge disc + a bright ring; the stage number is
+          -- read off the panel row of the same color when hovered.
+          local up = { x = 0, y = 1, z = 0 }
+          draw.disc(p.x, p.y + 0.15, p.z, up.x, up.y, up.z, 0.0, 0.22 + (hot and 0.08 or 0),
+            r, g, b, 0.9)
+          draw.ring(p.x, p.y + 0.15, p.z, up.x, up.y, up.z, 0.30, r, g, b, 1.0)
+          -- little riser so the badge reads above the part
+          draw.line(p.x, p.y, p.z, p.x, p.y + 0.15, p.z, r, g, b, 0.8)
+        end
+      end
+    end
+  end
 end
 
 local function refresh_stats()
@@ -410,9 +463,10 @@ local function refresh_stats()
   end
   local twr = (mass > 0) and (thrust / (mass * 9.81)) or 0
   local twr_s = (thrust > 0) and string.format("   TWR %.2f", twr) or ""
-  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s%s",
+  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s   ⛭ %s%s",
     n, mass, cost, twr_s,
-    sym_n > 1 and ("   SYM ×" .. sym_n) or "", stage_lines())
+    sym_n > 1 and ("   SYM ×" .. sym_n) or "",
+    TOOL_LABEL[tool] or "?", stage_lines())
 end
 
 -- ── Undo (robust: ops that can't apply yet re-push and wait) ────────────────
@@ -617,17 +671,21 @@ local function find_snap()
 end
 
 -- Would a part of `def` (at the ghost's orientation) centered at (x,y,z)
--- overlap any placed part's box? Rotated parts test with their effective
--- axis-aligned extents. (Boxes shrunk a touch so flush stacking never
--- counts as overlap.)
+-- DEEPLY overlap a placed part? FORGIVING on purpose: parts live in ONE rigid
+-- compound and dropped stages don't collide with each other, so touching /
+-- clipping is harmless — only a near-total overlap (one part buried inside
+-- another) is worth refusing. The old 0.9 gate rejected boosters that merely
+-- HUG the hull, forcing the pull-out-then-nudge-back dance. 0.55 = "you'd
+-- have to shove it most of the way through" before it's blocked.
+local OVERLAP = 0.55
 local function overlaps(def, x, y, z, exclude, gy, gp, gr)
   local ax, ay, az = eff_extents(def, gy, gp, gr)
   for uid, p in pairs(parts) do
     if not (exclude and exclude[uid]) then
       local bx, by, bz = part_extents(p)
-      if math.abs(x - p.x) < (ax + bx) * 0.9
-        and math.abs(y - p.y) < (ay + by) * 0.9
-        and math.abs(z - p.z) < (az + bz) * 0.9 then
+      if math.abs(x - p.x) < (ax + bx) * OVERLAP
+        and math.abs(y - p.y) < (ay + by) * OVERLAP
+        and math.abs(z - p.z) < (az + bz) * OVERLAP then
         return true
       end
     end
@@ -739,53 +797,81 @@ local function apply_edit(uid, ddx, ddy, ddz, dyaw, dpitch, droll)
   refresh_stats()
 end
 
--- ── Drag gizmo (editor-style handles on the hovered part) ───────────────────
--- Three MOVE arrows (world X/Y/Z) with tip knobs, three ROTATE rings about
--- those axes. Grab a tip and drag along the arrow; grab a ring and drag to
--- turn (SHIFT snaps to 15°). Rings map to yaw (Y), pitch (X), roll (Z).
+-- ── Transform gizmos (editor-style, tool-specific) ──────────────────────────
+-- ONE gizmo at a time, on the SELECTED part, for the ACTIVE tool: the MOVE
+-- tool shows three solid arrows (world X/Y/Z, filled cone heads); the ROTATE
+-- tool shows three solid rings (filled bands about those axes). Grab a handle
+-- and drag: an arrow moves along its axis, a ring turns about it (SHIFT = fine
+-- / 15° snap). Standard R/G/B axis colors so it reads at a glance.
 local GIZ_AXES = {
-  { x = 1, y = 0, z = 0, r = 0.95, g = 0.35, b = 0.3 },  -- X: pitch ring
-  { x = 0, y = 1, z = 0, r = 0.4,  g = 0.9,  b = 0.4 },  -- Y: yaw ring
-  { x = 0, y = 0, z = 1, r = 0.35, g = 0.55, b = 1.0 },  -- Z: roll ring
+  { x = 1, y = 0, z = 0, r = 0.95, g = 0.30, b = 0.28 }, -- X (red)  → pitch
+  { x = 0, y = 1, z = 0, r = 0.40, g = 0.90, b = 0.42 }, -- Y (green)→ yaw
+  { x = 0, y = 0, z = 1, r = 0.35, g = 0.55, b = 1.0 },  -- Z (blue) → roll
 }
-local GIZ_LEN = 1.35
-local GIZ_RAD = 0.95
 local gizmo_drag = nil -- { uid, kind = "move"|"turn", axis, lmx, lmy, acc }
-local gizmo_uid = nil  -- latched: handles stay grabbable after the cursor
-                       -- leaves the part body (they sit OUTSIDE it)
 
-local function draw_gizmo(p)
+-- The gizmo's size scales with the selected part so it never swamps a small
+-- part or hides inside a big one. Returns the arrow length + ring radius.
+local function gizmo_dims(p)
   local ex, ey, ez = part_extents(p)
-  local len = GIZ_LEN + math.max(ex, ey, ez) * 0.4
-  local rad = GIZ_RAD + math.max(ex, ez) * 0.35
-  for _, a in ipairs(GIZ_AXES) do
-    draw.line(p.x, p.y, p.z, p.x + a.x * len, p.y + a.y * len, p.z + a.z * len,
-      a.r, a.g, a.b, 0.9)
-    draw.sphere(p.x + a.x * len, p.y + a.y * len, p.z + a.z * len, 0.11,
-      a.r, a.g, a.b, 1.0)
-    draw.ring(p.x, p.y, p.z, a.x, a.y, a.z, rad, a.r, a.g, a.b, 0.5)
+  local reach = math.max(ex, ey, ez)
+  return 1.15 + reach * 0.5, 0.85 + reach * 0.55
+end
+
+-- Two unit vectors spanning the plane ⊥ to axis `a` (for the rotate ring).
+local function ring_basis(a)
+  local ux, uy, uz = a.z, a.x, a.y
+  return ux, uy, uz, a.y, a.z, a.x
+end
+
+local function draw_gizmo(p, tool)
+  local len, rad = gizmo_dims(p)
+  if tool == "rotate" then
+    for _, a in ipairs(GIZ_AXES) do
+      -- A solid band (filled annulus) reads as a real ring, not a thin line.
+      draw.disc(p.x, p.y, p.z, a.x, a.y, a.z, rad * 0.9, rad, a.r, a.g, a.b, 0.7)
+    end
+    -- a small hub so the pivot is obvious
+    draw.sphere(p.x, p.y, p.z, 0.09, 0.9, 0.9, 0.95, 1.0)
+  else -- move
+    for _, a in ipairs(GIZ_AXES) do
+      local hx, hy, hz = p.x + a.x * len, p.y + a.y * len, p.z + a.z * len
+      -- shaft
+      draw.line(p.x, p.y, p.z, hx, hy, hz, a.r, a.g, a.b, 1.0)
+      -- solid cone arrowhead (base a bit back from the tip)
+      local bl = 0.26
+      draw.cone(hx - a.x * bl, hy - a.y * bl, hz - a.z * bl,
+        a.x, a.y, a.z, 0.11, bl, a.r, a.g, a.b, 1.0)
+    end
+    draw.box(p.x, p.y, p.z, 0.09, 0.09, 0.09, 0, 0.95, 0.95, 1.0, 1.0)
   end
   return len, rad
 end
 
--- Which handle is under the cursor? → kind, axis index (nil = none).
-local function gizmo_hit(p, len, rad)
+-- Which handle is under the cursor for `tool`? → kind, axis index (nil none).
+local function gizmo_hit(p, tool, len, rad)
   local mx, my = input.mouse()
-  for ai, a in ipairs(GIZ_AXES) do
-    local sx, sy, on = screen_of(p.x + a.x * len, p.y + a.y * len, p.z + a.z * len)
-    if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 18 * 18 then return "move", ai end
-  end
-  for ai, a in ipairs(GIZ_AXES) do
-    -- two in-plane basis vectors for this axis's ring
-    local ux, uy, uz = a.z, a.x, a.y -- cyclic: ⊥ to the axis
-    local vx2, vy2, vz2 = a.y, a.z, a.x
-    for k = 0, 19 do
-      local t = k * (2 * math.pi / 20)
-      local cx = p.x + (ux * math.cos(t) + vx2 * math.sin(t)) * rad
-      local cy2 = p.y + (uy * math.cos(t) + vy2 * math.sin(t)) * rad
-      local cz = p.z + (uz * math.cos(t) + vz2 * math.sin(t)) * rad
-      local sx, sy, on = screen_of(cx, cy2, cz)
-      if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 12 * 12 then return "turn", ai end
+  if tool == "rotate" then
+    for ai, a in ipairs(GIZ_AXES) do
+      local ux, uy, uz, vx2, vy2, vz2 = ring_basis(a)
+      for k = 0, 23 do
+        local t = k * (2 * math.pi / 24)
+        local cx = p.x + (ux * math.cos(t) + vx2 * math.sin(t)) * rad
+        local cy2 = p.y + (uy * math.cos(t) + vy2 * math.sin(t)) * rad
+        local cz = p.z + (uz * math.cos(t) + vz2 * math.sin(t)) * rad
+        local sx, sy, on = screen_of(cx, cy2, cz)
+        if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 16 * 16 then return "turn", ai end
+      end
+    end
+  else
+    for ai, a in ipairs(GIZ_AXES) do
+      -- Test several points along the shaft so grabbing anywhere on the arrow
+      -- (not just the tip) works — much more forgiving.
+      for s = 4, 10 do
+        local f = len * s / 10
+        local sx, sy, on = screen_of(p.x + a.x * f, p.y + a.y * f, p.z + a.z * f)
+        if on and (sx - mx) ^ 2 + (sy - my) ^ 2 < 16 * 16 then return "move", ai end
+      end
     end
   end
   return nil
@@ -964,7 +1050,8 @@ local function save_blueprint()
       h = d.h, mass = d.mass, cost = d.cost, kind = d.kind,
       thrust = d.thrust or 0, burn = d.burn or 0, fuel = d.fuel or 0,
       decouple = d.decouple and 1 or 0, legs = d.legs and 1 or 0,
-      radial = d.radial and 1 or 0,
+      radial = d.radial and 1 or 0, chute = d.chute and 1 or 0,
+      comms = d.comms and 1 or 0, aero = d.aero and 1 or 0,
     }
   end
   save.set("shipyard.blueprint", bp)
@@ -1047,6 +1134,20 @@ function update(node, dt)
   end
   local cam_busy = input.button(1) -- RMB = the camera's; never build through it
 
+  -- TOOL switch (1 Move · 2 Rotate · 3 Stage · 4 Grab) — never while placing
+  -- a part or holding a gizmo. The active tool decides what the SELECTION's
+  -- gizmo does; switching tools keeps the selection.
+  if not ghost and not gizmo_drag then
+    for i, tname in ipairs(TOOLS) do
+      if input.pressed(tostring(i)) then
+        tool = tname
+        hint("tool: " .. TOOL_LABEL[tool] .. (tool == "grab"
+          and " — click a part to pick it up" or ""), 2.0)
+        refresh_stats()
+      end
+    end
+  end
+
   -- SYMMETRY mode: X cycles ×1 ×2 ×3 ×4 ×6 ×8 (SHIFT+X cycles back).
   -- Applies to radial placements; stacking on a ring always auto-mirrors.
   if input.pressed("x") then
@@ -1062,24 +1163,41 @@ function update(node, dt)
     refresh_stats()
   end
 
-  -- ── STAGING panel: drag rows to reorder the firing sequence ──
+  -- ── STAGING panel (STAGE tool): drag rows to reorder the firing sequence ──
+  -- Hit-tested against the panel's ACTUAL solved rect (node:uiRect — physical
+  -- pixels, same space as the mouse), so a click lands on the row you point
+  -- at — no more guessed geometry drifting from the rendered panel. Rows are
+  -- laid out under STAGE_HEADER_LINES header lines; the panel's text size sets
+  -- the line height, read back from the rect.
   local in_panel = false
-  do
-    local W, H = camera.screenSize()
-    if W and #stage_order > 0 then
-      local pw, ph = 250, 320
-      local x0, y0 = 16, (H - ph) * 0.5
+  draw_stage_badges()
+  stage_hover = nil
+  if tool == "stage" and #stage_order > 0 then
+    if not stage_node2 then stage_node2 = find("StagePanel") end
+    -- NB: `a and f()` truncates f's multi-return to one value — call uiRect
+    -- on its own line so all four components survive.
+    local rx, ry, rw, rh = 0, 0, 0, 0
+    if stage_node2 then rx, ry, rw, rh = stage_node2:uiRect() end
+    if rx and rw > 1 then
       local mx, my = input.mouse()
-      in_panel = mx >= x0 and mx <= x0 + pw and my >= y0 and my <= y0 + ph
+      in_panel = mx >= rx and mx <= rx + rw and my >= ry and my <= ry + rh
+      -- Row pitch: total rows (header + events) share the panel's inner
+      -- height minus a small pad, so the math tracks the real render.
+      local pad = rh * 0.03
+      local n_rows = STAGE_HEADER_LINES + #stage_order
+      local pitch = (rh - pad * 2) / n_rows
       local function row_of(y)
-        local r = math.floor((y - y0 - 8 - 3 * 18) / 18) + 1
+        local r = math.floor((y - ry - pad) / pitch) - STAGE_HEADER_LINES + 1
         if r < 1 or r > #stage_order then return nil end
         return r
+      end
+      if in_panel then
+        local r = row_of(my)
+        if r then stage_hover = stage_order[r] end
       end
       if stage_drag then
         local r = row_of(my)
         if r and r ~= stage_drag.row then
-          -- Live reorder: the row follows the cursor.
           table.remove(stage_order, stage_drag.row)
           table.insert(stage_order, r, stage_drag.key)
           stage_drag.row = r
@@ -1089,7 +1207,7 @@ function update(node, dt)
           stage_drag = nil
           click_cool = 0.2
           paint_stages()
-          hint("staging order set — it fires top to bottom in flight", 2.5)
+          hint("staging order set — it fires #1 first in flight", 2.5)
         end
       elseif in_panel and clicked and not grab_mode then
         local r = row_of(my)
@@ -1098,6 +1216,7 @@ function update(node, dt)
           paint_stages()
         end
       end
+      paint_stages() -- refresh the ▸ hover marker
     end
   end
   -- While the cursor is over the panel (or a row is in hand) it owns the
@@ -1199,8 +1318,13 @@ function update(node, dt)
     if snap then
       local ex2 = { [snap.uid] = true }
       if exclude then for u in pairs(exclude) do ex2[u] = true end end
-      if overlaps(ghost.def, x, y, z, ex2, ghost.yaw, ghost.pitch, ghost.roll) then
-        can_place, why = false, "that spot is blocked by another part"
+      -- A RADIAL mount hugs the hull by design — never overlap-gate it (that
+      -- was the "pull it out then push it back" jank). Stack snaps still
+      -- reject only a DEEP overlap.
+      local blocked = snap.side ~= "radial"
+        and overlaps(ghost.def, x, y, z, ex2, ghost.yaw, ghost.pitch, ghost.roll)
+      if blocked then
+        can_place, why = false, "that spot is buried inside another part"
         draw.sphere(x, y, z, 0.35, 1.0, 0.25, 0.2, 1.0)
       else
         can_place = true
@@ -1213,16 +1337,10 @@ function update(node, dt)
           sym_slots = symmetry_slots(host, ghost.def, ghost.yaw, ghost.pitch,
                                      ghost.roll, x, y, z, sym_n)
           for _, s in ipairs(sym_slots) do
+            -- Radial ring copies hug the hull too — preview only, no gate.
             local bx3, by3, bz3 = eff_extents(ghost.def, s.yaw, s.pitch, s.roll)
-            if overlaps(ghost.def, s.x, s.y, s.z, ex2, s.yaw, s.pitch, s.roll) then
-              can_place, why = false, "symmetry ring blocked — clear the flanks or lower ×N"
-              draw.box(s.x, s.y, s.z, bx3, by3, bz3, s.yaw, 1.0, 0.25, 0.2, 0.8)
-            else
-              -- Ghost preview of every mirrored copy.
-              draw.box(s.x, s.y, s.z, bx3, by3, bz3, s.yaw, 1.0, 0.75, 0.3, 0.55)
-            end
+            draw.box(s.x, s.y, s.z, bx3, by3, bz3, s.yaw, 1.0, 0.75, 0.3, 0.55)
           end
-          if not can_place then sym_slots = nil end
         end
       end
     elseif free_ok then
@@ -1280,6 +1398,7 @@ function update(node, dt)
           gid = next_sym
         end
         local placed = place_ghost(x, y, z, host_uid, snap and snap.side or nil, gid)
+        selected_uid = placed -- the freshly placed part becomes the selection
         if sym_slots and placed then
           local uids = { placed }
           for _, s in ipairs(sym_slots) do
@@ -1351,14 +1470,13 @@ function update(node, dt)
     local p = parts[gizmo_drag.uid]
     if not lmb or not p then
       gizmo_drag = nil
-      click_cool = 0.15
-      hint(HINT_IDLE, 0.0); hint_t = 0
+      click_cool = 0.12
     else
       local mx, my = input.mouse()
       local dmx, dmy = mx - gizmo_drag.lmx, my - gizmo_drag.lmy
       gizmo_drag.lmx, gizmo_drag.lmy = mx, my
       local a = GIZ_AXES[gizmo_drag.axis]
-      draw_gizmo(p)
+      draw_gizmo(p, tool)
       outline(p, 0.55, 0.85, 1.0, 1.0)
       if gizmo_drag.kind == "move" then
         -- Mouse motion projected onto the arrow's screen direction.
@@ -1371,7 +1489,7 @@ function update(node, dt)
           if input.key("shift") then t2 = t2 * 0.25 end -- fine control
           apply_edit(gizmo_drag.uid, a.x * t2, a.y * t2, a.z * t2, 0, 0, 0)
         end
-        hint("drag along the arrow  ·  SHIFT fine  ·  release to set", 1.0)
+        hint("MOVE — drag the arrow  ·  SHIFT fine  ·  release to set", 1.0)
       else
         -- Ring turn: horizontal+vertical drag turns about the ring's axis;
         -- SHIFT snaps the accumulated angle to 15° notches.
@@ -1391,53 +1509,77 @@ function update(node, dt)
             apply_edit(gizmo_drag.uid, 0, 0, 0, dy2, dp2, dr2)
           end
         end
-        hint("drag to turn  ·  SHIFT snaps 15°  ·  release to set", 1.0)
+        hint("ROTATE — drag the ring  ·  SHIFT snaps 15°  ·  release to set", 1.0)
       end
     end
     return
   end
 
-  -- ── Hover / precise edit / pickup / scrap ──
+  -- ── Hover preview + SELECT + tool action ──
+  -- Clicking a part SELECTS it (persists); hovering only previews what a
+  -- click would pick. The selection's gizmo follows the active TOOL — never
+  -- the cursor — so nudging one part can't grab another.
   hover_uid = (not cam_busy) and part_under_cursor(70) or nil
-  if hover_uid then
-    local p = parts[hover_uid]
-    -- Selection outline: the hovered part bright, everything it would carry
-    -- dim — for a symmetry-ring member that is the WHOLE ring.
-    outline(p, 0.55, 0.85, 1.0, 1.0)
-    for u in pairs(edit_set(hover_uid)) do
-      if u ~= hover_uid and parts[u] then outline(parts[u], 0.55, 0.85, 1.0, 0.35) end
-    end
+  local sel = selected_uid and parts[selected_uid]
+  if not sel then selected_uid = nil end
 
-    -- The DRAG GIZMO: arrows move (with the stack / the whole ring), rings
-    -- rotate in place — grab a handle instead of remembering keybinds.
-    gizmo_uid = hover_uid
-    local glen, grad = draw_gizmo(p)
-    if clicked then
-      local kind, ai = gizmo_hit(p, glen, grad)
-      if kind then
-        local mx, my = input.mouse()
-        gizmo_drag = { uid = hover_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
-        return
+  -- The selected part: bright outline + (in Move/Rotate) its tool gizmo.
+  if sel then
+    outline(sel, 0.4, 0.95, 0.7, 1.0)
+    for u in pairs(edit_set(selected_uid)) do
+      if u ~= selected_uid and parts[u] then outline(parts[u], 0.4, 0.95, 0.7, 0.3) end
+    end
+    if tool == "move" or tool == "rotate" then
+      local glen, grad = draw_gizmo(sel, tool)
+      if clicked and not cam_busy then
+        local kind, ai = gizmo_hit(sel, tool, glen, grad)
+        if kind then
+          local mx, my = input.mouse()
+          gizmo_drag = { uid = selected_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
+          return -- a gizmo grab never re-selects
+        end
       end
     end
+  end
 
-    -- PRECISE EDIT: arrows nudge the part + its stack from where it sits
-    -- (↑/↓ vertical, ←/→ screen-horizontal snapped to a world axis, ALT+←/→
-    -- the depth axis; SHIFT = fine). R/T/Y rotate the part in place. One
-    -- undo op per hover streak — CTRL+Z restores the whole adjustment.
+  -- Hover preview: a soft outline of what a click would select.
+  if hover_uid and hover_uid ~= selected_uid then
+    outline(parts[hover_uid], 0.8, 0.88, 1.0, 0.45)
+  end
+
+  -- Click: SELECT the hovered part, or (GRAB tool) pick it up to re-attach,
+  -- or click empty space to deselect. Never moves anything.
+  if clicked and not cam_busy then
+    if hover_uid then
+      if tool == "grab" then
+        pickup(hover_uid) -- carry flow → re-place at a new attach node
+        selected_uid = nil
+      else
+        selected_uid = hover_uid
+      end
+    else
+      selected_uid = nil -- clicked the empty canvas
+    end
+    return
+  end
+
+  -- ── Selection editing (acts on the SELECTION; a fallback to the gizmo) ──
+  if sel then
+    local p = sel
+    -- Arrow keys nudge (↑/↓ vertical, ←/→ screen-horizontal, ALT+←/→ depth,
+    -- SHIFT fine); R/T/Y rotate. All route through apply_edit on the
+    -- selection (ring-symmetric, one undo op per streak).
     local step = input.key("shift") and params.nudge * 0.25 or params.nudge
     local ddx, ddy, ddz = 0, 0, 0
     if input.pressed("up") then ddy = step end
     if input.pressed("down") then ddy = -step end
     local h = (input.pressed("right") and 1 or 0) - (input.pressed("left") and 1 or 0)
     if h ~= 0 then
-      -- Camera-right on the ground, snapped to the nearest world axis, so a
-      -- nudge always goes where the arrow points on screen — predictably.
       local mx, my = input.mouse()
       local _, _, _, d1x, _, d1z = camera.screenToRay(mx, my)
       local _, _, _, d2x, _, d2z = camera.screenToRay(mx + 40, my)
       local rxx, rzz = d2x - d1x, d2z - d1z
-      if input.key("alt") then rxx, rzz = -rzz, rxx end -- depth axis instead
+      if input.key("alt") then rxx, rzz = -rzz, rxx end
       if math.abs(rxx) >= math.abs(rzz) then
         ddx = (rxx >= 0 and 1 or -1) * h * step
       else
@@ -1447,19 +1589,14 @@ function update(node, dt)
     local rot = { yaw = p.yaw or 0, pitch = p.pitch or 0, roll = p.roll or 0 }
     local turned = rot_input(rot)
     if ddx ~= 0 or ddy ~= 0 or ddz ~= 0 or turned then
-      apply_edit(hover_uid, ddx, ddy, ddz,
+      apply_edit(selected_uid, ddx, ddy, ddz,
         turned and (rot.yaw - (p.yaw or 0)) or 0,
         turned and (rot.pitch - (p.pitch or 0)) or 0,
         turned and (rot.roll - (p.roll or 0)) or 0)
-      hint(string.format("precise edit  ·  step %.2g (SHIFT fine)  ·  ALT+←/→ depth  ·  CTRL+Z undoes it all", step), 2.0)
     end
-
-    if clicked then
-      pickup(hover_uid)
-      return
-    end
+    -- DEL scraps the selection + its stack (a ring member takes the ring).
     if input.pressed("delete") or input.pressed("del") then
-      local grab = edit_set(hover_uid) -- a ring member scraps the whole ring
+      local grab = edit_set(selected_uid)
       local datas = {}
       for u in pairs(grab) do
         local d = remove_part(u)
@@ -1467,28 +1604,10 @@ function update(node, dt)
       end
       push_undo({ type = "scrap", parts = datas })
       hint("scrapped " .. #datas .. " part(s) — CTRL+Z to undo", 2.5)
+      selected_uid = nil
     end
   else
-    nudge_uid = nil -- next hover streak opens a fresh undo op
-    -- The gizmo LATCH: its handles reach outside the part, so it stays live
-    -- (drawn + grabbable) while the cursor is near it — else it lets go.
-    local lp = gizmo_uid and parts[gizmo_uid]
-    if lp then
-      local glen, grad = draw_gizmo(lp)
-      local sx0, sy0, on0 = screen_of(lp.x, lp.y, lp.z)
-      local mx, my = input.mouse()
-      if not on0 or (sx0 - mx) ^ 2 + (sy0 - my) ^ 2 > 300 * 300 then
-        gizmo_uid = nil
-      elseif clicked then
-        local kind, ai = gizmo_hit(lp, glen, grad)
-        if kind then
-          gizmo_drag = { uid = gizmo_uid, kind = kind, axis = ai, lmx = mx, lmy = my }
-          return
-        end
-      end
-    else
-      gizmo_uid = nil
-    end
+    nudge_uid = nil -- nothing selected: next edit opens a fresh undo op
   end
 
   -- ── Shortcuts ──

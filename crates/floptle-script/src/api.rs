@@ -1136,6 +1136,24 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         methods.set("component", f.clone())?;
         methods.set("getcomponent", f)?;
     }
+    // node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
+    // game-viewport physical pixels (the same space as input.mouse() /
+    // camera.screenSize()), or 0,0,0,0 when it has no screen-space rect this
+    // frame. Lets a script hit-test the cursor against a panel's ACTUAL
+    // rendered position instead of guessing its geometry.
+    {
+        let ui_rects = shared.ui_rects.clone();
+        methods.set(
+            "uiRect",
+            lua.create_function(move |_, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                match ui_rects.borrow().get(&e).copied() {
+                    Some(r) => Ok((r[0], r[1], r[2], r[3])),
+                    None => Ok((0.0f32, 0.0, 0.0, 0.0)),
+                }
+            })?,
+        )?;
+    }
     {
         let scene = shared.scene.clone();
         methods.set(

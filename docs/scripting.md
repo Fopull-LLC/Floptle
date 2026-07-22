@@ -299,6 +299,14 @@ They look similar but serve different masters:
     the normal `n`
   - `draw.sphere(cx,cy,cz, radius, r,g,b [,a])` — three rings
   - `draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a])` — wireframe box
+  - **Filled** primitives (solid triangles, for polished gizmos & markers):
+    - `draw.tri(x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a])` — one triangle
+    - `draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b [,a])` — a solid
+      cone (base at `b`, apex `height` along unit dir `d`): arrowheads,
+      nozzles, markers
+    - `draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a])` — a filled annulus
+      (inner `r0`, outer `r1`) around normal `n`; `r0=0` is a full disc.
+      Rotation-gizmo bands, ring markers
 - **`gizmo.*` is for DEBUGGING** (`gizmo.line/ray/sphere/point`) — drawn
   only while the editor's viewport gizmos toggle (and its Script filter)
   is on, exactly like collider/light overlays. Ground-check rays, AI
