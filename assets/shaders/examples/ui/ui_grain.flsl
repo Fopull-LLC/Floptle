@@ -1,9 +1,0 @@
-// Animated film grain — a touch of texture over flat panels.
-shader ui_grain {
-  stage ui
-  uniform strength: float = 0.2
-  uniform scale: float = 220.0
-  let n = noise(uv * scale + vec2(time * 11.0, time * 7.0))
-  let g = n * 0.5 + 0.5
-  output color = vec4(vec3(g, g, g), strength) * instanceColor
-}
