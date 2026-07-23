@@ -43,6 +43,13 @@ impl TransformTRS {
         Mat4::from_scale_rotation_translation(self.s, self.r, self.t)
     }
 
+    /// Decompose an affine matrix back into TRS (used when re-parenting a node
+    /// keeps it in place: `local = inv(new_parent_world) · own_world`).
+    pub fn from_matrix(m: Mat4) -> Self {
+        let (s, r, t) = m.to_scale_rotation_translation();
+        Self { t, r: r.normalize(), s }
+    }
+
     /// Blend `a → b` by `k` (lerp translation/scale, slerp rotation).
     pub fn blend(a: &Self, b: &Self, k: f32) -> Self {
         Self { t: a.t.lerp(b.t, k), r: a.r.slerp(b.r, k), s: a.s.lerp(b.s, k) }

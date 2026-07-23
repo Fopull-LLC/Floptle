@@ -640,6 +640,9 @@ impl EditorTabViewer<'_> {
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
         let bone_names = self.bone_names;
+        // Snapshot the selected object/bone before `world` reborrows `self` — the
+        // Objects & Rig lists highlight it and route clicks through `cmd.select_bone`.
+        let cur_bone = *self.bone_selection;
         match primary {
             Some(e) if world.get::<Light>(e).is_some() => {
                 if let Some(l) = world.get_mut::<Light>(e) {
@@ -2324,13 +2327,142 @@ impl EditorTabViewer<'_> {
                 // ===== Animation Controller (when attached) =====
                 anim_ui::anim_component_ui(ui, e, world, &*self.anim, self.anim_ui, cmd);
 
+                // ===== ◈ Objects & Rig (this model's sub-objects + bones) =====
+                // Shown on the model node itself: two lists (Objects = mesh sub-objects,
+                // Bones = rig joints) whose entries select the same pose-able skeleton
+                // node the Hierarchy tree does, plus the per-object re-parent dropdown
+                // and the Mirror / flow-rig tools.
+                if let Some(nodes) = bone_names.get(&e) {
+                    ui.separator();
+                    ui.strong("◈ Objects & Rig");
+                    ui.small("every object and bone in this model — click to select, then pose or keyframe it");
+
+                    let sel_idx = cur_bone.filter(|(m, _)| *m == e).map(|(_, i)| i);
+                    let objects: Vec<usize> =
+                        (0..nodes.len()).filter(|&i| nodes[i].is_object).collect();
+                    let bones_only: Vec<usize> =
+                        (0..nodes.len()).filter(|&i| !nodes[i].is_object).collect();
+
+                    // Descendants of `child` (so the "parent under" dropdown never offers
+                    // a cycle): walk parents up from every node and mark those under child.
+                    let is_descendant_of = |node: usize, ancestor: usize| -> bool {
+                        let mut cur = nodes[node].parent;
+                        let mut guard = 0;
+                        while let Some(p) = cur {
+                            if p == ancestor {
+                                return true;
+                            }
+                            cur = nodes[p].parent;
+                            guard += 1;
+                            if guard > 256 {
+                                break;
+                            }
+                        }
+                        false
+                    };
+
+                    let mut list_group = |ui: &mut egui::Ui, title: String, idxs: &[usize], allow_reparent: bool| {
+                        egui::CollapsingHeader::new(title)
+                            .id_salt(("objrig", e, allow_reparent))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for &i in idxs {
+                                    let sel = sel_idx == Some(i);
+                                    let icon = if nodes[i].is_object { "◈" } else { "🔗" };
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .selectable_label(sel, format!("{icon} {}", nodes[i].name))
+                                            .clicked()
+                                        {
+                                            cmd.select_bone = Some((e, i));
+                                        }
+                                        if allow_reparent {
+                                            // "under ▸ <parent>" — reparent this object within
+                                            // the model (persisted to the .rig.ron sidecar).
+                                            let cur_parent = nodes[i].parent.map(|p| nodes[p].name.clone());
+                                            let cur_label = cur_parent.clone().unwrap_or_else(|| "(root)".into());
+                                            egui::ComboBox::from_id_salt(("reparent", e, i))
+                                                .selected_text(format!("under {cur_label}"))
+                                                .width(140.0)
+                                                .show_ui(ui, |ui| {
+                                                    if ui.selectable_label(cur_parent.is_none(), "(root)").clicked()
+                                                        && cur_parent.is_some()
+                                                    {
+                                                        cmd.set_object_parent = Some((e, nodes[i].name.clone(), None));
+                                                    }
+                                                    for j in 0..nodes.len() {
+                                                        if j == i || is_descendant_of(j, i) {
+                                                            continue; // no self / cycles
+                                                        }
+                                                        let picked = cur_parent.as_deref() == Some(nodes[j].name.as_str());
+                                                        let jicon = if nodes[j].is_object { "◈" } else { "🔗" };
+                                                        if ui
+                                                            .selectable_label(picked, format!("{jicon} {}", nodes[j].name))
+                                                            .clicked()
+                                                            && !picked
+                                                        {
+                                                            cmd.set_object_parent = Some((
+                                                                e,
+                                                                nodes[i].name.clone(),
+                                                                Some(nodes[j].name.clone()),
+                                                            ));
+                                                        }
+                                                    }
+                                                });
+                                        }
+                                    });
+                                }
+                            });
+                    };
+
+                    if !objects.is_empty() {
+                        list_group(ui, format!("◈ Objects ({})", objects.len()), &objects, true);
+                    }
+                    if !bones_only.is_empty() {
+                        list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, false);
+                    }
+
+                    // ---- tools ----
+                    ui.add_space(4.0);
+                    if ui
+                        .button("⇋ Apply Mirror → new .glb")
+                        .on_hover_text(
+                            "Complete a Blender model whose Mirror modifier wasn't applied: \
+                             synthesize the missing half, split off-center limbs into an L/R \
+                             pair, weld centerline halves. Writes a new .mirrored.glb beside \
+                             the source (non-destructive).",
+                        )
+                        .clicked()
+                    {
+                        cmd.mirror_model = Some(e);
+                    }
+                    let sel_obj_name = sel_idx
+                        .filter(|&i| nodes[i].is_object)
+                        .map(|i| nodes[i].name.clone());
+                    ui.add_enabled_ui(sel_obj_name.is_some(), |ui| {
+                        if ui
+                            .button("🦴 Rig selected object to flow")
+                            .on_hover_text(
+                                "Generate a soft bone-chain down the selected object and \
+                                 auto-weight it (hair, cloth, antennae). Writes a new rigged \
+                                 .glb beside the source; pose/keyframe the chain to make it \
+                                 bend and flow.",
+                            )
+                            .clicked()
+                            && let Some(name) = sel_obj_name.clone()
+                        {
+                            cmd.add_hair_rig = Some((e, name));
+                        }
+                    });
+                }
+
                 // ===== 🔗 Bone attachment (node parented to a rigged mesh) =====
                 if let Some(floptle_core::Parent(mesh)) = world.get::<floptle_core::Parent>(e).copied()
                     && let Some(bones) = bone_names.get(&mesh)
                 {
                     ui.separator();
                     ui.strong("🔗 Bone attachment");
-                    ui.small("ride a bone / part of the parent model (a weapon on a hand)");
+                    ui.small("ride an object or bone of the parent model (a weapon on a hand)");
                     let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
                     egui::ComboBox::from_id_salt("bone_attach_pick")
                         .selected_text(cur.clone().unwrap_or_else(|| "(not attached)".into()))
@@ -2341,9 +2473,10 @@ impl EditorTabViewer<'_> {
                                 world.remove::<floptle_core::BoneAttach>(e);
                                 cmd.inspector_changed = true;
                             }
-                            for (name, _parent) in bones {
-                                let sel = cur.as_deref() == Some(name.as_str());
-                                if ui.selectable_label(sel, name).clicked() && !sel {
+                            for node in bones {
+                                let sel = cur.as_deref() == Some(node.name.as_str());
+                                let icon = if node.is_object { "◈" } else { "🔗" };
+                                if ui.selectable_label(sel, format!("{icon} {}", node.name)).clicked() && !sel {
                                     // Attach snapping the node to the bone (offset kept if
                                     // re-picking, else identity — then nudge it below).
                                     let offset = world
@@ -2352,7 +2485,7 @@ impl EditorTabViewer<'_> {
                                         .unwrap_or(floptle_core::transform::Transform::IDENTITY);
                                     world.insert(
                                         e,
-                                        floptle_core::BoneAttach { target: mesh, bone: name.clone(), offset },
+                                        floptle_core::BoneAttach { target: mesh, bone: node.name.clone(), offset },
                                     );
                                     cmd.inspector_changed = true;
                                 }

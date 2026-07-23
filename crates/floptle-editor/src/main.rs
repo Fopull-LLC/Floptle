@@ -63,6 +63,7 @@ mod shaders;
 mod prefs;
 mod project;
 mod render_frame;
+mod rig_overrides;
 mod scene_ops;
 mod space;
 mod script_actions;
@@ -344,6 +345,22 @@ struct EditorCmd {
     do_delete_asset: Option<Vec<String>>,
     /// Folder the new controller should be created in (absolute; None = default).
     new_anim_controller_dir: Option<String>,
+    /// Select a model's object/bone by (rigged-mesh entity, skeleton node index) — set
+    /// from the Inspector's Objects/Bones lists, applied after the world borrow ends
+    /// (drives the same `bone_selection` the Hierarchy tree uses).
+    select_bone: Option<(Entity, usize)>,
+    /// Re-parent one object within a model to another (or to the model root =
+    /// `None`): (rigged-mesh entity, child object name, new parent name). Persisted to
+    /// the model's `.rig.ron` sidecar and re-applied on import, so a forearm follows a
+    /// shoulder without touching the source file.
+    set_object_parent: Option<(Entity, String, Option<String>)>,
+    /// Run the Mirror-apply pass on this Mesh node's model — synthesize the missing
+    /// mirrored half, split lateral limbs into an L/R pair, weld centerline halves —
+    /// and write the result to a new `.glb` beside the source.
+    mirror_model: Option<Entity>,
+    /// Generate a starter hair bone-chain + auto-skin on (rigged-mesh entity, hair
+    /// object name), baked into a new rigged `.glb` beside the source.
+    add_hair_rig: Option<(Entity, String)>,
 }
 
 /// Lowercase name for a key, for the script `input` API (`input.key("w")`).
@@ -440,9 +457,10 @@ struct EditorTabViewer<'a> {
     fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
-    /// Per rigged-Mesh entity: its skeleton bones (name + parent index), for the
-    /// hierarchy's expandable sub-objects + the inspector bone-attach picker.
-    bone_names: &'a HashMap<Entity, Vec<(String, Option<usize>)>>,
+    /// Per rigged-Mesh entity: its structure nodes (objects + bones), for the
+    /// hierarchy's expandable Objects/Bones groups + the inspector object/rig lists
+    /// and bone-attach picker.
+    bone_names: &'a HashMap<Entity, Vec<RigNode>>,
     /// The engine Console (script logs / warnings / errors).
     console: &'a mut ConsoleState,
     /// The Inspector asset preview to draw (model/material render or texture image).
@@ -2098,6 +2116,18 @@ struct MeshAsset {
     parts: Vec<MeshId>,
     size: f32,
     rig: Option<anim::RigAsset>,
+}
+
+/// One selectable node of a model's structure, for the Hierarchy tree + Inspector
+/// lists. A model's nodes split into **objects** (mesh sub-objects you can pose —
+/// Sae's `Forearm`) and **bones** (the rig's armature joints/empties); `is_object`
+/// says which. `parent` indexes into the same per-model `Vec<RigNode>` (for tree
+/// indentation), mirroring `Skeleton::nodes`.
+#[derive(Clone)]
+pub(crate) struct RigNode {
+    pub(crate) name: String,
+    pub(crate) parent: Option<usize>,
+    pub(crate) is_object: bool,
 }
 
 /// Which gizmo categories draw while the master ◎ toggle is on — the ⏷ menu
