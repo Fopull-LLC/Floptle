@@ -56,3 +56,7 @@ out.png
 # Crash-recovery autosaves + per-project runtime save dirs.
 **/.floptle/autosave/
 solar/save/
+
+# Auto-seeded UI effect examples in the scratch/default project (regenerated on
+# project open; the canonical copies live under each real project, e.g. solar/).
+assets/shaders/examples/ui/

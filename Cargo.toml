@@ -34,7 +34,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]
