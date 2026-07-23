@@ -83,11 +83,32 @@ pub enum Place {
     /// Stick to a parent edge/corner: the same 9-point of the element sits at
     /// the parent's point, plus an offset. HUD corners that follow the window.
     Pin { anchor: Anchor, offset: [f32; 2] },
+    /// Two-point anchor rect — the responsive placement. `min`/`max` are
+    /// fractions (0..1) of the parent rect; the element anchors to the box
+    /// between them, then insets by `margin` = `[left, top, right, bottom]`
+    /// design units.
+    ///
+    /// On an axis where `max > min` the element STRETCHES to fill that span
+    /// (its own `size` on that axis is ignored) — e.g. `min:(0,0) max:(1,1)
+    /// margin:(16,16,16,16)` is "16 units in from all four edges, at any
+    /// window size". On an axis where `min == max` it's a point anchor: the
+    /// element keeps its `size` and its top-left sits on that line + the
+    /// leading margin. This is how a panel grows with the screen instead of
+    /// staying a fixed box.
+    Stretch { min: [f32; 2], max: [f32; 2], margin: [f32; 4] },
 }
 
 impl Default for Place {
     fn default() -> Self {
         Place::Free { pos: [0.0, 0.0] }
+    }
+}
+
+impl Place {
+    /// A full-parent stretch inset by `m` design units on every side — the
+    /// common "fill my parent with a margin" placement.
+    pub fn fill(m: f32) -> Self {
+        Place::Stretch { min: [0.0, 0.0], max: [1.0, 1.0], margin: [m, m, m, m] }
     }
 }
 
@@ -145,6 +166,28 @@ impl Default for StackCfg {
     }
 }
 
+/// A soft drop shadow cast behind a [`ShapeSpec`] — the juice that lifts a panel
+/// off the background. Rendered as a blurred rounded rect BEHIND the element's
+/// own rect (the one effect that lives outside the rect, so it's built-in rather
+/// than a shader).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShadowSpec {
+    /// Shadow color; alpha is the strength (multiplied by the element opacity).
+    pub color: [f32; 4],
+    /// Offset in design units — `+x` right, `+y` down (a light from top-left).
+    pub offset: [f32; 2],
+    /// Soft-edge width in design units (0 = a hard offset shape; bigger = softer).
+    pub blur: f32,
+    /// Grow the shadow beyond the element on every side (design units).
+    pub spread: f32,
+}
+
+impl Default for ShadowSpec {
+    fn default() -> Self {
+        ShadowSpec { color: [0.0, 0.0, 0.0, 0.5], offset: [0.0, 4.0], blur: 10.0, spread: 0.0 }
+    }
+}
+
 /// The visual primitive: a rounded rectangle. Radius 0 = sharp panel, radius
 /// ≥ half the short side = pill/circle. Transparency via the fill alpha.
 /// The engine ships no UI art — shapes + your textures + text ARE the kit.
@@ -155,6 +198,9 @@ pub struct ShapeSpec {
     /// Border thickness in design units (0 = none).
     pub border: f32,
     pub border_color: [f32; 4],
+    /// Optional soft drop shadow drawn behind this shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<ShadowSpec>,
 }
 
 impl Default for ShapeSpec {
@@ -164,6 +210,7 @@ impl Default for ShapeSpec {
             radius: 0.0,
             border: 0.0,
             border_color: [0.0, 0.0, 0.0, 1.0],
+            shadow: None,
         }
     }
 }
@@ -354,6 +401,14 @@ pub struct ElementSpec {
     pub place: Place,
     #[serde(default)]
     pub size: [Size; 2],
+    /// Lower clamp on the resolved size, per axis (design units). 0 = no floor.
+    /// Keeps `Pct`/`Fit`/`Stretch` elements from collapsing on small windows.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub min_size: [f32; 2],
+    /// Upper clamp on the resolved size, per axis (design units). 0 = no cap.
+    /// Keeps an element from ballooning on huge/ultrawide displays.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub max_size: [f32; 2],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<StackCfg>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,12 +457,17 @@ fn default_true() -> bool {
 fn default_one() -> f32 {
     1.0
 }
+fn is_zero2(v: &[f32; 2]) -> bool {
+    v[0] == 0.0 && v[1] == 0.0
+}
 
 impl Default for ElementSpec {
     fn default() -> Self {
         ElementSpec {
             place: Place::default(),
             size: [Size::Fit, Size::Fit],
+            min_size: [0.0, 0.0],
+            max_size: [0.0, 0.0],
             stack: None,
             shape: None,
             text: None,
@@ -438,16 +498,56 @@ pub enum UiSpace {
     World,
 }
 
+/// How a layer's design units map to physical pixels as the window resizes —
+/// the canvas scaler (cf. Unity's CanvasScaler). Every mode resolves to ONE
+/// uniform `scale` (physical px per design unit); the design viewport handed to
+/// the solver is then `window_px / scale`, so the whole layout pipeline stays
+/// unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiScaleMode {
+    /// `design_height` design units always span the window HEIGHT; width floats
+    /// with the aspect. The classic default — every existing layer behaves
+    /// exactly as before.
+    #[default]
+    MatchHeight,
+    /// `reference_width` design units always span the window WIDTH; height
+    /// floats. Good for wide HUDs that must keep their horizontal layout.
+    MatchWidth,
+    /// Blend between match-width and match-height by `match_wh` (0 = width,
+    /// 1 = height) using the log-2 average — the fully responsive choice that
+    /// splits the difference across aspect ratios.
+    Blend,
+    /// Fit the whole reference resolution INSIDE the window (letterbox): the UI
+    /// never crops, but leaves empty margins on off-aspect monitors.
+    Expand,
+    /// Fill the window with the reference resolution (may crop): no empty
+    /// margins, but edges can fall outside a very different aspect.
+    Shrink,
+    /// 1 design unit = 1 physical pixel, always. The UI never rescales with the
+    /// window (pixel-perfect art); references are ignored.
+    ConstantPixels,
+}
+
 /// A UI layer root. Lives on a scene node; its element children form the tree.
-/// The layer scales uniformly so `design_height` design units always span the
-/// canvas height (resolution independence in screen space; the design box's
-/// height in world space).
+/// The layer scales uniformly (see [`UiScaleMode`]) so it stays consistent
+/// across window sizes and monitor aspects.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiLayer {
-    /// Resolution independence: this many design units ALWAYS span the window
-    /// height, at any resolution — bigger number = smaller-looking UI. The
-    /// width follows the window's aspect.
+    /// The reference HEIGHT in design units — the vertical half of the canvas's
+    /// reference resolution. In `MatchHeight` (and as the height reference for
+    /// `Blend`/`Expand`/`Shrink`) this many units span the window height.
     pub design_height: f32,
+    /// The reference WIDTH in design units — the horizontal half of the
+    /// reference resolution. Used by `MatchWidth`/`Blend`/`Expand`/`Shrink`
+    /// (ignored by `MatchHeight`, where width just follows the aspect).
+    #[serde(default = "default_reference_width")]
+    pub reference_width: f32,
+    /// How design units map to pixels as the window resizes (the canvas scaler).
+    #[serde(default)]
+    pub scale_mode: UiScaleMode,
+    /// `Blend` only: 0 = match width, 1 = match height, 0.5 = balance both.
+    #[serde(default = "default_match_wh")]
+    pub match_wh: f32,
     /// Layers draw lowest-z first.
     pub z: i32,
     /// Master switch: an off layer draws nothing (in-game and in-editor).
@@ -467,6 +567,12 @@ pub struct UiLayer {
 fn default_canvas_scale() -> f32 {
     0.01
 }
+fn default_reference_width() -> f32 {
+    1280.0
+}
+fn default_match_wh() -> f32 {
+    0.5
+}
 
 impl UiLayer {
     /// A world-space layer renders as a quad in the scene at runtime, not a
@@ -474,12 +580,45 @@ impl UiLayer {
     pub fn is_world(&self) -> bool {
         matches!(self.space, UiSpace::World)
     }
+
+    /// Physical pixels per design unit for a window of `viewport_px` — the one
+    /// number every screen-space consumer needs. Divide the window size by it to
+    /// get the design-space viewport handed to [`solve`]. Always finite and > 0.
+    pub fn scale_for(&self, viewport_px: [f32; 2]) -> f32 {
+        let w = viewport_px[0].max(1.0);
+        let h = viewport_px[1].max(1.0);
+        let ref_w = self.reference_width.max(1.0);
+        let ref_h = self.design_height.max(1.0);
+        let by_w = w / ref_w;
+        let by_h = h / ref_h;
+        let s = match self.scale_mode {
+            UiScaleMode::MatchHeight => by_h,
+            UiScaleMode::MatchWidth => by_w,
+            UiScaleMode::Blend => {
+                let m = self.match_wh.clamp(0.0, 1.0);
+                // Log-2 average, so halving one dimension halves the scale
+                // symmetrically regardless of which axis dominates.
+                (by_w.ln() * (1.0 - m) + by_h.ln() * m).exp()
+            }
+            UiScaleMode::Expand => by_w.min(by_h),
+            UiScaleMode::Shrink => by_w.max(by_h),
+            UiScaleMode::ConstantPixels => 1.0,
+        };
+        if s.is_finite() && s > 0.0 {
+            s
+        } else {
+            0.01
+        }
+    }
 }
 
 impl Default for UiLayer {
     fn default() -> Self {
         UiLayer {
             design_height: 720.0,
+            reference_width: default_reference_width(),
+            scale_mode: UiScaleMode::default(),
+            match_wh: default_match_wh(),
             z: 0,
             enabled: true,
             space: UiSpace::Screen,
@@ -529,21 +668,40 @@ pub fn solve(roots: &[Node], viewport: [f32; 2], measure: MeasureText) -> Vec<Pl
 }
 
 /// An element's own size (before Grow expansion), given the parent's inner
-/// size. `Fit` recurses into content.
+/// size. `Fit` recurses into content; a `Stretch` axis fills the anchor span.
 fn measure_node(n: &Node, avail: [f32; 2], measure: MeasureText) -> [f32; 2] {
-    let needs_fit = n
-        .spec
-        .size
-        .iter()
-        .any(|s| matches!(s, Size::Fit | Size::Grow(_)));
+    // On a stretching axis the size comes from the parent span, not `size`.
+    let stretch = match n.spec.place {
+        Place::Stretch { min, max, .. } => [max[0] - min[0] > 0.0, max[1] - min[1] > 0.0],
+        _ => [false, false],
+    };
+    let needs_fit = n.spec.size.iter().zip(stretch).any(|(s, st)| {
+        !st && matches!(s, Size::Fit | Size::Grow(_))
+    });
     let fit = if needs_fit { fit_size(n, avail, measure) } else { [0.0, 0.0] };
     let mut size = [0.0f32; 2];
     for a in 0..2 {
-        size[a] = match n.spec.size[a] {
-            Size::Fixed(v) => v.max(0.0),
-            Size::Pct(p) => (avail[a] * p).max(0.0),
-            Size::Fit | Size::Grow(_) => fit[a],
+        size[a] = if stretch[a] {
+            // Fill the anchored span (fraction of the parent) minus the margins.
+            let Place::Stretch { min, max, margin } = n.spec.place else { unreachable!() };
+            let span = (max[a] - min[a]).clamp(0.0, 1.0);
+            let (lead, trail) = if a == 0 { (margin[0], margin[2]) } else { (margin[1], margin[3]) };
+            (avail[a] * span - lead - trail).max(0.0)
+        } else {
+            match n.spec.size[a] {
+                Size::Fixed(v) => v.max(0.0),
+                Size::Pct(p) => (avail[a] * p).max(0.0),
+                Size::Fit | Size::Grow(_) => fit[a],
+            }
         };
+        // Clamp to the authored min/max (0 = unbounded on that end).
+        let (lo, hi) = (n.spec.min_size[a], n.spec.max_size[a]);
+        if lo > 0.0 {
+            size[a] = size[a].max(lo);
+        }
+        if hi > 0.0 {
+            size[a] = size[a].min(hi);
+        }
     }
     size
 }
@@ -611,6 +769,14 @@ fn place_in(
                 parent_pos[1] + parent_size[1] * f[1] - size[1] * f[1] + offset[1],
             ]
         }
+        // The element's top-left sits on the min-anchor line + the leading
+        // margin. A stretched axis already sized itself to reach the max line
+        // minus the trailing margin (see `measure_node`); a point axis (min ==
+        // max) keeps its own size and hangs off the anchor line.
+        Place::Stretch { min, margin, .. } => [
+            parent_pos[0] + parent_size[0] * min[0] + margin[0],
+            parent_pos[1] + parent_size[1] * min[1] + margin[1],
+        ],
     }
 }
 
@@ -695,6 +861,7 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
                 let authored = match c.spec.place {
                     Place::Free { pos } => pos[axis],
                     Place::Pin { offset, .. } => offset[axis],
+                    Place::Stretch { margin, .. } => margin[axis],
                 };
                 let parent = [px, py];
                 let extent = [pw, ph];
@@ -735,6 +902,9 @@ pub struct Quad {
     /// Custom-shader face: `(flsl path, owner element id)` — the renderer
     /// resolves this to a pipeline + per-element param binding.
     pub shader: Option<(String, u32)>,
+    /// Soft-shadow feather in design units. `0` = a normal crisp quad; `> 0`
+    /// marks this as a drop-shadow quad the renderer draws with a blurred edge.
+    pub feather: f32,
 }
 
 /// One text run (the renderer owns the font and lays out glyphs).
@@ -882,6 +1052,32 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
         let clip = clip_of.get(&p.id).copied();
         let a = spec.opacity.clamp(0.0, 1.0);
         if let Some(s) = spec.shape {
+            // Drop shadow first, so it sits BEHIND the shape (and lifts it off
+            // whatever was drawn before). It grows by `spread` and offsets by
+            // `offset`, with a `blur`-wide soft edge (the `feather`).
+            if let Some(sh) = s.shadow
+                && sh.color[3] > 0.0
+            {
+                let mut col = sh.color;
+                col[3] *= a;
+                dl.quads.push(Quad {
+                    rect: [
+                        p.rect[0] + sh.offset[0] - sh.spread,
+                        p.rect[1] + sh.offset[1] - sh.spread,
+                        p.rect[2] + sh.spread * 2.0,
+                        p.rect[3] + sh.spread * 2.0,
+                    ],
+                    color: col,
+                    radius: s.radius + sh.spread.max(0.0),
+                    border: 0.0,
+                    border_color: [0.0; 4],
+                    texture: String::new(),
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    clip,
+                    shader: None,
+                    feather: sh.blur.max(0.0),
+                });
+            }
             let mut fill = s.fill;
             fill[3] *= a;
             let mut bc = s.border_color;
@@ -896,21 +1092,25 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 uv: [0.0, 0.0, 1.0, 1.0],
                 clip,
                 shader: None,
+                feather: 0.0,
             });
         }
         if !spec.shader.is_empty() {
             // A custom-shader face: white tint (the shader reads it as
-            // `instanceColor`, alpha = the element's opacity).
+            // `instanceColor`, alpha = the element's opacity). The shape's corner
+            // radius rides along in `radius` so the transpiled shader can clip its
+            // output to the element's rounded rect (no spill past the corners).
             dl.quads.push(Quad {
                 rect: p.rect,
                 color: [1.0, 1.0, 1.0, a],
-                radius: 0.0,
+                radius: spec.shape.map(|s| s.radius).unwrap_or(0.0),
                 border: 0.0,
                 border_color: [0.0; 4],
                 texture: String::new(),
                 uv: [0.0, 0.0, 1.0, 1.0],
                 clip,
                 shader: Some((spec.shader.clone(), p.id)),
+                feather: 0.0,
             });
         }
         if let Some(img) = &spec.image
@@ -928,6 +1128,7 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 uv: img.cell_uv(),
                 clip,
                 shader: None,
+                feather: 0.0,
             });
         }
         if let Some(t) = &spec.text
@@ -1411,5 +1612,137 @@ mod tests {
         assert_eq!(spec.opacity, 1.0);
         assert!(matches!(spec.place, Place::Free { .. }), "free placement is the default");
         assert!(spec.stack.is_none(), "flow is opt-in");
+        assert_eq!(spec.min_size, [0.0, 0.0]);
+        assert_eq!(spec.max_size, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn stretch_fills_parent_with_margins_at_any_size() {
+        // "16 in from every edge" must track the parent, not stay a fixed box.
+        let child = el(
+            ElementSpec { place: Place::fill(16.0), ..Default::default() },
+            vec![],
+        );
+        let cid = child.id;
+        let parent = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(400.0), Size::Fixed(300.0)],
+                ..Default::default()
+            },
+            vec![child],
+        );
+        let roots = [parent];
+        let placed = solve(&roots, [1000.0, 800.0], &m);
+        // Inset 16 on each side of a 400×300 parent → [16,16, 368,268].
+        assert_eq!(rect_of(&placed, cid), [16.0, 16.0, 368.0, 268.0]);
+    }
+
+    #[test]
+    fn stretch_point_axis_keeps_its_own_size() {
+        // A bottom bar: stretch across x, fixed height pinned to the bottom edge.
+        let bar = el(
+            ElementSpec {
+                place: Place::Stretch { min: [0.0, 1.0], max: [1.0, 1.0], margin: [8.0, 0.0, 8.0, 8.0] },
+                size: [Size::Fit, Size::Fixed(48.0)],
+                ..Default::default()
+            },
+            vec![],
+        );
+        let bid = bar.id;
+        let parent = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(600.0), Size::Fixed(400.0)],
+                ..Default::default()
+            },
+            vec![bar],
+        );
+        let roots = [parent];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        let r = rect_of(&placed, bid);
+        assert_eq!(r[2], 600.0 - 16.0, "stretched x fills width minus L+R margin");
+        assert_eq!(r[3], 48.0, "point y keeps the fixed height");
+        assert_eq!(r[0], 8.0, "left margin");
+        // Anchored to the bottom line (y=1.0 of 400) + leading (top) margin 0.
+        assert_eq!(r[1], 400.0);
+    }
+
+    #[test]
+    fn min_max_size_clamp_resolved_size() {
+        let clamped = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Pct(0.5), Size::Pct(0.5)],
+                min_size: [200.0, 0.0],
+                max_size: [0.0, 100.0],
+                ..Default::default()
+            },
+            vec![],
+        );
+        let id = clamped.id;
+        // Parent 300×400: 50% = 150×200 → clamped to min-w 200 and max-h 100.
+        let parent = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(300.0), Size::Fixed(400.0)],
+                ..Default::default()
+            },
+            vec![clamped],
+        );
+        let roots = [parent];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        let r = rect_of(&placed, id);
+        assert_eq!(r[2], 200.0, "width floored to min");
+        assert_eq!(r[3], 100.0, "height capped to max");
+    }
+
+    #[test]
+    fn canvas_scale_modes() {
+        let layer = |mode: UiScaleMode| UiLayer {
+            design_height: 720.0,
+            reference_width: 1280.0,
+            scale_mode: mode,
+            match_wh: 0.5,
+            ..Default::default()
+        };
+        // Match-height: scale = h/refH regardless of width (the classic default).
+        assert_eq!(layer(UiScaleMode::MatchHeight).scale_for([1920.0, 1440.0]), 2.0);
+        assert_eq!(layer(UiScaleMode::MatchHeight).scale_for([100.0, 1440.0]), 2.0);
+        // Match-width: scale = w/refW.
+        assert_eq!(layer(UiScaleMode::MatchWidth).scale_for([2560.0, 100.0]), 2.0);
+        // Expand fits inside (min); Shrink fills (max).
+        let vp = [1280.0, 1440.0]; // by_w = 1, by_h = 2
+        assert_eq!(layer(UiScaleMode::Expand).scale_for(vp), 1.0);
+        assert_eq!(layer(UiScaleMode::Shrink).scale_for(vp), 2.0);
+        // Constant px never rescales.
+        assert_eq!(layer(UiScaleMode::ConstantPixels).scale_for([9999.0, 9999.0]), 1.0);
+        // Blend at 0.5 is the geometric mean of by_w and by_h (1 and 2 → √2).
+        let b = layer(UiScaleMode::Blend).scale_for([1280.0, 1440.0]);
+        assert!((b - 2.0f32.sqrt()).abs() < 1e-4, "blend geo-mean, got {b}");
+        // Degenerate viewport never yields a non-positive scale.
+        assert!(layer(UiScaleMode::MatchHeight).scale_for([0.0, 0.0]) > 0.0);
+    }
+
+    #[test]
+    fn stretch_place_round_trips_and_defaults_omit() {
+        // New fields must not appear in a default element's RON (back-compat).
+        let text = ron::ser::to_string(&ElementSpec::default()).unwrap();
+        assert!(!text.contains("min_size"), "default min_size omitted: {text}");
+        assert!(!text.contains("max_size"), "default max_size omitted: {text}");
+        // Stretch + clamps survive a round-trip.
+        let spec = ElementSpec {
+            place: Place::Stretch { min: [0.0, 0.0], max: [1.0, 0.5], margin: [4.0, 8.0, 4.0, 0.0] },
+            min_size: [10.0, 20.0],
+            max_size: [300.0, 0.0],
+            ..Default::default()
+        };
+        let t = ron::ser::to_string(&spec).unwrap();
+        let back: ElementSpec = ron::from_str(&t).unwrap();
+        assert_eq!(back, spec);
+        // An old layer RON (no scaler fields) loads with the classic defaults.
+        let old: UiLayer = ron::from_str("(design_height: 720.0, z: 0)").unwrap();
+        assert_eq!(old.scale_mode, UiScaleMode::MatchHeight);
+        assert_eq!(old.reference_width, 1280.0);
     }
 }

@@ -1,0 +1,30 @@
+[
+    // VEHICLE ASSEMBLY HANGAR — the base's ship-building shed. hangar_roundA is
+    // native 3.28x1.5x2.84 (centred, y -0.75..0.75); collider half = native ×
+    // scale (2.5) → 4.1x1.875x3.55 world half-box. Surface-anchored + planet-
+    // parented by base_facilities.lua.
+    (
+        name: "FacHangar",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (2.5, 2.5, 2.5),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/hangar_roundA.glb",
+        ),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Static,
+            radius: 3.0,
+            height: 2.0,
+            half_extents: (1.64, 0.75, 1.42),
+            restitution: 0.0,
+            friction: 0.9,
+            gravity: false,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+        )),
+    ),
+]

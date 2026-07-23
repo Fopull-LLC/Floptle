@@ -221,6 +221,11 @@ pub struct EffectInstance {
     /// from the origin. `anchored` guards the first advance (no shift on birth).
     anchor: DVec3,
     anchored: bool,
+    /// Emitter world velocity (m/s) for the NEXT advance only — set by
+    /// `advance_at_moving`, consumed and cleared inside `advance_at`, so a plain
+    /// `advance`/`advance_at` never inherits stale motion. Newborns on World tracks
+    /// add `inherit_velocity * this` at birth.
+    pending_emit_vel: Vec3,
 }
 
 /// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
@@ -248,12 +253,18 @@ impl EffectInstance {
             tracks,
             anchor: DVec3::ZERO,
             anchored: false,
+            pending_emit_vel: Vec3::ZERO,
         }
     }
 
     /// Set the live emission scale (clamped 0..4). 1 = the authored effect.
     pub fn set_intensity(&mut self, i: f32) {
         self.intensity = i.clamp(0.0, 4.0);
+    }
+
+    /// Where this instance's gravity points — the host picks the pull vector accordingly.
+    pub fn gravity_mode(&self) -> crate::GravityMode {
+        self.effect.gravity_mode
     }
 
     /// The world anchor `Space::World` particles are stored relative to (the emitter's
@@ -297,6 +308,7 @@ impl EffectInstance {
     }
 
     /// [`simulate_to`] with the emitter's world transform (for `Space::World` tracks).
+    /// A scrub has no emitter motion history, so newborns inherit no velocity.
     pub fn simulate_to_at(&mut self, target: f32, gravity: Vec3, emitter: Transform) {
         self.reset();
         let mut sim_t = 0.0;
@@ -312,6 +324,14 @@ impl EffectInstance {
     /// Advance with the emitter at the world origin — for tests and static previews.
     pub fn advance(&mut self, dt: f32, gravity: Vec3) {
         self.advance_at(dt, gravity, Transform::IDENTITY);
+    }
+
+    /// [`advance_at`] with an explicit emitter world velocity (m/s) so newborns can
+    /// inherit the emitter's momentum (see [`crate::Track::inherit_velocity`]). Detached
+    /// one-shots on a fast vessel pass its velocity here; node instances usually pass ZERO.
+    pub fn advance_at_moving(&mut self, dt: f32, gravity: Vec3, emitter: Transform, emitter_vel: Vec3) {
+        self.pending_emit_vel = emitter_vel;
+        self.advance_at(dt, gravity, emitter);
     }
 
     /// Advance the playhead by `dt`, firing crossed clips/bursts and aging every
@@ -345,13 +365,16 @@ impl EffectInstance {
         // Age existing particles first; newborns then age only their partial step.
         self.integrate(dt, gravity);
 
+        // Emitter velocity for newborns this advance (Space::World inherit), consumed once.
+        let emit_vel = std::mem::replace(&mut self.pending_emit_vel, Vec3::ZERO);
+
         let lifetime = self.effect.lifetime;
         let mut remaining = dt;
         while remaining > 0.0 {
             let step_end = (self.t + remaining).min(lifetime);
             let seg = remaining.min(lifetime - self.t);
             let (prev, now) = (self.prev_t, step_end);
-            self.emit_segment(prev, now, gravity, &emitter);
+            self.emit_segment(prev, now, gravity, &emitter, emit_vel);
             self.t = step_end;
             self.prev_t = step_end;
             remaining -= seg.max(0.0);
@@ -375,7 +398,7 @@ impl EffectInstance {
     /// continuous stream (particles born across its whole span) or a burst-train (pulses
     /// at `start + k·interval`); either way, the particles it spawns live `clip.lifetime()`
     /// (= the clip's length) — there is no track-level rate or lifetime.
-    fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3, emitter: &Transform) {
+    fn emit_segment(&mut self, prev: f32, now: f32, gravity: Vec3, emitter: &Transform, emit_vel: Vec3) {
         let effect = Arc::clone(&self.effect);
         let inst_seed = hash(self.instance_seed ^ hash(effect.seed));
         let lifetime = effect.lifetime;
@@ -418,7 +441,7 @@ impl EffectInstance {
                             // Reconstruct the exact accumulator-crossing time so birth
                             // spacing is even regardless of frame boundaries.
                             let tau = (s + (k as f32 - acc0) / rate_eff).clamp(s, e);
-                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, self.intensity);
+                            spawn(ts, ct, ti as u32, inst_seed, tau, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity);
                         }
                     }
                     Emit::Burst { count, count_jitter, pulses, interval, interval_jitter } => {
@@ -439,7 +462,7 @@ impl EffectInstance {
                                     .round()
                                     .max(0.0) as u32;
                                 for _ in 0..n {
-                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, self.intensity);
+                                    spawn(ts, ct, ti as u32, inst_seed, tp, clip_life, jitter, now, lifetime, gravity, emitter, emit_vel, self.intensity);
                                 }
                             }
                         }
@@ -512,6 +535,7 @@ fn spawn(
     lifetime: f32,
     gravity: Vec3,
     emitter: &Transform,
+    emit_vel: Vec3,
     intensity: f32,
 ) {
     if ts.particles.count as u32 >= ct.capacity {
@@ -547,12 +571,25 @@ fn spawn(
     // Birth velocity: value at life 0, resolving a per-particle `Range` from the seed.
     let v0 = frame * ct.velocity.sample_vec3_rand(0.0, rand01(seed, SALT_VELOCITY)) * speed_mul;
 
+    // Inherited emitter momentum (World tracks only — Local tracks already ride the
+    // node). A world-space drift added to the integrated state, so drag bleeds it off
+    // over life; kinematic (curve) tracks keep re-sampling their base velocity on top.
+    let inherit = if ct.space == Space::World && ct.inherit_velocity != 0.0 {
+        emit_vel * ct.inherit_velocity
+    } else {
+        Vec3::ZERO
+    };
+
     // Constant-velocity particles carry their full velocity in the integrated
     // state; kinematic (curve) ones carry only the gravity-accumulated part and
     // re-sample their base velocity each step.
     let g0 = gravity * ct.gravity * age0;
-    let (vel, carried) = if ct.velocity_is_curve { (g0, v0) } else { (v0 + g0, v0) };
-    let pos = offset + carried * age0;
+    let (vel, carried) = if ct.velocity_is_curve {
+        (g0 + inherit, v0)
+    } else {
+        (v0 + g0 + inherit, v0)
+    };
+    let pos = offset + (carried + inherit) * age0;
 
     let misc = Vec4::new(birth_size, speed_mul, 0.0, 0.0);
     ts.particles.push(pos, age0, vel, life, frame, misc, seed);

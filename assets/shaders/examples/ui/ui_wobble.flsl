@@ -1,0 +1,11 @@
+// A wobbling interference shimmer — a lively, jelly-ish overlay.
+shader ui_wobble {
+  stage ui
+  uniform tint: color = #7CF6C4
+  uniform amp: float = 0.5
+  uniform freq: float = 7.0
+  uniform speed: float = 3.0
+  let wx = sin(uv.x * freq + time * speed) * 0.5 + 0.5
+  let wy = sin(uv.y * freq - time * speed * 0.8) * 0.5 + 0.5
+  output color = vec4(tint.rgb, wx * wy * amp) * instanceColor
+}

@@ -73,6 +73,7 @@ mod terrain_edit;
 mod terrain_ui;
 mod theme;
 mod ui_game;
+mod ui_shader_lib;
 mod ui_widgets;
 mod timeline;
 mod vertex_paint;
@@ -319,6 +320,13 @@ struct EditorCmd {
     instantiate_prefab: Option<(String, Option<Entity>)>,
     /// Move these asset files/folders (absolute paths) into a destination folder.
     move_assets: Option<(Vec<String>, PathBuf)>,
+    /// Import these OS files (absolute source paths) by COPYING them into a project
+    /// folder — a native file-explorer drag-and-drop onto the Assets panel.
+    import_files: Option<(Vec<PathBuf>, PathBuf)>,
+    /// Open the native "Import files…" picker, importing the chosen files into this
+    /// folder. The reliable cross-platform path (works on Wayland via the XDG
+    /// portal, where winit delivers no drag-and-drop).
+    pick_import_dir: Option<PathBuf>,
     /// Extract a model's embedded animation clips to assets/animations/ (a model path).
     extract_anims: Option<String>,
     /// Attach / change / remove a node's AnimationController: (entity, Some(key) | None).
@@ -450,6 +458,9 @@ struct EditorTabViewer<'a> {
     /// Compiled `.flsl` shaders — the Inspector's Material section reads the
     /// selected shader's uniform/texture schema (and error) from here.
     flsl_cache: &'a shaders::FlslCache,
+    /// Compiled `stage ui` element shaders — the Inspector's UI Element section
+    /// reads the selected shader's uniform schema (and error) from here.
+    ui_flsl_cache: &'a shaders::UiFlslCache,
     /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
     /// back to this schema when the picked shader is `stage sdf`.
     sdf_cache: &'a shaders::SdfCache,
@@ -693,7 +704,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
                     floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
@@ -716,6 +727,32 @@ fn main() {
                     std::process::exit(2);
                 };
                 std::process::exit(migrate_project(Path::new(p), &stamp));
+            }
+            // Re-bake a model's EMBEDDED glTF clips into <project>/animations/<Stem>/
+            // and exit — headless. The fix for clips that went stale against a
+            // replaced .glb (extracted placeholders left animating a couple of bones
+            // while the real animation is full-body). Hub/CI-friendly.
+            "--extract-clips" => {
+                let proj = args.get(i + 1).filter(|p| !p.starts_with('-'));
+                let model = args.get(i + 2).filter(|p| !p.starts_with('-'));
+                let (Some(proj), Some(model)) = (proj, model) else {
+                    eprintln!("--extract-clips needs <project_dir> <model_path>");
+                    std::process::exit(2);
+                };
+                let mut system = anim::AnimSystem::default();
+                match anim::extract_clips(&mut system, Path::new(proj), model) {
+                    Ok(keys) => {
+                        for k in &keys {
+                            println!("extracted {k}");
+                        }
+                        println!("{} clip(s) written", keys.len());
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("extract-clips failed: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
             "--play" => player_mode = true,
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
@@ -1861,6 +1898,11 @@ struct Editor {
     assets_grid: bool,
     /// The folder the icon grid is currently showing (grid view only).
     assets_grid_dir: PathBuf,
+    /// In-flight native "Import files…" dialog: the background thread sends the
+    /// picked (files, destination folder) here when the user confirms. `Some`
+    /// while a dialog is open (button disabled). Works on Wayland via the XDG
+    /// portal, where drag-and-drop from the file manager isn't delivered.
+    import_rx: Option<std::sync::mpsc::Receiver<(Vec<PathBuf>, PathBuf)>>,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
     /// Whether the floating Material Editor window is open.
@@ -2536,10 +2578,25 @@ impl ApplicationHandler for Editor {
                                 self.drag = Some(DragState {
                                     handle: h,
                                     entity: e,
+                                    bone: None,
                                     start_xf,
                                     cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
                                 });
                             }
+                        } else if let (Some(h), Some((mesh, idx, start_xf))) =
+                            (hovered, self.bone_gizmo_target())
+                        {
+                            // On a gizmo handle while an armature BONE is selected: grab
+                            // it to pose the bone. No begin_edit — the clip has its own
+                            // coalesced save (clip_dirty), bones aren't scene undo.
+                            self.grabbed = Some(h);
+                            self.drag = Some(DragState {
+                                handle: h,
+                                entity: mesh,
+                                bone: Some(idx),
+                                start_xf,
+                                cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                            });
                         } else if let Some(cursor) = self.cursor {
                             // Empty viewport ⏵ pick: single-select, or Shift to add.
                             match self.pick(cursor) {

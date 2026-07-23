@@ -140,6 +140,30 @@ pub enum VfxSpaceDoc {
     World,
 }
 
+/// Where an effect's per-track `gravity` pull points (see `floptle_vfx::GravityMode`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VfxGravityDoc {
+    /// Constant world −Y (classic, the default — unchanged for every existing asset).
+    #[default]
+    WorldDown,
+    /// Sample the live scene gravity field at the emitter — falls toward planets.
+    Field,
+}
+
+/// What happens to a track's authored automation-lane keys when the effect's
+/// `lifetime` changes (see `floptle_vfx::LifetimeScaleMode`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VfxLifetimeScaleDoc {
+    /// Lane keys keep their absolute second positions (Unity-style — the default,
+    /// unchanged for every existing asset). Editing lifetime just changes how much
+    /// of the timeline plays.
+    #[default]
+    Absolute,
+    /// Lane keys are rescaled proportionally so the whole automation graph
+    /// stretches/squashes with the timeline (Roblox-style, normalized-over-lifetime).
+    Rescale,
+}
+
 /// Where particles are born (and the emit direction the velocity's +Y aligns to).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
 pub enum VfxShapeDoc {
@@ -306,6 +330,10 @@ pub struct VfxTrackDoc {
     pub gravity: f32,
     #[serde(default)]
     pub drag: f32,
+    /// Fraction of the emitter's world velocity a newborn keeps (World tracks only).
+    /// 0 (default) = classic; 1 = fully rides the emitter's momentum then drifts.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inherit_velocity: f32,
     /// Force fields added to velocity each step (default: none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forces: Vec<VfxForceDoc>,
@@ -340,6 +368,54 @@ pub struct VfxEffectDoc {
     pub tracks: Vec<VfxTrackDoc>,
     #[serde(default = "one_u32")]
     pub seed: u32,
+    /// Where this effect's gravity points (default `WorldDown` — every old asset keeps
+    /// its behavior; opt an effect into `Field` to fall toward planets).
+    #[serde(default, skip_serializing_if = "is_world_down")]
+    pub gravity_mode: VfxGravityDoc,
+    /// How automation-lane keys react when `lifetime` is edited (default `Absolute`
+    /// — every old asset keeps its behavior; opt into `Rescale` for graphs that
+    /// stretch with the timeline).
+    #[serde(default, skip_serializing_if = "is_absolute_scale")]
+    pub lifetime_scale_mode: VfxLifetimeScaleDoc,
+}
+
+fn is_world_down(g: &VfxGravityDoc) -> bool {
+    matches!(g, VfxGravityDoc::WorldDown)
+}
+
+fn is_absolute_scale(m: &VfxLifetimeScaleDoc) -> bool {
+    matches!(m, VfxLifetimeScaleDoc::Absolute)
+}
+
+impl VfxEffectDoc {
+    /// Uniformly stretch/squash everything authored along the effect timeline by
+    /// `ratio` (= new_lifetime / old_lifetime). This is the `Rescale` (Roblox-style)
+    /// response to a lifetime edit: automation-lane graphs and clip spans move
+    /// proportionally so the whole timeline scales as one. Per-particle life curves
+    /// are normalized `[0,1]` and are intentionally left untouched.
+    ///
+    /// Only the timeline-domain positions change — clip lengths (particle lifetime)
+    /// stretch with everything else, matching the WYSIWYG "the whole thing scales"
+    /// feel. Callers apply this before writing the new `lifetime`.
+    pub fn rescale_timeline(&mut self, ratio: f32) {
+        if !ratio.is_finite() || ratio <= 0.0 || (ratio - 1.0).abs() < 1e-6 {
+            return;
+        }
+        for track in &mut self.tracks {
+            for clip in &mut track.clips {
+                clip.start *= ratio;
+                clip.end *= ratio;
+            }
+            for lane in &mut track.automation {
+                for key in &mut lane.curve.keys {
+                    key.t *= ratio;
+                }
+            }
+            for burst in &mut track.bursts {
+                burst.t *= ratio;
+            }
+        }
+    }
 }
 
 fn true_bool() -> bool {
@@ -487,6 +563,8 @@ mod tests {
             playback: VfxPlaybackDoc::OneShot,
             end: VfxEndDoc::Destroy,
             seed: 7,
+            gravity_mode: VfxGravityDoc::Field,
+            lifetime_scale_mode: VfxLifetimeScaleDoc::default(),
             tracks: vec![VfxTrackDoc {
                 name: "Crescents".into(),
                 enabled: true,
@@ -578,6 +656,7 @@ mod tests {
                 color: default_color(),
                 gravity: 0.5,
                 drag: 0.1,
+                inherit_velocity: 0.5,
                 forces: vec![
                     VfxForceDoc::Directional { dir: [1.0, 0.0, 0.0], strength: 2.0 },
                     VfxForceDoc::Turbulence { frequency: 0.5, strength: 1.5 },
@@ -625,6 +704,57 @@ mod tests {
     }
 
     #[test]
+    fn lifetime_scale_mode_defaults_absolute_and_omits() {
+        // Old files (no field) default to Absolute — today's behavior, unchanged.
+        let doc: VfxEffectDoc = ron::from_str(r#"(name: "Old")"#).unwrap();
+        assert_eq!(doc.lifetime_scale_mode, VfxLifetimeScaleDoc::Absolute);
+        // …and the default is omitted from a fresh save (skip_serializing_if).
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        assert!(!text.contains("lifetime_scale_mode"), "default must not serialize: {text}");
+        // Rescale, once chosen, round-trips.
+        let mut doc2 = doc.clone();
+        doc2.lifetime_scale_mode = VfxLifetimeScaleDoc::Rescale;
+        let text2 = ron::ser::to_string_pretty(&doc2, Default::default()).unwrap();
+        assert!(text2.contains("Rescale"));
+        let back: VfxEffectDoc = ron::from_str(&text2).unwrap();
+        assert_eq!(back.lifetime_scale_mode, VfxLifetimeScaleDoc::Rescale);
+    }
+
+    #[test]
+    fn rescale_timeline_stretches_lanes_and_clips_proportionally() {
+        let key = |t: f32, v: f32| VfxKeyDoc {
+            t,
+            v: VfxValueDoc::F32(v),
+            interp: VfxInterpDoc::default(),
+            in_tan: 0.0,
+            out_tan: 0.0,
+        };
+        let mut track = minimal_track();
+        track.clips = vec![VfxClipDoc { start: 0.5, end: 1.5, lifetime_jitter: 0.0, emit: None }];
+        track.automation = vec![VfxLaneDoc {
+            target: VfxLaneTargetDoc::Rate,
+            curve: VfxCurveDoc {
+                keys: vec![key(0.0, 1.0), key(2.0, 3.0)],
+                extrapolate: VfxExtrapolateDoc::default(),
+            },
+        }];
+        let mut doc: VfxEffectDoc = ron::from_str(r#"(name: "Blast", lifetime: 2.0)"#).unwrap();
+        doc.lifetime_scale_mode = VfxLifetimeScaleDoc::Rescale;
+        doc.tracks = vec![track];
+        // Doubling lifetime (2 → 4) doubles every timeline position; values untouched.
+        doc.rescale_timeline(4.0 / 2.0);
+        let tr = &doc.tracks[0];
+        assert_eq!(tr.clips[0].start, 1.0);
+        assert_eq!(tr.clips[0].end, 3.0);
+        assert_eq!(tr.automation[0].curve.keys[0].t, 0.0);
+        assert_eq!(tr.automation[0].curve.keys[1].t, 4.0);
+        assert_eq!(tr.automation[0].curve.keys[1].v, VfxValueDoc::F32(3.0));
+        // ratio 1.0 is a no-op.
+        doc.rescale_timeline(1.0);
+        assert_eq!(doc.tracks[0].automation[0].curve.keys[1].t, 4.0);
+    }
+
+    #[test]
     fn pre_orientation_track_defaults_to_face_camera_square() {
         // A track authored before orientation existed (no orient/aspect/stretch)
         // must load as a plain camera-facing square billboard — no visual change.
@@ -647,6 +777,8 @@ mod tests {
             playback: VfxPlaybackDoc::OneShot,
             end: VfxEndDoc::Destroy,
             seed: 1,
+            gravity_mode: VfxGravityDoc::WorldDown,
+            lifetime_scale_mode: VfxLifetimeScaleDoc::default(),
             tracks: vec![VfxTrackDoc {
                 orient: VfxOrientDoc::FaceCamera,
                 aspect: 1.0,

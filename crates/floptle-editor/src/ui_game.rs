@@ -168,7 +168,7 @@ impl Editor {
             if !layer.enabled || layer.is_world() {
                 continue; // world-space layers render in the scene, not as an overlay
             }
-            let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
+            let scale = layer.scale_for(viewport);
             let roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
@@ -441,7 +441,7 @@ impl Editor {
                         };
                         (dvp, pd, None)
                     } else {
-                        let scale = (viewport[1] / layer.design_height.max(1.0)).max(0.01);
+                        let scale = layer.scale_for(viewport);
                         (
                             [viewport[0] / scale, viewport[1] / scale],
                             Some([ptr_px[0] / scale, ptr_px[1] / scale]),
@@ -729,10 +729,11 @@ impl Editor {
         asset_tree: &[crate::assets::AssetEntry],
         project_root: &std::path::Path,
         texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
+        ui_flsl_cache: &crate::shaders::UiFlslCache,
     ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
-            use floptle_ui::UiSpace;
+            use floptle_ui::{UiScaleMode, UiSpace};
             ui.separator();
             ui.label("🖼 UI Layer");
             // ---- screen vs world space ----------------------------------
@@ -773,15 +774,54 @@ impl Editor {
                     .on_hover_text("layers draw lowest z first")
                     .changed();
             });
+            // ---- canvas scaler: how design units map to the window ----------
             ui.horizontal(|ui| {
-                ui.label("design height");
+                ui.label("scale mode");
+                let (label, tip) = match layer.scale_mode {
+                    UiScaleMode::MatchHeight => ("match height", "reference height spans the window height; width follows the aspect (the classic default)"),
+                    UiScaleMode::MatchWidth => ("match width", "reference width spans the window width; height follows the aspect"),
+                    UiScaleMode::Blend => ("blend W/H", "blend match-width and match-height by the slider below — the responsive middle ground"),
+                    UiScaleMode::Expand => ("expand (fit)", "fit the whole reference INSIDE the window — never crops, may leave margins"),
+                    UiScaleMode::Shrink => ("shrink (fill)", "fill the window with the reference — no margins, may crop the edges"),
+                    UiScaleMode::ConstantPixels => ("constant px", "1 design unit = 1 pixel; the UI never rescales with the window"),
+                };
+                egui::ComboBox::from_id_salt(("ui_scale_mode", e))
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for (v, l, t) in [
+                            (UiScaleMode::MatchHeight, "match height", "reference height spans the window height; width follows the aspect (the classic default)"),
+                            (UiScaleMode::MatchWidth, "match width", "reference width spans the window width; height follows the aspect"),
+                            (UiScaleMode::Blend, "blend W/H", "blend match-width and match-height by the slider below"),
+                            (UiScaleMode::Expand, "expand (fit)", "fit the whole reference INSIDE the window — never crops, may leave margins"),
+                            (UiScaleMode::Shrink, "shrink (fill)", "fill the window with the reference — no margins, may crop"),
+                            (UiScaleMode::ConstantPixels, "constant px", "1 design unit = 1 pixel; never rescales"),
+                        ] {
+                            changed |= ui.selectable_value(&mut layer.scale_mode, v, l).on_hover_text(t).changed();
+                        }
+                    })
+                    .response
+                    .on_hover_text(tip);
+            });
+            ui.horizontal(|ui| {
+                ui.label("reference");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut layer.design_height).range(100.0..=4320.0))
-                    .on_hover_text(
-                        "resolution independence: this many design units ALWAYS span the                          window height, on any monitor — bigger number = smaller-looking                          UI. Width follows the window's aspect. Element positions/sizes                          are in these units.",
-                    )
+                    .add(egui::DragValue::new(&mut layer.reference_width).range(100.0..=8192.0).prefix("W "))
+                    .on_hover_text("reference WIDTH in design units — the width you author against (used by every mode except match-height)")
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut layer.design_height).range(100.0..=4320.0).prefix("H "))
+                    .on_hover_text("reference HEIGHT in design units — the height you author against. Element positions/sizes are in these units.")
                     .changed();
             });
+            if layer.scale_mode == UiScaleMode::Blend {
+                ui.horizontal(|ui| {
+                    ui.label("match");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut layer.match_wh, 0.0..=1.0).text("W↔H"))
+                        .on_hover_text("0 = match width, 1 = match height, 0.5 = balance both")
+                        .changed();
+                });
+            }
             ui.horizontal(|ui| {
                 ui.label("canvas size");
                 changed |= ui
@@ -809,18 +849,55 @@ impl Editor {
         let mut c = false;
         ui.separator();
         ui.label("▭ UI Element");
-        // --- placement ---
-        let mut pinned = matches!(spec.place, Place::Pin { .. });
+        // --- placement (Free / Pin / Stretch) ---
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut pinned, "pin to edge").on_hover_text("stick to a corner/edge preset instead of a free position").changed() {
-                spec.place = if pinned {
-                    Place::Pin { anchor: Anchor::TopLeft, offset: [0.0, 0.0] }
-                } else {
-                    Place::Free { pos: [40.0, 40.0] }
-                };
-                c = true;
-            }
+            ui.label("placement");
+            let cur = match spec.place {
+                Place::Free { .. } => "free",
+                Place::Pin { .. } => "pin",
+                Place::Stretch { .. } => "stretch",
+            };
+            egui::ComboBox::from_id_salt(("ui_place_mode", e.index()))
+                .selected_text(cur)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(cur == "free", "free").on_hover_text("a fixed position from the parent's top-left").clicked()
+                        && !matches!(spec.place, Place::Free { .. }) {
+                        spec.place = Place::Free { pos: [40.0, 40.0] };
+                        c = true;
+                    }
+                    if ui.selectable_label(cur == "pin", "pin").on_hover_text("stick to one of 9 parent points + an offset (HUD corners)").clicked()
+                        && !matches!(spec.place, Place::Pin { .. }) {
+                        spec.place = Place::Pin { anchor: Anchor::TopLeft, offset: [0.0, 0.0] };
+                        c = true;
+                    }
+                    if ui.selectable_label(cur == "stretch", "stretch").on_hover_text("anchor to a box between two parent fractions and STRETCH with it — the responsive mode").clicked()
+                        && !matches!(spec.place, Place::Stretch { .. }) {
+                        spec.place = Place::fill(16.0);
+                        c = true;
+                    }
+                });
         });
+        // Stretch quick-presets: the shapes designers actually reach for.
+        if matches!(spec.place, Place::Stretch { .. }) {
+            ui.horizontal(|ui| {
+                ui.small("fill:");
+                let presets: [(&str, [f32; 2], [f32; 2]); 5] = [
+                    ("all", [0.0, 0.0], [1.0, 1.0]),
+                    ("top", [0.0, 0.0], [1.0, 0.0]),
+                    ("bottom", [0.0, 1.0], [1.0, 1.0]),
+                    ("left", [0.0, 0.0], [0.0, 1.0]),
+                    ("right", [1.0, 0.0], [1.0, 1.0]),
+                ];
+                for (lbl, mn, mx) in presets {
+                    if ui.small_button(lbl).clicked()
+                        && let Place::Stretch { min, max, .. } = &mut spec.place {
+                        *min = mn;
+                        *max = mx;
+                        c = true;
+                    }
+                }
+            });
+        }
         match &mut spec.place {
             Place::Free { pos } => {
                 ui.horizontal(|ui| {
@@ -828,6 +905,26 @@ impl Editor {
                     c |= ui.add(egui::DragValue::new(&mut pos[0]).speed(1.0)).changed();
                     c |= ui.add(egui::DragValue::new(&mut pos[1]).speed(1.0)).changed();
                 });
+            }
+            Place::Stretch { min, max, margin } => {
+                ui.horizontal(|ui| {
+                    ui.label("anchor min");
+                    c |= ui.add(egui::DragValue::new(&mut min[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut min[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("anchor max");
+                    c |= ui.add(egui::DragValue::new(&mut max[0]).speed(0.01).range(0.0..=1.0).prefix("x ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut max[1]).speed(0.01).range(0.0..=1.0).prefix("y ")).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("margin");
+                    c |= ui.add(egui::DragValue::new(&mut margin[0]).speed(1.0).prefix("L ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut margin[1]).speed(1.0).prefix("T ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut margin[2]).speed(1.0).prefix("R ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut margin[3]).speed(1.0).prefix("B ")).changed();
+                });
+                ui.small("axes where max>min stretch (size ignored there); equal = a point anchor keeping its size");
             }
             Place::Pin { anchor, offset } => {
                 ui.horizontal(|ui| {
@@ -891,6 +988,17 @@ impl Editor {
                 }
             });
         }
+        // --- min/max size clamps (0 = unbounded) ---
+        ui.horizontal(|ui| {
+            ui.label("min size").on_hover_text("floor on the resolved size (design units, 0 = none) — keeps %/fit/stretch from collapsing");
+            c |= ui.add(egui::DragValue::new(&mut spec.min_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
+            c |= ui.add(egui::DragValue::new(&mut spec.min_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("max size").on_hover_text("cap on the resolved size (design units, 0 = none) — keeps it from ballooning on huge/ultrawide screens");
+            c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
+            c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+        });
         ui.horizontal(|ui| {
             c |= ui.checkbox(&mut spec.visible, "visible").changed();
             ui.label("opacity");
@@ -952,6 +1060,31 @@ impl Editor {
                 c |= ui.add(egui::DragValue::new(&mut s.border).speed(0.5).range(0.0..=64.0)).changed();
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut s.border_color).changed();
             });
+            // Soft drop shadow — the one effect that lives outside the rect.
+            let mut has_shadow = s.shadow.is_some();
+            if ui
+                .checkbox(&mut has_shadow, "drop shadow")
+                .on_hover_text("a soft shadow behind the panel — lifts it off the background")
+                .changed()
+            {
+                s.shadow = has_shadow.then(floptle_ui::ShadowSpec::default);
+                c = true;
+            }
+            if let Some(sh) = &mut s.shadow {
+                ui.horizontal(|ui| {
+                    ui.label("  color");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
+                    ui.label("blur");
+                    c |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.5).range(0.0..=128.0)).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("  offset");
+                    c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.5).prefix("x ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.5).prefix("y ")).changed();
+                    ui.label("spread");
+                    c |= ui.add(egui::DragValue::new(&mut sh.spread).speed(0.5).range(0.0..=128.0)).changed();
+                });
+            }
         }
         // --- text ---
         let mut has = spec.text.is_some();
@@ -1182,6 +1315,92 @@ impl Editor {
                         "fill scales with the parent slider's value; handle rides its                          position — its authored size is the full-value size",
                     );
             });
+        }
+        // --- ✨ effect (a `stage ui` .flsl face drawn over the shape) ---
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("✨ effect");
+            // One-click built-in effects: pick one and it assigns the shader +
+            // resets params to that effect's defaults. "Custom…" keeps whatever is
+            // set (use the picker below); "None" removes the shader.
+            let cur_name = crate::ui_shader_lib::effect_label(&spec.shader);
+            egui::ComboBox::from_id_salt(("ui_effect", e.index()))
+                .selected_text(cur_name)
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(spec.shader.is_empty(), "None").clicked()
+                        && !spec.shader.is_empty()
+                    {
+                        spec.shader.clear();
+                        spec.shader_params.clear();
+                        c = true;
+                    }
+                    for (label, stem, _) in crate::ui_shader_lib::UI_EFFECTS {
+                        let path = crate::ui_shader_lib::effect_path(stem);
+                        if ui.selectable_label(spec.shader == path, *label).clicked()
+                            && spec.shader != path
+                        {
+                            spec.shader = path;
+                            spec.shader_params.clear(); // fall back to the effect's defaults
+                            c = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "built-in procedural effects (outline, gloss, glow, wobble, …). \
+                     They draw over the element's shape and follow its rounded corners. \
+                     Pick 'Custom' below to point at your own .flsl.",
+                );
+        });
+        // Custom .flsl picker (any stage-ui shader in your assets).
+        ui.horizontal(|ui| {
+            ui.label("  shader");
+            let current = if spec.shader.is_empty() {
+                "(none)".to_string()
+            } else {
+                spec.shader.rsplit('/').next().unwrap_or(&spec.shader).to_string()
+            };
+            if let Some(pick) = crate::ui_widgets::asset_picker(
+                ui,
+                egui::Id::new(("ui_shader_pick", e.index())),
+                project_root,
+                &current,
+                Some("(none)"),
+                asset_tree,
+                crate::assets::is_shader,
+                150.0,
+            ) {
+                spec.shader = pick.unwrap_or_default();
+                spec.shader_params.clear();
+                c = true;
+            }
+        });
+        // Live params for the assigned shader (compile error surfaced in red).
+        if !spec.shader.is_empty() {
+            if let Some(entry) = ui_flsl_cache.get(&spec.shader) {
+                if let Some(err) = &entry.error {
+                    ui.colored_label(egui::Color32::from_rgb(230, 120, 110), format!("⚠ {err}"));
+                }
+                if let Some((compiled, _)) = &entry.compiled {
+                    if compiled.uniforms.is_empty() {
+                        ui.small("this shader exposes no parameters");
+                    } else {
+                        egui::Grid::new(("ui_shader_params", e.index()))
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                c |= crate::inspector::shader_uniform_rows(
+                                    ui,
+                                    &compiled.uniforms,
+                                    &mut spec.shader_params,
+                                );
+                            });
+                    }
+                }
+            } else {
+                ui.small("compiling…");
+            }
         }
         // --- scroll view (children shift by the wheel + clip to this rect) ---
         let mut has = spec.scroll.is_some();

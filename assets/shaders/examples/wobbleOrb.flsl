@@ -1,16 +1,16 @@
-// Wobble orb — this shader IS geometry: assign it to a ◈ Field Shape node
-// (Add → Field Shape) and the scene raymarches it, shadows and all. Space is
-// twisted over time, then a sphere and a rounded box melt together.
 shader wobbleOrb {
   stage sdf
   uniform wobble: float = 0.6 range(0, 3)
   uniform blend: float = 0.35 range(0.05, 1)
 
-  let p = twist(worldPos, wobble * sin(time * 0.7))
+  let mixdown1 = wobble * sin(time * 0.7)
+  let p = twist(worldPos, mixdown1)
   let body = smoothMin(sphere(p, radius: 0.75), box(p, vec3(0.55, 0.35, 0.55), rounding: 0.08), k: blend)
-  let swirl = noise(worldPos * 2.5 + time * 0.3) * 0.5 + 0.5
+  let mixdown2 = noise(worldPos * 2.5 + time * 0.3) * 0.5
+  let swirl = mixdown2 + 0.5
+  let mix1 = mix(vec3(0.55, 0.2, 0.75), vec3(0.15, 0.9, 0.8), swirl)
 
+  output color = mix1
   output sdf = body
-  output color = mix(vec3(0.55, 0.2, 0.75), vec3(0.15, 0.9, 0.8), swirl)
 }
-//@layout { p: (-684, 40), body: (-342, 40), swirl: (-342, 200), out: (0, 100) }
+//@layout { body: (-162, 147), in.worldPos: (-1596, -106), mix1: (-61, -205), mixdown1: (-878, -256), mixdown2: (-599, -305), out: (156, 179), p: (-664, 211), swirl: (-302, -354), u.wobble: (-1149, -226) }

@@ -546,6 +546,107 @@ impl Editor {
         self.asset_tree = build_assets(&self.project_root);
     }
 
+    /// Import OS files by COPYING them into a project folder — the native
+    /// file-explorer drag-and-drop. Sources are absolute paths from the OS; each
+    /// lands in `dest_dir` (auto-suffixed on name collision so nothing is
+    /// clobbered). Directories are copied recursively. Dropped models are
+    /// registered so they're usable immediately without a reload.
+    pub(crate) fn import_files(&mut self, sources: &[PathBuf], dest_dir: &Path) {
+        // Guard the destination: it must be a folder inside this project (a drop
+        // that resolved to nothing falls back to the project root).
+        let dest = if dest_dir.is_dir() && dest_dir.starts_with(&self.project_root) {
+            dest_dir.to_path_buf()
+        } else {
+            self.project_root.clone()
+        };
+        let mut imported = 0usize;
+        let mut model_refs: Vec<String> = Vec::new();
+        for src in sources {
+            if !src.exists() {
+                continue;
+            }
+            // Refuse to copy a folder into itself/a descendant of it.
+            if src.is_dir() && dest.starts_with(src) {
+                continue;
+            }
+            let Some(stem) = src.file_stem().map(|s| s.to_string_lossy().to_string()) else {
+                continue;
+            };
+            let ext = src.extension().map(|e| e.to_string_lossy().to_string());
+            let dst = unique_path(&dest, &stem, ext.as_deref());
+            let ok = if src.is_dir() {
+                copy_dir_recursive(src, &dst).is_ok()
+            } else {
+                std::fs::copy(src, &dst).is_ok()
+            };
+            if !ok {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("import: failed to copy {}", src.display()),
+                    None,
+                );
+                continue;
+            }
+            imported += 1;
+            // A model dropped in is ready to use immediately: register it under its
+            // project-relative ref (how scenes/pickers reference meshes).
+            if src.is_file()
+                && crate::assets::is_model(&dst.to_string_lossy())
+                && let Ok(rel) = dst.strip_prefix(&self.project_root)
+            {
+                model_refs.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        if imported == 0 {
+            return;
+        }
+        self.asset_tree = build_assets(&self.project_root);
+        for r in &model_refs {
+            self.import_model(r);
+        }
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "imported {imported} file(s) into {}",
+                dest.strip_prefix(&self.project_root)
+                    .map(|p| format!("assets/{}", p.display()))
+                    .unwrap_or_else(|_| dest.display().to_string())
+            ),
+            None,
+        );
+    }
+
+    /// Open the OS's native file picker (multi-select) on a background thread and
+    /// import the chosen files into `dir` when the user confirms. This is the
+    /// reliable cross-platform import path: rfd's XDG-desktop-portal backend works
+    /// on Wayland — where winit delivers no drag-and-drop — as well as on X11,
+    /// Windows and macOS. The dialog runs off the UI thread (a channel delivers
+    /// the result), so the editor never freezes while it's open; the result is
+    /// drained each frame in `apply_frame_commands`.
+    pub(crate) fn open_import_dialog(&mut self, dir: std::path::PathBuf) {
+        if self.import_rx.is_some() {
+            return; // one dialog at a time
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // ashpd/rfd's portal backend needs an async runtime; a tiny
+            // current-thread tokio runtime drives it on this worker thread.
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                return;
+            };
+            let picked = rt.block_on(async {
+                rfd::AsyncFileDialog::new().set_title("Import assets into the project").pick_files().await
+            });
+            if let Some(handles) = picked {
+                let paths: Vec<PathBuf> = handles.iter().map(|h| h.path().to_path_buf()).collect();
+                if !paths.is_empty() {
+                    let _ = tx.send((paths, dir));
+                }
+            }
+        });
+        self.import_rx = Some(rx);
+    }
+
     /// Delete files/folders (recursively) and drop any references to them —
     /// IDE tabs, the asset selection, the preview. One tree rebuild at the end.
     pub(crate) fn delete_assets(&mut self, paths: &[String]) {
@@ -592,6 +693,7 @@ impl Editor {
         }
         seed_default_scripts(&self.scripts_dir());
         seed_example_shaders(&self.project_root);
+        crate::ui_shader_lib::seed_ui_effects(&self.project_root);
         write_lua_support(&self.project_root);
     }
 
@@ -676,6 +778,16 @@ impl Editor {
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
         self.materials = self.load_materials();
+        // Re-scan the animation + particle registries against the NEW project
+        // root. Without this they kept pointing at whatever was scanned at editor
+        // startup (e.g. the workspace's `assets/`), so opening another project
+        // found none of ITS controllers or effects: characters T-posed (the
+        // controller key never resolved) and every spawnEffect / plume silently
+        // no-op'd (the effect key never resolved). Project-scoped assets MUST
+        // follow the project. (Meshes below + flsl materials each frame already
+        // resolve against project_root; these two registries were the gap.)
+        self.anim.rescan(&self.project_root);
+        self.vfx.rescan(&self.project_root);
         self.asset_tree = build_assets(&self.project_root);
         self.load_texture_settings();
         self.texture_registry.clear();
@@ -722,6 +834,7 @@ impl Editor {
         // Ship the default Lua scripts so the IDE/docs have something to show.
         seed_default_scripts(&root.join("scripts"));
         seed_example_shaders(&root);
+        crate::ui_shader_lib::seed_ui_effects(&root);
         self.open_project(root);
     }
 
@@ -1247,6 +1360,23 @@ pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
             default_camera_node(),
         ],
     }
+}
+
+/// Recursively copy `src` (a directory) to `dst`, creating `dst` and every
+/// subfolder. Used when a whole folder is dragged in from the OS file explorer.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

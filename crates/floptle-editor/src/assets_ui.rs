@@ -25,6 +25,21 @@ impl<'a> EditorTabViewer<'a> {
             ui.menu_button("✚ New", |ui| {
                 self.new_asset_menu(ui, &root);
             });
+            // Native file picker — the reliable cross-platform import (works on
+            // Wayland, where dragging from the file manager isn't delivered). Targets
+            // the folder you're viewing in grid mode, else the assets root.
+            let import_dir =
+                if *self.assets_grid { self.assets_grid_dir.clone() } else { root.clone() };
+            if ui
+                .button("⤓ Import…")
+                .on_hover_text(
+                    "pick files to copy into the project (models, textures, audio, …).\n\
+                     You can also drag files in from your file manager on X11/Windows/macOS.",
+                )
+                .clicked()
+            {
+                self.cmd.pick_import_dir = Some(import_dir);
+            }
             ui.separator();
             // Tree / Grid view toggle.
             if ui.selectable_label(!*self.assets_grid, "☰").on_hover_text("file tree").clicked() {
@@ -54,6 +69,10 @@ impl<'a> EditorTabViewer<'a> {
         // Drop a Hierarchy node on the empty space → save it as a prefab
         // (lands in the canonical prefabs/ folder; drop on a folder to aim).
         self.node_drop_makes_prefab(ui, &resp, &root.join("prefabs"));
+        // OS files dropped anywhere in the panel that missed a folder → import at the
+        // assets root (folder tiles claim first via the import_files guard).
+        let panel = ui.max_rect();
+        self.os_file_drop(ui, panel, &root, false);
         resp.context_menu(|ui| {
             self.new_asset_menu(ui, &root);
         });
@@ -172,8 +191,12 @@ impl<'a> EditorTabViewer<'a> {
         });
         ui.separator();
 
+        // Whole-panel drop zone for OS file imports missing a folder tile (below).
+        let panel = ui.max_rect();
         let Some(entries) = self.grid_entries(&dir) else {
             ui.weak("(empty)");
+            // Even an empty folder should accept a drop into itself.
+            self.os_file_drop(ui, panel, &dir, false);
             return;
         };
         // Ordered file list of this folder — the range for Shift-select.
@@ -209,6 +232,9 @@ impl<'a> EditorTabViewer<'a> {
             self.node_drop_makes_prefab(ui, &bg, &dir);
             bg.context_menu(|ui| self.new_asset_menu(ui, &dir));
         });
+        // OS files dropped anywhere in the grid that missed a folder tile → import
+        // into the folder you're viewing (folder tiles claim first).
+        self.os_file_drop(ui, panel, &dir, false);
         if let Some(d) = enter {
             *self.assets_grid_dir = d;
         }
@@ -230,15 +256,77 @@ impl<'a> EditorTabViewer<'a> {
         if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
             self.cmd.move_assets = Some((self.move_sources(&p.path), dir.to_path_buf()));
         }
+        // Native OS file drop from the file explorer → import into this folder.
+        self.os_file_drop(ui, resp.rect, dir, true);
         self.node_drop_makes_prefab(ui, &resp, dir);
         resp.context_menu(|ui| self.folder_menu(ui, dir));
         resp
+    }
+
+    /// Accept files dragged in from the OS file explorer, importing (copying) them
+    /// into `dir`. egui-winit populates `raw.hovered_files`/`raw.dropped_files`, but
+    /// winit carries NO drop position and doesn't move the cursor during an OS drag
+    /// (and on Wayland delivers no drops at all — use the ⤓ Import button there).
+    ///
+    /// `strong` = a folder target: precise, pointer-gated (bright outline + tip), so
+    /// it only claims a drop the cursor is actually over. `!strong` = the panel-wide
+    /// fallback: claims any unclaimed drop REGARDLESS of pointer (so a release always
+    /// lands somewhere sensible even when the cursor position is stale), with a faint
+    /// whole-panel cue while hovering.
+    fn os_file_drop(&mut self, ui: &egui::Ui, rect: egui::Rect, dir: &Path, strong: bool) {
+        let ptr = ui.ctx().input(|i| i.pointer.interact_pos());
+        let over = ptr.is_some_and(|p| rect.contains(p));
+        if strong && !over {
+            return;
+        }
+        let (hovering, dropped) = ui.ctx().input(|i| {
+            (
+                !i.raw.hovered_files.is_empty(),
+                i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect::<Vec<_>>(),
+            )
+        });
+        let green = egui::Color32::from_rgb(130, 210, 140);
+        if hovering && strong {
+            ui.painter().rect_stroke(
+                rect.shrink(2.0),
+                5.0,
+                egui::Stroke::new(2.0, green),
+                egui::StrokeKind::Inside,
+            );
+            if let Some(p) = ptr {
+                egui::Area::new(egui::Id::new("os-import-tip"))
+                    .fixed_pos(p + egui::vec2(14.0, 14.0))
+                    .order(egui::Order::Tooltip)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.small("＋ import here");
+                        });
+                    });
+            }
+        } else if hovering {
+            ui.painter().rect_stroke(
+                rect.shrink(1.0),
+                3.0,
+                egui::Stroke::new(1.0, green.gamma_multiply(0.5)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // Claim the drop. Strong targets already returned unless the cursor is over
+        // them; the panel-wide fallback reaches here regardless of pointer, so a
+        // release always lands somewhere sensible even with a stale cursor.
+        if !dropped.is_empty() && self.cmd.import_files.is_none() {
+            self.cmd.import_files = Some((dropped, dir.to_path_buf()));
+        }
     }
 
     /// The shared folder context menu (tree header + grid tile): New…, then
     /// Rename / Reveal / Delete — the same verbs files get.
     fn folder_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
         self.new_asset_menu(ui, dir);
+        if ui.button("⤓ Import here…").on_hover_text("copy files from your computer into this folder").clicked() {
+            self.cmd.pick_import_dir = Some(dir.to_path_buf());
+            ui.close();
+        }
         ui.separator();
         if ui.button("🖊 Rename…").clicked() {
             self.cmd.rename_asset = Some(dir.to_string_lossy().to_string());
@@ -455,6 +543,7 @@ impl<'a> EditorTabViewer<'a> {
                         self.cmd.move_assets =
                             Some((self.move_sources(&p.path), child_dir.clone()));
                     }
+                    self.os_file_drop(ui, hr.rect, &child_dir, true);
                     self.node_drop_makes_prefab(ui, &hr, &child_dir);
                     hr.context_menu(|ui| self.folder_menu(ui, &child_dir));
                 }

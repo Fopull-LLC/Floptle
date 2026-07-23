@@ -102,6 +102,7 @@
             )),
             gravity: 9.0,
             drag: 0.6,
+            inherit_velocity: 0.4,
         ),
         // EMBERS: glowing chunks that tumble and fall (Debris texture + gravity).
         (
@@ -134,6 +135,7 @@
             )),
             gravity: 10.0,
             drag: 0.3,
+            inherit_velocity: 0.4,
         ),
         // Rolling SMOKE that lingers after the fire dies down.
         (
@@ -205,4 +207,5 @@
         ),
     ],
     seed: 7,
+    gravity_mode: Field,
 )

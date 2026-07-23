@@ -238,13 +238,12 @@ impl AnimSystem {
         Some(&first.1)
     }
 
-    /// Save a clip doc back to disk + refresh the registry entry in place.
-    pub fn save_clip(&mut self, project_root: &Path, key: &str, doc: &AnimClipDoc) {
-        let path = project_root.join(format!("{key}{ANIM_CLIP_EXT}"));
-        if let Err(e) = floptle_scene::save_anim_clip(doc, &path) {
-            eprintln!("  save clip {key} failed: {e}");
-            return;
-        }
+    /// Refresh the in-memory clip registry entry + bump the revision (so bound
+    /// animators rebind and previews reflect the edit) WITHOUT touching disk.
+    /// Used for LIVE edits held under the pointer — a bone gizmo/inspector DRAG
+    /// defers its disk save to pointer-up, but the preview must still update in
+    /// real time as the bone moves; this is the cheap per-frame refresh that does it.
+    pub fn register_clip(&mut self, key: &str, doc: &AnimClipDoc) {
         match self.clips.iter_mut().find(|(k, _)| k == key) {
             Some(slot) => slot.1 = doc.clone(),
             None => {
@@ -253,6 +252,16 @@ impl AnimSystem {
             }
         }
         self.revision += 1;
+    }
+
+    /// Save a clip doc back to disk + refresh the registry entry in place.
+    pub fn save_clip(&mut self, project_root: &Path, key: &str, doc: &AnimClipDoc) {
+        let path = project_root.join(format!("{key}{ANIM_CLIP_EXT}"));
+        if let Err(e) = floptle_scene::save_anim_clip(doc, &path) {
+            eprintln!("  save clip {key} failed: {e}");
+            return;
+        }
+        self.register_clip(key, doc);
     }
 
     /// Save a controller doc back to disk + refresh the registry entry.
@@ -793,14 +802,81 @@ pub fn advance_animators(
     // Pass 3: advance, collect events, apply poses.
     let mut fired = Vec::new();
     for e in wanted {
-        let Some(inst) = system.instances.get_mut(&e) else { continue };
+        let Some(inst) = system.instances.get_mut(&e) else {
+            // A wanted entity with no instance never got bound — diagnose why.
+            diagnose_anim(system, world, mesh_registry, e, DiagBind::Missing);
+            continue;
+        };
+        let bind = match inst.binding {
+            AnimBinding::Rig => DiagBind::Rig,
+            AnimBinding::Nodes { .. } => DiagBind::Nodes,
+        };
         inst.ctl.advance(dt);
         for func in inst.ctl.take_fired() {
             fired.push((e.index(), func));
         }
         apply_instance(system, world, mesh_registry, e);
+        diagnose_anim(system, world, mesh_registry, e, bind);
     }
     fired
+}
+
+/// The binding a wanted entity resolved to, for `diagnose_anim` (a cheap
+/// discriminant so we needn't clone the binding's node lists).
+enum DiagBind {
+    Missing,
+    Rig,
+    Nodes,
+}
+
+/// One-shot per-entity diagnostic for the astronaut T-pose class of bug: a mesh
+/// that SHOULD animate but doesn't. Fires (once) to the Console when a wanted
+/// animated entity ends up with no runtime instance, binds to Nodes despite its
+/// mesh carrying a rig, or produces no pose after advancing — the three states
+/// that render as a static bind pose. Costs nothing once each has warned.
+fn diagnose_anim(
+    system: &mut AnimSystem,
+    world: &World,
+    mesh_registry: &HashMap<String, MeshAsset>,
+    e: Entity,
+    binding: DiagBind,
+) {
+    let mesh_path = match world.get::<Matter>(e) {
+        Some(Matter::Mesh { asset_path }) => Some(asset_path.clone()),
+        _ => None,
+    };
+    let ctl_key = world.get::<AnimController>(e).map(|c| c.asset.clone());
+    let has_rig = mesh_path
+        .as_ref()
+        .and_then(|p| mesh_registry.get(p))
+        .is_some_and(|a| a.rig.is_some());
+    let in_registry = mesh_path.as_ref().is_some_and(|p| mesh_registry.contains_key(p));
+    let trouble = match binding {
+        DiagBind::Missing => Some("no runtime animator instance was created"),
+        DiagBind::Nodes if has_rig => {
+            Some("bound to a node skeleton even though the mesh has a rig (bind-pose T-pose)")
+        }
+        DiagBind::Rig if !system.poses.contains_key(&e) => {
+            Some("rig-bound but produced no pose this frame")
+        }
+        _ => None,
+    };
+    if let Some(why) = trouble {
+        let key = format!("anim-diag:{}", e.index());
+        if system.warned.insert(key) {
+            let msg = format!(
+                "animation: {} ({why}). controller={:?} mesh={:?} in_registry={in_registry} \
+                 has_rig={has_rig}. If this is the on-foot character, that's the T-pose.",
+                e.index(),
+                ctl_key.as_deref().unwrap_or("<none>"),
+                mesh_path.as_deref().unwrap_or("<none>"),
+            );
+            // Also to stdout so it's visible when launched from a terminal, not
+            // only in the in-editor Console panel.
+            eprintln!("[anim-diag] {msg}");
+            system.warnings.push(msg);
+        }
+    }
 }
 
 /// Apply an instance's current pose (rig → poses map, nodes → Transforms).
@@ -1563,5 +1639,63 @@ mod tests {
         let inst = system.instances.get(&root).expect("bound on frame 1");
         let (name, _, _) = inst.ctl.layers[0].current().expect("state playing");
         assert_eq!(name, "Run", "the first-frame play() command must land");
+    }
+
+    /// REGRESSION (Ty's astronaut T-pose): binding the solar demo's real
+    /// character controller through the registry path (`layers_from_doc` →
+    /// `AnimSystem::clip`) must yield NON-EMPTY clips that actually move the
+    /// rig. The prior offline check fed `clip_from_doc` directly and so never
+    /// exercised the registry key resolution — which is exactly where an
+    /// unresolved clip degrades to a 1 ms empty clip and the rig sits at its
+    /// bind pose (the T-pose). Skips cleanly if the solar assets aren't present.
+    #[test]
+    fn solar_astronaut_controller_binds_to_real_motion() {
+        use std::path::Path;
+        let solar = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar");
+        let glb = solar.join("models/characters/character_retro.glb");
+        let ctl_file = solar.join("animation_controllers/character.actl.ron");
+        if !glb.exists() || !ctl_file.exists() {
+            eprintln!("solar assets absent — skipping astronaut bind regression");
+            return;
+        }
+        let model = floptle_assets::import_rigged(&glb)
+            .expect("import_rigged ok")
+            .expect("character_retro.glb carries a rig + clips");
+        let rig = rig_from_model(&model);
+
+        let mut sys = AnimSystem::default();
+        sys.rescan(&solar);
+        let doc = sys
+            .controller("animation_controllers/character")
+            .expect("character controller registered by the whole-project rescan")
+            .clone();
+
+        // Bind exactly as bind_entity's (controller, rig) arm does.
+        let layers = layers_from_doc(&sys, &doc, &rig.skeleton);
+        for st in &layers[0].states {
+            // Empty (unresolved) clips fall back to a 1 ms no-channel clip.
+            assert!(
+                st.clip.duration > 0.02,
+                "controller state bound an EMPTY clip — its key did not resolve in the \
+                 registry; this is the astronaut T-pose"
+            );
+        }
+
+        let mut ctl =
+            floptle_anim::Controller::new(rig.skeleton.rest_pose(), layers, doc.default_fade);
+        ctl.advance(0.30); // advance auto-starts the default ("idle") state
+        let mut posed = Vec::new();
+        rig.skeleton.world_matrices(ctl.pose(), &mut posed);
+        let mut rest = Vec::new();
+        rig.skeleton.world_matrices(&rig.skeleton.rest_pose(), &mut rest);
+        let moved = posed
+            .iter()
+            .zip(&rest)
+            .map(|(a, b)| (*a - *b).to_cols_array().iter().map(|v| v.abs()).sum::<f32>())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            moved > 1e-3,
+            "the bound controller produced NO rig motion (bind pose = the T-pose); max delta {moved}"
+        );
     }
 }

@@ -808,10 +808,11 @@ mod tests {
         let mut nose_hit = 0.0f32;
         for _ in 0..600 {
             sim.step_tick(1.0 / 60.0, None); // the editor's Play loop driver
-            for (r, part, j, speed, point) in sim.compound_impacts() {
+            for (r, part, j, speed, speed_abs, point) in sim.compound_impacts() {
                 assert_eq!(r, root.index(), "impacts attribute to the assembly root");
                 assert!(point.y < 1.5, "contact points sit near the pad, y={}", point.y);
                 assert!(speed >= 0.0, "impact speed is non-negative, got {speed}");
+                assert!(speed_abs >= speed - 1e-3, "total speed ≥ normal speed, {speed_abs} vs {speed}");
                 if part == engine.index() {
                     engine_hit = engine_hit.max(j);
                     engine_speed = engine_speed.max(speed);
@@ -853,15 +854,19 @@ mod tests {
         // (4 units) into the saturated interior on the first contact.
         sim.set_compound_velocity(root.index(), Vec3::new(1200.0, 0.0, 0.0));
         let mut peak = 0.0f32;
+        let mut peak_abs = 0.0f32;
         for _ in 0..3 {
             sim.step_tick(1.0 / 60.0, None);
-            for (_r, _part, _j, speed, _p) in sim.compound_impacts() {
+            for (_r, _part, _j, speed, speed_abs, _p) in sim.compound_impacts() {
                 peak = peak.max(speed);
+                peak_abs = peak_abs.max(speed_abs);
             }
         }
         // Without the fallback the +Y normal reads a +X ram as ~0; with it the
         // full closing speed comes through (well above any crash tolerance).
         assert!(peak > 400.0, "a 1200 u/s ram must report a high impact speed, got {peak}");
+        // The total (energy) speed is always at least the normal component.
+        assert!(peak_abs >= peak, "total speed ≥ normal speed, {peak_abs} vs {peak}");
     }
 
     #[test]

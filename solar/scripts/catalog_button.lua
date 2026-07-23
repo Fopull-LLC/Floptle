@@ -8,7 +8,8 @@ defaults = { part = 1 }
 -- get the next indices (their buttons are added at the end of the panel).
 local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM",
               "decoupler", "legs", "radialDec",
-              "nose", "fins", "battery", "dish" }
+              "nose", "fins", "battery", "dish", "solar",
+              "skipper", "radialTank" }
 
 local el, builder
 

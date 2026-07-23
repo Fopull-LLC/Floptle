@@ -1,0 +1,33 @@
+[
+    // COMMAND CENTER — the main base habitat/HQ building. base_facilities.lua
+    // spawns it surface-anchored + parented to the home planet (rides the orbit,
+    // engine glues its baked Static collider to the moving surface — same trick
+    // as the launchpad). hangar_largeA is native 2x1x3 (centred, y -0.5..0.5), so
+    // the collider half_extents = native half-size × the node scale (3.0) →
+    // 3x1.5x4.5 world half-box. Kenney space-kit carries its own textures, so no
+    // material block (matches the launchpad's decision).
+    (
+        name: "FacCommand",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (3.0, 3.0, 3.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/hangar_largeA.glb",
+        ),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Static,
+            radius: 3.0,
+            height: 3.0,
+            half_extents: (1.0, 0.5, 1.5),
+            restitution: 0.0,
+            friction: 0.9,
+            gravity: false,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+        )),
+    ),
+]

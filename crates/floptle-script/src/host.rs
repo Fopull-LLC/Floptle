@@ -670,15 +670,22 @@ impl ScriptHost {
             let _ = lua.globals().set("scene", t);
         }
 
-        // `spawnEffect(key, x, y, z)` — fire a one-shot particle effect at a world
-        // point, no node required. The editor spawns a detached instance that plays
-        // once and auto-despawns (the fire-and-forget path for hits, pickups, poofs).
+        // `spawnEffect(key, x, y, z [, vx, vy, vz])` — fire a one-shot particle effect at
+        // a world point, no node required. The editor spawns a detached instance that
+        // plays once and auto-despawns (the fire-and-forget path for hits, pickups,
+        // poofs). The optional velocity is the emitter's world velocity: inherit-velocity
+        // tracks (smoke/dust off a fast vessel) ride it so they aren't stranded in space.
         let spawn_effects: Rc<RefCell<Vec<crate::SpawnedEffect>>> =
             Rc::new(RefCell::new(Vec::new()));
         {
             let q = spawn_effects.clone();
-            if let Ok(f) = lua.create_function(move |_, (key, x, y, z): (String, f64, f64, f64)| {
-                q.borrow_mut().push((key, [x, y, z]));
+            type Args = (String, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
+            if let Ok(f) = lua.create_function(move |_, (key, x, y, z, vx, vy, vz): Args| {
+                q.borrow_mut().push((
+                    key,
+                    [x, y, z],
+                    [vx.unwrap_or(0.0), vy.unwrap_or(0.0), vz.unwrap_or(0.0)],
+                ));
                 Ok(())
             }) {
                 let _ = lua.globals().set("spawnEffect", f);

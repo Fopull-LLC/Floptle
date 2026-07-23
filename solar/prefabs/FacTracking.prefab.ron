@@ -1,0 +1,33 @@
+[
+    // TRACKING STATION — a big steerable comms dish. This is the facility the
+    // Tracking Station menu reads the `comms.ships` registry through (roadmap
+    // task 7): walk up to it, open it, and see every launched vessel that still
+    // holds a comms link. satelliteDish_large is native 0.84x0.82x0.74 (centred,
+    // y -0.41..0.41); collider half = native × scale (4.0) → 1.68x1.64x1.48 world
+    // half-box. The "TrackingStation" tag lets the facilities menu find it.
+    (
+        name: "FacTracking",
+        tags: ["TrackingStation"],
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (4.0, 4.0, 4.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/satelliteDish_large.glb",
+        ),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Static,
+            radius: 1.7,
+            height: 1.7,
+            half_extents: (0.42, 0.41, 0.37),
+            restitution: 0.0,
+            friction: 0.9,
+            gravity: false,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+        )),
+    ),
+]

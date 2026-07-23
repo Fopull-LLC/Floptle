@@ -141,7 +141,12 @@ pub(crate) struct DragState {
     pub(crate) handle: Handle,
     /// The entity this snapshot belongs to — guards against the selection
     /// changing mid-drag and applying the wrong object's start transform.
+    /// For a BONE drag this is the rigged-mesh entity that owns the bone.
     pub(crate) entity: Entity,
+    /// `Some(bone_index)` when the gizmo is posing an armature bone (not an ECS
+    /// entity). The drag writes the bone's local pose into the open clip instead
+    /// of an entity `Transform`.
+    pub(crate) bone: Option<usize>,
     pub(crate) start_xf: Transform,
     pub(crate) cursor_start: Vec2,
 }
@@ -214,13 +219,18 @@ pub(crate) fn build_gizmo(
     w: f32,
     h: f32,
     rect_half: Option<Vec3>,
+    xf_override: Option<Transform>,
 ) -> Option<GizmoFrame> {
     if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint {
         return None;
     }
-    let e = selection?;
-    // World transform, so the gizmo sits on the node's actual (parented) placement.
-    let t = floptle_core::world_transform(world, e);
+    // Either an explicit world transform — a selected armature BONE, which is not
+    // an ECS entity — or the selected entity's world transform (so the gizmo sits
+    // on the node's actual, parented placement).
+    let t = match xf_override {
+        Some(t) => t,
+        None => floptle_core::world_transform(world, selection?),
+    };
     let center = project(t.translation, cam_world, vp, w, h)?;
     let rot = t.rotation;
 

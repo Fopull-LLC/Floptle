@@ -135,6 +135,20 @@ pub enum Space {
     World,
 }
 
+/// Where an effect's per-track `gravity` pull points — the dev-facing knob for
+/// particles near worlds with non-down gravity. `WorldDown` is the classic
+/// constant −Y pull (unchanged default). `Field` samples the LIVE scene gravity
+/// field at the emitter each tick (radial "planet" volumes + celestial µ/r²), so
+/// debris, dust and embers fall toward the ground beneath them instead of toward
+/// world −Y. The host supplies the sampled vector; the per-track `gravity` scalar
+/// still scales it, so a game tunes strength exactly as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GravityMode {
+    #[default]
+    WorldDown,
+    Field,
+}
+
 /// How a [`Clip`] releases its particles across its span.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Emit {
@@ -313,6 +327,12 @@ pub struct Track {
     /// 0 = weightless, 1 = full gravity.
     pub gravity: f32,
     pub drag: f32,
+    /// Fraction of the emitter's world velocity a newborn particle carries (Unity's
+    /// "inherit velocity"). 0 = ignore the emitter's motion (classic); 1 = fully keep
+    /// up with it. Fixes World-space trails (smoke, dust) spawned off a fast vessel
+    /// getting "left behind in space" — they now ride its momentum, then drift as drag
+    /// bleeds it off. Only meaningful for `Space::World` (Local tracks ride the node).
+    pub inherit_velocity: f32,
     /// Force fields (wind / attractor / vortex / turbulence) added to velocity each
     /// step — the "make it feel alive" layer. Empty = none (zero cost).
     pub forces: Vec<Force>,
@@ -336,6 +356,7 @@ impl Default for Track {
             color: ValueOrCurve::Const(Value::Rgba([1.0; 4])),
             gravity: 0.0,
             drag: 0.0,
+            inherit_velocity: 0.0,
             forces: Vec::new(),
         }
     }
@@ -353,6 +374,8 @@ pub struct ParticleEffect {
     pub tracks: Vec<Track>,
     /// Base seed; instances offset it so two campfires don't march in lockstep.
     pub seed: u32,
+    /// Where this effect's gravity points (constant world-down vs. the live scene field).
+    pub gravity_mode: GravityMode,
 }
 
 impl Default for ParticleEffect {
@@ -364,6 +387,7 @@ impl Default for ParticleEffect {
             end: EndBehavior::default(),
             tracks: Vec::new(),
             seed: 1,
+            gravity_mode: GravityMode::default(),
         }
     }
 }
@@ -398,6 +422,8 @@ pub struct CompiledTrack {
     pub color: Prop4,
     pub gravity: f32,
     pub drag: f32,
+    /// Fraction of the emitter's world velocity a newborn carries (see [`Track::inherit_velocity`]).
+    pub inherit_velocity: f32,
     /// Force fields (copied straight from the authoring track — no baking needed).
     pub forces: Vec<Force>,
 
@@ -420,6 +446,7 @@ pub struct CompiledEffect {
     pub end: EndBehavior,
     pub seed: u32,
     pub tracks: Vec<CompiledTrack>,
+    pub gravity_mode: GravityMode,
 }
 
 /// Fold every lane targeting `which` into one scalar multiplier LUT (lanes stack
@@ -534,6 +561,7 @@ impl Track {
             color: bake4(&self.color, 1.0),
             gravity: self.gravity,
             drag: self.drag.max(0.0),
+            inherit_velocity: self.inherit_velocity,
             forces: self.forces.clone(),
             lane_rate,
             lane_count,
@@ -557,6 +585,7 @@ impl ParticleEffect {
             end: self.end,
             seed: self.seed,
             tracks: self.tracks.iter().map(|t| t.compile(lifetime)).collect(),
+            gravity_mode: self.gravity_mode,
         }
     }
 }

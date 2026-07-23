@@ -1,17 +1,13 @@
-// A billowing ground cloud kicked up when engines fire close to the surface —
-// liftoff, hovering, hard descents. Emitted from vessel_controller while the
-// throttle is up and the ship is near the ground.
 (
     name: "LaunchDust",
     lifetime: 1.4,
     playback: OneShot,
     end: Destroy,
     tracks: [
-        // Fast low dust rolling outward along the ground.
         (
             name: "Ground Dust",
             render: Billboard(
-                texture: Some("textures/VFXTEX/Circles/1.png"),
+                texture: Some("textures/VFXTEX/Smoke/5.png"),
             ),
             blend: Alpha,
             space: World,
@@ -19,26 +15,52 @@
                 (
                     start: 0.0,
                     end: 0.5,
-                    emit: Some(Burst(count: 12, count_jitter: 0.2)),
+                    emit: Some(Burst(
+                        count: 12,
+                        count_jitter: 0.2,
+                        pulses: 1,
+                        interval: 0.0,
+                        interval_jitter: 0.0,
+                    )),
                 ),
             ],
-            shape: Ring(radius: 1.2),
+            automation: [],
+            shape: Ring(
+                radius: 1.2,
+            ),
             velocity: Range(Vec3((-6.0, 0.5, -6.0)), Vec3((6.0, 3.0, 6.0))),
             size: Range(F32(2.2), F32(4.5)),
             rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
             angular_velocity: Range(Vec3((0.0, 0.0, -0.8)), Vec3((0.0, 0.0, 0.8))),
             color: Curve((
                 keys: [
-                    (t: 0.0, v: Rgba((0.55, 0.5, 0.44, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 0.2, v: Rgba((0.58, 0.53, 0.46, 0.7)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: Rgba((0.42, 0.39, 0.36, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: Rgba((0.55, 0.5, 0.44, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.2,
+                        v: Rgba((0.58, 0.53, 0.46, 0.7)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.42, 0.39, 0.36, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),
             gravity: -0.4,
             drag: 1.4,
         ),
-        // Darker exhaust smoke boiling upward through the dust.
         (
             name: "Exhaust",
             render: Billboard(
@@ -50,19 +72,47 @@
                 (
                     start: 0.0,
                     end: 0.5,
-                    emit: Some(Burst(count: 7, count_jitter: 0.2)),
+                    emit: Some(Burst(
+                        count: 7,
+                        count_jitter: 0.2,
+                        pulses: 1,
+                        interval: 0.0,
+                        interval_jitter: 0.0,
+                    )),
                 ),
             ],
-            shape: Sphere(radius: 0.8, shell: false),
+            automation: [],
+            shape: Sphere(
+                radius: 0.8,
+                shell: false,
+            ),
             velocity: Range(Vec3((-1.5, 2.5, -1.5)), Vec3((1.5, 6.0, 1.5))),
             size: Range(F32(1.8), F32(3.4)),
             rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
             angular_velocity: Range(Vec3((0.0, 0.0, -1.0)), Vec3((0.0, 0.0, 1.0))),
             color: Curve((
                 keys: [
-                    (t: 0.0, v: Rgba((0.4, 0.36, 0.32, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 0.25, v: Rgba((0.34, 0.31, 0.29, 0.6)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
-                    (t: 1.0, v: Rgba((0.22, 0.2, 0.19, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (
+                        t: 0.0,
+                        v: Rgba((0.4, 0.36, 0.32, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 0.25,
+                        v: Rgba((0.34, 0.31, 0.29, 0.6)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
+                    (
+                        t: 1.0,
+                        v: Rgba((0.22, 0.2, 0.19, 0.0)),
+                        interp: Linear,
+                        in_tan: 0.0,
+                        out_tan: 0.0,
+                    ),
                 ],
                 extrapolate: Clamp,
             )),
@@ -71,4 +121,5 @@
         ),
     ],
     seed: 11,
+    gravity_mode: Field,
 )

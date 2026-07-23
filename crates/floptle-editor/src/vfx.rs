@@ -32,6 +32,18 @@ use crate::anim::asset_key;
 /// backend phase (where the field is a texture fetch anyway).
 pub(crate) const VFX_GRAVITY: Vec3 = Vec3::new(0.0, -10.0, 0.0);
 
+/// The live scene gravity field, handed to `advance` so `GravityMode::Field` effects
+/// (debris, dust, embers near a planet) fall toward the ground beneath them instead of
+/// world −Y. Sampled at each emitter's world position via the SAME field the
+/// rigidbodies use (radial volumes + celestial µ/r²). `WorldDown` effects ignore it.
+pub struct VfxGravity<'a> {
+    pub field: &'a floptle_physics::GravityField,
+    pub colliders: &'a [floptle_physics::AnchoredCollider],
+    /// Sim-frame origin (ADR-0015): field source centers are sim-local, so a world
+    /// emitter position converts by `world - origin` before sampling.
+    pub origin: DVec3,
+}
+
 /// One registered effect asset: the editable doc + its compiled runtime form.
 pub struct VfxAsset {
     pub doc: VfxEffectDoc,
@@ -60,6 +72,12 @@ pub struct DetachedEffect {
     pub inst: EffectInstance,
     /// The world spawn point — a static emitter transform for the effect.
     pub pos: DVec3,
+    /// Emitter world velocity at spawn (m/s), passed by `spawnEffect`'s optional
+    /// velocity args. Newborns on World tracks with `inherit_velocity > 0` keep a
+    /// fraction of it, so a puff off a fast vessel rides its momentum instead of being
+    /// stranded in world space. The point also drifts by this each frame so a streaming
+    /// effect keeps emitting from where the emitter now is.
+    pub vel: Vec3,
 }
 
 /// Everything particles the editor owns. One field on `Editor`.
@@ -170,8 +188,9 @@ impl VfxSystem {
     }
 
     /// Spawn a fire-and-forget one-shot at a world point (`spawnEffect(...)` from a
-    /// script). It plays once and is reaped when it finishes — no node needed.
-    pub fn spawn_detached(&mut self, key: &str, pos: DVec3) {
+    /// script). It plays once and is reaped when it finishes — no node needed. `vel` is
+    /// the emitter's world velocity for inherit-velocity tracks (ZERO if the caller has none).
+    pub fn spawn_detached(&mut self, key: &str, pos: DVec3, vel: Vec3) {
         if let Some(fx) = self.effect(key) {
             // Fire-and-forget contract: coerce to a self-destructing one-shot even if
             // the asset was authored Looping/Persist, so is_done() reaps it in advance()
@@ -195,7 +214,7 @@ impl VfxSystem {
             let seed = self.detached_seq.wrapping_add(
                 bits(pos.x) ^ bits(pos.y).rotate_left(11) ^ bits(pos.z).rotate_left(22),
             );
-            self.detached.push(DetachedEffect { inst: EffectInstance::new(fx, seed), pos });
+            self.detached.push(DetachedEffect { inst: EffectInstance::new(fx, seed), pos, vel });
         }
     }
 
@@ -224,14 +243,24 @@ impl VfxSystem {
     /// component or swapped its asset are dropped (a swap re-spawns below — the
     /// physics live-sync discipline). Finished one-shots stay as inert entries so
     /// the re-spawn scan can't resurrect them into a loop.
-    pub fn advance(&mut self, world: &World, dt: f32) {
+    pub fn advance(&mut self, world: &World, dt: f32, grav: Option<VfxGravity<'_>>) {
+        // The gravity vector an effect feels at a world point, honoring its gravity mode.
+        let grav_at = |world_pos: DVec3, mode: floptle_vfx::GravityMode| -> Vec3 {
+            match (mode, &grav) {
+                (floptle_vfx::GravityMode::Field, Some(g)) => {
+                    g.field.accel_at((world_pos - g.origin).as_vec3(), g.colliders)
+                }
+                _ => VFX_GRAVITY,
+            }
+        };
         self.instances.retain(|e, (key, _)| {
             world.get::<ParticleSystem>(*e).is_some_and(|ps| ps.asset == *key)
         });
         for (e, (_, inst)) in self.instances.iter_mut() {
             // Feed the emitter's world transform so World-space tracks anchor correctly.
             let emitter = floptle_core::world_transform(world, *e);
-            inst.advance_at(dt, VFX_GRAVITY, emitter);
+            let g = grav_at(emitter.translation, inst.gravity_mode());
+            inst.advance_at(dt, g, emitter);
         }
         // Spawn for play-on-start systems without an instance: an asset swapped
         // mid-play, or a component attached mid-play.
@@ -243,10 +272,15 @@ impl VfxSystem {
         for (e, key) in missing {
             self.spawn(e, &key);
         }
-        // Detached one-shots: tick at their fixed world point, then reap the finished.
+        // Detached one-shots: tick at their (drifting) world point with inherited
+        // emitter velocity, then reap the finished.
         for d in &mut self.detached {
+            let g = grav_at(d.pos, d.inst.gravity_mode());
             let emitter = floptle_core::transform::Transform::from_translation(d.pos);
-            d.inst.advance_at(dt, VFX_GRAVITY, emitter);
+            d.inst.advance_at_moving(dt, g, emitter, d.vel);
+            // Carry the emit point along with the inherited motion so a still-emitting
+            // effect keeps pace with the vessel it was fired from.
+            d.pos += (d.vel * dt).as_dvec3();
         }
         self.detached.retain(|d| !d.inst.is_done());
     }
@@ -539,6 +573,7 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         }),
         gravity: 0.6,
         drag: 0.0,
+        inherit_velocity: 0.0,
         forces: Vec::new(),
     }];
     VfxEffectDoc {
@@ -549,6 +584,8 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         end: Default::default(),
         tracks,
         seed: 1,
+        gravity_mode: Default::default(),
+        lifetime_scale_mode: Default::default(),
     }
 }
 
@@ -719,9 +756,14 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 color: prop_from_doc(&t.color),
                 gravity: t.gravity,
                 drag: t.drag,
+                inherit_velocity: t.inherit_velocity,
                 forces: t.forces.iter().map(force_from_doc).collect(),
             })
             .collect(),
+        gravity_mode: match doc.gravity_mode {
+            floptle_scene::VfxGravityDoc::WorldDown => floptle_vfx::GravityMode::WorldDown,
+            floptle_scene::VfxGravityDoc::Field => floptle_vfx::GravityMode::Field,
+        },
     }
 }
 

@@ -51,11 +51,17 @@ pub struct AssemblyImpact {
     pub part: u32,
     /// Total normal impulse the part absorbed this tick (mass·Δv, sim units).
     pub impulse: f32,
-    /// Peak closing SPEED the part hit at this tick (m/s) — the honest crash
-    /// metric. Budgeted depenetration flattens `impulse` on a fast crash, but
-    /// this reports the true impact speed, so `speed >= tolerance` is a clean
-    /// KSP-style crash test (compare directly, no mass normalization needed).
+    /// Peak NORMAL closing speed the part hit at this tick (m/s). Budgeted
+    /// depenetration flattens `impulse` on a fast crash, but this reports the
+    /// true normal impact speed. NOTE: this is only the component ALONG the
+    /// contact normal — it collapses on a glancing hit or a hit against a curved
+    /// surface (a fast ram into a planet reads a small `speed`). Judge crash
+    /// severity by `speedAbs`; keep `speed` for square-on touchdown feel.
     pub speed: f32,
+    /// Peak TOTAL closing speed at the contact this tick (m/s) — the full
+    /// contact-point velocity magnitude, the honest ENERGY metric. The
+    /// tangential (grind/slide) speed is `sqrt(max(0, speedAbs² − speed²))`.
+    pub speed_abs: f32,
     /// World point of the part's hardest contact.
     pub point: [f64; 3],
 }
@@ -79,6 +85,10 @@ pub enum AssemblyCmd {
     /// craft stays in full physics however far the camera roams (so you can
     /// fly it from the map view, where the camera pulls far back).
     KeepLive { root: u32, on: bool },
+    /// Re-pose the compound's COLLISION shapes to match its part nodes' current
+    /// transforms — for articulated parts (a folding landing leg) so the
+    /// collider follows the moving geometry. Mass properties stay frozen.
+    SyncColliders { root: u32 },
     /// Teleport the assembly ORIGIN to a world position, velocity untouched
     /// (re-pinning a clamped vessel to a pad that rides an orbiting planet).
     Teleport { root: u32, pos: [f64; 3] },
@@ -250,6 +260,20 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("keepLive", f)?;
     }
+    // assembly.syncColliders(node) — re-pose the compound's collision shapes to
+    // match its part nodes' CURRENT transforms. Call it after moving articulated
+    // parts (a folding landing leg) so their colliders follow the geometry:
+    // deployed legs actually hold the ship up, retracted ones tuck away. Mass
+    // properties stay as baked (a leg's mass is negligible), so it's cheap.
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, node: Value| {
+            let root = node_eid(&node, "assembly.syncColliders(node)")?;
+            q.borrow_mut().push(AssemblyCmd::SyncColliders { root });
+            Ok(())
+        })?;
+        t.set("syncColliders", f)?;
+    }
     // assembly.teleport(node, pos) — move the assembly origin to a world
     // position without touching velocity. The compound writeback owns the
     // root node's transform, so plain node position writes are overwritten —
@@ -297,11 +321,13 @@ pub(crate) fn install_assembly_api(
         t.set("info", f)?;
     }
     // assembly.impacts(node) — the LAST TICK's per-part contact loads: an
-    // array of { part, impulse, speed, x, y, z } (part = the part node's entity
-    // id, impulse = total normal impulse it absorbed, speed = peak closing speed
-    // in m/s — the honest crash metric, x/y/z = its hardest contact point, world
-    // space). Empty between contacts. Poll from fixedUpdate and compare `speed`
-    // against a per-part crash tolerance — that's a damage model in ten lines.
+    // array of { part, impulse, speed, speedAbs, x, y, z } (part = the part
+    // node's entity id, impulse = total normal impulse it absorbed, speed = peak
+    // NORMAL closing speed, speedAbs = peak TOTAL closing speed = the energy
+    // metric, x/y/z = its hardest contact point, world space). Empty between
+    // contacts. Poll from fixedUpdate and compare `speedAbs` against a per-part
+    // crash tolerance (and `sqrt(speedAbs²−speed²)` is the grind/slide speed) —
+    // that's a fair damage model in a dozen lines.
     {
         let impacts = impacts.clone();
         let f = lua.create_function(move |lua, node: Value| {
@@ -314,6 +340,7 @@ pub(crate) fn install_assembly_api(
                     e.set("part", i.part)?;
                     e.set("impulse", i.impulse as f64)?;
                     e.set("speed", i.speed as f64)?;
+                    e.set("speedAbs", i.speed_abs as f64)?;
                     e.set("x", i.point[0])?;
                     e.set("y", i.point[1])?;
                     e.set("z", i.point[2])?;
@@ -384,7 +411,13 @@ mod tests {
         install_assembly_api(&lua, info, impacts.clone(), cmds).unwrap();
         impacts.borrow_mut().insert(
             7,
-            vec![AssemblyImpact { part: 42, impulse: 18.5, speed: 12.5, point: [1.0, 2.0, 3.0] }],
+            vec![AssemblyImpact {
+                part: 42,
+                impulse: 18.5,
+                speed: 12.5,
+                speed_abs: 21.0,
+                point: [1.0, 2.0, 3.0],
+            }],
         );
         lua.load(
             r#"
@@ -393,6 +426,7 @@ mod tests {
             assert(hits[1].part == 42, "part id")
             assert(math.abs(hits[1].impulse - 18.5) < 1e-6, "impulse")
             assert(math.abs(hits[1].speed - 12.5) < 1e-6, "impact speed")
+            assert(math.abs(hits[1].speedAbs - 21.0) < 1e-6, "total impact speed")
             assert(hits[1].x == 1.0 and hits[1].y == 2.0 and hits[1].z == 3.0, "point")
             local quiet = assembly.impacts({ __id = 9 })
             assert(type(quiet) == "table" and #quiet == 0, "no contacts reads empty, not nil")

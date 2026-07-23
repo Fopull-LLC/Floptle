@@ -159,6 +159,12 @@ pub struct BodySnapshot {
     pub grounded: bool,
 }
 
+/// One row of [`Sim::compound_impacts`]: `(root entity index, part = shape_id,
+/// sum normal impulse, peak NORMAL speed, peak TOTAL speed, world contact point)`.
+/// The two speeds let a damage model judge severity by the honest total (energy)
+/// while keeping the normal component for square-on landing feel.
+pub type CompoundImpact = (u32, u32, f32, f32, f32, DVec3);
+
 impl Sim {
     /// Build the sim from the ECS: every `RigidBody` entity becomes a dynamic sphere at
     /// its world position; each terrain volume in `terrains` — `(node world translation,
@@ -804,6 +810,31 @@ impl Sim {
         }
     }
 
+    /// Set a compound's angular velocity (used to preserve spin across a sim
+    /// rebuild — terrain streaming rebuilds the sim mid-flight and must not
+    /// silently de-spin a tumbling stage).
+    pub fn set_compound_angular_velocity(&mut self, eid: u32, ang: Vec3) {
+        if let Some(c) = self.compound_of_mut(eid) {
+            c.ang_vel = ang;
+        }
+    }
+
+    /// Every compound root's RUNTIME state that a sim rebuild must carry over:
+    /// `(entity index, anchored, linear velocity, angular velocity)`. Unlike
+    /// [`Self::compound_states`] this exposes the raw `anchored` flag (not merged
+    /// with `grounded`) and the angular velocity, so `rebuild_sim` can restore a
+    /// clamped, spinning vessel exactly instead of dropping it to a free, still
+    /// body (which permanently disarmed launch-clamp damage on loaded saves).
+    pub fn compound_runtime_states(&self) -> Vec<(u32, bool, Vec3, Vec3)> {
+        self.cmap
+            .iter()
+            .map(|l| {
+                let c = &self.world.compounds[l.compound];
+                (l.entity.index(), c.anchored, c.vel, c.ang_vel)
+            })
+            .collect()
+    }
+
     /// Drop any queued tick-held forces without applying them (a paused
     /// physics tick must not bank thrust for the unpause).
     pub fn clear_held_forces(&mut self) {
@@ -838,17 +869,21 @@ impl Sim {
     /// terrain must still show up as "in contact" so a damage system can grind it
     /// down by the craft's own slide speed. (Filtering by impulse hid scrapes
     /// entirely — Ty could belly-slide a ship along a planet with zero effect.)
-    /// Tuple: `(root entity index, part = shape_id, sum impulse, peak speed, world point)`.
-    pub fn compound_impacts(&self) -> Vec<(u32, u32, f32, f32, DVec3)> {
+    /// Tuple: `(root entity index, part = shape_id, sum impulse, peak NORMAL
+    /// speed, peak TOTAL speed, world point)`. `peak total speed` (`speed_abs`)
+    /// is the energy metric — the normal component alone collapses on a glancing
+    /// or curved-surface hit, so a crash model should judge severity by the
+    /// total and derive the tangential (grind) speed as `sqrt(total² − normal²)`.
+    pub fn compound_impacts(&self) -> Vec<CompoundImpact> {
         let origin = self.world.origin;
-        // Value = (sum_impulse, max_impulse, hardest_point, max_speed).
-        let mut agg: std::collections::HashMap<(u32, u32), (f32, f32, Vec3, f32)> =
-            std::collections::HashMap::new();
+        // Value = (sum_impulse, max_impulse, hardest_point, max_speed, max_speed_abs).
+        type Agg = (f32, f32, Vec3, f32, f32);
+        let mut agg: std::collections::HashMap<(u32, u32), Agg> = std::collections::HashMap::new();
         for cc in &self.tick_cc {
             let Some(l) = self.cmap.iter().find(|l| l.compound == cc.compound) else { continue };
             let e = agg
                 .entry((l.entity.index(), cc.shape_id as u32))
-                .or_insert((0.0, -1.0, cc.point, 0.0));
+                .or_insert((0.0, -1.0, cc.point, 0.0, 0.0));
             e.0 += cc.impulse;
             if cc.impulse > e.1 {
                 e.1 = cc.impulse;
@@ -856,13 +891,19 @@ impl Sim {
             }
             // Peak incoming speed across the tick's contacts on this part: the
             // first (hardest) contact carries the true approach velocity before
-            // it's cancelled, so the max is the crash speed.
+            // it's cancelled, so the max is the crash speed. Track both the
+            // normal component and the total (energy) speed.
             if cc.speed > e.3 {
                 e.3 = cc.speed;
             }
+            if cc.speed_abs > e.4 {
+                e.4 = cc.speed_abs;
+            }
         }
         agg.into_iter()
-            .map(|((root, part), (sum, _, p, spd))| (root, part, sum, spd, origin + p.as_dvec3()))
+            .map(|((root, part), (sum, _, p, spd, spd_abs))| {
+                (root, part, sum, spd, spd_abs, origin + p.as_dvec3())
+            })
             .collect()
     }
 
@@ -1210,6 +1251,59 @@ impl Sim {
             self.tick_prev_c.push((c.pos, c.orient));
         }
         true
+    }
+
+    /// Re-pose an assembly's COLLISION shapes to match the current pose of its
+    /// part nodes — the runtime counterpart to how `compound_from` baked them at
+    /// build. For articulated parts (a folding landing leg): call this when the
+    /// visual joints move so the collider follows, and the ship rests on its
+    /// feet deployed / tucks its footprint retracted. Mass properties are left
+    /// frozen (see [`Compound::resync_shape_geometry`]). No-op for an unknown
+    /// root. Cheap: one descendant walk + per-shape offset, no tensor rebuild.
+    pub fn resync_compound_shapes(&mut self, root_eid: u32, ecs: &World) {
+        let Some(li) = self.cmap.iter().position(|l| l.entity.index() == root_eid) else {
+            return;
+        };
+        let root = self.cmap[li].entity;
+        let ci = self.cmap[li].compound;
+        let root_wt = world_transform(ecs, root);
+        let inv_rot = root_wt.rotation.inverse();
+        let inv_scale = 1.0 / root_wt.scale.max(Vec3::splat(1e-6));
+        // Recompute each part's offset (about the assembly origin = the root's
+        // pose) + orientation from its live world transform — identical math to
+        // `compound_from`, so a re-synced shape matches a freshly-baked one.
+        let mut updates: Vec<(u64, Vec3, Quat)> = Vec::new();
+        for (e, _) in ecs.query::<RigidBody>() {
+            if e == root {
+                continue;
+            }
+            // Same descendant rule as build/add_compound_for: nearest assembly
+            // ancestor must be this root.
+            let mut cur = e;
+            let mut belongs = false;
+            for _ in 0..64 {
+                let Some(floptle_core::Parent(p)) = ecs.get::<floptle_core::Parent>(cur).copied()
+                else {
+                    break;
+                };
+                if p == root {
+                    belongs = true;
+                    break;
+                }
+                if ecs.get::<RigidBody>(p).is_some_and(|prb| prb.assembly) {
+                    break;
+                }
+                cur = p;
+            }
+            if !belongs {
+                continue;
+            }
+            let wt = world_transform(ecs, e);
+            let offset = (inv_rot * (wt.translation - root_wt.translation).as_vec3()) * inv_scale;
+            let rot = (inv_rot * wt.rotation).normalize();
+            updates.push((e.index() as u64, offset, rot));
+        }
+        self.world.compounds[ci].resync_shape_geometry(&updates);
     }
 
     /// Remove a despawned assembly root's compound (swap-remove; the displaced

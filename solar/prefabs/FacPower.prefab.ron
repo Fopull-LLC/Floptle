@@ -1,0 +1,30 @@
+[
+    // POWER PLANT — the base generator. machine_generatorLarge is native
+    // 1x0.68x1.3 (centred, y -0.34..0.34); collider half = native × scale (3.0) →
+    // 1.5x1.02x1.95 world half-box. Surface-anchored + planet-parented by
+    // base_facilities.lua.
+    (
+        name: "FacPower",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (3.0, 3.0, 3.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/machine_generatorLarge.glb",
+        ),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Static,
+            radius: 2.0,
+            height: 2.0,
+            half_extents: (0.5, 0.34, 0.65),
+            restitution: 0.0,
+            friction: 0.9,
+            gravity: false,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+        )),
+    ),
+]

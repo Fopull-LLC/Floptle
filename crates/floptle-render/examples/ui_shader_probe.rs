@@ -64,6 +64,7 @@ fn render_ui_shader(
             uv: [0.0, 0.0, 1.0, 1.0],
             clip: None,
             shader: Some((path.to_string(), 1)),
+            feather: 0.0,
         }],
         texts: Vec::new(),
     };

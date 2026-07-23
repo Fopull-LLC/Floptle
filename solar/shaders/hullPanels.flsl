@@ -12,6 +12,9 @@ shader hullPanels {
   uniform lineWidth: float = 0.04 range(0.005, 0.25)
   uniform grime:     float = 0.35 range(0, 1)
   uniform sheen:     float = 0.5  range(0, 1)
+  // Battle damage, 0 pristine … 1 wrecked. Driven per-part by the vessel
+  // controller as a part loses HP (scrapes, scorch, bare-metal gouges).
+  uniform damage:    float = 0.0  range(0, 1)
 
   // Panel seams: distance to the nearest grid boundary along any axis.
   let f    = fract(objectPos / panelSize)
@@ -26,8 +29,33 @@ shader hullPanels {
 
   // Seams read as darker recessed metal; a fresnel sheen on the plate faces.
   let albedo = weathered * mix(0.45, 1.0, seam)
-  let rim    = pow(1.0 - saturate(dot(normal, viewDir)), 4.0) * sheen
-  let lit    = litSurface(albedo + vec3(rim))
+
+  // ── battle damage ──────────────────────────────────────────────────────────
+  // A part that's taking a beating scorches, scuffs and gouges. Three layers,
+  // all object-locked so they stick to the hull: sooty SCORCH blotches (low-freq
+  // fbm) blacken the plate; sharp bare-metal GOUGES (worley cell edges) cut
+  // bright scratches; a mid-freq DENT term breaks up the shading like busted AO.
+  // Everything ramps in with `damage`, so a pristine part is untouched.
+  let dmg     = saturate(damage)
+  // Front-loaded intensity: parts often break fast, so even a little damage must
+  // read as obvious scars, not a subtle tint. sqrt ramps hard off zero.
+  let vis     = sqrt(dmg)
+  // Scorch: sooty blotches over a WIDE range (low threshold) so heat marks
+  // spread across the plate as it takes a beating.
+  let soot    = smoothstep(0.25, 0.75, fbm(objectPos * 1.6, octaves: 4.0) * 0.5 + 0.5)
+  let scorch  = saturate(soot * vis * 1.4)
+  // Gouges: bright bare-metal scratches carved along worley cell edges; they
+  // widen with damage so a wrecked hull is criss-crossed with scuffs.
+  let gouge   = (1.0 - smoothstep(0.0, 0.06 + 0.18 * dmg, worley(objectPos * 3.2))) * vis
+  // Dents: mid-freq shading break-up so the surface looks beaten, not flat.
+  let dents   = mix(1.0, 0.45 + 0.55 * (fbm(objectPos * 5.5, octaves: 3.0) * 0.5 + 0.5), vis)
+  // Scorch → near-black soot; gouges → bright torn metal over the top.
+  let burnt   = mix(albedo, vec3(0.03, 0.025, 0.022), scorch)
+  let scarred = mix(burnt, vec3(0.66, 0.64, 0.6), saturate(gouge)) * dents
+
+  // Fresnel sheen fades as the finish is destroyed (a wrecked hull is matte).
+  let rim    = pow(1.0 - saturate(dot(normal, viewDir)), 4.0) * sheen * (1.0 - dmg * 0.85)
+  let lit    = litSurface(scarred + vec3(rim))
 
   output color = vec4(lit, 1.0)
 }

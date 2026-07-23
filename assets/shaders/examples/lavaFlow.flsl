@@ -17,4 +17,4 @@ shader lavaFlow {
 
   output color = vec4(mix(molten, rock, crust), 1)
 }
-//@layout { churn: (-684, 30), crust: (-228, 0), drift: (-912, 30), in.time: (-2263, -128), in.uv: (-2086, -7), mixdown1: (-1560, -165), mixdown2: (-1641, 39), mixdown3: (-2069, 84), molten: (-228, 120), node1: (-1644, 184), out: (0, 90), palette1: (-848, -115), rock: (-228, 260), u.flow: (-1804, -122), u.heat: (-920, 245), veins: (-456, 30) }
+//@layout { churn: (-684, 30), crust: (-228, 0), drift: (-912, 30), in.time: (-2263, -128), in.uv: (-1898, 23), mixdown1: (-1560, -165), mixdown2: (-1641, 39), mixdown3: (-1923, 285), molten: (-228, 120), node1: (-1126, 357), out: (0, 90), palette1: (-746, -309), rock: (-228, 260), u.flow: (-1804, -122), u.heat: (-920, 245), veins: (-456, 30) }

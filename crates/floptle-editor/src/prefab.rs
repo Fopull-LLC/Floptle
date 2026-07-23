@@ -352,11 +352,12 @@ impl Editor {
         // — the damage/stress raw material).
         let mut impacts: std::collections::HashMap<u32, Vec<floptle_script::AssemblyImpact>> =
             std::collections::HashMap::new();
-        for (root, part, impulse, speed, point) in sim.compound_impacts() {
+        for (root, part, impulse, speed, speed_abs, point) in sim.compound_impacts() {
             impacts.entry(root).or_default().push(floptle_script::AssemblyImpact {
                 part,
                 impulse,
                 speed,
+                speed_abs,
                 point: [point.x, point.y, point.z],
             });
         }
@@ -429,6 +430,11 @@ impl Editor {
                 floptle_script::AssemblyCmd::Teleport { root, pos } => {
                     if let Some(sim) = self.sim.as_mut() {
                         sim.set_compound_origin(root, DVec3::new(pos[0], pos[1], pos[2]));
+                    }
+                }
+                floptle_script::AssemblyCmd::SyncColliders { root } => {
+                    if let Some(sim) = self.sim.as_mut() {
+                        sim.resync_compound_shapes(root, &self.world);
                     }
                 }
                 floptle_script::AssemblyCmd::Split { root, parts, cb } => {

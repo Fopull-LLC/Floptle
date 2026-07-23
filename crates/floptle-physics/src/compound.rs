@@ -101,6 +101,14 @@ pub struct CompoundContact {
     /// the per-tick impulse plateaus, but the incoming normal velocity is not
     /// capped, so `speed` faithfully reports how hard something actually hit.
     pub speed: f32,
+    /// TOTAL closing speed at the contact point (m/s, sim units, ≥ 0): the full
+    /// magnitude of the contact-point velocity, before resolution. `speed` above
+    /// is only its NORMAL component — which collapses on a glancing hit or a hit
+    /// against a curved surface (a 30 m/s ram into a planet 65° off-normal reads
+    /// a normal `speed` of ~12). `speed_abs` is the honest ENERGY metric a crash
+    /// model should judge by; the tangential (grind/slide) speed is
+    /// `sqrt(max(0, speed_abs² − speed²))`.
+    pub speed_abs: f32,
 }
 
 /// A compound rigid body. Positions/velocities are sim-frame (origin-relative,
@@ -199,6 +207,26 @@ impl Compound {
     /// The assembly origin (the pose callers authored shapes around), sim frame.
     pub fn origin(&self) -> Vec3 {
         self.pos + self.orient * self.local_origin
+    }
+
+    /// Re-pose the COLLISION shapes named in `updates` — `(shape id, new offset
+    /// about the assembly origin, new orientation)` — in place, WITHOUT touching
+    /// the body's mass, CoM or inertia. For articulated parts whose pose changes
+    /// at runtime (a folding landing leg): the collider follows the moving foot
+    /// so the ship rests on its feet deployed and the footprint tucks away when
+    /// retracted. Mass properties are held frozen deliberately — a leg's mass is
+    /// negligible against the stack, so re-deriving the tensor every fold-frame
+    /// would cost more than it's worth (and risk jitter). Offsets are stored
+    /// about the CoM, so we shift each incoming origin-relative offset by
+    /// `local_origin` (= −CoM).
+    pub fn resync_shape_geometry(&mut self, updates: &[(u64, Vec3, Quat)]) {
+        let lo = self.local_origin;
+        for (id, off_origin, rot) in updates {
+            if let Some(s) = self.shapes.iter_mut().find(|s| s.id == *id) {
+                s.offset = *off_origin + lo;
+                s.rot = *rot;
+            }
+        }
     }
 
     /// Sim-frame world center of one shape.
@@ -393,6 +421,33 @@ mod tests {
         assert!((c.inv_inertia_local.x_axis.x - want).abs() < 1e-4);
         assert!((c.inv_inertia_local.y_axis.y - want).abs() < 1e-4);
         assert_eq!(c.mass, 2.0);
+    }
+
+    #[test]
+    fn resync_shape_geometry_moves_collider_but_keeps_mass_props() {
+        // A hull + a light "foot". Re-posing the foot (a folding leg) must move
+        // its COLLIDER to the new spot while mass/inertia/origin stay put.
+        let authored = Vec3::new(0.0, 3.0, 0.0);
+        let hull = boxs(Vec3::ZERO, Vec3::splat(0.5), 5.0, 1);
+        let foot = boxs(Vec3::new(0.0, -1.0, 0.0), Vec3::splat(0.3), 0.15, 2);
+        let mut c = Compound::new(authored, Quat::IDENTITY, vec![hull, foot]);
+        let mass0 = c.mass;
+        let inertia0 = c.inv_inertia_local;
+        let origin0 = c.origin();
+        let fi = c.shapes.iter().position(|s| s.id == 2).unwrap();
+        assert!((c.shape_center(fi) - (origin0 + Vec3::new(0.0, -1.0, 0.0))).length() < 1e-4);
+        // Fold the foot out + down (a new offset about the assembly origin).
+        c.resync_shape_geometry(&[(2, Vec3::new(0.8, -1.4, 0.0), Quat::IDENTITY)]);
+        assert!(
+            (c.shape_center(fi) - (origin0 + Vec3::new(0.8, -1.4, 0.0))).length() < 1e-4,
+            "the foot collider follows the new pose"
+        );
+        assert_eq!(c.mass, mass0, "mass frozen across a resync");
+        assert!(
+            (c.inv_inertia_local.x_axis - inertia0.x_axis).length() < 1e-9,
+            "inertia frozen across a resync"
+        );
+        assert!((c.origin() - origin0).length() < 1e-6, "assembly origin stays put");
     }
 
     #[test]

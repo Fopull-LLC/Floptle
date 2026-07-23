@@ -1,0 +1,57 @@
+[
+    // SKIPPER — a heavier, higher-thrust engine in the SAME footprint as the Anvil
+    // (identical proven geometry/collider — only the copper hull colour + catalog
+    // stats differ), so it drops straight into any stack. hullPanels shader keeps
+    // it panelled, not flat.
+    (
+        name: "PartSkipper",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/rocket_baseA.glb",
+        ),
+        material: Some((
+            color: (0.5, 0.34, 0.22),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.5, 0.34, 0.22, 1.0),
+            },
+        )),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Kinematic,
+            radius: 0.5,
+            height: 2.0,
+            half_extents: (0.9, 0.8, 0.9),
+            restitution: 0.05,
+            friction: 0.6,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            mass: 2.4,
+        )),
+    ),
+    (
+        name: "Engine Flame",
+        transform: (
+            translation: (0.0, -0.85, 0.0),
+            rotation: (1.0, 0.0, 0.0, 0.0),
+            scale: (0.85, 0.6, 0.85),
+        ),
+        matter: PointLight(
+            color: (1.0, 0.6, 0.28),
+            intensity: 0.0,
+            range: 18.0,
+        ),
+        scripts: [],
+        particles: Some((
+            asset: "vfx/Flame",
+            play_on_start: false,
+        )),
+        parent: Some(0),
+    ),
+]

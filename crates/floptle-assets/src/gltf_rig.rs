@@ -75,7 +75,13 @@ pub struct SkinStream {
 /// static import instead).
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
-    if doc.animations().len() == 0 {
+    // Keep the rig if the file is animated OR merely skinned. A skinned-but-
+    // unanimated character (its rig authored elsewhere, its clips to be keyed
+    // IN-ENGINE via the Animating tab) must keep its skeleton so its bones are
+    // exposed and pose-able — otherwise it falls to the static bake, loses the
+    // rig, and shows no bones (the astronaut_male T-pose). Only a truly static
+    // prop (no animations AND no skin) uses the plain static importer.
+    if doc.animations().len() == 0 && doc.skins().len() == 0 {
         return Ok(None);
     }
 

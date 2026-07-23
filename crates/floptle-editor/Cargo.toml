@@ -41,3 +41,7 @@ egui_dock = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
 floptle-net = { path = "../floptle-net" }
+# Native file picker for asset import — the XDG desktop portal backend works on
+# Wayland (where winit delivers no file drops) as well as X11/Windows/macOS.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+tokio = { version = "1", features = ["rt", "net", "time"] }

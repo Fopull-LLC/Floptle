@@ -12,6 +12,10 @@
         shadow_quantize: 0,
         shadow_dither: false,
         shadow_distance: 120.0,
+        fog_color: (0.6, 0.65, 0.72),
+        fog_start: 40.0,
+        fog_end: 200.0,
+        fog_dither_strength: 0.5,
     ),
     nodes: [
         (
@@ -678,9 +682,9 @@
             parent: Some(37),
             ui: Some((
                 place: Free(
-                    pos: (18, 12),
+                    pos: (18.0, 12.0),
                 ),
-                size: (Fixed(500), Fixed(26)),
+                size: (Fixed(500.0), Fixed(26.0)),
                 text: Some((
                     text: "ASSEMBLY  ·  ship builder",
                     size: 19.0,
@@ -689,6 +693,8 @@
                     valign: Center,
                     fit: false,
                 )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -703,9 +709,9 @@
             parent: Some(37),
             ui: Some((
                 place: Free(
-                    pos: (18, 40),
+                    pos: (18.0, 40.0),
                 ),
-                size: (Fixed(600), Fixed(22)),
+                size: (Fixed(600.0), Fixed(22.0)),
                 text: Some((
                     text: "",
                     size: 15.0,
@@ -714,6 +720,8 @@
                     valign: Center,
                     fit: false,
                 )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -728,9 +736,9 @@
             parent: Some(37),
             ui: Some((
                 place: Free(
-                    pos: (18, 694),
+                    pos: (18.0, 694.0),
                 ),
-                size: (Fixed(1160), Fixed(20)),
+                size: (Fixed(1160.0), Fixed(20.0)),
                 text: Some((
                     text: "click part = pick up   ·   R rotate   ·   G grab ship   ·   DEL scrap   ·   CTRL+Z undo   ·   CTRL+S save   ·   RMB+WASD fly   ·   F focus",
                     size: 12.5,
@@ -739,6 +747,8 @@
                     valign: Center,
                     fit: false,
                 )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -756,13 +766,24 @@
                     anchor: Right,
                     offset: (-12.0, 0.0),
                 ),
-                size: (Fixed(190.0), Fixed(730.0)),
+                // A fixed, screen-fitting height with a SCROLL VIEW: the part
+                // buttons keep their authored column layout but scroll (wheel over
+                // the panel), so the catalogue holds ANY number of parts without
+                // running off the bottom of the screen. The "PARTS" title rides at
+                // the top of the content.
+                size: (Fixed(190.0), Fixed(600.0)),
+                scroll: Some((
+                    offset: 0.0,
+                    speed: 48.0,
+                )),
                 shape: Some((
                     fill: (0.05, 0.07, 0.1, 0.88),
                     radius: 10.0,
                     border: 1.0,
                     border_color: (0.35, 0.5, 0.62, 0.5),
                 )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -777,9 +798,9 @@
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (14, 10),
+                    pos: (14.0, 10.0),
                 ),
-                size: (Fixed(160), Fixed(20)),
+                size: (Fixed(160.0), Fixed(20.0)),
                 text: Some((
                     text: "PARTS",
                     size: 14.0,
@@ -788,6 +809,8 @@
                     valign: Center,
                     fit: false,
                 )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -802,15 +825,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 1.0)],
+                    params: [
+                        ("part", 1.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 38),
+                    pos: (12.0, 38.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -826,6 +851,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -840,15 +867,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 2.0)],
+                    params: [
+                        ("part", 2.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 90),
+                    pos: (12.0, 90.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -864,6 +893,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -878,15 +909,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 3.0)],
+                    params: [
+                        ("part", 3.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 142),
+                    pos: (12.0, 142.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -902,6 +935,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -916,15 +951,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 4.0)],
+                    params: [
+                        ("part", 4.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 194),
+                    pos: (12.0, 194.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -940,6 +977,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -954,15 +993,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 5.0)],
+                    params: [
+                        ("part", 5.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 246),
+                    pos: (12.0, 246.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -978,6 +1019,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -992,15 +1035,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 6.0)],
+                    params: [
+                        ("part", 6.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 298),
+                    pos: (12.0, 298.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1016,6 +1061,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1030,15 +1077,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 7.0)],
+                    params: [
+                        ("part", 7.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 350),
+                    pos: (12.0, 350.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1054,6 +1103,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1068,15 +1119,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 8.0)],
+                    params: [
+                        ("part", 8.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 402),
+                    pos: (12.0, 402.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1092,6 +1145,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1106,15 +1161,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 9.0)],
+                    params: [
+                        ("part", 9.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 454),
+                    pos: (12.0, 454.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1130,6 +1187,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1144,15 +1203,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 10.0)],
+                    params: [
+                        ("part", 10.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 506),
+                    pos: (12.0, 506.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1168,6 +1229,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1182,15 +1245,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 11.0)],
+                    params: [
+                        ("part", 11.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 558),
+                    pos: (12.0, 558.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1206,6 +1271,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1220,15 +1287,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 12.0)],
+                    params: [
+                        ("part", 12.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 610),
+                    pos: (12.0, 610.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1244,6 +1313,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1258,15 +1329,17 @@
                 (
                     kind: "catalog_button",
                     enabled: true,
-                    params: [("part", 13.0)],
+                    params: [
+                        ("part", 13.0),
+                    ],
                 ),
             ],
             parent: Some(41),
             ui: Some((
                 place: Free(
-                    pos: (12, 662),
+                    pos: (12.0, 662.0),
                 ),
-                size: (Fixed(166), Fixed(44)),
+                size: (Fixed(166.0), Fixed(44.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1282,6 +1355,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1329,15 +1404,17 @@
                 (
                     kind: "builder_hud_button",
                     enabled: true,
-                    params: [("action", 1.0)],
+                    params: [
+                        ("action", 1.0),
+                    ],
                 ),
             ],
             parent: Some(37),
             ui: Some((
                 place: Free(
-                    pos: (18, 620),
+                    pos: (18.0, 620.0),
                 ),
-                size: (Fixed(150), Fixed(46)),
+                size: (Fixed(150.0), Fixed(46.0)),
                 shape: Some((
                     fill: (0.1, 0.14, 0.18, 0.92),
                     radius: 7.0,
@@ -1353,6 +1430,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1367,15 +1446,17 @@
                 (
                     kind: "builder_hud_button",
                     enabled: true,
-                    params: [("action", 2.0)],
+                    params: [
+                        ("action", 2.0),
+                    ],
                 ),
             ],
             parent: Some(37),
             ui: Some((
                 place: Free(
-                    pos: (186, 620),
+                    pos: (186.0, 620.0),
                 ),
-                size: (Fixed(170), Fixed(46)),
+                size: (Fixed(170.0), Fixed(46.0)),
                 shape: Some((
                     fill: (0.13, 0.2, 0.12, 0.92),
                     radius: 7.0,
@@ -1391,6 +1472,8 @@
                     fit: false,
                 )),
                 button: true,
+                visible: true,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1912,6 +1995,154 @@
                     fit: false,
                 )),
                 visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Skybox",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Skybox(
+                color: (0.5, 0.5, 0.52),
+                size: 500.0,
+                tint: (1.0, 1.0, 1.0),
+            ),
+            scripts: [],
+        ),
+        // Catalogue button (part 14 = Solar Panel). APPENDED at the end of the
+        // nodes array on purpose: node ids here are POSITIONAL (array index), so
+        // inserting mid-array would shift every later id and break parent refs.
+        // Buttons are Free-positioned and parented by id, so trailing order is fine.
+        (
+            name: "Cat Solar Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [
+                        ("part", 14.0),
+                    ],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12.0, 714.0),
+                ),
+                size: (Fixed(166.0), Fixed(44.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Solar Panel",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        // Catalogue button (part 15 = Skipper engine). Appended at the end (node
+        // ids are POSITIONAL); the Catalogue panel now scrolls, so buttons past
+        // the old bottom are reachable by wheel.
+        (
+            name: "Cat Skipper",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [
+                        ("part", 15.0),
+                    ],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12.0, 758.0),
+                ),
+                size: (Fixed(166.0), Fixed(44.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Skipper",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        // Catalogue button (part 16 = Radial Tank).
+        (
+            name: "Cat Radial Tank",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [
+                        ("part", 16.0),
+                    ],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12.0, 802.0),
+                ),
+                size: (Fixed(166.0), Fixed(44.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.55, 0.65, 0.6),
+                )),
+                text: Some((
+                    text: "Radial Tank",
+                    size: 15.0,
+                    color: (0.8, 0.9, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
                 opacity: 1.0,
             )),
         ),

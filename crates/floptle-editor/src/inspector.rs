@@ -194,7 +194,7 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
 /// Widget rows for a shader's exposed uniforms (shared by fragment materials,
 /// Field Shape sdf shaders and the Skybox's sky shader): edits write into the
 /// given `params` map by uniform name (absent names use the shader default).
-fn shader_uniform_rows(
+pub(crate) fn shader_uniform_rows(
     ui: &mut egui::Ui,
     uniforms: &[floptle_shader::Uniform],
     params: &mut std::collections::BTreeMap<String, [f32; 4]>,
@@ -569,6 +569,8 @@ impl EditorTabViewer<'_> {
             let dur = self.anim_ui.clip_doc.as_ref().map(|(_, d)| d.duration).unwrap_or(0.0);
             ui.small(format!("⏺ keys at playhead {ph:.2}s / {dur:.2}s"));
             if changed {
+                // One undo step per edit gesture (no-op once already dirty).
+                crate::anim_ui::snapshot_clip(self.anim_ui);
                 if let Some((_, doc)) = self.anim_ui.clip_doc.as_mut() {
                     crate::anim_ui::write_key(doc, &bone_name, ph, &trs);
                 }
@@ -1919,7 +1921,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
-                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings) {
+                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings, self.ui_flsl_cache) {
                         cmd.inspector_changed = true;
                     }
                 }
