@@ -778,8 +778,11 @@ impl Editor {
                 .or_else(|| rig.rest_world.get(idx))
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
+            // Place the gizmo at the object's pivot (its joint), matching
+            // `bone_gizmo_target` — for a baked object the node origin is at the feet.
+            let pivot = rig.skeleton.nodes.get(idx).map(|n| n.pivot).unwrap_or(Vec3::ZERO);
             let world_m = floptle_core::world_transform(&self.world, mesh).world_matrix()
-                * bone_local.as_dmat4();
+                * (bone_local * Mat4::from_translation(pivot)).as_dmat4();
             Some(floptle_core::transform::Transform::from_matrix(world_m))
         });
         self.gizmo = build_gizmo(
@@ -1309,6 +1312,7 @@ impl Editor {
         let has_selection = !self.selection.is_empty();
         let selection = &mut self.selection;
         let bone_selection = &mut self.bone_selection;
+        let pivot_edit = &mut self.pivot_edit;
         let collapsed = &mut self.collapsed;
         let console = &mut self.console;
         let preview_zoom = &mut self.preview_zoom;
@@ -1895,6 +1899,7 @@ impl Editor {
                 ui_canvas: &ui_canvas_snapshot,
                 ref_kinds,
                 bone_selection,
+                pivot_edit,
                 fullscreen_tab,
                 collapsed,
                 bone_names: &bone_names,
@@ -4187,7 +4192,7 @@ impl Editor {
                             .collect();
                         let overrides =
                             crate::rig_overrides::RigOverrides::load(std::path::Path::new(&path));
-                        let rig = anim::rig_from_model(&model, &overrides.reparent);
+                        let rig = anim::rig_from_model(&model, &overrides);
                         self.mesh_registry.insert(
                             path.clone(),
                             MeshAsset { parts, size: model.size, rig: Some(rig) },
@@ -4754,6 +4759,9 @@ impl Editor {
             self.bone_selection = Some((mesh, idx));
             self.selection.clear();
             self.selected_asset = None;
+        }
+        if let Some((mesh, name, p)) = cmd.set_object_pivot {
+            self.apply_object_pivot(mesh, &name, Vec3::from(p));
         }
         if let Some((mesh, child, parent)) = cmd.set_object_parent {
             // Persist an object re-parent to the model's `.rig.ron` sidecar, then

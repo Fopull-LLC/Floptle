@@ -56,6 +56,10 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
         self.selection.clear();
+        // Entities are respawned, so a bone selection's (mesh entity, node idx) is stale
+        // — drop it (and the pivot-edit mode) so nothing dereferences the old handle.
+        self.bone_selection = None;
+        self.pivot_edit = false;
         self.grabbed = None;
         self.drag = None;
     }

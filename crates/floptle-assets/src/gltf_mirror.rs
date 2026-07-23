@@ -68,7 +68,13 @@ pub fn mirror_apply(model_path: &Path) -> Result<MirrorReport, ImportError> {
         let straddles = min_x < -eps && max_x > eps;
         let touches_plane = min_abs_x <= seam_eps;
 
-        if straddles {
+        // Idempotency: an object already produced by a previous mirror pass (its name
+        // ends in `.L`/`.R`) is one half of a pair that ALREADY exists in the model —
+        // re-splitting it just stacks a second overlapping copy on each side (the
+        // "duplicate limbs" bug from running Mirror-apply twice). Keep it as-is.
+        let already_mirrored =
+            o.name.ends_with(".L") || o.name.ends_with(".R") || o.name.ends_with(".l") || o.name.ends_with(".r");
+        if straddles || already_mirrored {
             report.kept.push(o.name.clone());
             out_nodes.push(WriteNode::mesh_node(o.name, o.mesh));
         } else if touches_plane {

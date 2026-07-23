@@ -54,6 +54,20 @@ impl TransformTRS {
     pub fn blend(a: &Self, b: &Self, k: f32) -> Self {
         Self { t: a.t.lerp(b.t, k), r: a.r.slerp(b.r, k), s: a.s.lerp(b.s, k) }
     }
+
+    /// Like [`Self::matrix`], but rotation and scale happen about `pivot` (a point
+    /// in this node's local space) instead of the node origin: `T(t)·T(pivot)·R·S·
+    /// T(-pivot)`. With `pivot = 0` this is exactly `matrix()`. This is what lets an
+    /// object whose mesh sits far from its origin (an N64-style forearm baked in
+    /// model space) rotate about a chosen joint — the pivot point stays put as the
+    /// rotation changes, and the rest pose is unaffected.
+    pub fn matrix_about(&self, pivot: Vec3) -> Mat4 {
+        if pivot == Vec3::ZERO {
+            return self.matrix();
+        }
+        let rs = Mat4::from_scale_rotation_translation(self.s, self.r, Vec3::ZERO);
+        Mat4::from_translation(self.t + pivot) * rs * Mat4::from_translation(-pivot)
+    }
 }
 
 /// One node of an animated hierarchy. Topologically sorted (parent index <
@@ -64,6 +78,12 @@ pub struct SkelNode {
     pub parent: Option<usize>,
     /// Rest-pose local TRS — the fallback for nodes a clip doesn't animate.
     pub rest: TransformTRS,
+    /// The point (this node's local space) that rotation/scale pivot around — the
+    /// object's "joint". `ZERO` = the node origin (the default for rigged bones,
+    /// whose origin already IS the joint). Editor-authored for baked object models
+    /// (see the `.rig.ron` pivot overrides); ignored by clips (it only reshapes how
+    /// a pose composes, never what's keyed).
+    pub pivot: Vec3,
 }
 
 /// A model's animated node hierarchy, shared by every instance of the model.
@@ -107,7 +127,7 @@ impl Skeleton {
         out.clear();
         out.reserve(self.nodes.len());
         for (i, n) in self.nodes.iter().enumerate() {
-            let local = pose.get(i).unwrap_or(&n.rest).matrix();
+            let local = pose.get(i).unwrap_or(&n.rest).matrix_about(n.pivot);
             let m = match n.parent {
                 Some(p) => out[p] * local,
                 None => local,
@@ -1077,13 +1097,35 @@ fn smoothstep(k: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn matrix_about_pivot_keeps_pivot_fixed_and_orbits_the_rest() {
+        // A 90° turn about Z, pivoting on (2,0,0). The pivot point must stay put;
+        // a point offset from it must swing around it. (t = 0.)
+        let trs = TransformTRS {
+            t: Vec3::ZERO,
+            r: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            s: Vec3::ONE,
+        };
+        let pivot = Vec3::new(2.0, 0.0, 0.0);
+        let m = trs.matrix_about(pivot);
+        let fixed = m.transform_point3(pivot);
+        assert!((fixed - pivot).length() < 1e-5, "pivot moved: {fixed}");
+        // The point one unit +X of the pivot (3,0,0) swings to +Y of the pivot (2,1,0).
+        let swung = m.transform_point3(Vec3::new(3.0, 0.0, 0.0));
+        assert!((swung - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-5, "expected (2,1,0), got {swung}");
+        // pivot = ZERO must be identical to plain matrix().
+        let plain = TransformTRS { t: Vec3::new(1.0, 2.0, 3.0), ..trs };
+        assert_eq!(plain.matrix_about(Vec3::ZERO), plain.matrix());
+    }
+
     fn skel2() -> Skeleton {
         Skeleton::new(vec![
-            SkelNode { name: "Root".into(), parent: None, rest: TransformTRS::IDENTITY },
+            SkelNode { name: "Root".into(), parent: None, rest: TransformTRS::IDENTITY, pivot: Vec3::ZERO },
             SkelNode {
                 name: "Arm".into(),
                 parent: Some(0),
                 rest: TransformTRS { t: Vec3::new(0.0, 1.0, 0.0), ..TransformTRS::IDENTITY },
+                pivot: Vec3::ZERO,
             },
         ])
     }

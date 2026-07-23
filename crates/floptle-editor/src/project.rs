@@ -185,6 +185,12 @@ impl Editor {
         }
         // The registry stays keyed by the ref as WRITTEN; only the fs read resolves.
         let file = resolve_asset_path(&self.project_root, path);
+        // A missing file (e.g. a model deleted while still referenced by a VFX effect or
+        // a scene node) must NOT be re-attempted + error-logged every frame — bail on the
+        // cheap existence check. It re-imports for free if the file comes back.
+        if !file.exists() {
+            return false;
+        }
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
             return false;
         };
@@ -198,7 +204,7 @@ impl Editor {
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
                 let overrides = crate::rig_overrides::RigOverrides::load(&file);
-                let rig = anim::rig_from_model(&model, &overrides.reparent);
+                let rig = anim::rig_from_model(&model, &overrides);
                 let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(
@@ -669,6 +675,41 @@ impl Editor {
                 self.selected_asset = None;
             }
             self.asset_selection.retain(|s| s != path);
+
+            // Drop editor state that referenced the deleted file, so nothing re-imports
+            // it, re-saves it (resurrecting the file on disk), or keeps animating against
+            // a now-missing asset — the delete-while-animating hang/crash. Registry keys
+            // and clip keys are project-relative, so relativize the (absolute) path.
+            if let Ok(rel) = p.strip_prefix(&self.project_root)
+                && let Some(rel) = rel.to_str()
+            {
+                self.mesh_registry.remove(rel); // model asset (a Matter::Mesh ref)
+                let clip_key = rel.strip_suffix(floptle_scene::ANIM_CLIP_EXT); // a `.anim.ron` clip
+                if let Some(ck) = clip_key {
+                    self.anim.clips.retain(|(k, _)| k != ck);
+                    // Stop the Animating tab from re-saving (and resurrecting) this clip.
+                    if self.anim_ui.clip_doc.as_ref().map(|(k, _)| k.as_str()) == Some(ck) {
+                        self.anim_ui.clip_doc = None;
+                        self.anim_ui.clip_dirty = false;
+                        self.anim_ui.sel_anim = None;
+                    }
+                }
+                // A deleted MODEL: clear a bone/object selection or anim target riding it,
+                // then rebind everything fresh (orphaned instances simply drop).
+                let rides_deleted = |e| {
+                    matches!(self.world.get::<Matter>(e), Some(Matter::Mesh { asset_path }) if asset_path == rel)
+                };
+                if self.bone_selection.map(|(m, _)| rides_deleted(m)).unwrap_or(false) {
+                    self.bone_selection = None;
+                    self.pivot_edit = false;
+                }
+                if self.anim_ui.target.map(rides_deleted).unwrap_or(false) {
+                    self.anim_ui.target = None;
+                    self.anim_ui.clip_doc = None;
+                    self.anim_ui.clip_dirty = false;
+                }
+                self.anim.clear_instances();
+            }
         }
         self.asset_tree = build_assets(&self.project_root);
     }
