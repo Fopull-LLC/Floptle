@@ -71,17 +71,24 @@ pub struct SkinStream {
     pub inverse_bind: Vec<Mat4>,
 }
 
-/// Import a `.glb`/`.gltf` keeping its rig. `None` = no animations (use the
-/// static import instead).
+/// Import a `.glb`/`.gltf` keeping its node structure. `None` = a single-object
+/// static prop with no rig (use the flattening static import instead).
+///
+/// We keep the tree when the model is animated, skinned, OR made of more than one
+/// mesh object (an N64-style character split into body-part meshes). In every
+/// case each mesh stays in its node's local space, the whole node tree becomes a
+/// [`Skeleton`], and the model's objects/bones are individually addressable,
+/// pose-able and keyframe-able — the static bake would merge them per-material
+/// and throw the identities away. Only a lone single-mesh prop (nothing to parent
+/// or animate independently) takes the cheaper flattening path.
 pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
     let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
-    // Keep the rig if the file is animated OR merely skinned. A skinned-but-
-    // unanimated character (its rig authored elsewhere, its clips to be keyed
-    // IN-ENGINE via the Animating tab) must keep its skeleton so its bones are
-    // exposed and pose-able — otherwise it falls to the static bake, loses the
-    // rig, and shows no bones (the astronaut_male T-pose). Only a truly static
-    // prop (no animations AND no skin) uses the plain static importer.
-    if doc.animations().len() == 0 && doc.skins().len() == 0 {
+    // Keep the structure if the file is animated OR skinned (a rig authored
+    // elsewhere, clips to be keyed IN-ENGINE — the astronaut_male case) OR it has
+    // two or more mesh objects (the multi-part unrigged character — Sae). A single
+    // mesh with no rig has no sub-objects to expose, so it stays a plain baked prop.
+    let mesh_objects = doc.nodes().filter(|n| n.mesh().is_some()).count();
+    if doc.animations().len() == 0 && doc.skins().len() == 0 && mesh_objects < 2 {
         return Ok(None);
     }
 

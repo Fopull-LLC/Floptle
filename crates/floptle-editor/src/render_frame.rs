@@ -1261,7 +1261,7 @@ impl Editor {
         // Bone names per rigged Mesh entity (name + parent index) — for the hierarchy's
         // expandable sub-objects and the inspector's bone-attach picker. Built read-only
         // before the borrow split so the UI never touches the mesh registry itself.
-        let bone_names: HashMap<Entity, Vec<(String, Option<usize>)>> = self
+        let bone_names: HashMap<Entity, Vec<crate::RigNode>> = self
             .world
             .query::<Matter>()
             .filter_map(|(e, m)| match m {
@@ -1270,7 +1270,18 @@ impl Editor {
                     .get(asset_path)
                     .and_then(|a| a.rig.as_ref())
                     .map(|rig| {
-                        (e, rig.skeleton.nodes.iter().map(|n| (n.name.clone(), n.parent)).collect())
+                        let nodes = rig
+                            .skeleton
+                            .nodes
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| crate::RigNode {
+                                name: n.name.clone(),
+                                parent: n.parent,
+                                is_object: rig.node_is_object.get(i).copied().unwrap_or(true),
+                            })
+                            .collect();
+                        (e, nodes)
                     }),
                 _ => None,
             })
@@ -4174,7 +4185,9 @@ impl Editor {
                             .iter()
                             .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                             .collect();
-                        let rig = anim::rig_from_model(&model);
+                        let overrides =
+                            crate::rig_overrides::RigOverrides::load(std::path::Path::new(&path));
+                        let rig = anim::rig_from_model(&model, &overrides.reparent);
                         self.mesh_registry.insert(
                             path.clone(),
                             MeshAsset { parts, size: model.size, rig: Some(rig) },
@@ -4734,6 +4747,104 @@ impl Editor {
             }
         if let Some(path) = cmd.extract_textures {
             self.extract_textures(&path);
+        }
+        if let Some((mesh, idx)) = cmd.select_bone {
+            // Select a model object/bone from the Inspector's Objects & Rig lists —
+            // mutually exclusive with node/asset selection (like the Hierarchy tree).
+            self.bone_selection = Some((mesh, idx));
+            self.selection.clear();
+            self.selected_asset = None;
+        }
+        if let Some((mesh, child, parent)) = cmd.set_object_parent {
+            // Persist an object re-parent to the model's `.rig.ron` sidecar, then
+            // re-import the model so the new hierarchy takes effect live and every
+            // instance rebinds against the reordered skeleton.
+            if let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() {
+                let abs = self.resolve_asset_path(&asset_path);
+                let mut ov = crate::rig_overrides::RigOverrides::load(&abs);
+                // "" = model root (an explicit reparent-to-root, distinct from absent).
+                ov.reparent.insert(child, parent.unwrap_or_default());
+                if let Err(e) = ov.save(&abs) {
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("save rig override failed: {e}"),
+                        None,
+                    );
+                }
+                self.mesh_registry.remove(&asset_path);
+                self.import_model(&asset_path);
+                self.anim.revision += 1; // force every instance to rebind
+                self.bone_selection = None; // node indices changed after the re-sort
+            }
+        }
+        if let Some(mesh) = cmd.mirror_model
+            && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
+        {
+            let abs = self.resolve_asset_path(&asset_path);
+            match floptle_assets::mirror_apply(&abs) {
+                Ok(r) => {
+                    // Carry any object re-parenting onto the mirrored model (same node
+                    // names), so the sidecar keeps working after the bake.
+                    let src_side = crate::rig_overrides::RigOverrides::sidecar_path(&abs);
+                    if src_side.exists() {
+                        let _ = std::fs::copy(
+                            &src_side,
+                            crate::rig_overrides::RigOverrides::sidecar_path(&r.output),
+                        );
+                    }
+                    let rel = r
+                        .output
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let split: Vec<String> =
+                        r.split.iter().map(|(l, _)| l.trim_end_matches(".L").trim_end_matches(".R").to_string()).collect();
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "Mirror-apply → {rel}  ·  welded {:?}  ·  split L/R {:?}  ·  kept {:?}  \
+                             (assign the new model in the Inspector to use it)",
+                            r.welded, split, r.kept
+                        ),
+                        None,
+                    );
+                    self.asset_tree = build_assets(&self.project_root);
+                }
+                Err(e) => self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("Mirror-apply failed: {e}"),
+                    None,
+                ),
+            }
+        }
+        if let Some((mesh, object)) = cmd.add_hair_rig
+            && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
+        {
+            let abs = self.resolve_asset_path(&asset_path);
+            match floptle_assets::add_flow_rig(&abs, &object, 5) {
+                Ok(r) => {
+                    let rel = r
+                        .output
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "Flow-rig → {rel}  ·  {} got a {}-bone chain  \
+                             (assign the new model, then pose the {}_root chain to make it flow)",
+                            r.object, r.bones, r.object
+                        ),
+                        None,
+                    );
+                    self.asset_tree = build_assets(&self.project_root);
+                }
+                Err(e) => self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("Flow-rig failed: {e}"),
+                    None,
+                ),
+            }
         }
         if let Some(path) = cmd.extract_anims {
             self.anim_ui.probes.remove(&path); // refresh the model's clip list

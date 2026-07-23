@@ -16,7 +16,7 @@
 //! - **Extraction** — bake a model's embedded glTF clips into standalone
 //!   `.anim.ron` files under `assets/animations/<Model>/`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use floptle_anim::{
@@ -52,6 +52,14 @@ pub struct RigAsset {
     /// the draw path CPU-deforms each frame; `None` for a rigid-parented part (drawn at
     /// its node matrix, R6-style). This is what makes a skinned character actually move.
     pub skins: Vec<Option<SkinnedPart>>,
+    /// Per SKELETON node (parallel to `skeleton.nodes`): `true` if the node renders
+    /// geometry — an **object** / mesh sub-object (Sae's `Forearm`, a character's mesh
+    /// part); `false` if it's a structural / skin-joint node — a **bone** of the rig
+    /// (an armature joint, an empty). Objects and bones are both pose-able skeleton
+    /// nodes keyframed the same way; this only tells the UI how to group + label them
+    /// (the "Objects" vs "Bones" lists). A skinned mesh whose own node also deforms
+    /// counts as an object (it has geometry).
+    pub node_is_object: Vec<bool>,
 }
 
 /// CPU vertex-skinning data for one part: the bind-pose vertices plus everything needed
@@ -1328,33 +1336,154 @@ pub fn apply_commands(
 
 /// Load a rigged model into a `RigAsset` + return its parts for registration.
 /// Called from `import_model` when the static importer defers to the rig path.
-pub fn rig_from_model(model: &floptle_assets::RiggedModel) -> RigAsset {
+pub fn rig_from_model(
+    model: &floptle_assets::RiggedModel,
+    reparent: &BTreeMap<String, String>,
+) -> RigAsset {
+    // Apply any per-model re-parenting (the `.rig.ron` sidecar) up front: it
+    // reorders + reindexes the skeleton, so every node reference we build below
+    // (parts, skin joints, clip channels) is threaded through the old→new remap.
+    let mut skeleton = model.skeleton.clone();
+    let mut part_nodes: Vec<usize> = model.parts.iter().map(|p| p.node).collect();
+    let remap = (!reparent.is_empty()).then(|| apply_reparent(&mut skeleton, reparent));
+    if let Some(rm) = &remap {
+        for pn in part_nodes.iter_mut() {
+            *pn = rm[*pn];
+        }
+    }
+
     let offset = Mat4::from_translation(-Vec3::from(model.center));
     let mut rest_world = Vec::new();
-    model.skeleton.world_matrices(&model.skeleton.rest_pose(), &mut rest_world);
+    skeleton.world_matrices(&skeleton.rest_pose(), &mut rest_world);
     for m in rest_world.iter_mut() {
         *m = offset * *m;
     }
-    RigAsset {
-        skeleton: model.skeleton.clone(),
-        clips: model.clips.clone(),
-        part_nodes: model.parts.iter().map(|p| p.node).collect(),
-        rest_world,
-        offset,
-        skins: model
-            .parts
-            .iter()
-            .map(|p| {
-                p.skin.as_ref().map(|s| SkinnedPart {
-                    base: p.mesh.vertices.clone(),
-                    joints: s.joints.clone(),
-                    weights: s.weights.clone(),
-                    joint_nodes: s.joint_nodes.clone(),
-                    inverse_bind: s.inverse_bind.clone(),
-                })
-            })
-            .collect(),
+    // Classify every skeleton node: a node that any render part lives on renders
+    // geometry → it's an "object"; everything else (armature joints, empties) is a
+    // "bone" of the rig. Both are keyframed identically — this only drives the UI's
+    // Objects/Bones grouping.
+    let mut node_is_object = vec![false; skeleton.nodes.len()];
+    for &pn in &part_nodes {
+        if let Some(flag) = node_is_object.get_mut(pn) {
+            *flag = true;
+        }
     }
+    // Embedded clips bind channels by index — remap them onto the reordered skeleton.
+    let mut clips = model.clips.clone();
+    if let Some(rm) = &remap {
+        for clip in clips.iter_mut() {
+            for ch in clip.channels.iter_mut() {
+                ch.node = rm[ch.node];
+            }
+            clip.channels.sort_by_key(|c| c.node);
+        }
+    }
+    let skins = model
+        .parts
+        .iter()
+        .map(|p| {
+            p.skin.as_ref().map(|s| SkinnedPart {
+                base: p.mesh.vertices.clone(),
+                joints: s.joints.clone(),
+                weights: s.weights.clone(),
+                joint_nodes: match &remap {
+                    Some(rm) => s.joint_nodes.iter().map(|&j| rm[j]).collect(),
+                    None => s.joint_nodes.clone(),
+                },
+                inverse_bind: s.inverse_bind.clone(),
+            })
+        })
+        .collect();
+    RigAsset { skeleton, clips, part_nodes, rest_world, offset, node_is_object, skins }
+}
+
+/// Re-parent nodes in `skel` per the overrides (child name → new parent name;
+/// empty/unknown parent = model root), keeping every node visually in place
+/// (recomputing its local rest as `inv(new_parent_world) · own_world`), then
+/// re-topo-sorting so parent index < child index (the [`Skeleton`] invariant).
+/// Returns the old→new index remap so callers can fix every node reference
+/// (parts, skin joints, clip channels). Cycles and self-parents are skipped.
+fn apply_reparent(skel: &mut Skeleton, reparent: &BTreeMap<String, String>) -> Vec<usize> {
+    let n = skel.nodes.len();
+    let mut world = Vec::new();
+    skel.world_matrices(&skel.rest_pose(), &mut world);
+
+    let mut parent: Vec<Option<usize>> = skel.nodes.iter().map(|nn| nn.parent).collect();
+    // Is `node` a descendant of `ancestor` under the (in-progress) parent table?
+    let is_desc = |parent: &[Option<usize>], mut node: usize, ancestor: usize| -> bool {
+        let mut guard = 0;
+        while let Some(p) = parent[node] {
+            if p == ancestor {
+                return true;
+            }
+            node = p;
+            guard += 1;
+            if guard > n {
+                return true; // treat an existing cycle as "would loop" — refuse
+            }
+        }
+        false
+    };
+    for (child, par) in reparent {
+        let Some(ci) = skel.index_of(child) else { continue };
+        let pi = if par.is_empty() { None } else { skel.index_of(par) };
+        if let Some(p) = pi
+            && (p == ci || is_desc(&parent, p, ci))
+        {
+            continue; // no self-parent, no cycle
+        }
+        parent[ci] = pi;
+    }
+    // Keep-in-place: recompute the local rest of every node whose parent changed.
+    for i in 0..n {
+        if parent[i] != skel.nodes[i].parent {
+            let pw = parent[i].map(|p| world[p]).unwrap_or(Mat4::IDENTITY);
+            let local = pw.inverse() * world[i];
+            skel.nodes[i].rest = TransformTRS::from_matrix(local);
+        }
+    }
+    for (node, &p) in skel.nodes.iter_mut().zip(&parent) {
+        node.parent = p;
+    }
+    // Topo-sort: emit a node once its parent is already emitted (parent-first).
+    let mut new_idx = vec![0usize; n];
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while order.len() < n {
+        let mut progressed = false;
+        for i in 0..n {
+            if placed[i] {
+                continue;
+            }
+            let ready = skel.nodes[i].parent.is_none_or(|p| placed[p]);
+            if ready {
+                new_idx[i] = order.len();
+                order.push(i);
+                placed[i] = true;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            // Defensive: a residual cycle — flush the rest in original order.
+            for i in 0..n {
+                if !placed[i] {
+                    new_idx[i] = order.len();
+                    order.push(i);
+                    placed[i] = true;
+                }
+            }
+            break;
+        }
+    }
+    let mut slots: Vec<Option<SkelNode>> = std::mem::take(&mut skel.nodes).into_iter().map(Some).collect();
+    let mut new_nodes: Vec<SkelNode> = Vec::with_capacity(n);
+    for &old in &order {
+        let mut sn = slots[old].take().unwrap();
+        sn.parent = sn.parent.map(|p| new_idx[p]);
+        new_nodes.push(sn);
+    }
+    *skel = Skeleton::new(new_nodes);
+    new_idx
 }
 
 /// A fresh controller asset key in `dir_rel` (project-relative), defaulting to
@@ -1661,7 +1790,7 @@ mod tests {
         let model = floptle_assets::import_rigged(&glb)
             .expect("import_rigged ok")
             .expect("character_retro.glb carries a rig + clips");
-        let rig = rig_from_model(&model);
+        let rig = rig_from_model(&model, &BTreeMap::new());
 
         let mut sys = AnimSystem::default();
         sys.rescan(&solar);
@@ -1697,5 +1826,51 @@ mod tests {
             moved > 1e-3,
             "the bound controller produced NO rig motion (bind pose = the T-pose); max delta {moved}"
         );
+    }
+
+    /// Re-parenting an object within a model (the `.rig.ron` override) must keep it
+    /// visually in place and preserve the `Skeleton` topo-order (parent < child), so
+    /// posing the new parent carries the child without teleporting it. Uses the Sae
+    /// multi-object model; skips if the solar assets aren't present.
+    #[test]
+    fn reparent_keeps_object_in_place_and_topo_sorted() {
+        use std::path::Path;
+        let solar = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar");
+        let glb = solar.join("models/Sae.glb");
+        if !glb.exists() {
+            eprintln!("Sae model absent — skipping reparent regression");
+            return;
+        }
+        let model = floptle_assets::import_rigged(&glb)
+            .expect("import")
+            .expect("multi-object model kept its structure");
+
+        let base = rig_from_model(&model, &BTreeMap::new());
+        let fi = base.skeleton.index_of("Forearm").expect("Forearm object");
+        let before = base.rest_world[fi].to_scale_rotation_translation().2;
+
+        let mut rp = BTreeMap::new();
+        rp.insert("Forearm".to_string(), "Soulder".to_string());
+        rp.insert("Hand".to_string(), "Forearm".to_string()); // a chain, to exercise the re-sort
+        let re = rig_from_model(&model, &rp);
+
+        let si = re.skeleton.index_of("Soulder").expect("Soulder");
+        let fi2 = re.skeleton.index_of("Forearm").expect("Forearm");
+        let hi = re.skeleton.index_of("Hand").expect("Hand");
+        assert_eq!(re.skeleton.nodes[fi2].parent, Some(si), "Forearm now under Soulder");
+        assert_eq!(re.skeleton.nodes[hi].parent, Some(fi2), "Hand now under Forearm");
+        assert!(si < fi2 && fi2 < hi, "parents must precede children after the re-sort");
+
+        let after = re.rest_world[fi2].to_scale_rotation_translation().2;
+        assert!(
+            (before - after).length() < 1e-3,
+            "re-parented Forearm must not move: {before} -> {after}"
+        );
+        // The part that renders "Forearm" must still point at the Forearm node.
+        let forearm_part = re
+            .part_nodes
+            .iter()
+            .find(|&&pn| re.skeleton.nodes[pn].name == "Forearm");
+        assert_eq!(forearm_part, Some(&fi2), "part→node remap survived the re-sort");
     }
 }

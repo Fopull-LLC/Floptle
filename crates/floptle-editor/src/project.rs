@@ -197,7 +197,8 @@ impl Editor {
                     .iter()
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
-                let rig = anim::rig_from_model(&model);
+                let overrides = crate::rig_overrides::RigOverrides::load(&file);
+                let rig = anim::rig_from_model(&model, &overrides.reparent);
                 let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(

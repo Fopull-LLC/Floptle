@@ -12,11 +12,17 @@
 //! - `material`    : the material asset (shader ref + params + textures). *(TODO)*
 //! - `db`          : asset database (stable ids, hot-reload, dependency graph). *(TODO)*
 
+pub mod auto_rig;
+pub mod glb_write;
 pub mod gltf_import;
+pub mod gltf_mirror;
 pub mod gltf_rig;
 pub mod texture;
 
+pub use auto_rig::{add_flow_rig, RigReport};
+pub use glb_write::{write_glb, WriteMesh, WriteNode, WriteSkin};
 pub use gltf_import::{import, ImportError, ImportedModel};
+pub use gltf_mirror::{mirror_apply, MirrorReport};
 pub use gltf_rig::{import_rigged, probe_animations, RiggedModel, RiggedPart};
 pub use texture::{
     decode_png, encode_png, load_texture, load_texture_sized, load_texture_sized_filtered,

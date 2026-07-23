@@ -371,35 +371,43 @@ impl EditorTabViewer<'_> {
                 }
             }
 
-        // A rigged mesh's bones/sub-objects, shown as a read-only tree of attach
-        // targets (indented by skeleton depth) — select a node and pick one in the
-        // Inspector's 🔗 Bone attachment to ride it.
+        // A model's structure — its objects (mesh sub-objects) and bones (rig joints)
+        // — shown as a read-only tree (indented by skeleton depth). Select a node to
+        // pose/keyframe it in the Inspector, or (for a child parented to this mesh)
+        // pick one in the Inspector's 🔗 Bone attachment to ride it. Objects carry ◈,
+        // bones 🔗, so a mixed rig reads at a glance.
         if !self.collapsed.contains(&e)
             && let Some(bones) = self.bone_names.get(&e)
         {
             let mut bdepth = vec![0usize; bones.len()];
-            for (i, (_, parent)) in bones.iter().enumerate() {
-                bdepth[i] = parent.map_or(0, |p| bdepth.get(p).copied().unwrap_or(0) + 1);
+            for (i, n) in bones.iter().enumerate() {
+                bdepth[i] = n.parent.map_or(0, |p| bdepth.get(p).copied().unwrap_or(0) + 1);
             }
-            for (i, (bname, _)) in bones.iter().enumerate() {
+            for (i, node) in bones.iter().enumerate() {
                 let sel = *self.bone_selection == Some((e, i));
+                let (icon, hover) = if node.is_object {
+                    ("◈", "model object (mesh sub-object) — click to select + pose/keyframe it in the Inspector")
+                } else {
+                    ("🔗", "rig bone — click to select + pose/keyframe it in the Inspector")
+                };
+                let label = format!("{icon} {}", node.name);
                 let resp = ui
                     .horizontal(|ui| {
                         ui.add_space((depth + 1 + bdepth[i]) as f32 * 14.0 + 12.0);
                         let text = if sel {
-                            egui::RichText::new(format!("🔗 {bname}"))
+                            egui::RichText::new(&label)
                                 .strong()
                                 .color(ui.visuals().selection.stroke.color)
                         } else {
-                            egui::RichText::new(format!("🔗 {bname}")).weak()
+                            egui::RichText::new(&label).weak()
                         };
                         ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click()))
-                            .on_hover_text("armature bone — click to select + edit/keyframe its transform in the Inspector")
+                            .on_hover_text(hover)
                     })
                     .inner;
                 if resp.clicked() {
-                    // Selecting a bone clears the node/asset selection so the Inspector
-                    // switches to the bone editor (they're mutually exclusive).
+                    // Selecting a node clears the node/asset selection so the Inspector
+                    // switches to the object/bone editor (they're mutually exclusive).
                     *self.bone_selection = Some((e, i));
                     self.selection.clear();
                     *self.selected_asset = None;
