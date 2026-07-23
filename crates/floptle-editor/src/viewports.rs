@@ -527,6 +527,15 @@ impl Editor {
                     &mut ui_batches,
                 );
             }
+            // Capture the composited scene (now in `cv`, before the UI draws on
+            // top) into the backdrop, so `backdrop()` UI shaders can frost it.
+            {
+                let mut enc = gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") });
+                uir.capture_backdrop(gpu, &mut enc, &cv, w.max(1), h.max(1));
+                gpu.queue.submit(Some(enc.finish()));
+            }
             uir.draw(gpu, &cv, vp, &ui_instances, &ui_batches, raster);
         }
     }

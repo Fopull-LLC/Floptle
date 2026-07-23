@@ -68,6 +68,11 @@ const FRAG: &[Stage] = &[Stage::Fragment];
 const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky, Stage::Ui];
 // Fragment + Sky + Ui (color helpers; no field position needed).
 const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky, Stage::Ui];
+// Fragment + Ui: texture sampling (a UI element's own image is bound like a
+// material texture, so the same ops read it).
+const FRAGUI: &[Stage] = &[Stage::Fragment, Stage::Ui];
+// Ui only: the backdrop (scene behind the UI layer) exists only in the UI pass.
+const UIONLY: &[Stage] = &[Stage::Ui];
 
 const F: SigTy = SigTy::Exact(Ty::Float);
 const V2: SigTy = SigTy::Exact(Ty::Vec2);
@@ -126,7 +131,8 @@ pub static OPS: &[OpSpec] = &[
     // ---- texture -----------------------------------------------------------
     OpSpec { name: "sample", inputs: &[req("tex", SigTy::Texture), req("uv", V2)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Sample a declared texture slot (honors the slot's tiling block from the material).", category: "texture" },
     OpSpec { name: "sampleTriplanar", inputs: &[req("tex", SigTy::Texture), req("p", V3), req("n", V3)], output: V4, stages: FRAG, emit: Emit::Special, doc: "Project a slot's texture from three axes, blended by the normal — clean tiling with no UVs (scale/blend come from the slot's tiling block).", category: "texture" },
-    OpSpec { name: "baseTexture", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAG, emit: Emit::Special, doc: "The node's own base-color texture, through the material's tiling (pass a uv to sample it raw somewhere else).", category: "texture" },
+    OpSpec { name: "baseTexture", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: FRAGUI, emit: Emit::Special, doc: "In a material: the node's own base-color texture through its tiling. In a UI shader: the element's own image (pass a uv, or omit for the element's 0..1 rect UV).", category: "texture" },
+    OpSpec { name: "backdrop", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: UIONLY, emit: Emit::Special, doc: "UI only: the (blurred) scene BEHIND this UI layer — frosted glass / refraction. Sample at `uv` (0..1 across the screen for this element's pixel) or omit for this pixel's screen position; offset the uv to refract.", category: "texture" },
 
     // ---- sdf ---------------------------------------------------------------
     OpSpec { name: "sphere", inputs: &[req("p", V3), opt("radius", F, 1.0)], output: F, stages: BOTH, emit: Emit::Fn("flsl_sd_sphere"), doc: "Distance to a sphere at the origin.", category: "sdf" },

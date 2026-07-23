@@ -3008,6 +3008,9 @@ impl Editor {
                                 &mut ui_batches,
                             );
                         }
+                        // World panels don't use the screen backdrop; ensure no
+                        // stale capture leaks in.
+                        uir.clear_backdrop();
                         uir.draw_world(
                             gpu,
                             color,
@@ -3095,6 +3098,30 @@ impl Editor {
                 // in retro mode the chain outputs into the retro color target so
                 // the nearest-neighbor blit carries the finished effects up with
                 // the same chunky pixels as the scene.
+                // Capture the composited scene into the UI backdrop BEFORE post
+                // consumes it, so frosted-glass UI (`backdrop()`) works in
+                // fullscreen/player. Only the post-on, non-retro path has a
+                // sampleable offscreen (`post.input_view()`); otherwise clear the
+                // backdrop so `backdrop()` reads black rather than a stale capture.
+                if !ui_layers.is_empty()
+                    && let Some(uir) = self.ui_render.as_mut()
+                {
+                    if post_on && !self.project.retro {
+                        let mut enc = gpu.device.create_command_encoder(
+                            &wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") },
+                        );
+                        uir.capture_backdrop(
+                            gpu,
+                            &mut enc,
+                            post.input_view(),
+                            gpu.config.width,
+                            gpu.config.height,
+                        );
+                        gpu.queue.submit(Some(enc.finish()));
+                    } else {
+                        uir.clear_backdrop();
+                    }
+                }
                 if post_on {
                     let proj = cam.proj_matrix(aspect);
                     let ssao_frame = floptle_render::SsaoFrame {
@@ -3136,6 +3163,9 @@ impl Editor {
                             &mut ui_batches,
                         );
                     }
+                    // Backdrop for frosted-glass UI was captured before post ran
+                    // (post-on path); if there was no sampleable source it was
+                    // cleared to black. Draw the UI over the finished frame.
                     uir.draw(gpu, &frame.view, vp, &ui_instances, &ui_batches, raster);
                 }
 

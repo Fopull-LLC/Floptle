@@ -141,10 +141,44 @@ pub struct Ui {
     shader_binds: Vec<UiShaderBinding>,
     /// Scene time uploaded into `Globals.viewport.w` (the `time` input).
     time: f32,
+    /// Sampler for the backdrop (linear, clamped) — the `backdrop()` op.
+    backdrop_sampler: wgpu::Sampler,
+    /// group(3) bind for `backdrop()` holding the captured scene, valid only
+    /// when `has_backdrop` is set (otherwise `backdrop_default_bind` is used).
+    backdrop_bind: wgpu::BindGroup,
+    /// A 1×1 black fallback bind — used whenever no capture is active this frame,
+    /// so `backdrop()` reads black instead of a stale scene.
+    backdrop_default_bind: wgpu::BindGroup,
+    /// Whether `backdrop_bind` holds a real capture for this frame's draw.
+    has_backdrop: bool,
+    /// Fullscreen blit that copies the composited scene into `backdrop_target`.
+    capture_pipeline: wgpu::RenderPipeline,
+    /// The backdrop capture target (texture, view, w, h) — lazily (re)created to
+    /// match the viewport, reused across frames.
+    backdrop_target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
 }
 
 const QUAD_VERTS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 const QUAD_INDICES: [u16; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Fullscreen-triangle blit used to CAPTURE the composited scene into the
+/// backdrop texture (so `backdrop()` in UI shaders can read the scene behind the
+/// layer). group(0) = the source texture + sampler (the `tex_layout` shape).
+const CAPTURE_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+    var xy = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0))[i];
+    var o: VOut;
+    o.pos = vec4<f32>(xy, 0.0, 1.0);
+    o.uv = vec2<f32>((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5);
+    return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
+    return textureSample(src, samp, in.uv);
+}
+"#;
 
 const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: 8,
@@ -394,6 +428,93 @@ impl Ui {
             }],
         });
 
+        // Backdrop (group 3): a dedicated clamped sampler + a 1×1 black default
+        // so `backdrop()` reads black until a real capture is bound this frame.
+        let backdrop_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ui-backdrop-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let black = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ui-backdrop-black"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &black,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8, 0, 0, 255],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let make_backdrop_bind = |view: &wgpu::TextureView| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ui-backdrop"),
+                layout: &tex_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&backdrop_sampler),
+                    },
+                ],
+            })
+        };
+        let black_view = black.create_view(&wgpu::TextureViewDescriptor::default());
+        let backdrop_default_bind = make_backdrop_bind(&black_view);
+        let backdrop_bind = make_backdrop_bind(&black_view);
+
+        // The scene→backdrop capture blit (group(0) = source tex+sampler).
+        let capture_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ui-capture"),
+            source: wgpu::ShaderSource::Wgsl(CAPTURE_WGSL.into()),
+        });
+        let capture_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ui-capture"),
+            bind_group_layouts: &[Some(&tex_layout)],
+            immediate_size: 0,
+        });
+        let capture_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ui-capture"),
+            layout: Some(&capture_layout),
+            vertex: wgpu::VertexState {
+                module: &capture_module,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &capture_module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: gpu.surface_format(),
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ui {
             pipeline,
             pipeline_world,
@@ -417,7 +538,122 @@ impl Ui {
             shaders: Vec::new(),
             shader_binds: Vec::new(),
             time: 0.0,
+            backdrop_sampler,
+            backdrop_bind,
+            backdrop_default_bind,
+            has_backdrop: false,
+            capture_pipeline,
+            backdrop_target: None,
         }
+    }
+
+    /// Capture the composited scene in `src_view` (the color target holding
+    /// everything drawn BEFORE this UI layer) into the backdrop texture, and
+    /// point `backdrop()` at it for this frame's draw. Records into `enc`; the
+    /// caller must run this BEFORE `draw`, and pass the same `src_view` its UI is
+    /// about to be drawn on top of. `w`/`h` are the target's physical size.
+    pub fn capture_backdrop(
+        &mut self,
+        gpu: &Gpu,
+        enc: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+    ) {
+        let (w, h) = (w.max(1), h.max(1));
+        let need_new = !matches!(&self.backdrop_target, Some((_, _, tw, th)) if *tw == w && *th == h);
+        if need_new {
+            let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui-backdrop-target"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: gpu.surface_format(),
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.backdrop_target = Some((tex, view, w, h));
+        }
+        let src_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui-capture-src"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src_view) },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.backdrop_sampler),
+                },
+            ],
+        });
+        let target_view = &self.backdrop_target.as_ref().unwrap().1;
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-backdrop-capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.capture_pipeline);
+            rp.set_bind_group(0, &src_bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        // Point group(3) at the freshly captured backdrop for this frame's draw.
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui-backdrop"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.backdrop_target.as_ref().unwrap().1),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.backdrop_sampler),
+                },
+            ],
+        });
+        self.backdrop_bind = bind;
+        self.has_backdrop = true;
+    }
+
+    /// Point `backdrop()` at a captured scene texture for this frame's UI draw.
+    /// Call `clear_backdrop` afterwards (or before a layer that shouldn't frost)
+    /// so a stale capture never leaks in.
+    pub fn set_backdrop(&mut self, gpu: &Gpu, view: &wgpu::TextureView) {
+        self.backdrop_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ui-backdrop"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.backdrop_sampler),
+                },
+            ],
+        });
+        self.has_backdrop = true;
+    }
+
+    /// Reset `backdrop()` to the 1×1 black default for the next draw.
+    pub fn clear_backdrop(&mut self) {
+        self.has_backdrop = false;
+    }
+
+    /// The active group(3) backdrop bind for this frame (real capture or black).
+    fn backdrop_group(&self) -> &wgpu::BindGroup {
+        if self.has_backdrop { &self.backdrop_bind } else { &self.backdrop_default_bind }
     }
 
     /// The UI pass's WGSL source — the prelude a `stage ui` .flsl chunk is
@@ -450,6 +686,10 @@ impl Ui {
                 Some(&self.globals_layout),
                 Some(&self.tex_layout),
                 Some(&self.params_layout),
+                // group(3) = the backdrop (scene behind the UI). Reuses the
+                // texture+sampler layout; always bound (a 1×1 default when no
+                // capture is active), so every UI shader shares this layout.
+                Some(&self.tex_layout),
             ],
             immediate_size: 0,
         });
@@ -911,6 +1151,8 @@ impl Ui {
                         if let Some(pb) = self.shader_binds.get(pid.0 as usize) {
                             rp.set_bind_group(2, &pb.bind, &[]);
                         }
+                        // group(3) = the backdrop (real capture or 1×1 black).
+                        rp.set_bind_group(3, self.backdrop_group(), &[]);
                         on_custom = true;
                     }
                     None if on_custom => {
@@ -998,6 +1240,7 @@ impl Ui {
                         if let Some(pb) = self.shader_binds.get(pid.0 as usize) {
                             rp.set_bind_group(2, &pb.bind, &[]);
                         }
+                        rp.set_bind_group(3, self.backdrop_group(), &[]);
                         on_custom = true;
                     }
                     None if on_custom => {

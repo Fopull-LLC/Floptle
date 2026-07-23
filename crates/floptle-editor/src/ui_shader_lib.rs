@@ -133,6 +133,29 @@ shader ui_holo {
 "#,
     ),
     (
+        "Frosted glass",
+        "ui_frosted",
+        r#"// Frosted glass: blur + tint the SCENE BEHIND this UI layer. Give the
+// element a translucent shape too; this samples the captured backdrop. Nudge
+// the taps for more blur, or offset backdrop() for refraction.
+shader ui_frosted {
+  stage ui
+  uniform tint: color = #AECBFF
+  uniform tintAmount: float = 0.25
+  uniform blur: float = 0.004
+  uniform alpha: float = 0.92
+  let b0 = backdrop()
+  let b1 = backdrop(vec2(blur, 0.0))
+  let b2 = backdrop(vec2(-blur, 0.0))
+  let b3 = backdrop(vec2(0.0, blur))
+  let b4 = backdrop(vec2(0.0, -blur))
+  let avg = (b0 + b1 + b2 + b3 + b4) * 0.2
+  let rgb = mix(avg.rgb, tint.rgb, tintAmount)
+  output color = vec4(rgb, alpha) * instanceColor
+}
+"#,
+    ),
+    (
         "Film grain",
         "ui_grain",
         r#"// Animated film grain — a touch of texture over flat panels.

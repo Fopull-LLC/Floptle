@@ -60,3 +60,6 @@ solar/save/
 # Auto-seeded UI effect examples in the scratch/default project (regenerated on
 # project open; the canonical copies live under each real project, e.g. solar/).
 assets/shaders/examples/ui/
+
+# Offscreen render-probe outputs (ui_shader_probe, etc.)
+*_probe.png
