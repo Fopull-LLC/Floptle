@@ -18,6 +18,11 @@ pub(crate) struct RigOverrides {
     /// child object/bone name → new parent name (`""` or absent parent = model root).
     #[serde(default)]
     pub reparent: BTreeMap<String, String>,
+    /// object/bone name → its rotation PIVOT (the "joint"), in the node's local space.
+    /// Absent = the object's geometry centroid (the auto default). This is what lets a
+    /// baked object whose origin is at the model root rotate about its real joint.
+    #[serde(default)]
+    pub pivot: BTreeMap<String, [f32; 3]>,
 }
 
 impl RigOverrides {
@@ -40,7 +45,7 @@ impl RigOverrides {
     /// fully-cleared reparent doesn't linger on disk.
     pub fn save(&self, model_abs: &Path) -> std::io::Result<()> {
         let p = Self::sidecar_path(model_abs);
-        if self.reparent.is_empty() {
+        if self.reparent.is_empty() && self.pivot.is_empty() {
             let _ = std::fs::remove_file(&p);
             return Ok(());
         }

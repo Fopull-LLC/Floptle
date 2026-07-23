@@ -132,6 +132,7 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                 r: Quat::from_array(r).normalize(),
                 s: Vec3::from(s),
             },
+            pivot: Vec3::ZERO,
         });
         map.insert(node.index(), idx);
         for child in node.children() {

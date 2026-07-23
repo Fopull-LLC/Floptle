@@ -400,10 +400,15 @@ impl Editor {
     /// node's *local* transform when it has a parent (so dragging a child's gizmo
     /// edits its local placement, and parents still carry it).
     pub(crate) fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
-        // A gizmo drag on an armature BONE (not an ECS entity) writes the bone's
-        // local pose into the open clip — route it before any Transform write.
+        // A gizmo drag on an armature BONE / model object (not an ECS entity):
+        // in pivot-edit mode it moves the object's rotation pivot; otherwise it poses
+        // the bone into the open clip. Route it before any Transform write.
         if let Some(idx) = self.drag.and_then(|d| (d.entity == e).then_some(d.bone).flatten()) {
-            self.set_bone_world(e, idx, world_xf);
+            if self.pivot_edit {
+                self.set_bone_pivot(e, idx, world_xf);
+            } else {
+                self.set_bone_world(e, idx, world_xf);
+            }
             return;
         }
         // A bone-attached node's Transform is regenerated from BoneAttach.offset every
@@ -464,8 +469,12 @@ impl Editor {
             .or_else(|| rig.rest_world.get(idx))
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        let world_m =
-            floptle_core::world_transform(&self.world, mesh).world_matrix() * bone_local.as_dmat4();
+        // Sit the gizmo at the object's PIVOT (its joint), not the node origin — for a
+        // baked object the origin is at the model root (the feet), which is exactly the
+        // problem. `bone_local · T(pivot)` places it at the pivot with the node's orientation.
+        let pivot = rig.skeleton.nodes.get(idx).map(|n| n.pivot).unwrap_or(Vec3::ZERO);
+        let world_m = floptle_core::world_transform(&self.world, mesh).world_matrix()
+            * (bone_local * Mat4::from_translation(pivot)).as_dmat4();
         Some((mesh, idx, Transform::from_matrix(world_m)))
     }
 
@@ -478,7 +487,7 @@ impl Editor {
             return;
         };
         // Pull everything off the rig, then drop the borrow before touching anim_ui.
-        let (parent, parent_local, offset, bone_name) = {
+        let (parent, parent_local, offset, bone_name, pivot) = {
             let Some(rig) = self.mesh_registry.get(&asset_path).and_then(|m| m.rig.as_ref())
             else {
                 return;
@@ -495,7 +504,13 @@ impl Editor {
                     .unwrap_or(Mat4::IDENTITY),
                 None => Mat4::IDENTITY,
             };
-            (parent, pw, rig.offset, rig.skeleton.nodes.get(idx).map(|n| n.name.clone()))
+            (
+                parent,
+                pw,
+                rig.offset,
+                rig.skeleton.nodes.get(idx).map(|n| n.name.clone()),
+                rig.skeleton.nodes.get(idx).map(|n| n.pivot).unwrap_or(Vec3::ZERO),
+            )
         };
         let Some(bone_name) = bone_name else { return };
         let mesh_world = floptle_core::world_transform(&self.world, mesh).world_matrix();
@@ -506,12 +521,19 @@ impl Editor {
             Some(_) => mesh_world * parent_local.as_dmat4(),
             None => mesh_world * offset.as_dmat4(),
         };
+        // The gizmo sits at the pivot, so `parent_scene⁻¹ · world` = T(t)·T(pivot)·R·S
+        // (see `TransformTRS::matrix_about`); its translation is `t + pivot`, so the
+        // node's pose translation is that minus the pivot. (pivot = 0 → unchanged.)
         let local_m = parent_scene.inverse() * world_xf.world_matrix();
         if !local_m.is_finite() {
             return;
         }
         let (s, r, t) = local_m.to_scale_rotation_translation();
-        let trs = floptle_anim::TransformTRS { t: t.as_vec3(), r: r.as_quat(), s: s.as_vec3() };
+        let trs = floptle_anim::TransformTRS {
+            t: t.as_vec3() - pivot,
+            r: r.as_quat(),
+            s: s.as_vec3(),
+        };
         // Auto-key at the playhead — same gate as bone_inspector_ui (this mesh must be
         // the Animating tab's target with a clip open, since channels bind by name).
         if self.anim_ui.target == Some(mesh) && self.anim_ui.clip_doc.is_some() {
@@ -523,6 +545,53 @@ impl Editor {
             }
             self.anim_ui.clip_dirty = true;
         }
+    }
+
+    /// Move an object/bone's rotation PIVOT to the dragged gizmo position (pivot-edit
+    /// mode). The gizmo sits at the pivot in the node's REST frame, so the node-local
+    /// pivot point is `(mesh_world · rest_world[idx])⁻¹ · gizmo_world`. Applied live +
+    /// persisted to the `.rig.ron` sidecar.
+    pub(crate) fn set_bone_pivot(&mut self, mesh: Entity, idx: usize, world_xf: Transform) {
+        let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() else {
+            return;
+        };
+        let mesh_world = floptle_core::world_transform(&self.world, mesh).world_matrix();
+        let (rest_world_i, node_name) = {
+            let Some(rig) = self.mesh_registry.get(&asset_path).and_then(|m| m.rig.as_ref())
+            else {
+                return;
+            };
+            (
+                rig.rest_world.get(idx).copied().unwrap_or(Mat4::IDENTITY),
+                rig.skeleton.nodes.get(idx).map(|n| n.name.clone()),
+            )
+        };
+        let Some(node_name) = node_name else { return };
+        let base = mesh_world * rest_world_i.as_dmat4();
+        let local = base.inverse() * world_xf.world_matrix();
+        if !local.is_finite() {
+            return;
+        }
+        let p = local.to_scale_rotation_translation().2.as_vec3();
+        self.apply_object_pivot(mesh, &node_name, p);
+    }
+
+    /// Set an object/bone's rotation pivot (node-local) live on the shared rig and
+    /// persist it to the model's `.rig.ron` sidecar. Shared by the pivot-drag gizmo
+    /// and the Inspector's numeric pivot fields.
+    pub(crate) fn apply_object_pivot(&mut self, mesh: Entity, node_name: &str, pivot: Vec3) {
+        let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() else {
+            return;
+        };
+        if let Some(rig) = self.mesh_registry.get_mut(&asset_path).and_then(|m| m.rig.as_mut())
+            && let Some(i) = rig.skeleton.index_of(node_name)
+        {
+            rig.skeleton.nodes[i].pivot = pivot;
+        }
+        let abs = self.resolve_asset_path(&asset_path);
+        let mut ov = crate::rig_overrides::RigOverrides::load(&abs);
+        ov.pivot.insert(node_name.to_string(), [pivot.x, pivot.y, pivot.z]);
+        let _ = ov.save(&abs);
     }
 }
 

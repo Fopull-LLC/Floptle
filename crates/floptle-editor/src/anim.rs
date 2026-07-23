@@ -253,13 +253,22 @@ impl AnimSystem {
     /// real time as the bone moves; this is the cheap per-frame refresh that does it.
     pub fn register_clip(&mut self, key: &str, doc: &AnimClipDoc) {
         match self.clips.iter_mut().find(|(k, _)| k == key) {
-            Some(slot) => slot.1 = doc.clone(),
+            // Only bump the revision when the doc actually CHANGED. Otherwise a clip
+            // stuck `dirty` (Record armed with nothing moving, a held drag, or a clip
+            // whose file was deleted) would re-register identical content every frame,
+            // bumping the revision each frame and forcing EVERY animator to fully rebind
+            // each frame — the editor freeze. No change → no bump → no rebind storm.
+            Some(slot) if slot.1 == *doc => {}
+            Some(slot) => {
+                slot.1 = doc.clone();
+                self.revision += 1;
+            }
             None => {
                 self.clips.push((key.to_string(), doc.clone()));
                 self.clips.sort_by(|a, b| a.0.cmp(&b.0));
+                self.revision += 1;
             }
         }
-        self.revision += 1;
     }
 
     /// Save a clip doc back to disk + refresh the registry entry in place.
@@ -554,7 +563,7 @@ fn scene_skeleton(world: &World, root: Entity) -> (Skeleton, Vec<Entity>) {
     ) {
         let idx = nodes.len();
         let name = world.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
-        nodes.push(SkelNode { name, parent, rest: local_trs(world, e) });
+        nodes.push(SkelNode { name, parent, rest: local_trs(world, e), pivot: Vec3::ZERO });
         ents.push(e);
         if let Some(kids) = children.get(&e) {
             for &k in kids {
@@ -1338,17 +1347,38 @@ pub fn apply_commands(
 /// Called from `import_model` when the static importer defers to the rig path.
 pub fn rig_from_model(
     model: &floptle_assets::RiggedModel,
-    reparent: &BTreeMap<String, String>,
+    overrides: &crate::rig_overrides::RigOverrides,
 ) -> RigAsset {
     // Apply any per-model re-parenting (the `.rig.ron` sidecar) up front: it
     // reorders + reindexes the skeleton, so every node reference we build below
     // (parts, skin joints, clip channels) is threaded through the old→new remap.
     let mut skeleton = model.skeleton.clone();
     let mut part_nodes: Vec<usize> = model.parts.iter().map(|p| p.node).collect();
-    let remap = (!reparent.is_empty()).then(|| apply_reparent(&mut skeleton, reparent));
+    let remap = (!overrides.reparent.is_empty()).then(|| apply_reparent(&mut skeleton, &overrides.reparent));
     if let Some(rm) = &remap {
         for pn in part_nodes.iter_mut() {
             *pn = rm[*pn];
+        }
+    }
+
+    // Rotation PIVOTS. Default each object node's pivot to its geometry centroid (in
+    // node-local space) — far more useful than the model origin for a baked object —
+    // then let the `.rig.ron` sidecar override per node by name. Bones (no geometry)
+    // keep pivot ZERO (their origin already is the joint).
+    let mut centroid_sum = vec![(Vec3::ZERO, 0usize); skeleton.nodes.len()];
+    for (part, &node) in model.parts.iter().zip(&part_nodes) {
+        if let Some(slot) = centroid_sum.get_mut(node) {
+            for v in &part.mesh.vertices {
+                slot.0 += Vec3::from(v.pos);
+                slot.1 += 1;
+            }
+        }
+    }
+    for (i, node) in skeleton.nodes.iter_mut().enumerate() {
+        if let Some(p) = overrides.pivot.get(&node.name) {
+            node.pivot = Vec3::from(*p);
+        } else if centroid_sum[i].1 > 0 {
+            node.pivot = centroid_sum[i].0 / centroid_sum[i].1 as f32;
         }
     }
 
@@ -1790,7 +1820,7 @@ mod tests {
         let model = floptle_assets::import_rigged(&glb)
             .expect("import_rigged ok")
             .expect("character_retro.glb carries a rig + clips");
-        let rig = rig_from_model(&model, &BTreeMap::new());
+        let rig = rig_from_model(&model, &crate::rig_overrides::RigOverrides::default());
 
         let mut sys = AnimSystem::default();
         sys.rescan(&solar);
@@ -1845,14 +1875,14 @@ mod tests {
             .expect("import")
             .expect("multi-object model kept its structure");
 
-        let base = rig_from_model(&model, &BTreeMap::new());
+        let base = rig_from_model(&model, &crate::rig_overrides::RigOverrides::default());
         let fi = base.skeleton.index_of("Forearm").expect("Forearm object");
         let before = base.rest_world[fi].to_scale_rotation_translation().2;
 
-        let mut rp = BTreeMap::new();
-        rp.insert("Forearm".to_string(), "Soulder".to_string());
-        rp.insert("Hand".to_string(), "Forearm".to_string()); // a chain, to exercise the re-sort
-        let re = rig_from_model(&model, &rp);
+        let mut ov = crate::rig_overrides::RigOverrides::default();
+        ov.reparent.insert("Forearm".to_string(), "Soulder".to_string());
+        ov.reparent.insert("Hand".to_string(), "Forearm".to_string()); // a chain, to exercise the re-sort
+        let re = rig_from_model(&model, &ov);
 
         let si = re.skeleton.index_of("Soulder").expect("Soulder");
         let fi2 = re.skeleton.index_of("Forearm").expect("Forearm");

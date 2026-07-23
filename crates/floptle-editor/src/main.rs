@@ -361,6 +361,9 @@ struct EditorCmd {
     /// Generate a starter hair bone-chain + auto-skin on (rigged-mesh entity, hair
     /// object name), baked into a new rigged `.glb` beside the source.
     add_hair_rig: Option<(Entity, String)>,
+    /// Set an object/bone's rotation pivot (rigged-mesh entity, node name, pivot xyz in
+    /// node-local space) — from the Inspector's numeric pivot fields.
+    set_object_pivot: Option<(Entity, String, [f32; 3])>,
 }
 
 /// Lowercase name for a key, for the script `input` API (`input.key("w")`).
@@ -453,6 +456,8 @@ struct EditorTabViewer<'a> {
     /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
     /// exclusive with `selection`; drives the Hierarchy highlight + Inspector bone editor.
     bone_selection: &'a mut Option<(Entity, usize)>,
+    /// Pivot-edit toggle (see `Editor::pivot_edit`) — the bone Inspector flips it.
+    pivot_edit: &'a mut bool,
     /// Double-clicking a tab toggles it into this slot (maximized full-window).
     fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
@@ -1693,6 +1698,9 @@ struct Editor {
     /// the Hierarchy's bone tree. Bones aren't ECS entities, so this rides alongside
     /// `selection` (they're mutually cleared) and drives the Inspector's bone editor.
     bone_selection: Option<(Entity, usize)>,
+    /// Pivot-edit mode: while on, a bone/object gizmo drag moves that object's rotation
+    /// PIVOT (its joint) instead of posing it — set from the bone Inspector.
+    pivot_edit: bool,
     /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
     /// with the triangle or Enter on a selected folder.
     collapsed: std::collections::HashSet<Entity>,
@@ -2485,20 +2493,42 @@ impl ApplicationHandler for Editor {
                                 // (printed sources) — scene undo stays out.
                                 let in_graph =
                                     matches!(self.focused_tab, Some(EditorTab::ShaderGraph));
+                                // Posing a model object/bone happens through the SCENE
+                                // viewport (so focus isn't the Animating tab), but the
+                                // CONTEXT is the animator: route undo/redo to the open clip
+                                // and keep scene-destructive keys (Delete, copy/paste/dup)
+                                // out — else Ctrl+Z respawns the World (breaking the rig you
+                                // selected) and Delete removes the node you're animating.
+                                let posing_bone = self.bone_selection.is_some();
                                 if self.ctrl {
                                     match code {
+                                        KeyCode::KeyZ if posing_bone => {
+                                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, false) {
+                                                self.anim_ui.clip_dirty = true;
+                                            }
+                                        }
+                                        KeyCode::KeyY if posing_bone => {
+                                            if crate::anim_ui::clip_undo_redo(&mut self.anim_ui, true) {
+                                                self.anim_ui.clip_dirty = true;
+                                            }
+                                        }
                                         KeyCode::KeyZ if !in_graph => self.undo(),
                                         KeyCode::KeyY if !in_graph => self.redo(),
                                         KeyCode::KeyS => self.save_all(),
-                                        // Scene-mutating — not while a timeline has focus.
-                                        KeyCode::KeyC if !in_timeline => self.copy_selected(),
-                                        KeyCode::KeyV if !in_timeline => self.paste(),
-                                        KeyCode::KeyD if !in_timeline => self.duplicate_selected(),
-                                        KeyCode::KeyA if !in_timeline => self.select_all(),
+                                        // Scene-mutating — not while a timeline has focus or
+                                        // while posing a bone in the viewport.
+                                        KeyCode::KeyC if !in_timeline && !posing_bone => self.copy_selected(),
+                                        KeyCode::KeyV if !in_timeline && !posing_bone => self.paste(),
+                                        KeyCode::KeyD if !in_timeline && !posing_bone => self.duplicate_selected(),
+                                        KeyCode::KeyA if !in_timeline && !posing_bone => self.select_all(),
                                         _ => {}
                                     }
                                 } else if !in_timeline {
                                     match code {
+                                        // Never delete a scene node while an object/bone is
+                                        // selected for animation (there's no scene selection
+                                        // to delete anyway — this just prevents accidents).
+                                        KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
                                         KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
                                         KeyCode::KeyF => self.focus_selected(),
                                         KeyCode::KeyQ => self.selection.clear(), // unselect

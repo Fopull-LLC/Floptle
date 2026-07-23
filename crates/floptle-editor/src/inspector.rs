@@ -500,11 +500,14 @@ impl EditorTabViewer<'_> {
                 .mesh_registry
                 .get(asset_path)
                 .and_then(|m| m.rig.as_ref())
-                .and_then(|rig| rig.skeleton.nodes.get(idx))
-                .map(|n| (n.name.clone(), n.rest)),
+                .and_then(|rig| {
+                    let n = rig.skeleton.nodes.get(idx)?;
+                    let is_object = rig.node_is_object.get(idx).copied().unwrap_or(true);
+                    Some((n.name.clone(), n.rest, n.pivot, is_object))
+                }),
             _ => None,
         };
-        let Some((bone_name, rest)) = resolved else {
+        let Some((bone_name, rest, pivot, is_object)) = resolved else {
             *self.bone_selection = None;
             return;
         };
@@ -517,13 +520,15 @@ impl EditorTabViewer<'_> {
             .unwrap_or(rest);
         let mesh_name = self.world.get::<Name>(mesh).map(|n| n.0.clone()).unwrap_or_default();
 
+        let (icon, kind) = if is_object { ("◈", "object") } else { ("🔗", "bone") };
         ui.horizontal(|ui| {
-            ui.strong(format!("🔗 {bone_name}"));
+            ui.strong(format!("{icon} {bone_name}"));
             if ui.small_button("⮪ back").on_hover_text("back to the node inspector").clicked() {
                 *self.bone_selection = None;
+                *self.pivot_edit = false;
             }
         });
-        ui.small(format!("armature bone of {mesh_name}"));
+        ui.small(format!("{kind} of {mesh_name}"));
         ui.separator();
 
         let mut trs = cur;
@@ -558,6 +563,36 @@ impl EditorTabViewer<'_> {
             changed |= ui.add(egui::DragValue::new(&mut trs.s.y).speed(0.01).range(0.001..=100.0).prefix("y ")).changed();
             changed |= ui.add(egui::DragValue::new(&mut trs.s.z).speed(0.01).range(0.001..=100.0).prefix("z ")).changed();
         });
+
+        // ---- rotation pivot (the "joint" this object turns around) ----
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("⌖ Pivot");
+            let mut editing = *self.pivot_edit;
+            if ui
+                .selectable_label(editing, "✥ drag in view")
+                .on_hover_text(
+                    "move the rotation joint by dragging the gizmo in the Scene view \
+                     instead of posing — turn off to pose around the new pivot",
+                )
+                .clicked()
+            {
+                editing = !editing;
+                *self.pivot_edit = editing;
+            }
+        });
+        ui.small("where this object rotates/scales around — defaults to its geometry center");
+        let mut p = pivot;
+        let mut pchanged = false;
+        ui.horizontal(|ui| {
+            ui.label("pivot");
+            pchanged |= ui.add(egui::DragValue::new(&mut p.x).speed(0.01).prefix("x ")).changed();
+            pchanged |= ui.add(egui::DragValue::new(&mut p.y).speed(0.01).prefix("y ")).changed();
+            pchanged |= ui.add(egui::DragValue::new(&mut p.z).speed(0.01).prefix("z ")).changed();
+        });
+        if pchanged {
+            self.cmd.set_object_pivot = Some((mesh, bone_name.clone(), [p.x, p.y, p.z]));
+        }
 
         // Auto-key into the open clip at the playhead — but only when the Animating tab is
         // targeting THIS mesh with a clip open (bone channels are name-bound to this

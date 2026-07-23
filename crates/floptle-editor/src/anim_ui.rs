@@ -1146,17 +1146,26 @@ impl EditorTabViewer<'_> {
                         .collect()
                 })
                 .unwrap_or_default(),
-            // Rig without a controller: embedded clip names. Using the NAME as the
-            // clip key lets the registry's stem-fallback find an extracted
-            // `.anim.ron` of the same name → full editable timeline; names with no
-            // extracted file fall through to the read-only banner below.
+            // Rig without a controller: embedded clip names (the NAME as key lets the
+            // registry's stem-fallback find an extracted `.anim.ron` of the same name
+            // → full editable timeline), PLUS any standalone clip authored FOR this
+            // model (its `source_model` = this mesh's path) — that's how a "✚ New…"
+            // clip on a controller-less rigged model shows up, persists, and edits.
             None => match self.world.get::<Matter>(target) {
-                Some(Matter::Mesh { asset_path }) => self
-                    .mesh_registry
-                    .get(asset_path)
-                    .and_then(|m| m.rig.as_ref())
-                    .map(|r| r.clips.iter().map(|c| (c.name.clone(), c.name.clone())).collect())
-                    .unwrap_or_default(),
+                Some(Matter::Mesh { asset_path }) => {
+                    let mut out: Vec<(String, String)> = self
+                        .mesh_registry
+                        .get(asset_path)
+                        .and_then(|m| m.rig.as_ref())
+                        .map(|r| r.clips.iter().map(|c| (c.name.clone(), c.name.clone())).collect())
+                        .unwrap_or_default();
+                    for (key, doc) in &self.anim.clips {
+                        if &doc.source_model == asset_path && !out.iter().any(|(_, k)| k == key) {
+                            out.push((doc.name.clone(), key.clone()));
+                        }
+                    }
+                    out
+                }
                 _ => Vec::new(),
             },
         };
@@ -1217,7 +1226,17 @@ impl EditorTabViewer<'_> {
                         }
                     }
                 });
-            if ctl_key.is_some() && ui.button("✚ New…").on_hover_text("create a new empty animation clip and add it to this controller").clicked() {
+            // New clip: on a controller it adds a state; on a controller-less rigged
+            // Mesh it authors a standalone clip bound to the model (source_model).
+            let is_mesh = matches!(self.world.get::<Matter>(target), Some(Matter::Mesh { .. }));
+            let new_hover = if ctl_key.is_some() {
+                "create a new empty animation clip and add it to this controller"
+            } else {
+                "create a new empty animation clip for this model — key its objects/bones below"
+            };
+            if (ctl_key.is_some() || is_mesh)
+                && ui.button("✚ New…").on_hover_text(new_hover).clicked()
+            {
                 self.anim_ui.new_anim_buf = Some(String::new());
                 self.anim_ui.focus_prompt = true;
             }
@@ -1395,10 +1414,16 @@ impl EditorTabViewer<'_> {
             if done && !buf.trim().is_empty() {
                 let name = buf.trim().to_string();
                 let clip_key = anim::new_clip_key(self.project_root, &name);
+                // Tie the clip to the target model so a controller-less rigged mesh can
+                // list + edit it (the no-controller states pick up source_model matches).
+                let source_model = match self.world.get::<Matter>(target) {
+                    Some(Matter::Mesh { asset_path }) => asset_path.clone(),
+                    _ => String::new(),
+                };
                 let doc = AnimClipDoc {
                     name: name.clone(),
                     duration: 2.0,
-                    source_model: String::new(),
+                    source_model,
                     channels: Vec::new(),
                     events: Vec::new(),
                 };
@@ -1438,6 +1463,14 @@ impl EditorTabViewer<'_> {
                             self.anim_ui.sel_anim = Some(sname);
                             self.anim_ui.clip_doc = None;
                         }
+                } else {
+                    // Controller-less rigged model: the clip is bound via source_model
+                    // (picked up by the no-controller states next frame) — select it.
+                    self.anim_ui.sel_anim = Some(name.clone());
+                    self.anim_ui.clip_doc = None;
+                    self.anim_ui.playhead = 0.0;
+                    self.anim_ui.sel_event = None;
+                    self.anim_ui.sel_prop = None;
                 }
                 self.anim_ui.new_anim_buf = None;
             } else if cancel || done {
@@ -1447,7 +1480,7 @@ impl EditorTabViewer<'_> {
 
         let Some(sel_anim) = self.anim_ui.sel_anim.clone() else {
             ui.add_space(10.0);
-            ui.weak("No animations yet — extract some from a model, or ✚ New to author one.");
+            ui.weak("No animations yet — click ✚ New… above to author one, or ⬇ Extract a model's embedded clips.");
             return;
         };
 
