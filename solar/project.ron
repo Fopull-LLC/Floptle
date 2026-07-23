@@ -1,6 +1,6 @@
 (
     retro: false,
-    retro_height: 270,
+    retro_height: 410,
     matter: true,
     title: Some("Floptle Solar"),
     entry_scene: Some("scenes/planetoid.ron"),
@@ -17,8 +17,6 @@
             muted: false,
             soloed: false,
             effects: [
-                // A ceiling so a full ship — engines + boosters + explosions +
-                // UI all at once — never clips.
                 (
                     effect: Limiter(
                         ceiling_db: -0.5,
@@ -30,9 +28,6 @@
             output: None,
         ),
         tracks: [
-            // Spatial world SFX (engines, staging, explosions, gear). A short
-            // reverb gives the scene scale/air; a compressor keeps a stack of
-            // engines from swamping everything else.
             (
                 name: "SFX",
                 gain_db: 0.0,
@@ -63,7 +58,6 @@
                 ],
                 output: None,
             ),
-            // UI clicks (builder): dry and a touch quieter than the world.
             (
                 name: "UI",
                 gain_db: -3.0,
@@ -73,8 +67,6 @@
                 effects: [],
                 output: None,
             ),
-            // The ambient bed (machine hum / space drone): low and rolled-off
-            // at the top so it sits UNDER everything as a felt presence.
             (
                 name: "Ambient",
                 gain_db: -9.0,

@@ -422,7 +422,9 @@ pub struct VfxInfo {
 
 /// A one-shot effect a script requested via `spawnEffect(...)`: (asset key, world
 /// position). The editor spawns a detached instance for each.
-pub type SpawnedEffect = (String, [f64; 3]);
+/// `(effect key, world point, emitter world velocity)`. The velocity (default 0) lets
+/// inherit-velocity tracks ride the emitter's momentum — see `spawnEffect`.
+pub type SpawnedEffect = (String, [f64; 3], [f64; 3]);
 
 /// One queued `node:particles()` command, drained by the editor and applied to the
 /// live VFX instances before they advance (so intent set this frame lands this frame).

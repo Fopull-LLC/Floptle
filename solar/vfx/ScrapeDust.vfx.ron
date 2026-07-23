@@ -1,0 +1,78 @@
+// Ground-scrape debris: a spray of fine tumbling GRIT plus a light DUST haze kicked
+// off the surface as a hull grinds along it. Deliberately small + gritty (not soft
+// smoke circles) — pairs with Sparks at the contact point in vessel_controller.
+(
+    name: "ScrapeDust",
+    lifetime: 0.9,
+    playback: OneShot,
+    end: Destroy,
+    tracks: [
+        // Chunky flecks of rock/paint that tumble out and fall straight back down.
+        (
+            name: "Grit",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Debris/1.png"),
+            ),
+            blend: Alpha,
+            orient: WorldFixed,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.12,
+                    emit: Some(Burst(count: 16, count_jitter: 0.3)),
+                ),
+            ],
+            shape: Sphere(radius: 0.22, shell: true),
+            velocity: Range(Vec3((-5.5, 1.0, -5.5)), Vec3((5.5, 6.5, 5.5))),
+            size: Range(F32(0.1), F32(0.32)),
+            rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
+            angular_velocity: Range(Vec3((-9.0, -9.0, -9.0)), Vec3((9.0, 9.0, 9.0))),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((0.62, 0.55, 0.46, 1.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 0.7, v: Rgba((0.5, 0.44, 0.38, 0.9)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((0.4, 0.36, 0.32, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: 9.0,
+            drag: 0.5,
+            inherit_velocity: 0.6,
+        ),
+        // A thin, fast-fading dust haze — small, low-opacity, not a fat smoke puff.
+        (
+            name: "Dust",
+            render: Billboard(
+                texture: Some("textures/VFXTEX/Smoke/5.png"),
+            ),
+            blend: Alpha,
+            space: World,
+            clips: [
+                (
+                    start: 0.0,
+                    end: 0.14,
+                    emit: Some(Burst(count: 8, count_jitter: 0.3)),
+                ),
+            ],
+            shape: Sphere(radius: 0.3, shell: false),
+            velocity: Range(Vec3((-2.5, 0.4, -2.5)), Vec3((2.5, 2.2, 2.5))),
+            size: Range(F32(0.35), F32(0.85)),
+            rotation: Range(Vec3((0.0, 0.0, 0.0)), Vec3((0.0, 0.0, 360.0))),
+            angular_velocity: Range(Vec3((0.0, 0.0, -1.2)), Vec3((0.0, 0.0, 1.2))),
+            color: Curve((
+                keys: [
+                    (t: 0.0, v: Rgba((0.58, 0.52, 0.45, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 0.2, v: Rgba((0.55, 0.5, 0.43, 0.45)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                    (t: 1.0, v: Rgba((0.44, 0.4, 0.36, 0.0)), interp: Linear, in_tan: 0.0, out_tan: 0.0),
+                ],
+                extrapolate: Clamp,
+            )),
+            gravity: -0.2,
+            drag: 2.2,
+            inherit_velocity: 0.5,
+        ),
+    ],
+    seed: 9,
+    gravity_mode: Field,
+)

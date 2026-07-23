@@ -818,8 +818,15 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     w.line("        let cd = sd_round_rect(in.px - ccenter, chalf, cr);".into(), None);
     w.line("        cmask = clamp(0.5 - cd, 0.0, 1.0);".into(), None);
     w.line("    }".into(), None);
+    // Clip the shader to the element's OWN rounded rect too, so effects (gloss,
+    // gradient, glow) never spill past a rounded panel's corners. `params.x` is the
+    // element's corner radius in px (the draw list forwards the shape's radius to
+    // the shader quad); radius 0 = a plain rectangle, unchanged.
+    w.line("    let er = min(in.params.x, min(in.half_size.x, in.half_size.y));".into(), None);
+    w.line("    let ed = sd_round_rect(in.local, in.half_size, er);".into(), None);
+    w.line("    let shapemask = clamp(0.5 - ed, 0.0, 1.0);".into(), None);
     w.line("    let c = flsl_ui_surface(in);".into(), None);
-    w.line("    return vec4<f32>(c.rgb, c.a * in.color.a * cmask);".into(), None);
+    w.line("    return vec4<f32>(c.rgb, c.a * in.color.a * cmask * shapemask);".into(), None);
     w.line("}".into(), None);
 
     Ok(CompiledUi {

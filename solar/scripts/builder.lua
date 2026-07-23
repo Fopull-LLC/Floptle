@@ -79,7 +79,11 @@ local REG = {
   -- host itself — it can only attach to another part's flank, where it self-
   -- orients to point outward. Ring it with X symmetry for a proper fin set.
   fins      = { prefab = "PartFins",      label = "Aero Fin",     h = 0.95, rx = 0.35, rz = 0.03, mass = 0.5,  cost = 110, top = false, bottom = false, kind = "structural", aero = true, radial_orient = true },
-  battery   = { prefab = "PartBattery",   label = "Battery",      h = 1.00, rx = 0.50, rz = 0.50, mass = 0.6,  cost = 130, top = true,  bottom = true,  kind = "structural", power = true, side = true },
+  battery   = { prefab = "PartBattery",   label = "Battery",      h = 1.00, rx = 0.50, rz = 0.50, mass = 0.6,  cost = 130, top = true,  bottom = true,  kind = "structural", power = true, ec = 200, side = true },
+  -- Solar panel: a RADIAL blade (mounts on a flank like a fin, self-orients
+  -- outward) that DEPLOYS in flight (U-group with the dish) and trickles EC into
+  -- the batteries while it faces the sun. gen = EC/sec at full sun, per panel.
+  solar     = { prefab = "PartSolar",     label = "Solar Panel",  h = 0.70, rx = 0.45, rz = 0.06, mass = 0.25, cost = 200, top = false, bottom = false, kind = "structural", solar = true, gen = 14, radial_orient = true },
   dish      = { prefab = "PartDish",      label = "Comms Dish",   h = 0.80, rx = 0.40, rz = 0.40, mass = 0.2,  cost = 120, top = true,  bottom = true,  kind = "structural", comms = true, side = true },
   decoupler = { prefab = "PartDecoupler", label = "Decoupler",    h = 0.25, rx = 0.51, rz = 0.51, mass = 0.15, cost = 60,  top = true,  bottom = true,  kind = "structural", decouple = true },
   -- The RADIAL decoupler mounts on a flank and kicks its outboard branch
@@ -91,6 +95,13 @@ local REG = {
   -- to deploy / up to stow as ONE symmetry ring (G in flight). No more stack
   -- sandwich — bolt three or four around the base and they splay out to land.
   legs      = { prefab = "PartLegs",      label = "Landing Legs", h = 0.90, rx = 0.40, rz = 0.18, mass = 0.3,  cost = 90,  top = false, bottom = false, kind = "structural", legs = true, radial_orient = true },
+  -- SKIPPER: a heavier, punchier engine in the Anvil's exact footprint (same
+  -- proven collider) — more thrust for a bigger burn rate + more mass.
+  skipper    = { prefab = "PartSkipper",    label = "Skipper",      h = 1.60, rx = 0.90, rz = 0.90, mass = 2.4,  cost = 520, top = true,  bottom = true,  kind = "engine", thrust = 210, burn = 2.6 },
+  -- RADIAL TANK: a strap-on drop-tank. radial_orient mounts it on a flank like a
+  -- fin (ring it with symmetry); its fuel joins the shared pool, and a radial
+  -- decoupler kicks it (and its ring) away when spent.
+  radialTank = { prefab = "PartRadialTank", label = "Radial Tank",  h = 1.00, rx = 0.50, rz = 0.50, mass = 1.4,  cost = 140, top = false, bottom = false, kind = "tank", fuel = 70, radial_orient = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
@@ -1160,6 +1171,11 @@ local function save_blueprint()
       decouple = d.decouple and 1 or 0, legs = d.legs and 1 or 0,
       radial = d.radial and 1 or 0, chute = d.chute and 1 or 0,
       comms = d.comms and 1 or 0, aero = d.aero and 1 or 0,
+      -- Electrical capabilities: these were being DROPPED on save, so a battery
+      -- (power) or solar panel (solar) never did anything in flight. Carry them
+      -- and their ratings (EC capacity / charge rate) through to the vessel.
+      power = d.power and 1 or 0, solar = d.solar and 1 or 0,
+      ec = d.ec or 0, gen = d.gen or 0,
     }
   end
   save.set("shipyard.blueprint", bp)

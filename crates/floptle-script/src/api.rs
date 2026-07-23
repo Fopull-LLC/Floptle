@@ -78,10 +78,12 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ("visible".to_string(), b(spec.visible)),
             ("opacity".to_string(), spec.opacity as f64),
         ]);
-        // Position: the active placement's numbers (Free pos or Pin offset).
+        // Position: the active placement's numbers (Free pos, Pin offset, or a
+        // Stretch's leading margin).
         let (px, py) = match spec.place {
             floptle_ui::Place::Free { pos } => (pos[0], pos[1]),
             floptle_ui::Place::Pin { offset, .. } => (offset[0], offset[1]),
+            floptle_ui::Place::Stretch { margin, .. } => (margin[0], margin[1]),
         };
         f.insert("posX".to_string(), px as f64);
         f.insert("posY".to_string(), py as f64);
@@ -221,6 +223,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         match &mut spec.place {
                             floptle_ui::Place::Free { pos } => pos[i] = v,
                             floptle_ui::Place::Pin { offset, .. } => offset[i] = v,
+                            floptle_ui::Place::Stretch { margin, .. } => margin[i] = v,
                         }
                     }
                     "width" | "height" => {

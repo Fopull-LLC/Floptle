@@ -148,8 +148,11 @@ API.space = {
 }
 
 API.CRATERS = {}
+API.SCUFFS = {}
 API.terrain = { warm = function() end, query = function() return 0.1 end,
-  dig = function(x, y, z, r) API.CRATERS[#API.CRATERS + 1] = { x = x, y = y, z = z, r = r } end }
+  dig = function(x, y, z, r) API.CRATERS[#API.CRATERS + 1] = { x = x, y = y, z = z, r = r } end,
+  paint = function(x, y, z, r) API.SCUFFS[#API.SCUFFS + 1] = { x = x, y = y, z = z, r = r } end,
+  paintTexture = function() end }
 -- Line recorder: update_map3d draws the subject craft's conic in cyan
 -- (0.35, 0.85, 1.0) — the map assertions look for it here. Cleared per tick.
 local tick_lines = {}
@@ -230,6 +233,10 @@ API.assembly = {
   keepLive = function(node, on)
     assert(asm and asm.root == node, "keepLive before rebuild")
     asm.kept_live = on
+  end,
+  syncColliders = function(node)
+    assert(asm and asm.root == node, "syncColliders before rebuild")
+    asm.collider_syncs = (asm.collider_syncs or 0) + 1
   end,
   teleport = function(node, pos)
     assert(asm and asm.root == node, "teleport before rebuild")
@@ -420,15 +427,16 @@ end
 save_store["shipyard.blueprint"] = { parts = {
   { uid = 1, id = "pod", prefab = "PartPod", x = 0, y = 3.0, z = 0, yaw = 0,
     h = 0.8, mass = 1.2, cost = 400, kind = "crewed", thrust = 0, burn = 0, fuel = 0, decouple = 0, legs = 0 },
-  { uid = 2, id = "tankS", prefab = "PartTankS", x = 0, y = 2.1, z = 0, yaw = 0,
+  { uid = 2, id = "tankS", prefab = "PartTankS", x = 0, y = 2.1, z = 0, yaw = 0, parent = 1,
     h = 1.0, mass = 1.5, cost = 120, kind = "tank", thrust = 0, burn = 0, fuel = 60, decouple = 0, legs = 0 },
-  { uid = 3, id = "decoupler", prefab = "PartDecoupler", x = 0, y = 1.47, z = 0, yaw = 0,
+  { uid = 3, id = "decoupler", prefab = "PartDecoupler", x = 0, y = 1.47, z = 0, yaw = 0, parent = 2,
     h = 0.25, mass = 0.15, cost = 60, kind = "structural", thrust = 0, burn = 0, fuel = 0, decouple = 1, legs = 0 },
-  { uid = 4, id = "engineS", prefab = "PartEngineS", x = 0, y = 0.65, z = 0, yaw = 0,
+  { uid = 4, id = "engineS", prefab = "PartEngineS", x = 0, y = 0.65, z = 0, yaw = 0, parent = 3,
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 55, burn = 0.9, fuel = 0, decouple = 0, legs = 0 },
   -- An UPPER-stage engine above the decoupler: it must stay cold (no thrust,
-  -- no flame) until the stage below separates.
-  { uid = 5, id = "engineS", prefab = "PartEngineS", x = 0, y = 2.5, z = 0, yaw = 0,
+  -- no flame) until the stage below separates. Bolted to the POD (uid 1), so
+  -- the axial cut below the tank must never sweep it away.
+  { uid = 5, id = "engineS", prefab = "PartEngineS", x = 0, y = 2.5, z = 0, yaw = 0, parent = 1,
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 55, burn = 0.9, fuel = 0, decouple = 0, legs = 0 },
   -- A SIDE BOOSTER branch (builder v1.2 radial mounts): a radial decoupler
   -- on the tank's flank (disc rolled to face outward) + a booster engine on
@@ -441,11 +449,15 @@ save_store["shipyard.blueprint"] = { parts = {
     h = 1.3, mass = 0.8, cost = 150, kind = "engine", thrust = 40, burn = 0.7,
     fuel = 0, decouple = 0, legs = 0, parent = 6 },
   -- LANDING LEGS: the first peripheral device — G toggles them in flight.
-  { uid = 8, id = "legs", prefab = "PartLegs", x = 0, y = 0.65, z = 0.8, yaw = 0,
+  -- Mounted LOW (y=0.65, beside the bottom engine) but bolted to the TANK
+  -- (uid 2, on the pod/upper side): the tree-based axial cut below the tank
+  -- must KEEP it, even though old bottom-up-y staging would have dropped it
+  -- (a low part hung on an upper stage — exactly Ty's staging bug).
+  { uid = 8, id = "legs", prefab = "PartLegs", x = 0, y = 0.65, z = 0.8, yaw = 0, parent = 2,
     h = 0.7, mass = 0.3, cost = 90, kind = "structural", thrust = 0, burn = 0,
     fuel = 0, decouple = 0, legs = 1 },
   -- A PARACHUTE on the nose: armed in staging, deploys to drag in atmosphere.
-  { uid = 9, id = "chute", prefab = "PartChute", x = 0, y = 3.7, z = 0, yaw = 0,
+  { uid = 9, id = "chute", prefab = "PartChute", x = 0, y = 3.7, z = 0, yaw = 0, parent = 1,
     h = 0.61, mass = 0.1, cost = 80, kind = "canvas", thrust = 0, burn = 0,
     fuel = 0, decouple = 0, legs = 0, chute = 1 },
 } }
@@ -589,10 +601,20 @@ check(force_calls >= 20 and force_calls <= 35,
 check(flame_boost and not flame_boost.particles_state.playing,
   "booster plume dies with the separation")
 
--- SPACE #3: the AXIAL decoupler path (split stubbed; must not error).
+-- SPACE #3: the AXIAL decoupler path. TREE-BASED separation: the decoupler's
+-- subtree = the decoupler (uid 3) + the bottom engine (uid 4) bolted below it.
+-- The landing legs (uid 8) sit just as LOW (y=0.65) but hang off the TANK on
+-- the pod side — old bottom-up-y staging swept them off with the cut; the tree
+-- keeps them. This is Ty's staging bug, pinned by a test.
 press("space")
 step(2)
 check(#split_calls == 2, "axial stage fires after the boosters are gone")
+check(split_calls[2] == 2,
+  string.format("axial cut drops exactly its subtree (decoupler + bottom engine); got %d parts",
+    split_calls[2] or -1))
+local legs_after = find_node("PartLegs")
+check(legs_after ~= nil and legs_after.parent ~= nil,
+  "a LOW part on the UPPER stage survives the axial cut below it (tree, not y)")
 
 -- SPACE #4: PARACHUTES — the last staging event. It doesn't split; it opens
 -- the canopy, which then drags against velocity in the atmosphere. Put the
@@ -681,17 +703,30 @@ for _, n in ipairs(nodes) do
 end
 check(tank_node ~= nil and pod_node ~= nil, "tank + pod children located")
 
--- Damage ARMS 2.5s after clamp release. The crash metric is IMPACT SPEED (m/s)
--- now (assembly.impacts .speed), not a mass-scaled impulse — inject `speed`. A
--- hard-but-survivable knock on the tank (fragile tolerance 3.5): speed 2.0 →
--- ~40% damage — enough to smoulder, not enough to break.
+-- Damage ARMS 2.5s after clamp release. The crash metric is now the TOTAL
+-- closing speed (assembly.impacts .speedAbs) — the energy, not just the normal
+-- component — and surviving-but-overloaded parts WEAR at a dt-scaled rate, so a
+-- real hit is a SUSTAINED contact (many ticks), not one frame. Simulate a
+-- ~20-tick low-speed GRIND on the tank (mostly tangential slide: normal 0.5,
+-- total 1.5 — under the wounded tolerance floor, so it wears via the dt-scaled
+-- path and never instant-breaks): it smoulders and shows on the HUD, survives.
 step(160)
 local n_fx = #API.EFFECTS
-API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 2.0,
-                  x = tank_node.x, y = tank_node.y, z = tank_node.z } }
-step(9)
-check(#API.EFFECTS > n_fx and API.EFFECTS[n_fx + 1].name == "Smoke",
-  "a hard-but-survivable hit smoulders (Smoke effect)")
+for _ = 1, 20 do
+  API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 0.5, speedAbs = 1.5,
+                    x = tank_node.x, y = tank_node.y, z = tank_node.z } }
+  step(1)
+end
+-- The grind throws sparks and kicks up gritty ScrapeDust (dust/scratch feedback,
+-- not soft smoke circles); wounded parts additionally smoulder (Smoke) once they
+-- drop below the smoulder threshold.
+local scraped, sparked = false, false
+for i = n_fx + 1, #API.EFFECTS do
+  local nm = API.EFFECTS[i].name
+  if nm == "ScrapeDust" then scraped = true end
+  if nm == "Sparks" then sparked = true end
+end
+check(scraped and sparked, "a sustained survivable grind throws sparks + kicks up dust")
 check(hudn.text:find("DAMAGE") ~= nil,
   "HUD reports the damaged part (got: " .. tostring(hudn.text) .. ")")
 
@@ -701,7 +736,7 @@ check(hudn.text:find("DAMAGE") ~= nil,
 -- still exactly one split.)
 local n_split = #split_calls
 local n_crater = #API.CRATERS
-API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 8.0,
+API.IMPACTS = { { part = tank_node.id, impulse = 0.0, speed = 8.0, speedAbs = 8.0,
                   x = tank_node.x, y = tank_node.y, z = tank_node.z } }
 step(2)
 local exploded = false
@@ -719,7 +754,7 @@ check(#API.CRATERS > n_crater, "a tank blast against the ground digs a crater")
 -- split increase here proves the shatter path fired.
 local n_split2 = #split_calls
 local n_crater2 = #API.CRATERS
-API.IMPACTS = { { part = pod_node.id, impulse = 0.0, speed = 26.0,
+API.IMPACTS = { { part = pod_node.id, impulse = 0.0, speed = 26.0, speedAbs = 26.0,
                   x = pod_node.x, y = pod_node.y, z = pod_node.z } }
 step(2)
 check(#split_calls - n_split2 >= 2, string.format(

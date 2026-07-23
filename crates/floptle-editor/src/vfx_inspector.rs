@@ -563,6 +563,18 @@ fn particle_section(
             .on_hover_text("velocity damping per second (air resistance)")
             .changed();
     });
+    ui.horizontal(|ui| {
+        ui.label("inherit velocity");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.inherit_velocity).speed(0.02).range(0.0..=1.0))
+            .on_hover_text(
+                "World-space tracks only: fraction of the EMITTER's velocity a newborn \
+                 keeps. 0 = ignore emitter motion (classic); 1 = fully rides its momentum \
+                 then drifts. Stops trails (smoke/dust) off a fast vessel getting left \
+                 behind in space.",
+            )
+            .changed();
+    });
 }
 
 /// Force fields on a track — the "make it feel alive" layer. Add wind / attractor /

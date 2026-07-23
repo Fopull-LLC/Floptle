@@ -36,6 +36,7 @@
             )),
             gravity: 14.0,
             drag: 0.4,
+            inherit_velocity: 0.55,
         ),
         (
             name: "Flash",
@@ -72,4 +73,5 @@
         ),
     ],
     seed: 3,
+    gravity_mode: Field,
 )

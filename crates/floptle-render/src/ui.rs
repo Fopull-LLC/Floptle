@@ -750,7 +750,14 @@ impl Ui {
                     ],
                     color: q.color,
                     border_color: q.border_color,
-                    params: [q.radius * scale, q.border * scale, 0.0, clip_r],
+                    // A shadow quad (feather > 0) uses kind 2 and carries its
+                    // soft-edge width in the border lane; everything else is a
+                    // crisp shape/image (kind 0) with its border width.
+                    params: if q.feather > 0.0 {
+                        [q.radius * scale, q.feather * scale, 2.0, clip_r]
+                    } else {
+                        [q.radius * scale, q.border * scale, 0.0, clip_r]
+                    },
                     // Spritesheet cell (or the whole texture, [0,0,1,1]).
                     uv: q.uv,
                     clip,

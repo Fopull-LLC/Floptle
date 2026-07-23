@@ -1,0 +1,13 @@
+// A Floptle shader (.flsl) — one source of truth, editable as text or graph.
+// Assign it on a Material (Inspector -> Material -> Shader). Exposed `uniform`s
+// become Inspector knobs; `texture` slots take drag-and-dropped textures.
+shader myShader {
+  stage fragment
+  uniform tint: color = #FFFFFF
+  uniform glow: float = 0 range(0, 4)
+
+  let base = baseTexture() * tint * instanceColor
+  let lit = litSurface(base.rgb)
+
+  output color = vec4(lit + base.rgb * glow, base.a)
+}

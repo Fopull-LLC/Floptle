@@ -1,0 +1,11 @@
+// A two-color linear gradient fill. `angle` is in degrees (90 = top→bottom).
+shader ui_gradient {
+  stage ui
+  uniform top: color = #3A7BFF
+  uniform bottom: color = #0B1B33
+  uniform angle: float = 90.0
+  let a = angle * 0.0174533
+  let dir = vec2(cos(a), sin(a))
+  let t = saturate(dot(uv - vec2(0.5, 0.5), dir) + 0.5)
+  output color = vec4(mix(top.rgb, bottom.rgb, t), 1.0) * instanceColor
+}

@@ -531,6 +531,11 @@ impl PhysicsWorld {
                         // applied (negative vn = approaching). Not subject to the
                         // depenetration budget, so it reports true crash speed.
                         let speed = (-vn).max(0.0);
+                        // TOTAL contact-point speed (normal + tangential): the
+                        // energy the hit actually carries, independent of how the
+                        // surface happens to be angled. A crash model wants this,
+                        // not the normal component that a curved planet guts.
+                        let speed_abs = v_p.length();
                         let mut j = 0.0;
                         if vn < 0.0 {
                             j = -(1.0 + c.restitution) * vn / w;
@@ -564,6 +569,7 @@ impl PhysicsWorld {
                             normal: n,
                             impulse: j,
                             speed,
+                            speed_abs,
                         });
                     }
                 }

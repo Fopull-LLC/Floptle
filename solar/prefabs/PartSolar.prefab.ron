@@ -1,0 +1,39 @@
+[
+    (
+        name: "PartSolar",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.3, 0.12, 1.0),
+        ),
+        // A SOLAR PANEL: a radial blade (reuses the swept-fin mesh, flattened wide
+        // and thin into a cell array) that radial_orient yaws +X outward off a
+        // flank, exactly like a fin/leg. It DEPLOYS in flight (U-group with the
+        // dish) and trickles EC into the batteries while it faces the sun. The deep
+        // blue photovoltaic material reads it apart from a grey aero fin.
+        matter: Mesh(
+            asset_path: "models/parts/fin.glb",
+        ),
+        material: Some((
+            color: (0.09, 0.13, 0.32),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.09, 0.13, 0.32, 1.0),
+            },
+        )),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Kinematic,
+            radius: 0.4,
+            height: 1.0,
+            half_extents: (0.52, 0.06, 0.4),
+            restitution: 0.05,
+            friction: 0.6,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            mass: 0.25,
+        )),
+    ),
+]

@@ -15,8 +15,9 @@ use std::sync::Arc;
 use floptle_core::ParticleSystem;
 use floptle_core::World;
 use floptle_scene::{
-    VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxInterpDoc,
-    VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxPlaybackDoc, VfxPropDoc, VfxTrackDoc, VfxValueDoc,
+    VfxClipDoc, VfxCurveDoc, VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxGravityDoc,
+    VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxLifetimeScaleDoc, VfxPlaybackDoc,
+    VfxPropDoc, VfxTrackDoc, VfxValueDoc,
 };
 use floptle_vfx::EffectInstance;
 
@@ -710,9 +711,48 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
             .add(egui::DragValue::new(&mut lt).speed(0.02).range(0.05..=600.0).suffix("s"))
             .changed()
         {
+            let old = doc.lifetime;
+            if doc.lifetime_scale_mode == VfxLifetimeScaleDoc::Rescale && old > 1e-6 {
+                doc.rescale_timeline(lt / old);
+            }
             doc.lifetime = lt;
             *dirty = true;
         }
+        // How the timeline reacts to a lifetime edit: Absolute (Unity — graphs keep
+        // their second positions) vs Rescale (Roblox — the whole timeline stretches).
+        egui::ComboBox::from_id_salt("vfx_lifetime_scale")
+            .selected_text(match doc.lifetime_scale_mode {
+                VfxLifetimeScaleDoc::Absolute => "⇥ scale: absolute",
+                VfxLifetimeScaleDoc::Rescale => "↔ scale: with lifetime",
+            })
+            .show_ui(ui, |ui| {
+                for (v, l, tip) in [
+                    (
+                        VfxLifetimeScaleDoc::Absolute,
+                        "⇥ absolute time",
+                        "Editing lifetime just changes how much of the timeline plays. \
+                         Automation graphs and clips keep their exact second positions \
+                         (Unity-style). Good when curves represent real-time behavior.",
+                    ),
+                    (
+                        VfxLifetimeScaleDoc::Rescale,
+                        "↔ scale with lifetime",
+                        "Editing lifetime stretches/squashes the whole timeline — every \
+                         automation graph and clip moves proportionally so the shape is \
+                         preserved over the new length (Roblox-style, over-lifetime).",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(doc.lifetime_scale_mode == v, l)
+                        .on_hover_text(tip)
+                        .clicked()
+                        && doc.lifetime_scale_mode != v
+                    {
+                        doc.lifetime_scale_mode = v;
+                        *dirty = true;
+                    }
+                }
+            });
         egui::ComboBox::from_id_salt("vfx_playback")
             .selected_text(match doc.playback {
                 VfxPlaybackDoc::Looping => "⟲ Looping",
@@ -725,6 +765,33 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
                 ] {
                     if ui.selectable_label(doc.playback == v, l).clicked() && doc.playback != v {
                         doc.playback = v;
+                        *dirty = true;
+                    }
+                }
+            });
+        // Gravity source: constant world-down, or the live scene field (radial planets
+        // + celestial µ/r²) so debris/dust fall toward the ground beneath them.
+        egui::ComboBox::from_id_salt("vfx_gravity_mode")
+            .selected_text(match doc.gravity_mode {
+                VfxGravityDoc::WorldDown => "▼ gravity: world-down",
+                VfxGravityDoc::Field => "◎ gravity: scene field",
+            })
+            .show_ui(ui, |ui| {
+                for (v, l) in [
+                    (VfxGravityDoc::WorldDown, "▼ world-down (constant −Y)"),
+                    (VfxGravityDoc::Field, "◎ scene field (toward planets)"),
+                ] {
+                    if ui
+                        .selectable_label(doc.gravity_mode == v, l)
+                        .on_hover_text(
+                            "where each track's `gravity ×` pull points. World-down is the \
+                             classic constant. Scene field samples the live gravity field \
+                             at the emitter, so effects near a planet fall toward its surface.",
+                        )
+                        .clicked()
+                        && doc.gravity_mode != v
+                    {
+                        doc.gravity_mode = v;
                         *dirty = true;
                     }
                 }

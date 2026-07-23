@@ -451,7 +451,7 @@
         (
             name: "UI Layer",
             transform: (
-                translation: (0.0, 0.8, 2.0),
+                translation: (0.0, 10.897077369689942, 2.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
@@ -489,9 +489,9 @@
                 ),
                 size: (Fixed(827.0), Fixed(450.0)),
                 image: Some((
-                    texture: "assets/textures/UI/Hand/FP Hand-Sheet.png",
+                    texture: "textures/UI/Hand/FP Hand Keypad-Sheet.png",
                     tint: (1.0, 1.0, 1.0, 1.0),
-                    cols: 21,
+                    cols: 1,
                     rows: 1,
                     cell: 0,
                 )),

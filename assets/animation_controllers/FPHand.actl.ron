@@ -12,6 +12,13 @@
                     looped: true,
                     pos: (333.0, 63.0),
                 ),
+                (
+                    name: "Punch",
+                    clip: "animations/Punch",
+                    speed: 1.0,
+                    looped: true,
+                    pos: (70.0, 40.0),
+                ),
             ],
             default_state: Some("Idle"),
             transitions: [],

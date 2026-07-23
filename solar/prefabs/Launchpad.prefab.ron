@@ -1,29 +1,65 @@
 [
+    // The launch pad. The OLD prefab pointed at models/nasa/mobile_launcher_pad_only.glb,
+    // which uses KHR_draco_mesh_compression — unsupported by the glTF loader, so it
+    // imported NOTHING and the pad was invisible (only its baked collider existed, which
+    // is why ships still "clamped to the pad" onto thin air). Rebuilt from Kenney meshes
+    // that DO import: the root keeps the exact same world-space Static box collider (so
+    // vessel_spawner's deck=1.24 offset is unchanged), and the visible deck + gantry ride
+    // as child meshes (no colliders of their own — decorative).
     (
         name: "Launchpad",
         transform: (
             translation: (0.0, 0.0, 0.0),
             rotation: (0.0, 0.0, 0.0, 1.0),
-            scale: (0.05, 0.05, 0.05),
+            scale: (1.0, 1.0, 1.0),
         ),
-        matter: Mesh(
-            asset_path: "models/nasa/mobile_launcher_pad_only.glb",
-        ),
+        matter: Empty,
         scripts: [],
         rigidbody: Some((
             boxed: true,
             mode: Static,
-            radius: 0.5,
-            height: 2.0,
-            // Half-extents are multiplied by the node's world scale (0.05):
-            // the mesh is inch-authored (102x50x87), so these land at
-            // ~2.55 x 1.24 x 2.17 world units — deck top ~1.24 above center.
-            half_extents: (51.0, 24.9, 43.4),
+            radius: 2.6,
+            height: 2.5,
+            // Same world box as before (was 51,24.9,43.4 at scale 0.05): the deck
+            // top sits ~1.245 above the pad centre, which is the deck=1.24 the
+            // spawner clamps the vessel to.
+            half_extents: (2.55, 1.245, 2.17),
             restitution: 0.0,
             friction: 0.9,
             gravity: false,
             lock_pos: (false, false, false),
             lock_rot: (false, false, false),
         )),
+    ),
+    (
+        // Visible launch deck: a checkered slab filling the top of the collider box
+        // (native 2x1x2, origin at its base). Scaled to the ~5.1 x 4.34 footprint and
+        // raised so its top face lands at the collider top (+1.245).
+        name: "PadDeck",
+        transform: (
+            translation: (0.0, 0.745, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (2.55, 0.5, 2.17),
+        ),
+        matter: Mesh(
+            asset_path: "models/factory/top-large-checkerboard.glb",
+        ),
+        scripts: [],
+        parent: Some(0),
+    ),
+    (
+        // A launch gantry tower beside the deck (decorative, no collider so the
+        // ship never fouls it). structure-tall is native 2x3x2 (y -1..2).
+        name: "PadTower",
+        transform: (
+            translation: (3.1, 1.245, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (0.7, 1.1, 0.7),
+        ),
+        matter: Mesh(
+            asset_path: "models/factory/structure-tall.glb",
+        ),
+        scripts: [],
+        parent: Some(0),
     ),
 ]

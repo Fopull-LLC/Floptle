@@ -41,11 +41,14 @@
             mode: Kinematic,
             radius: 0.5,
             height: 1.0,
-            // Covers the DEPLOYED foot's reach (out ~1.15, down ~1.08 from the
-            // hinge) so the ship rests on its feet, not on a hidden box.
+            // A STABLE deployed-footprint box (out ~1.15, down ~1.08 from the
+            // hinge) so the ship plants on its legs. Held ALWAYS-ON rather than
+            // folding away with the gear: tracking the fold left a gear-up craft
+            // with no footprint, so it slid + bounced (Ty's regression). Feet-
+            // tracking colliders need a stability floor before they come back.
             half_extents: (0.95, 1.05, 0.45),
             restitution: 0.05,
-            friction: 0.7,
+            friction: 0.9,
             gravity: true,
             lock_pos: (false, false, false),
             lock_rot: (false, false, false),

@@ -1116,11 +1116,248 @@
                 scale: (0.5, 0.5, 0.5),
             ),
             matter: Mesh(
-                asset_path: "models/characters/character_retro.glb",
+                asset_path: "models/astronaut/astronaut_male.glb",
             ),
             scripts: [],
-            parent: Some(5),
             anim_controller: Some("animation_controllers/character"),
+            parent: Some(5),
+        ),
+        (
+            name: "Base Facilities",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "base_facilities",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Facilities Menu",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_menu",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Facility Prompt",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(11),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (0.0, -84.0),
+                ),
+                size: (Fixed(360.0), Fixed(34.0)),
+                shape: Some((
+                    fill: (0.06, 0.09, 0.13, 0.86),
+                    radius: 6.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.6, 0.75, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 15.0,
+                    color: (0.8, 0.92, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(11),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(460.0), Fixed(320.0)),
+                stack: Some((
+                    dir: Column,
+                    gap: 12.0,
+                    pad: 20.0,
+                    align: Center,
+                    justify: Start,
+                )),
+                shape: Some((
+                    fill: (0.05, 0.08, 0.12, 0.94),
+                    radius: 10.0,
+                    border: 1.5,
+                    border_color: (0.35, 0.55, 0.7, 0.8),
+                )),
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(42),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(420.0), Fixed(30.0)),
+                text: Some((
+                    text: "Facility",
+                    size: 20.0,
+                    color: (0.85, 0.95, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Body",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(42),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(420.0), Fixed(184.0)),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.75, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Action",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_button",
+                    enabled: true,
+                    params: [
+                        ("action", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(42),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(220.0), Fixed(34.0)),
+                shape: Some((
+                    fill: (0.12, 0.2, 0.28, 0.95),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.45, 0.65, 0.8, 0.8),
+                )),
+                text: Some((
+                    text: "Action",
+                    size: 14.0,
+                    color: (0.85, 0.95, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Exit",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_button",
+                    enabled: true,
+                    params: [
+                        ("action", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(42),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(220.0), Fixed(30.0)),
+                shape: Some((
+                    fill: (0.18, 0.1, 0.12, 0.95),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.7, 0.45, 0.5, 0.7),
+                )),
+                text: Some((
+                    text: "✕ Close",
+                    size: 13.0,
+                    color: (0.95, 0.85, 0.85, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
         ),
     ],
 )

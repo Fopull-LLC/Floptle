@@ -99,6 +99,25 @@ pub struct AnimUiState {
     pub record_restore_props: Vec<(Entity, String, String, f64)>,
     /// New-animation name prompt buffer (`Some` = prompt open).
     pub new_anim_buf: Option<String>,
+
+    // ---- Animating tab: undo, multi-select, clipboard ----
+    /// Clip-edit undo/redo stacks (whole-doc snapshots). One snapshot per edit
+    /// GESTURE — [`snapshot_clip`] pushes only on the clean→dirty transition, so a
+    /// held gizmo/DragValue drag is a single undo step. Separate from scene undo
+    /// (bones aren't ECS entities); Ctrl+Z/Y in the dopesheet drive these.
+    pub clip_undo: Vec<AnimClipDoc>,
+    pub clip_redo: Vec<AnimClipDoc>,
+    /// Multi-selected TRANSFORM keys: (channel index, time). Marquee-drag or a
+    /// click populates it; copy/cut/paste/Delete act on the whole set.
+    pub sel_keys: Vec<(usize, f32)>,
+    /// Copied transform keys: (node name, time, local pose) — pasted at the playhead.
+    pub key_clipboard: Vec<(String, f32, TransformTRS)>,
+    /// In-progress marquee box over the dopesheet (screen start, current).
+    pub marquee: Option<(Pos2, Pos2)>,
+    /// In-progress STRETCH of the selection: the previewed new time of the right
+    /// edge (keys scale around the selection's left edge). `Some` while dragging
+    /// the stretch grip that appears when ≥2 keys spanning a range are selected.
+    pub stretch_drag: Option<f32>,
 }
 
 impl Default for AnimUiState {
@@ -141,8 +160,55 @@ impl Default for AnimUiState {
             last_scene_props: HashMap::new(),
             record_restore_props: Vec::new(),
             new_anim_buf: None,
+            clip_undo: Vec::new(),
+            clip_redo: Vec::new(),
+            sel_keys: Vec::new(),
+            key_clipboard: Vec::new(),
+            marquee: None,
+            stretch_drag: None,
         }
     }
+}
+
+/// Push the current clip onto the undo stack — but only on the clean→dirty edge, so
+/// one continuous edit gesture (a gizmo/DragValue drag, which holds `clip_dirty`
+/// true until the pointer-up save) becomes a SINGLE undo step. Call this at the top
+/// of any clip-mutating path, before it sets `clip_dirty = true`. Also clears redo.
+pub(crate) fn snapshot_clip(st: &mut AnimUiState) {
+    if !st.clip_dirty
+        && let Some((_, d)) = &st.clip_doc
+    {
+        st.clip_undo.push(d.clone());
+        if st.clip_undo.len() > 64 {
+            st.clip_undo.remove(0);
+        }
+        st.clip_redo.clear();
+    }
+}
+
+/// What clicking a dopesheet track selects back in the scene — a rigged mesh's
+/// armature bone (by skeleton index) or a plain scene node.
+pub(crate) enum TrackSelect {
+    Bone(usize),
+    Node(Entity),
+}
+
+/// Apply an undo (`redo=false`) or redo (`redo=true`) to the open clip: swap the
+/// current doc with the top of the chosen stack, pushing the current onto the other.
+/// Returns true if anything happened (so the caller marks the clip dirty to re-save).
+pub(crate) fn clip_undo_redo(st: &mut AnimUiState, redo: bool) -> bool {
+    let Some((key, cur)) = st.clip_doc.clone() else { return false };
+    let taken = if redo { st.clip_redo.pop() } else { st.clip_undo.pop() };
+    let Some(doc) = taken else { return false };
+    if redo {
+        st.clip_undo.push(cur);
+    } else {
+        st.clip_redo.push(cur);
+    }
+    st.clip_doc = Some((key, doc));
+    st.sel_prop = None;
+    st.sel_keys.clear();
+    true
 }
 
 /// `path` is a baked animation clip asset.
@@ -1258,16 +1324,52 @@ impl EditorTabViewer<'_> {
             // (Zoom lives on the wheel — the old slider duplicated it and ate bar space.)
             if ui
                 .button("Fit")
-                .on_hover_text(
-                    "zoom to fit the whole clip (F)\n\nover the dopesheet: scroll = zoom · \
-                     Alt+scroll = row height · Shift+scroll = pan · Space play · ←/→ step · \
-                     Home/End · double-click a lane = key there · right-click a lane label = \
-                     its menu · Del = delete the selected key/event",
-                )
+                .on_hover_text("zoom to fit the whole clip (F)")
                 .clicked()
             {
                 self.anim_ui.fit_pending = true;
             }
+            // Live selection count (multi-select feedback).
+            if !self.anim_ui.sel_keys.is_empty() {
+                ui.separator();
+                ui.colored_label(
+                    ACCENT,
+                    format!("{} key(s) selected", self.anim_ui.sel_keys.len()),
+                );
+            }
+            // A discoverable cheat-sheet of every dopesheet gesture/shortcut.
+            ui.menu_button("⌨ Shortcuts", |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                for line in [
+                    "— Selection —",
+                    "click key = select · Shift+click = add/remove",
+                    "drag empty sheet = marquee box-select",
+                    "Ctrl+A = select all keys · Esc / click empty = deselect",
+                    "click a track label = select that bone/node",
+                    "— Editing —",
+                    "drag a key = move it (moves the whole selection)",
+                    "stretch grip (amber, on ≥2 selected) = scale timing",
+                    "Ctrl+C / X / V = copy / cut / paste at playhead",
+                    "Ctrl+D = duplicate selection at playhead",
+                    "Del / Backspace = delete selection",
+                    "Ctrl+Z / Ctrl+Y = undo / redo",
+                    "double-click a lane = key pose there",
+                    "right-click a lane = insert key here",
+                    "⏺ Key all bones · ⌾ Key all tracks (toolbar)",
+                    "— Navigation —",
+                    "Space = play/pause · Home/End = clip ends",
+                    "←/→ = step · , / . (or [ / ]) = prev/next key",
+                    "F = fit · wheel = zoom · Alt+wheel = row height",
+                    "Shift+wheel = pan",
+                ] {
+                    if line.starts_with('—') {
+                        ui.add_space(3.0);
+                        ui.strong(line);
+                    } else {
+                        ui.label(line);
+                    }
+                }
+            });
         });
 
         // New-animation prompt.
@@ -1439,6 +1541,8 @@ const PROP_KEY_COLOR: Color32 = Color32::from_rgb(120, 210, 175);
 const PROP_LABEL_COLOR: Color32 = Color32::from_rgb(150, 200, 185);
 /// The ● REC armed colour + the dopesheet's recording border tint.
 const RECORD_RED: Color32 = Color32::from_rgb(235, 80, 80);
+/// The selection stretch-span bar + grip (an amber, distinct from the accent).
+const STRETCH_COL: Color32 = Color32::from_rgb(235, 170, 90);
 
 /// One ＋ Property menu entry: (channel name, display name, [(component, field)]).
 type NodeFieldMenu = (String, String, Vec<(String, String)>);
@@ -1670,10 +1774,13 @@ impl EditorTabViewer<'_> {
         let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
         let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
         let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
+        // channel name → the scene entity it drives (for click-track-to-select).
+        let mut chan_entity: HashMap<String, Entity> = HashMap::new();
         for (e, chan) in scene_channel_names(self.world, target) {
             if e != target && chan.is_empty() {
                 continue; // unnamed children can't be addressed by a channel
             }
+            chan_entity.insert(chan.clone(), e);
             if let Some(tr) = self.world.get::<floptle_core::Transform>(e) {
                 live_trs.insert(
                     chan.clone(),
@@ -1724,6 +1831,30 @@ impl EditorTabViewer<'_> {
             }
         }
 
+        // Live LOCAL pose of every armature bone (from the bound controller), so
+        // "Key all bones" can drop a key holding each bone's current pose, and
+        // clicking a bone track can resolve its skeleton index. Bones aren't ECS
+        // entities, so this is the only source of their current transform.
+        let mut bone_trs: Vec<(String, TransformTRS)> = Vec::new();
+        let mut bone_idx: HashMap<String, usize> = HashMap::new();
+        if let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(target)
+            && let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
+        {
+            let pose = self.anim.instances.get(&target).map(|inst| inst.ctl.pose());
+            for (i, n) in rig.skeleton.nodes.iter().enumerate() {
+                bone_idx.insert(n.name.clone(), i);
+                let trs = pose
+                    .and_then(|p| p.get(i))
+                    .copied()
+                    .unwrap_or(n.rest);
+                bone_trs.push((n.name.clone(), trs));
+                // Bones live in `live_trs` too so every "key pose"/"key here"/double-
+                // click path treats a bone channel like any node channel (bones have
+                // no ECS Transform of their own, so this is their only pose source).
+                live_trs.entry(n.name.clone()).or_insert(trs);
+            }
+        }
+
         let st = &mut *self.anim_ui;
         // Read `dur` and run the wheel handler BEFORE borrowing `clip_doc` mutably (the
         // handler needs &mut st, which would alias the `doc` borrow).
@@ -1732,6 +1863,21 @@ impl EditorTabViewer<'_> {
             None => return,
         };
         handle_anim_wheel(ui, st, dur);
+        // Undo capture: snapshot the clip BEFORE this frame's edits and commit it at
+        // the END only if the frame dirtied a previously-clean clip — one undo step
+        // per gesture (a held drag stays dirty, so it snapshots once). Undo/redo are
+        // deferred (they swap clip_doc, which `doc` borrows) and applied after draw.
+        let undo_snap = st.clip_doc.clone();
+        let dirty_before = st.clip_dirty;
+        let mut do_undo = false;
+        let mut do_redo = false;
+        let mut copy_keys = false;
+        let mut cut_keys = false;
+        let mut paste_keys = false;
+        let mut dup_keys = false;
+        let mut delete_sel = false;
+        // A scene node/bone to select from a track click (applied after the borrow).
+        let mut pending_select: Option<TrackSelect> = None;
         let Some((_, doc)) = st.clip_doc.as_mut() else { return };
         let px = st.zoom;
         let label_w = ANIM_LABEL_W;
@@ -1744,12 +1890,61 @@ impl EditorTabViewer<'_> {
         // Header row: duration + event add + selected-event editor.
         let mut kill_event: Option<usize> = None;
         ui.horizontal(|ui| {
+            // Undo / redo the clip edits (Ctrl+Z / Ctrl+Y also work over the sheet).
+            if ui.add_enabled(!st.clip_undo.is_empty(), egui::Button::new("↶"))
+                .on_hover_text("Undo clip edit (Ctrl+Z)").clicked() { do_undo = true; }
+            if ui.add_enabled(!st.clip_redo.is_empty(), egui::Button::new("↷"))
+                .on_hover_text("Redo clip edit (Ctrl+Y)").clicked() { do_redo = true; }
+            ui.separator();
             ui.label("duration");
             let mut d = doc.duration;
             if ui.add(egui::DragValue::new(&mut d).speed(0.02).range(0.05..=600.0).suffix("s")).changed() {
                 doc.duration = d;
                 st.clip_dirty = true;
             }
+            ui.separator();
+            // KEY-ALL commands (both, deliberately — they serve different needs):
+            // "all bones" drops a key on EVERY armature bone at its current pose (a
+            // full-body keyframe, even bones with no track yet); "all tracks" keys
+            // every EXISTING lane (transform + property) at its current value.
+            if !bone_trs.is_empty()
+                && ui.button("⏺ Key all bones")
+                    .on_hover_text("full-body key: every bone gets a key at its current pose, here at the playhead")
+                    .clicked()
+            {
+                for (name, trs) in &bone_trs {
+                    write_key(doc, name, ph, trs);
+                }
+                st.clip_dirty = true;
+            }
+            if !doc.channels.is_empty()
+                && ui.button("⌾ Key all tracks")
+                    .on_hover_text("key every existing track (transform + property lanes) at its current value")
+                    .clicked()
+            {
+                for ci in 0..doc.channels.len() {
+                    let name = doc.channels[ci].node.clone();
+                    let trs = bone_trs
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, t)| *t)
+                        .or_else(|| live_trs.get(&name).copied());
+                    if let Some(trs) = trs {
+                        write_key(doc, &name, ph, &trs);
+                    }
+                    for ti in 0..doc.channels[ci].properties.len() {
+                        let (comp, field) = {
+                            let pt = &doc.channels[ci].properties[ti];
+                            (pt.component.clone(), pt.field.clone())
+                        };
+                        let kind = prop_kind(&comp, &field);
+                        let live = live_vals.get(&(name.clone(), comp, field)).copied();
+                        key_property_current(&mut doc.channels[ci].properties[ti], ph, kind, live);
+                    }
+                }
+                st.clip_dirty = true;
+            }
+            ui.separator();
             // ＋ Property: node ▸ field cascade listing only components actually on
             // each node (Unity's "Add Property"). Adds an empty lane to key into.
             ui.menu_button("＋ Property", |ui| {
@@ -1833,11 +2028,33 @@ impl EditorTabViewer<'_> {
             // widget layered on top wins the pointer — a click that reaches it hit
             // empty space, which deselects (like clicking off in any editor).
             let (full, bg_resp) =
-                ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::click());
+                ui.allocate_exact_size(egui::vec2(want_w, body_h), Sense::click_and_drag());
             if bg_resp.clicked() {
                 st.sel_prop = None;
                 st.sel_event = None;
+                st.sel_keys.clear();
             }
+            // Click-drag on EMPTY sheet = marquee box select (keys layered on top win
+            // the pointer, so a drag that reaches here started on empty space). While
+            // dragging we rebuild sel_keys from the keys inside the box each frame.
+            if bg_resp.drag_started()
+                && let Some(p) = bg_resp.interact_pointer_pos()
+            {
+                st.marquee = Some((p, p));
+                st.sel_keys.clear();
+                st.sel_prop = None;
+            }
+            if bg_resp.dragged()
+                && let Some(p) = bg_resp.interact_pointer_pos()
+                && let Some(m) = st.marquee.as_mut()
+            {
+                m.1 = p;
+                st.sel_keys.clear();
+            }
+            if bg_resp.drag_stopped() {
+                st.marquee = None;
+            }
+            let marquee = st.marquee.map(|(a, b)| Rect::from_two_pos(a, b));
             let painter = ui.painter_at(full);
             let tl_left = full.left() + label_w;
             let view = crate::timeline::TimelineView { left: tl_left, px_per_s: px, duration: dur };
@@ -1927,7 +2144,36 @@ impl EditorTabViewer<'_> {
             //   · single-click empty lane = deselect
             let rows_top = full.top() + ruler_h + event_h;
             let mut retime: Option<(usize, f32, f32)> = None; // transform: (channel, old t, new t)
+            let mut group_retime: Option<f32> = None; // shift ALL selected keys by this delta
             let mut delete_key: Option<(usize, f32)> = None;
+            // Is the in-flight key drag moving a whole multi-selection together? (The
+            // dragged key must itself be part of a >1 selection.) If so its delta drags
+            // every selected key; otherwise only the one key moves.
+            let (drag_delta, group_move) = match st.key_drag {
+                Some((aci, aot, apt)) => {
+                    let in_sel =
+                        st.sel_keys.iter().any(|&(c, t)| c == aci && (t - aot).abs() < 1e-6);
+                    (apt - aot, in_sel && st.sel_keys.len() > 1)
+                }
+                None => (0.0, false),
+            };
+            // Live STRETCH factor while dragging the selection's right grip: selected
+            // keys scale around the selection's left edge (`sel_min`).
+            let (sel_min, sel_max) = {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for &(_, t) in &st.sel_keys {
+                    lo = lo.min(t);
+                    hi = hi.max(t);
+                }
+                (lo, hi)
+            };
+            let stretch_factor = match st.stretch_drag {
+                Some(newmax) if sel_max > sel_min + 1e-4 => {
+                    Some(((newmax - sel_min) / (sel_max - sel_min)).max(0.02))
+                }
+                _ => None,
+            };
             let mut prop_retime: Option<(usize, usize, f32, f32)> = None; // (ci, ti, old, new)
             let mut prop_delete: Option<(usize, usize, f32)> = None; // (ci, ti, t)
             let mut prop_select: Option<(usize, usize, usize)> = None; // (ci, ti, ki)
@@ -2005,6 +2251,15 @@ impl EditorTabViewer<'_> {
                         }
                     });
                 }
+                // Clicking a track's LABEL selects the bone/node it drives, back in
+                // the scene (so you can grab its gizmo) — deferred past the borrow.
+                if lresp.clicked() {
+                    if let Some(&bi) = bone_idx.get(&chan_name) {
+                        pending_select = Some(TrackSelect::Bone(bi));
+                    } else if let Some(&e) = chan_entity.get(&chan_name) {
+                        pending_select = Some(TrackSelect::Node(e));
+                    }
+                }
                 painter.text(
                     Pos2::new(full.left() + 4.0, cy),
                     Align2::LEFT_CENTER,
@@ -2017,7 +2272,8 @@ impl EditorTabViewer<'_> {
                     },
                 );
                 // Lane strip: double-click keys the node's CURRENT pose there;
-                // a plain click on empty lane deselects.
+                // right-click inserts a key at the click position; a plain click on
+                // empty lane deselects.
                 let lane_strip = Rect::from_min_size(
                     Pos2::new(tl_left, y),
                     egui::vec2(dur * px, lane_h),
@@ -2035,22 +2291,85 @@ impl EditorTabViewer<'_> {
                     pose_key_at =
                         Some((ci, crate::timeline::snap_time(x_to_time(p.x), st.snap_fps)));
                 }
+                if live_trs.contains_key(&chan_name) || bone_idx.contains_key(&chan_name) {
+                    sresp.context_menu(|ui| {
+                        if ui
+                            .button("⏺ Insert key here")
+                            .on_hover_text("key this node's current pose at the click position")
+                            .clicked()
+                        {
+                            // The menu opens at the cursor; its left edge ≈ the click x.
+                            let mx = ui.min_rect().left();
+                            pose_key_at =
+                                Some((ci, crate::timeline::snap_time(x_to_time(mx), st.snap_fps)));
+                            ui.close();
+                        }
+                    });
+                }
                 let times = union_times(&doc.channels[ci]);
                 for (ki, &t) in times.iter().enumerate() {
+                    let selected =
+                        st.sel_keys.iter().any(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6);
                     // A drag previews at the pointer but the doc is only retimed on
                     // RELEASE — live-resorting mid-drag would hand it to a neighbour.
+                    // A group move shifts every selected key by the anchor's delta; a
+                    // stretch scales selected keys around the selection's left edge.
                     let dragging_this = st
                         .key_drag
                         .is_some_and(|(dci, ot, _)| dci == ci && (ot - t).abs() < 1e-6);
-                    let draw_t = if dragging_this { st.key_drag.unwrap().2 } else { t };
+                    let draw_t = if dragging_this {
+                        st.key_drag.unwrap().2
+                    } else if group_move && selected {
+                        (t + drag_delta).max(0.0)
+                    } else if let (Some(f), true) = (stretch_factor, selected) {
+                        sel_min + (t - sel_min) * f
+                    } else {
+                        t
+                    };
                     let c = Pos2::new(time_to_x(draw_t), cy);
+                    // Marquee box select: a key whose diamond falls in the box joins
+                    // the selection (rebuilt each drag frame).
+                    if let Some(mq) = marquee
+                        && mq.contains(c)
+                        && !selected
+                    {
+                        st.sel_keys.push((ci, t));
+                    }
                     let id = ui.id().with(("anim-key", ci, ki));
                     let resp = ui
                         .interact(Rect::from_center_size(c, egui::vec2(12.0, 12.0)), id, Sense::click_and_drag());
-                    let col = if resp.hovered() || dragging_this { ACCENT } else { KEY_COLOR };
+                    let col = if resp.hovered() || dragging_this || selected {
+                        ACCENT
+                    } else {
+                        KEY_COLOR
+                    };
                     key_diamond(&painter, c, col);
+                    if selected {
+                        // A ring around multi-selected keys, so a selection reads at a glance.
+                        painter.circle_stroke(c, 8.0, Stroke::new(1.0, ACCENT.gamma_multiply(0.8)));
+                    }
+                    if resp.clicked() {
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        if shift {
+                            if let Some(p) =
+                                st.sel_keys.iter().position(|&(sc, stt)| sc == ci && (stt - t).abs() < 1e-6)
+                            {
+                                st.sel_keys.remove(p);
+                            } else {
+                                st.sel_keys.push((ci, t));
+                            }
+                        } else {
+                            st.sel_keys = vec![(ci, t)];
+                        }
+                        st.sel_prop = None;
+                        st.sel_event = None;
+                    }
                     if resp.drag_started() {
                         st.key_drag = Some((ci, t, t));
+                        // Dragging a key that isn't in the selection makes it the selection.
+                        if !selected {
+                            st.sel_keys = vec![(ci, t)];
+                        }
                     }
                     if resp.dragged()
                         && let Some(p) = resp.interact_pointer_pos()
@@ -2069,10 +2388,25 @@ impl EditorTabViewer<'_> {
                         && (ot - t).abs() < 1e-6
                         && (nt - ot).abs() > 1e-6
                     {
-                        retime = Some((ci, ot, nt));
+                        // A multi-selection moves as one; a lone key retimes by itself.
+                        if group_move {
+                            group_retime = Some(nt - ot);
+                        } else {
+                            retime = Some((ci, ot, nt));
+                        }
                     }
                     resp.context_menu(|ui| {
-                        if ui.button("🗑 Delete key").clicked() {
+                        // Acting on a multi-selection? Offer the batch verbs.
+                        if selected && st.sel_keys.len() > 1 {
+                            if ui.button(format!("🗑 Delete {} keys", st.sel_keys.len())).clicked() {
+                                delete_sel = true;
+                                ui.close();
+                            }
+                            if ui.button("⧉ Copy keys").clicked() {
+                                copy_keys = true;
+                                ui.close();
+                            }
+                        } else if ui.button("🗑 Delete key").clicked() {
                             delete_key = Some((ci, t));
                             ui.close();
                         }
@@ -2225,9 +2559,45 @@ impl EditorTabViewer<'_> {
                 retime_channel(&mut doc.channels[ci], old, new);
                 st.clip_dirty = true;
             }
+            // Group move: shift every selected key by the same delta. Process in a
+            // collision-safe order (rightmost first when moving right) so a key never
+            // lands on — and merges into — a not-yet-moved neighbour.
+            if let Some(delta) = group_retime.filter(|d| d.abs() > 1e-6) {
+                let mut sel = st.sel_keys.clone();
+                sel.sort_by(|a, b| a.1.total_cmp(&b.1));
+                if delta > 0.0 {
+                    sel.reverse();
+                }
+                let mut new_sel = Vec::new();
+                for (ci, t) in sel {
+                    let nt = (t + delta).max(0.0);
+                    if let Some(ch) = doc.channels.get_mut(ci) {
+                        retime_channel(ch, t, nt);
+                    }
+                    new_sel.push((ci, nt));
+                }
+                st.sel_keys = new_sel;
+                st.clip_dirty = true;
+            }
             if let Some((ci, t)) = delete_key {
                 delete_channel_key(&mut doc.channels[ci], t);
                 drop_empty_channel(doc, ci);
+                st.clip_dirty = true;
+            }
+            // Context-menu "Delete N keys" (works regardless of keyboard focus).
+            if delete_sel && !st.sel_keys.is_empty() {
+                let targets: Vec<(String, f32)> = st
+                    .sel_keys
+                    .iter()
+                    .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
+                    .collect();
+                for (node, t) in targets {
+                    if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
+                        delete_channel_key(&mut doc.channels[ci], t);
+                        drop_empty_channel(doc, ci);
+                    }
+                }
+                st.sel_keys.clear();
                 st.clip_dirty = true;
             }
             if let Some(sel) = prop_select {
@@ -2296,18 +2666,90 @@ impl EditorTabViewer<'_> {
 
             // ---- keyboard transport (only when no text field is focused, not playing) ----
             if !playing && ui.memory(|m| m.focused().is_none()) {
-                let (sp, home, end, left, right, del, fit) = ui.input(|i| {
-                    (
-                        i.key_pressed(egui::Key::Space),
-                        i.key_pressed(egui::Key::Home),
-                        i.key_pressed(egui::Key::End),
-                        i.key_pressed(egui::Key::ArrowLeft),
-                        i.key_pressed(egui::Key::ArrowRight),
-                        i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                        i.key_pressed(egui::Key::F),
-                    )
-                });
+                // egui turns Ctrl+C/X/V into Copy/Cut/Paste EVENTS (the raw key is
+                // consumed), so those must be read from `events`, not key_pressed —
+                // that was why copy/paste "did nothing". Undo/redo have no such event.
+                let (sp, home, end, left, right, del, fit, ctrl, shift, z, y, a, dup, prevk, nextk, copy_ev, cut_ev, paste_ev) =
+                    ui.input(|i| {
+                        let (mut co, mut cu, mut pa) = (false, false, false);
+                        for e in &i.events {
+                            match e {
+                                egui::Event::Copy => co = true,
+                                egui::Event::Cut => cu = true,
+                                egui::Event::Paste(_) => pa = true,
+                                _ => {}
+                            }
+                        }
+                        (
+                            i.key_pressed(egui::Key::Space),
+                            i.key_pressed(egui::Key::Home),
+                            i.key_pressed(egui::Key::End),
+                            i.key_pressed(egui::Key::ArrowLeft),
+                            i.key_pressed(egui::Key::ArrowRight),
+                            i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                            i.key_pressed(egui::Key::F),
+                            i.modifiers.command || i.modifiers.ctrl,
+                            i.modifiers.shift,
+                            i.key_pressed(egui::Key::Z),
+                            i.key_pressed(egui::Key::Y),
+                            i.key_pressed(egui::Key::A),
+                            i.key_pressed(egui::Key::D),
+                            i.key_pressed(egui::Key::Comma) || i.key_pressed(egui::Key::OpenBracket),
+                            i.key_pressed(egui::Key::Period) || i.key_pressed(egui::Key::CloseBracket),
+                            co,
+                            cu,
+                            pa,
+                        )
+                    });
                 let step = if st.snap_fps > 0.0 { 1.0 / st.snap_fps } else { 0.1 };
+                // Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo the clip edits.
+                if ctrl && z && !shift {
+                    do_undo = true;
+                }
+                if ctrl && (y || (z && shift)) {
+                    do_redo = true;
+                }
+                // Copy / cut / paste selected transform keys (from egui clipboard events).
+                if copy_ev || cut_ev {
+                    copy_keys = true;
+                    if cut_ev {
+                        cut_keys = true;
+                    }
+                }
+                if paste_ev {
+                    paste_keys = true;
+                }
+                // Ctrl+A select every transform key; Ctrl+D duplicate the selection at
+                // the playhead (same path as paste). , / . (or [ / ]) jump the playhead
+                // to the previous / next keyframe across all lanes.
+                if ctrl && a {
+                    st.sel_keys.clear();
+                    for (ci, ch) in doc.channels.iter().enumerate() {
+                        for t in union_times(ch) {
+                            st.sel_keys.push((ci, t));
+                        }
+                    }
+                    st.sel_prop = None;
+                }
+                if ctrl && dup {
+                    dup_keys = true;
+                }
+                if prevk || nextk {
+                    let mut all: Vec<f32> = Vec::new();
+                    for ch in &doc.channels {
+                        all.extend(union_times(ch));
+                    }
+                    all.sort_by(|x, y| x.total_cmp(y));
+                    let cur = st.playhead;
+                    if nextk {
+                        if let Some(&t) = all.iter().find(|&&t| t > cur + 1e-4) {
+                            st.playhead = t;
+                        }
+                    } else if let Some(&t) = all.iter().rev().find(|&&t| t < cur - 1e-4) {
+                        st.playhead = t;
+                    }
+                    st.preview_playing = false;
+                }
                 if sp {
                     st.preview_playing = !st.preview_playing;
                 }
@@ -2330,8 +2772,25 @@ impl EditorTabViewer<'_> {
                 if fit {
                     st.fit_pending = true;
                 }
-                // Delete removes the selected property key first, else the event.
-                if del {
+                // Delete removes the multi-selected transform keys first, then a
+                // selected property key, then a selected event.
+                if del && !st.sel_keys.is_empty() {
+                    // Resolve to (node name, time) so channel-index shifts from
+                    // emptied-channel cleanup can't mis-target a later deletion.
+                    let targets: Vec<(String, f32)> = st
+                        .sel_keys
+                        .iter()
+                        .filter_map(|&(ci, t)| doc.channels.get(ci).map(|c| (c.node.clone(), t)))
+                        .collect();
+                    for (node, t) in targets {
+                        if let Some(ci) = doc.channels.iter().position(|c| c.node == node) {
+                            delete_channel_key(&mut doc.channels[ci], t);
+                            drop_empty_channel(doc, ci);
+                        }
+                    }
+                    st.sel_keys.clear();
+                    st.clip_dirty = true;
+                } else if del {
                     if let Some((ci, ti, ki)) = st.sel_prop.take() {
                         let removed = doc
                             .channels
@@ -2365,6 +2824,76 @@ impl EditorTabViewer<'_> {
                 }
             }
 
+            // ---- stretch grip: scale the time-span of a multi-selection ----
+            // With ≥2 keys spanning a range selected, a span bar sits just under the
+            // event lane with an anchor tick at the left edge and a draggable grip at
+            // the right; dragging the grip scales every selected key's offset from the
+            // left edge (stretch/squash the timing). Applied once on release.
+            if st.sel_keys.len() >= 2 && sel_max > sel_min + 1e-4 {
+                let gy = full.top() + ruler_h + event_h - 3.0;
+                let cur_max = st.stretch_drag.unwrap_or(sel_max);
+                let lx = time_to_x(sel_min);
+                let rx = time_to_x(cur_max);
+                painter.line_segment(
+                    [Pos2::new(lx, gy), Pos2::new(rx, gy)],
+                    Stroke::new(2.0, STRETCH_COL.gamma_multiply(0.8)),
+                );
+                painter.line_segment(
+                    [Pos2::new(lx, gy - 4.0), Pos2::new(lx, gy + 4.0)],
+                    Stroke::new(2.0, STRETCH_COL),
+                );
+                let grip = Rect::from_center_size(Pos2::new(rx, gy), egui::vec2(9.0, 13.0));
+                let gresp = ui.interact(grip, ui.id().with("anim-stretch-grip"), Sense::click_and_drag());
+                painter.rect_filled(
+                    grip,
+                    2.0,
+                    if gresp.hovered() || st.stretch_drag.is_some() { ACCENT } else { STRETCH_COL },
+                );
+                if gresp.drag_started() {
+                    st.stretch_drag = Some(sel_max);
+                }
+                if gresp.dragged()
+                    && let Some(p) = gresp.interact_pointer_pos()
+                {
+                    st.stretch_drag = Some(
+                        crate::timeline::snap_time(x_to_time(p.x), st.snap_fps).max(sel_min + 0.02),
+                    );
+                }
+                if gresp.drag_stopped()
+                    && let Some(newmax) = st.stretch_drag.take()
+                {
+                    let f = ((newmax - sel_min) / (sel_max - sel_min)).max(0.02);
+                    if (f - 1.0).abs() > 1e-4 {
+                        let mut sel = st.sel_keys.clone();
+                        sel.sort_by(|a, b| a.1.total_cmp(&b.1));
+                        if f > 1.0 {
+                            sel.reverse(); // expanding → move the rightmost first
+                        }
+                        let mut new_sel = Vec::new();
+                        for (ci, t) in sel {
+                            let nt = (sel_min + (t - sel_min) * f).max(0.0);
+                            if let Some(ch) = doc.channels.get_mut(ci) {
+                                retime_channel(ch, t, nt);
+                            }
+                            new_sel.push((ci, nt));
+                        }
+                        st.sel_keys = new_sel;
+                        st.clip_dirty = true;
+                    }
+                }
+            }
+
+            // ---- marquee selection box ----
+            if let Some(mq) = marquee {
+                painter.rect_filled(mq, 0.0, ACCENT.gamma_multiply(0.12));
+                painter.rect_stroke(
+                    mq,
+                    0.0,
+                    Stroke::new(1.0, ACCENT.gamma_multiply(0.8)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
             // ---- playhead over everything ----
             let xp = time_to_x(st.playhead.min(dur));
             let ph_col = if st.record { RECORD_RED } else { PLAYHEAD };
@@ -2395,6 +2924,128 @@ impl EditorTabViewer<'_> {
         });
         // Remember the offset so next frame's cursor-anchored zoom has an anchor.
         st.scroll_off = out.state.offset;
+
+        // ---- clip undo/redo + clipboard (deferred: they swap/read clip_doc, which
+        // `doc` borrowed for the whole draw above) ----
+        if do_undo {
+            if clip_undo_redo(st, false) {
+                st.clip_dirty = true;
+            }
+        } else if do_redo {
+            if clip_undo_redo(st, true) {
+                st.clip_dirty = true;
+            }
+        } else {
+            // Copy selected transform keys → clipboard (node name + time + pose).
+            if copy_keys {
+                let sel = st.sel_keys.clone();
+                if let Some((_, d)) = st.clip_doc.as_ref() {
+                    let mut cb = Vec::new();
+                    for (ci, t) in sel {
+                        if let Some(ch) = d.channels.get(ci) {
+                            cb.push((ch.node.clone(), t, sample_channel_key(ch, t)));
+                        }
+                    }
+                    if !cb.is_empty() {
+                        st.key_clipboard = cb;
+                    }
+                }
+            }
+            // Cut = delete the just-copied keys (by node+time, robust to reindexing).
+            if cut_keys {
+                let cb = st.key_clipboard.clone();
+                if let Some((_, d)) = st.clip_doc.as_mut() {
+                    for (node, t, _) in &cb {
+                        if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
+                            delete_channel_key(&mut d.channels[ci], *t);
+                            drop_empty_channel(d, ci);
+                        }
+                    }
+                }
+                st.sel_keys.clear();
+                st.clip_dirty = true;
+            }
+            // Paste at the playhead: the earliest copied key lands on the playhead,
+            // the rest keep their relative offsets. Reselect the pasted keys.
+            if paste_keys && !st.key_clipboard.is_empty() {
+                let cb = st.key_clipboard.clone();
+                let min_t = cb.iter().map(|(_, t, _)| *t).fold(f32::INFINITY, f32::min);
+                let base = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
+                if let Some((_, d)) = st.clip_doc.as_mut() {
+                    for (node, t, trs) in &cb {
+                        write_key(d, node, base + (t - min_t), trs);
+                    }
+                }
+                let mut ns = Vec::new();
+                if let Some((_, d)) = st.clip_doc.as_ref() {
+                    for (node, t, _) in &cb {
+                        let nt = base + (t - min_t);
+                        if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
+                            ns.push((ci, nt));
+                        }
+                    }
+                }
+                st.sel_keys = ns;
+                st.clip_dirty = true;
+            }
+            // Duplicate (Ctrl+D): copy the live selection to the playhead in one step.
+            if dup_keys && !st.sel_keys.is_empty() {
+                let sel = st.sel_keys.clone();
+                let mut items: Vec<(String, f32, TransformTRS)> = Vec::new();
+                if let Some((_, d)) = st.clip_doc.as_ref() {
+                    for (ci, t) in &sel {
+                        if let Some(ch) = d.channels.get(*ci) {
+                            items.push((ch.node.clone(), *t, sample_channel_key(ch, *t)));
+                        }
+                    }
+                }
+                if !items.is_empty() {
+                    let min_t = items.iter().map(|(_, t, _)| *t).fold(f32::INFINITY, f32::min);
+                    let base = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
+                    if let Some((_, d)) = st.clip_doc.as_mut() {
+                        for (node, t, trs) in &items {
+                            write_key(d, node, base + (t - min_t), trs);
+                        }
+                    }
+                    let mut ns = Vec::new();
+                    if let Some((_, d)) = st.clip_doc.as_ref() {
+                        for (node, t, _) in &items {
+                            let nt = base + (t - min_t);
+                            if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
+                                ns.push((ci, nt));
+                            }
+                        }
+                    }
+                    st.sel_keys = ns;
+                    st.clip_dirty = true;
+                }
+            }
+            // Commit the pre-edit snapshot as ONE undo step if this frame's edits
+            // dirtied a previously-clean clip (a held drag stays dirty → snapshots once).
+            if !dirty_before
+                && st.clip_dirty
+                && let Some((_, d)) = undo_snap
+            {
+                st.clip_undo.push(d);
+                if st.clip_undo.len() > 64 {
+                    st.clip_undo.remove(0);
+                }
+                st.clip_redo.clear();
+            }
+        }
+
+        // ---- track-click selection: select the bone/node the clicked lane drives ----
+        match pending_select {
+            Some(TrackSelect::Bone(idx)) => {
+                *self.bone_selection = Some((target, idx));
+                self.selection.clear();
+            }
+            Some(TrackSelect::Node(e)) => {
+                *self.selection = vec![e];
+                *self.bone_selection = None;
+            }
+            None => {}
+        }
 
         // Loop the preview playhead.
         if st.preview_playing && st.playhead > dur {
@@ -2662,6 +3313,28 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
     }
 }
 
+/// Read the full TRS a channel stores at key time `t` (per-lane exact-time lookup;
+/// a lane with no key there contributes identity). The read counterpart to
+/// [`write_key`] — used to copy transform keys to the clipboard.
+fn sample_channel_key(ch: &floptle_scene::AnimChannelDoc, t: f32) -> TransformTRS {
+    use floptle_core::math::{Quat, Vec3};
+    let at3 = |l: &Option<AnimTrackDoc3>, def: [f32; 3]| {
+        l.as_ref()
+            .and_then(|l| l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i]))
+            .unwrap_or(def)
+    };
+    let at4 = |l: &Option<AnimTrackDoc4>, def: [f32; 4]| {
+        l.as_ref()
+            .and_then(|l| l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i]))
+            .unwrap_or(def)
+    };
+    TransformTRS {
+        t: Vec3::from_array(at3(&ch.translation, [0.0, 0.0, 0.0])),
+        r: Quat::from_array(at4(&ch.rotation, [0.0, 0.0, 0.0, 1.0])),
+        s: Vec3::from_array(at3(&ch.scale, [1.0, 1.0, 1.0])),
+    }
+}
+
 /// Write (or overwrite) a full TRS key for `chan_name` at time `t`.
 pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &TransformTRS) {
     let ch = match doc.channels.iter_mut().find(|c| c.node == chan_name) {
@@ -2881,6 +3554,29 @@ mod tests {
             channels: Vec::new(),
             events: Vec::new(),
         }
+    }
+
+    /// Copy fidelity: a written transform key samples back to the same TRS (the
+    /// clipboard's read path must mirror `write_key`), and pasting elsewhere
+    /// reproduces it — the backbone of copy/cut/paste + duplicate.
+    #[test]
+    fn transform_key_write_sample_roundtrip() {
+        use floptle_core::math::{Quat, Vec3};
+        let mut doc = empty_clip();
+        let trs = TransformTRS {
+            t: Vec3::new(1.0, -2.0, 3.5),
+            r: Quat::from_axis_angle(Vec3::Y, 0.7),
+            s: Vec3::new(1.0, 1.0, 1.0),
+        };
+        write_key(&mut doc, "Hip", 0.5, &trs);
+        let ci = doc.channels.iter().position(|c| c.node == "Hip").unwrap();
+        let got = sample_channel_key(&doc.channels[ci], 0.5);
+        assert!((got.t - trs.t).length() < 1e-5, "translation round-trips");
+        assert!(got.r.dot(trs.r).abs() > 0.9999, "rotation round-trips");
+        // Paste the sampled key at a new time — it lands there faithfully.
+        write_key(&mut doc, "Hip", 1.25, &got);
+        let again = sample_channel_key(&doc.channels[ci], 1.25);
+        assert!((again.t - trs.t).length() < 1e-5, "pasted copy matches");
     }
 
     /// The recorder's property key write, the timeline's drag-retime, and the

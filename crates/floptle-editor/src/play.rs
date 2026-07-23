@@ -253,9 +253,29 @@ impl Editor {
             .as_ref()
             .map(|s| s.body_states().map(|(e, vel, ..)| (e.index(), vel)).collect())
             .unwrap_or_default();
+        // COMPOUNDS carry more runtime state that the rebuild must not drop:
+        // the `anchored` flag AND angular velocity. Losing `anchored` silently
+        // freed a launch-clamped vessel whenever terrain streamed in mid-clamp
+        // (loaded saves stream terrain during Play), which left the ship's
+        // damage model permanently disarmed — it flew fine but bounced off the
+        // ground with no crashes. Snapshot and restore both.
+        let saved_c: Vec<(u32, bool, floptle_core::math::Vec3, floptle_core::math::Vec3)> = self
+            .sim
+            .as_ref()
+            .map(|s| s.compound_runtime_states())
+            .unwrap_or_default();
         let mut sim = self.build_play_sim();
         for (eid, vel) in saved {
             sim.set_body_velocity(eid, vel);
+        }
+        for (eid, anchored, vel, ang) in saved_c {
+            if anchored {
+                // Re-clamp; set_compound_anchored zeroes velocities as it should.
+                sim.set_compound_anchored(eid, true);
+            } else {
+                sim.set_compound_velocity(eid, vel);
+                sim.set_compound_angular_velocity(eid, ang);
+            }
         }
         self.sim = Some(sim);
     }

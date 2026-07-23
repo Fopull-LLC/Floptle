@@ -1,0 +1,10 @@
+// STARTER clip for the realistic astronaut rig — intentionally EMPTY (bind pose).
+// Author it in-engine: select the AstroModel astronaut, open the ❙❙ Animating tab,
+// pick this "jump" state, turn on ● Record, then pose the bones at the playhead
+// to key the cycle. Record auto-keys each posed bone's TRS into these channels.
+(
+    name: "jump",
+    duration: 0.9,
+    source_model: "models/astronaut/astronaut_male.glb",
+    channels: [],
+)

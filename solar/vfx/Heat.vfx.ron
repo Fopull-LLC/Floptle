@@ -61,7 +61,9 @@
             )),
             gravity: 0.0,
             drag: 0.8,
+            inherit_velocity: 0.9,
         ),
     ],
     seed: 7,
+    gravity_mode: Field,
 )

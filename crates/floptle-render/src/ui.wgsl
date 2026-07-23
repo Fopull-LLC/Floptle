@@ -99,6 +99,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
     let kind = in.params.z;
     let tint = vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
+    if kind > 1.5 {
+        // Drop shadow: a rounded rect with a soft `feather`-wide edge (params.y),
+        // no texture or border. Fades from full inside to 0 beyond the edge.
+        let sr = min(in.params.x, min(in.half_size.x, in.half_size.y));
+        let sd = sd_round_rect(in.local, in.half_size, sr);
+        let feather = max(in.params.y, 0.5);
+        let mask = 1.0 - smoothstep(-feather, feather, sd);
+        return vec4<f32>(tint.rgb, tint.a * mask * cmask);
+    }
     if kind > 0.5 {
         // Glyph: atlas red channel is coverage.
         let a = textureSample(tex, samp, in.uv).r;

@@ -36,12 +36,18 @@ local face_yaw = 0.0
 local FOOTSTEPS = "audio/kenney/impact/footstep_concrete_00"
 
 local function resolve_model(node)
-  if model == nil then
-    model = false
+  -- Keep looking until we actually have a LIVE model child. The old code gave
+  -- up after the first frame (model = false), so if the "AstroModel" child
+  -- wasn't spawned yet on frame 1 the animator was never acquired and the
+  -- character stayed in its bind pose forever. Now we retry each frame until
+  -- the child exists, and (re)grab its animator handle once we have it.
+  if not (model and model.valid) then
+    model = nil
     for _, c in ipairs(node:children()) do
-      if c.name == "AstroModel" then model = c; anim = c:animator() end
+      if c.name == "AstroModel" then model = c end
     end
   end
+  if model and not anim then anim = model:animator() end
 end
 
 local function norm(x, y, z)

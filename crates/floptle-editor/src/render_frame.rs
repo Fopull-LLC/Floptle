@@ -186,6 +186,15 @@ impl Editor {
                         && anim_ui::record_scan(&self.world, &mut self.anim_ui, target) {
                             self.anim_ui.clip_dirty = true;
                         }
+                    // A held edit (bone gizmo/inspector DRAG) defers its disk save to
+                    // pointer-up, so without this the preview keeps re-sampling the OLD
+                    // clip and the bone looks frozen mid-drag. Refresh the in-memory clip
+                    // + bump the revision so preview_pose rebinds to the live edit — the
+                    // bone tracks the gizmo in real time. Disk save stays coalesced.
+                    if self.anim_ui.clip_dirty
+                        && let Some((k, d)) = self.anim_ui.clip_doc.clone() {
+                            self.anim.register_clip(&k, &d);
+                        }
                     anim::preview_pose(
                         &mut self.anim,
                         &mut self.world,
@@ -752,6 +761,27 @@ impl Editor {
             .last()
             .copied()
             .and_then(|e| crate::selection::rect_base_half(&self.world, &self.mesh_registry, e));
+        // A selected armature bone drives the gizmo off its world transform (bones
+        // aren't ECS entities); otherwise the selected entity does. Inlined with
+        // disjoint field borrows (not the &self helper) to co-exist with the field
+        // borrows live in this render scope.
+        let bone_xf = self.bone_selection.and_then(|(mesh, idx)| {
+            let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh) else {
+                return None;
+            };
+            let rig = self.mesh_registry.get(asset_path)?.rig.as_ref()?;
+            let bone_local = self
+                .anim
+                .poses
+                .get(&mesh)
+                .and_then(|p| p.get(idx))
+                .or_else(|| rig.rest_world.get(idx))
+                .copied()
+                .unwrap_or(Mat4::IDENTITY);
+            let world_m = floptle_core::world_transform(&self.world, mesh).world_matrix()
+                * bone_local.as_dmat4();
+            Some(floptle_core::transform::Transform::from_matrix(world_m))
+        });
         self.gizmo = build_gizmo(
             self.tool,
             self.selection.last().copied(),
@@ -762,6 +792,7 @@ impl Editor {
             gpu.config.width as f32,
             gpu.config.height.max(1) as f32,
             rect_half,
+            bone_xf,
         );
 
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
@@ -1124,14 +1155,26 @@ impl Editor {
                                 let node_world =
                                     self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
                                 for (i, &mid) in asset.parts.iter().enumerate() {
-                                    let local = rig
-                                        .part_nodes
-                                        .get(i)
-                                        .and_then(|&n| node_world.get(n))
-                                        .copied()
-                                        .unwrap_or(Mat4::IDENTITY);
-                                    mask_mesh
-                                        .push((mid, instance_of(model * local, [1.0, 1.0, 1.0])));
+                                    if matches!(rig.skins.get(i), Some(Some(_))) {
+                                        // A SKINNED part: cpu_skin_part already baked the pose
+                                        // into this mesh's vertex buffer for the visible draw,
+                                        // which uses just `model`. Applying node_world here too
+                                        // would transform it TWICE — the offset outline Ty saw
+                                        // on the astronaut (and Ty.glb). Match the draw exactly.
+                                        mask_mesh
+                                            .push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                                    } else {
+                                        let local = rig
+                                            .part_nodes
+                                            .get(i)
+                                            .and_then(|&n| node_world.get(n))
+                                            .copied()
+                                            .unwrap_or(Mat4::IDENTITY);
+                                        mask_mesh.push((
+                                            mid,
+                                            instance_of(model * local, [1.0, 1.0, 1.0]),
+                                        ));
+                                    }
                                 }
                             } else {
                                 for &mid in &asset.parts {
@@ -1854,6 +1897,7 @@ impl Editor {
                 materials,
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
+                ui_flsl_cache: &self.ui_flsl_cache,
                 sdf_cache: &self.sdf_cache,
                 sky_uniforms: self.sky_shader.as_ref().map_or(&[], |(_, _, u)| u.as_slice()),
                 component_clip,
@@ -4024,10 +4068,18 @@ impl Editor {
             let vfx_cmds = self.script_host.take_vfx_commands();
             self.vfx.apply_script_commands(&self.world, vfx_cmds);
             // Fire-and-forget one-shots a script requested this frame (spawnEffect).
-            for (key, p) in self.script_host.take_spawn_effects() {
-                self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p));
+            for (key, p, v) in self.script_host.take_spawn_effects() {
+                let vel = floptle_core::math::Vec3::new(v[0] as f32, v[1] as f32, v[2] as f32);
+                self.vfx.spawn_detached(&key, floptle_core::math::DVec3::from_array(p), vel);
             }
-            self.vfx.advance(&self.world, sdt);
+            // Hand particles the LIVE gravity field so `GravityMode::Field` effects fall
+            // toward planets (same field the rigidbodies use), not world −Y.
+            let vfx_grav = self.sim.as_ref().map(|s| crate::vfx::VfxGravity {
+                field: &s.world.gravity,
+                colliders: &s.world.colliders,
+                origin: s.world.origin,
+            });
+            self.vfx.advance(&self.world, sdt, vfx_grav);
             // Audio: apply queued Lua commands, then tick voices against the
             // final node transforms (same ordering rationale as particles).
             let audio_cmds = self.script_host.take_audio_commands();
@@ -4165,6 +4217,10 @@ impl Editor {
         }
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
+            // Mirror script logs to stdout too — running from a terminal
+            // (`cargo run`) you shouldn't have to open the Console panel to see
+            // `log(...)` output (crash reports, the FX/DMG diagnostics, etc.).
+            println!("[lua] {}", l.msg);
             self.console.push(l.level, l.msg, l.source);
         }
     }
@@ -4270,6 +4326,11 @@ impl Editor {
                         offset[0] += d[0];
                         offset[1] += d[1];
                     }
+                    // Slide the whole anchored box by nudging the leading margins.
+                    floptle_ui::Place::Stretch { margin, .. } => {
+                        margin[0] += d[0];
+                        margin[1] += d[1];
+                    }
                 }
                 self.world.insert(e, spec);
             }
@@ -4305,6 +4366,12 @@ impl Editor {
                         floptle_ui::Place::Pin { anchor, offset } => {
                             let f = anchor.factors()[a];
                             offset[a] += d * if from_min[a] { f - 1.0 } else { f };
+                        }
+                        // Dragging an edge shrinks that side's margin so the box
+                        // grows toward the drag (margin is [L, T, R, B]).
+                        floptle_ui::Place::Stretch { margin, .. } => {
+                            let side = if from_min[a] { a } else { a + 2 };
+                            margin[side] -= d;
                         }
                     }
                 }
@@ -4941,6 +5008,23 @@ impl Editor {
         }
         if let Some((sources, dest)) = cmd.move_assets {
             self.move_assets(&sources, &dest);
+        }
+        if let Some((sources, dest)) = cmd.import_files {
+            self.import_files(&sources, &dest);
+        }
+        if let Some(dir) = cmd.pick_import_dir {
+            self.open_import_dialog(dir);
+        }
+        // Drain a completed native import dialog (see open_import_dialog).
+        if let Some(rx) = &self.import_rx {
+            match rx.try_recv() {
+                Ok((files, dir)) => {
+                    self.import_files(&files, &dir);
+                    self.import_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.import_rx = None,
+            }
         }
         if let Some((roots, dir)) = cmd.save_prefab {
             self.save_prefab(&roots, &dir);

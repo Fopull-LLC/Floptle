@@ -21,7 +21,6 @@
     nodes: [
         (
             name: "Athosil",
-            parent: Some(42),
             transform: (
                 translation: (0.0, 0.0, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -60,14 +59,15 @@
                 clouds: 0.0,
                 luminosity: 26.0,
                 star_color: (0.72, 0.82, 1.0),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
         ),
         (
             name: "Umunquo",
-            parent: Some(42),
             transform: (
                 translation: (28.0, 0.0, -4738.7),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -94,14 +94,15 @@
                 clouds: 0.06,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
         ),
         (
             name: "Oria",
-            parent: Some(42),
             transform: (
                 translation: (-10473.4, 0.0, 1012.1),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -128,14 +129,15 @@
                 clouds: 0.78,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
         ),
         (
             name: "Pelexru",
-            parent: Some(42),
             transform: (
                 translation: (22038.3, 0.0, 4988.6),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -162,14 +164,15 @@
                 clouds: 0.58,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
         ),
         (
             name: "Pelia",
-            parent: Some(42),
             transform: (
                 translation: (-47665.3, 0.0, 7588.9),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -196,14 +199,15 @@
                 clouds: 0.52,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
         ),
         (
             name: "Draol",
-            parent: Some(42),
             transform: (
                 translation: (-47007.7, 0.0, 6320.3),
                 rotation: (0.0, 0.0, 0.0, 1.0),
@@ -229,7 +233,9 @@
                 clouds: 0.0,
                 luminosity: 0.0,
                 star_color: (1.0, 0.97, 0.9),
+                occluder_radius: 0.0,
             )),
+            parent: Some(42),
             tags: [
                 "genbody",
             ],
@@ -428,8 +434,6 @@
                 rotation: (0.0, 0.0, 0.0, 1.0),
                 scale: (1.0, 1.0, 1.0),
             ),
-            // The physics capsule is invisible; the animated character rides as
-            // the "AstroModel" child (planet_walker drives its animator + facing).
             matter: Empty,
             scripts: [
                 (
@@ -441,6 +445,8 @@
                         ("jump", 10.4),
                         ("run", 9.4),
                         ("walk", 4.5),
+                        ("face_offset", 0.0),
+                        ("stride", 2.2),
                     ],
                 ),
                 (
@@ -457,7 +463,7 @@
             ],
             rigidbody: Some((
                 capsule: true,
-                radius: 0.5,
+                radius: 0.33,
                 height: 2.0,
                 half_extents: (0.5, 0.5, 0.5),
                 restitution: 0.0,
@@ -570,6 +576,9 @@
             scripts: [],
             ui_layer: Some((
                 design_height: 720.0,
+                reference_width: 1280.0,
+                scale_mode: MatchHeight,
+                match_wh: 0.5,
                 z: 120,
                 enabled: true,
                 space: Screen,
@@ -1337,6 +1346,7 @@
                     border_color: (0.0, 0.0, 0.0, 0.0),
                 )),
                 visible: false,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1364,6 +1374,7 @@
                     fit: false,
                 )),
                 visible: false,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1404,6 +1415,7 @@
                 )),
                 button: true,
                 visible: false,
+                opacity: 1.0,
             )),
         ),
         (
@@ -1483,16 +1495,251 @@
             transform: (
                 translation: (0.0, -0.05, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (0.5, 0.5, 0.5),
+                scale: (1.0, 1.0, 1.0),
             ),
             matter: Mesh(
-                asset_path: "models/characters/character_retro.glb",
+                asset_path: "models/astronaut/astronaut_male.glb",
             ),
             scripts: [],
-            parent: Some(13),
             anim_controller: Some("animation_controllers/character"),
+            parent: Some(13),
+        ),
+        (
+            name: "Base Facilities",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "base_facilities",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Facilities Menu",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_menu",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Facility Prompt",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (0.0, -84.0),
+                ),
+                size: (Fixed(360.0), Fixed(34.0)),
+                shape: Some((
+                    fill: (0.06, 0.09, 0.13, 0.86),
+                    radius: 6.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.6, 0.75, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 15.0,
+                    color: (0.8, 0.92, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(460.0), Fixed(320.0)),
+                stack: Some((
+                    dir: Column,
+                    gap: 12.0,
+                    pad: 20.0,
+                    align: Center,
+                    justify: Start,
+                )),
+                shape: Some((
+                    fill: (0.05, 0.08, 0.12, 0.94),
+                    radius: 10.0,
+                    border: 1.5,
+                    border_color: (0.35, 0.55, 0.7, 0.8),
+                )),
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(54),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(420.0), Fixed(30.0)),
+                text: Some((
+                    text: "Facility",
+                    size: 20.0,
+                    color: (0.85, 0.95, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Body",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(54),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(420.0), Fixed(184.0)),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.75, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Action",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_button",
+                    enabled: true,
+                    params: [
+                        ("action", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(54),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(220.0), Fixed(34.0)),
+                shape: Some((
+                    fill: (0.12, 0.2, 0.28, 0.95),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.45, 0.65, 0.8, 0.8),
+                )),
+                text: Some((
+                    text: "Action",
+                    size: 14.0,
+                    color: (0.85, 0.95, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Facility Exit",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "facility_button",
+                    enabled: true,
+                    params: [
+                        ("action", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(54),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(220.0), Fixed(30.0)),
+                shape: Some((
+                    fill: (0.18, 0.1, 0.12, 0.95),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.7, 0.45, 0.5, 0.7),
+                )),
+                text: Some((
+                    text: "✕ Close",
+                    size: 13.0,
+                    color: (0.95, 0.85, 0.85, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
         ),
     ],
-
-
 )

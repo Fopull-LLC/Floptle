@@ -5,6 +5,7 @@ use floptle_core::Entity;
 use floptle_core::Matter;
 use floptle_core::Shape;
 use floptle_core::math::DVec3;
+use floptle_core::math::Mat4;
 use floptle_core::math::Quat;
 use floptle_core::math::Vec2;
 use floptle_core::math::Vec3;
@@ -236,10 +237,13 @@ impl Editor {
     /// Apply a gizmo drag for the grabbed handle, as an ABSOLUTE transform from the
     /// start-of-drag snapshot (no per-event accumulation ⏵ no drift).
     pub(crate) fn gizmo_drag(&mut self) {
-        let (Some(drag), Some(cursor), Some(e)) = (self.drag, self.cursor, self.primary()) else {
+        let (Some(drag), Some(cursor)) = (self.drag, self.cursor) else {
             return;
         };
-        // The snapshot must belong to the still-selected entity (guards against the
+        // A bone drag has no ECS selection (the bone isn't an entity) — it acts on the
+        // drag's mesh entity. An entity drag acts on the current primary selection.
+        let e = if drag.bone.is_some() { drag.entity } else { self.primary().unwrap_or(drag.entity) };
+        // The snapshot must belong to the still-selected object (guards against the
         // selection changing mid-drag and applying the wrong object's transform).
         if drag.entity != e {
             self.grabbed = None;
@@ -396,6 +400,12 @@ impl Editor {
     /// node's *local* transform when it has a parent (so dragging a child's gizmo
     /// edits its local placement, and parents still carry it).
     pub(crate) fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
+        // A gizmo drag on an armature BONE (not an ECS entity) writes the bone's
+        // local pose into the open clip — route it before any Transform write.
+        if let Some(idx) = self.drag.and_then(|d| (d.entity == e).then_some(d.bone).flatten()) {
+            self.set_bone_world(e, idx, world_xf);
+            return;
+        }
         // A bone-attached node's Transform is regenerated from BoneAttach.offset every
         // frame by resolve_attachments, so writing Transform here would be clobbered next
         // frame (the node snaps back onto the bone). Edit the offset instead — in the
@@ -431,6 +441,87 @@ impl Editor {
         };
         if let Some(t) = self.world.get_mut::<Transform>(e) {
             *t = local;
+        }
+    }
+
+    /// The transform gizmo's target when an armature bone is selected in the
+    /// Hierarchy: `(mesh entity, bone index, the bone's world Transform in scene
+    /// space)`. Bones aren't ECS entities, so the gizmo is driven off this instead
+    /// of a `Transform` component. `None` unless a bone on a rigged mesh is selected.
+    pub(crate) fn bone_gizmo_target(&self) -> Option<(Entity, usize, Transform)> {
+        let (mesh, idx) = self.bone_selection?;
+        let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh) else {
+            return None;
+        };
+        let rig = self.mesh_registry.get(asset_path)?.rig.as_ref()?;
+        // Live pose if animating, else the rest pose — same source as the bone
+        // Inspector and `bone_world_matrix` (offset already baked into `poses`).
+        let bone_local = self
+            .anim
+            .poses
+            .get(&mesh)
+            .and_then(|p| p.get(idx))
+            .or_else(|| rig.rest_world.get(idx))
+            .copied()
+            .unwrap_or(Mat4::IDENTITY);
+        let world_m =
+            floptle_core::world_transform(&self.world, mesh).world_matrix() * bone_local.as_dmat4();
+        Some((mesh, idx, Transform::from_matrix(world_m)))
+    }
+
+    /// Apply a gizmo drag to an armature bone: convert the desired WORLD transform
+    /// back to the bone's LOCAL pose (relative to its parent bone) and auto-key it
+    /// into the open clip at the playhead — exactly what the bone Inspector's numeric
+    /// editor writes, so posing a bone with the gizmo == keying it.
+    pub(crate) fn set_bone_world(&mut self, mesh: Entity, idx: usize, world_xf: Transform) {
+        let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned() else {
+            return;
+        };
+        // Pull everything off the rig, then drop the borrow before touching anim_ui.
+        let (parent, parent_local, offset, bone_name) = {
+            let Some(rig) = self.mesh_registry.get(&asset_path).and_then(|m| m.rig.as_ref())
+            else {
+                return;
+            };
+            let parent = rig.skeleton.nodes.get(idx).and_then(|n| n.parent);
+            let pw = match parent {
+                Some(p) => self
+                    .anim
+                    .poses
+                    .get(&mesh)
+                    .and_then(|ps| ps.get(p))
+                    .or_else(|| rig.rest_world.get(p))
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY),
+                None => Mat4::IDENTITY,
+            };
+            (parent, pw, rig.offset, rig.skeleton.nodes.get(idx).map(|n| n.name.clone()))
+        };
+        let Some(bone_name) = bone_name else { return };
+        let mesh_world = floptle_core::world_transform(&self.world, mesh).world_matrix();
+        // Parent frame in SCENE space. bone_scene = mesh_world · poses[bone] and
+        // poses[bone] = poses[parent] · local (the offset cancels), so the parent
+        // scene frame is mesh_world · poses[parent], or mesh_world · offset at a root.
+        let parent_scene = match parent {
+            Some(_) => mesh_world * parent_local.as_dmat4(),
+            None => mesh_world * offset.as_dmat4(),
+        };
+        let local_m = parent_scene.inverse() * world_xf.world_matrix();
+        if !local_m.is_finite() {
+            return;
+        }
+        let (s, r, t) = local_m.to_scale_rotation_translation();
+        let trs = floptle_anim::TransformTRS { t: t.as_vec3(), r: r.as_quat(), s: s.as_vec3() };
+        // Auto-key at the playhead — same gate as bone_inspector_ui (this mesh must be
+        // the Animating tab's target with a clip open, since channels bind by name).
+        if self.anim_ui.target == Some(mesh) && self.anim_ui.clip_doc.is_some() {
+            // One undo step per drag gesture (snapshot_clip is a no-op once dirty).
+            crate::anim_ui::snapshot_clip(&mut self.anim_ui);
+            let ph = self.anim_ui.playhead;
+            if let Some((_, doc)) = self.anim_ui.clip_doc.as_mut() {
+                crate::anim_ui::write_key(doc, &bone_name, ph, &trs);
+            }
+            self.anim_ui.clip_dirty = true;
         }
     }
 }

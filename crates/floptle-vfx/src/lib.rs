@@ -21,7 +21,7 @@ pub use curve::{Curve, Extrapolate, Interp, Key, Value, ValueOrCurve};
 pub use draw::{BillboardDraw, MeshDraw, collect_billboards, collect_mesh_particles};
 pub use effect::{
     BillboardOrient, Blend, Clip, CompiledEffect, CompiledTrack, Emit, EmitShape, EndBehavior,
-    FlipMode, Flipbook, Force, Lane, LaneTarget, Look, ParticleEffect, Playback, RenderMode, Space,
-    Track,
+    FlipMode, Flipbook, Force, GravityMode, Lane, LaneTarget, Look, ParticleEffect, Playback,
+    RenderMode, Space, Track,
 };
 pub use sim::{EffectInstance, ParticleSample, SCRUB_STEP};

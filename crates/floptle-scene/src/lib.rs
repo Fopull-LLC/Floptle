@@ -27,8 +27,9 @@ pub mod vfx;
 pub use vfx::{
     load_vfx_effect, save_vfx_effect, VfxBlendDoc, VfxBurstDoc, VfxClipDoc, VfxCurveDoc,
     VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxFlipModeDoc, VfxFlipbookDoc,
-    VfxForceDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc, VfxOrientDoc,
-    VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxTrackDoc, VfxValueDoc,
+    VfxForceDoc, VfxGravityDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
+    VfxLifetimeScaleDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc,
+    VfxSpaceDoc, VfxTrackDoc, VfxValueDoc,
     VFX_EXT,
 };
 
@@ -1691,7 +1692,7 @@ mod tests {
                         interp: false,
                         interp_delay: 12, // exercise the non-default round-trip
                     }),
-                    ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2, enabled: true, space: floptle_ui::UiSpace::World, canvas_scale: 0.02 }),
+                    ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2, enabled: true, space: floptle_ui::UiSpace::World, canvas_scale: 0.02, ..Default::default() }),
                     ui: Some(floptle_ui::ElementSpec {
                         place: floptle_ui::Place::Pin {
                             anchor: floptle_ui::Anchor::BottomRight,
