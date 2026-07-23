@@ -195,6 +195,97 @@ fn main() {
     assert!(ticks > 60, "expected scrolling tick marks, got {ticks} px");
     assert!(acc > 40, "expected the accent reference line/wedge, got {acc} px");
     println!("tape ui shader OK; wrote tape_probe.png");
+
+    // ---- DROP SHADOW: a `shape.shadow` (kind==2 feathered quad) must darken the
+    // area behind a panel. Gray bg → shadow → panel; the shadow region reads
+    // darker than plain gray. Proves the built-in fs_main shadow path renders.
+    {
+        let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("probe-shadow"),
+            size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let q = |rect: [f32; 4], color: [f32; 4], radius: f32, feather: f32| Quad {
+            rect,
+            color,
+            radius,
+            border: 0.0,
+            border_color: [0.0; 4],
+            texture: String::new(),
+            uv: [0.0, 0.0, 1.0, 1.0],
+            clip: None,
+            shader: None,
+            feather,
+        };
+        let list = DrawList {
+            quads: vec![
+                q([0.0, 0.0, W as f32, H as f32], [0.5, 0.5, 0.5, 1.0], 0.0, 0.0), // gray bg
+                q([140.0, 150.0, 180.0, 160.0], [0.0, 0.0, 0.0, 0.85], 24.0, 24.0), // shadow
+                q([120.0, 120.0, 180.0, 160.0], [0.85, 0.9, 1.0, 1.0], 14.0, 0.0), // panel
+            ],
+            texts: Vec::new(),
+        };
+        let mut instances = Vec::new();
+        let mut batches = Vec::new();
+        ui.clear_backdrop();
+        ui.pack(&gpu, &list, [0.0, 0.0], 1.0, &mut |_| None, &mut |_, _| None, &mut instances, &mut batches);
+        ui.draw(&gpu, &color_view, [W as f32, H as f32], &instances, &batches, &raster);
+        let px = readback(&gpu, &color_tex);
+        save_png(&px, "shadow_probe.png");
+        let shadow_px = px[(295 * W + 200) as usize]; // below the panel, inside the shadow
+        let gray_px = px[(40 * W + 40) as usize]; // plain gray corner
+        println!("shadow px {shadow_px:?} vs plain gray {gray_px:?}");
+        assert!(
+            shadow_px[0] + 20 < gray_px[0],
+            "drop shadow should darken behind the panel: {shadow_px:?} vs {gray_px:?}"
+        );
+        println!("drop shadow OK; wrote shadow_probe.png");
+    }
+
+    // ---- backdrop: a frosted shader must SEE the captured scene behind it ----
+    // Bind a solid bright-green "scene" as the backdrop, then draw a shader that
+    // samples backdrop() — the panel must come out green, not black.
+    let green = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("probe-backdrop"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &green, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &[20u8, 220, 40, 255],
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: None },
+        wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+    );
+    let green_view = green.create_view(&wgpu::TextureViewDescriptor::default());
+    // Exercise the FULL capture path: blit the green "scene" into the backdrop
+    // target, then sample it from the frosted shader.
+    let mut cap_enc = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("probe-capture") });
+    ui.capture_backdrop(&gpu, &mut cap_enc, &green_view, W, H);
+    gpu.queue.submit(Some(cap_enc.finish()));
+    let frost = std::env::temp_dir().join("floptle_frost_probe.flsl");
+    std::fs::write(
+        &frost,
+        "shader frost { stage ui\n  let b = backdrop()\n  output color = vec4(b.rgb, 0.95) * instanceColor }\n",
+    )
+    .expect("write frost flsl");
+    let fpx = render_ui_shader(&gpu, &raster, &mut ui, frost.to_str().unwrap(), &|_| None, "frost_probe.png");
+    let _ = std::fs::remove_file(&frost);
+    let mid = fpx[(220 * W + 220) as usize];
+    println!("frost center px {mid:?} (expect green backdrop showing through)");
+    assert!(mid[1] > 120 && mid[1] > mid[0] + 40 && mid[1] > mid[2] + 40, "backdrop should show green through the panel, got {mid:?}");
+    ui.clear_backdrop();
+    println!("backdrop ui shader OK; wrote frost_probe.png");
 }
 
 fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {

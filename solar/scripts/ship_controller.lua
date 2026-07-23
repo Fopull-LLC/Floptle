@@ -97,6 +97,7 @@ local avp, avy, avr = 0.0, 0.0, 0.0 -- angular rates about right/nose/fwd
 -- the flickery per-contact grounded flag so the model doesn't chatter.
 local tip_w, toppled, grounded_until = 0.0, false, -10.0
 local astronaut, flame, hud
+local hud_panel  -- the digital backing frame the flight readout sits inside
 local hud_t = -10.0
 local pad_x, pad_y, pad_z
 local spawn_t = -100.0
@@ -171,10 +172,14 @@ end
 
 local function set_hud(node, text)
   if not hud then hud = find("Ship HUD Text") end
-  if not hud then return end
-  local el = hud:getcomponent("UiElement")
-  if el then el.visible = text ~= nil end
-  if text then hud.text = text end
+  if not hud_panel then hud_panel = find("HUD Panel") end
+  -- Toggle the BACKING PANEL so the frame appears/vanishes with the readout.
+  local panel = hud_panel or hud
+  if panel then
+    local el = panel:getcomponent("UiElement")
+    if el then el.visible = text ~= nil end
+  end
+  if hud and text then hud.text = text end
 end
 
 -- ---- landing legs -----------------------------------------------------------
@@ -1167,7 +1172,7 @@ local function update_map3d(node, dt)
   if time - map_hud_t >= 0.1 then
     map_hud_t = time
     local lines = {}
-    lines[1] = string.format("MAP  ·  focus %s   (TAB cycle · RMB-drag orbit · CTRL+RMB pan · scroll/↑↓ zoom)", fname)
+    lines[1] = string.format("MAP · focus %s   [TAB] cycle · [RMB] orbit · [scroll] zoom", fname)
     if map_focus > 1 then
       local b = bodies[map_focus - 1]
       local dx4, dy4, dz4 = node.x - b.x, node.y - b.y, node.z - b.z
@@ -1196,9 +1201,9 @@ local function update_map3d(node, dt)
       if traj_mnv and #traj_mnv.enc > 0 then
         local e = traj_mnv.enc[1]
         local verb = e.kind == "enter" and "ENCOUNTER" or (e.kind == "impact" and "IMPACT" or "exit")
-        lines[#lines + 1] = string.format("  ⇒ %s %s in %.0fs", verb, e.name, e.t)
+        lines[#lines + 1] = string.format("  => %s %s in %.0fs", verb, e.name, e.t)
       end
-      lines[#lines + 1] = "  LMB-drag on orbit moves it · W/S prograde · A/D radial · Q/E normal · X zero · N clear"
+      lines[#lines + 1] = "  [LMB] move node · W/S pro · A/D rad · Q/E nor · X zero · N clear"
     elseif craft_flying and not node.grounded then
       if traj_now and #traj_now.enc > 0 then
         local e = traj_now.enc[1]
@@ -1486,7 +1491,7 @@ function fixedUpdate(node, dt)
             o.periapsis - b.radius, o.apoapsis - b.radius, o.period)
         end
       end
-      if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
+      if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "[!] " .. warp_note end
       set_hud(node, table.concat(lines, "\n"))
     end
     -- Parked warp (waiting out a transfer window on the pad): keep the brake
@@ -1679,13 +1684,13 @@ function fixedUpdate(node, dt)
     lines[1] = string.format("THR [%s%s] %3d%%   SAS %s   GEAR %s%s",
       string.rep("|", bars), string.rep("·", 10 - bars), throttle * 100,
       SAS_LABEL[sas_mode] or "?",
-      legs_deployed and "▼" or "▲",
+      legs_deployed and "DOWN" or "UP",
       node.grounded and "   LANDED" or "")
     local fbars = math.floor(fuel / params.fuel * 10 + 0.5)
     local ftag = ""
     if refueling then ftag = "  REFUELING"
-    elseif fuel <= 0.0 then ftag = "  ⚠ TANK EMPTY"
-    elseif acc > params.max_g * 0.88 and throttle > 0.01 then ftag = "  ⚠ NEAR G LIMIT" end
+    elseif fuel <= 0.0 then ftag = "  [TANK EMPTY]"
+    elseif acc > params.max_g * 0.88 and throttle > 0.01 then ftag = "  [NEAR G LIMIT]" end
     lines[2] = string.format("FUEL [%s%s] %3d%%%s",
       string.rep("|", fbars), string.rep("·", 10 - fbars), fuel / params.fuel * 100, ftag)
     if b then
@@ -1703,8 +1708,8 @@ function fixedUpdate(node, dt)
       local vorb = math.sqrt(b.mu / rlen)
       local vesc = vorb * 1.41421
       local tag = ""
-      if spd >= vesc then tag = "  ▲▲ ESCAPING"
-      elseif spd >= vesc * 0.93 then tag = "  ▲ near escape" end
+      if spd >= vesc then tag = "  [ESCAPING]"
+      elseif spd >= vesc * 0.93 then tag = "  near escape" end
       lines[#lines + 1] = string.format("V-ORBIT %5.1f   V-ESC %5.1f%s", vorb, vesc, tag)
       local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
       if o and o.apoapsis then
@@ -1728,23 +1733,23 @@ function fixedUpdate(node, dt)
       lines[#lines + 1] = string.format("NODE  T%s%.0fs   ΔV %.1f   burn ~%.1fs",
         lead >= 0 and "-" or "+", math.abs(lead), dv, burn_dt)
       if dv < 0.05 then
-        lines[#lines + 1] = "  open map (M) to set ΔV · then SAS ⟶ NODE to aim"
+        lines[#lines + 1] = "  open map (M) to set ΔV · then SAS -> NODE to aim"
       else
         local start_in = lead - burn_dt * 0.5
         if rem <= 0.05 then
-          lines[#lines + 1] = "  ✔ burn complete — X zeroes ΔV · N clears the node"
+          lines[#lines + 1] = "  [OK] burn complete — X zeroes ΔV · N clears the node"
         elseif start_in > 0.5 then
-          lines[#lines + 1] = string.format("  hold SAS ⟶ NODE · start burn in %.0fs", start_in)
+          lines[#lines + 1] = string.format("  hold SAS -> NODE · start burn in %.0fs", start_in)
         elseif lead > -burn_dt then
-          lines[#lines + 1] = string.format("  ▶▶ BURN NOW — ΔV %.1f left (~%.1fs)", rem, rem_dt)
+          lines[#lines + 1] = string.format("  >> BURN NOW — ΔV %.1f left (~%.1fs)", rem, rem_dt)
         else
-          lines[#lines + 1] = "  ⚠ node passed — N clears it (or replan on the map)"
+          lines[#lines + 1] = "  [!] node passed — N clears it (or replan on the map)"
         end
       end
     end
-    if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "⚠ " .. warp_note end
+    if warp_note and time - warp_note_t < 2.5 then lines[#lines + 1] = "[!] " .. warp_note end
     lines[#lines + 1] =
-      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·click SAS buttons (left) for hold modes·B gear·./,warp·M map"
+      "[T] SAS · [B] gear · [N] node · [.,] warp · [M] map · [F] exit"
     set_hud(node, table.concat(lines, "\n"))
   end
 

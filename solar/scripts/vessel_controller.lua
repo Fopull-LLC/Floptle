@@ -179,6 +179,7 @@ local elec = {
 }
 local boarding = false
 local astronaut, hud, hud_prompt
+local hud_panel, stage_panel  -- the digital backing frames the readouts sit inside
 local hud_t = -10.0
 local navball, tape_spd, tape_alt, txt_spd, txt_alt, txt_hdg
 local stage_node
@@ -522,10 +523,15 @@ end
 -- ── instruments (the scout ship's cluster, reused verbatim) ─────────────────
 local function set_hud(text)
   if not hud then hud = find("Ship HUD Text") end
-  if not hud then return end
-  local el = hud:getcomponent("UiElement")
-  if el then el.visible = text ~= nil end
-  if text then hud.text = text end
+  if not hud_panel then hud_panel = find("HUD Panel") end
+  -- Toggle the BACKING PANEL (the text rides inside it) so the frame appears and
+  -- vanishes with the readout — never an empty box while walking around.
+  local panel = hud_panel or hud
+  if panel then
+    local el = panel:getcomponent("UiElement")
+    if el then el.visible = text ~= nil end
+  end
+  if hud and text then hud.text = text end
 end
 
 -- The FLIGHT STAGE LIST (left side): every remaining stage bottom-up with
@@ -533,10 +539,13 @@ end
 local stage_last = nil
 local function set_stage_list(text)
   if not stage_node then stage_node = find("Stage List") end
-  if not stage_node then return end
-  local el = stage_node:getcomponent("UiElement")
-  if el then el.visible = text ~= nil end
-  if text and text ~= stage_last then
+  if not stage_panel then stage_panel = find("Stage Panel") end
+  local panel = stage_panel or stage_node
+  if panel then
+    local el = panel:getcomponent("UiElement")
+    if el then el.visible = text ~= nil end
+  end
+  if stage_node and text and text ~= stage_last then
     stage_node.text = text
     stage_last = text
   end
@@ -1128,7 +1137,7 @@ break_part = function(node, uid, d, c, hx, hy, hz, depth)
   local crater_r = is_tank and (2.6 + math.min(4.0, (d.fuel or 0) / 55))
     or (d.kind == "engine" and 2.1 or 1.5)
   make_crater(hx, hy, hz, crater_r)
-  log("💥 " .. (d.label or d.id or "part") .. " destroyed!")
+  log("BOOM: " .. (d.label or d.id or "part") .. " destroyed!")
   -- CHAIN REACTION: every break throws a concussion into the parts STILL
   -- ATTACHED nearby (staged-away parts aren't children — the blast can't reach
   -- bookkeeping ghosts). An EXPLOSIVE part (fuel tank or engine) goes off far
@@ -1213,7 +1222,7 @@ end
 local function shatter(node, hx, hy, hz, spd, info)
   if destroyed then return end
   destroyed = true
-  log("💥 CATASTROPHIC BREAKUP")
+  log("CATASTROPHIC BREAKUP")
   add_shake(1.4) -- the whole airframe failing is a hard jolt
   local evx, evy, evz = 0.0, 0.0, 0.0
   if info and info.vel then evx, evy, evz = info.vel.x, info.vel.y, info.vel.z end
@@ -1300,7 +1309,7 @@ local function damage_tick(node, info, dt)
     -- fixes aren't in either. Shout ONCE so it's obvious a rebuild is needed.
     if h.speedAbs == nil and not engine_version_warned then
       engine_version_warned = true
-      log("⚠ ENGINE OUT OF DATE — impacts have no `speedAbs`. Rebuild/reinstall " ..
+      log("[!] ENGINE OUT OF DATE — impacts have no `speedAbs`. Rebuild/reinstall " ..
         "the editor: the damage energy-metric, particle and animation fixes are " ..
         "in the Rust binary, not the Lua. Run `cargo run -p floptle-editor` (or " ..
         "reinstall the freshly-built version).")
@@ -1825,7 +1834,7 @@ function fixedUpdate(node, dt)
                   end
                 end
                 break_part(node, uid2, d2, c2, px2, py2, pz2)
-                log("🔥 burned up on reentry: " .. (d2.label or d2.id or "part"))
+                log("burned up on reentry: " .. (d2.label or d2.id or "part"))
               end
             end
           end
@@ -2110,12 +2119,12 @@ function fixedUpdate(node, dt)
       (info.anchored and "   CLAMPED" or (info.grounded and "   LANDED" or ""))
         .. ((#DEVICES.gear.parts > 0 and not gear_deployed) and "   GEAR UP" or ""),
       #events > 0 and string.format("   STAGES %d", #events) or "",
-      warp > 1.001 and string.format("   ⏩ WARP %d×", warp) or "")
+      warp > 1.001 and string.format("   [WARP %d×]", warp) or "")
     if fuel_cap > 0 then
       local fbars = math.floor(fuel / fuel_cap * 10 + 0.5)
       local ftag = ""
       if refueling then ftag = "  REFUELING"
-      elseif fuel <= 0.0 then ftag = "  ⚠ TANK EMPTY" end
+      elseif fuel <= 0.0 then ftag = "  [TANK EMPTY]" end
       lines[2] = string.format("FUEL [%s%s] %3d%%%s",
         string.rep("|", fbars), string.rep("·", 10 - fbars), fuel / fuel_cap * 100, ftag)
     end
@@ -2125,10 +2134,10 @@ function fixedUpdate(node, dt)
       local frac = (elec.cap > 0) and (elec.charge / elec.cap) or 0
       local ebars = math.floor(frac * 10 + 0.5)
       local etag = ""
-      if elec.gen > 0 and DEVICES.solar.on and DEVICES.solar.anim > 0.5 then etag = "  ☀ SOLAR" end
-      if elec.link then etag = etag .. "  📡 LINK"
+      if elec.gen > 0 and DEVICES.solar.on and DEVICES.solar.anim > 0.5 then etag = "  [SOLAR]" end
+      if elec.link then etag = etag .. "  [LINK]"
       elseif elec.comms and not DEVICES.comms.on then etag = etag .. "  (dish stowed — U)" end
-      if elec.cap > 0 and elec.charge <= 0.0 then etag = etag .. "  ⚠ BATTERY FLAT" end
+      if elec.cap > 0 and elec.charge <= 0.0 then etag = etag .. "  [BATTERY FLAT]" end
       lines[#lines + 1] = string.format("PWR  [%s%s] %3d%%%s",
         string.rep("|", ebars), string.rep("·", 10 - ebars), frac * 100, etag)
     end
@@ -2145,8 +2154,8 @@ function fixedUpdate(node, dt)
       local vorb = math.sqrt(b.mu / rlen)
       local vesc = vorb * 1.41421
       local tag = ""
-      if spd >= vesc then tag = "  ▲▲ ESCAPING"
-      elseif spd >= vesc * 0.93 then tag = "  ▲ near escape" end
+      if spd >= vesc then tag = "  [ESCAPING]"
+      elseif spd >= vesc * 0.93 then tag = "  near escape" end
       lines[#lines + 1] = string.format("V-ORBIT %5.1f   V-ESC %5.1f%s", vorb, vesc, tag)
       local o = space.elements(node.x, node.y, node.z, node.vx, node.vy, node.vz)
       if o and o.apoapsis then
@@ -2158,17 +2167,17 @@ function fixedUpdate(node, dt)
     end
     if info.anchored then
       if assembly_ready(info) then
-        lines[#lines + 1] = "▶ SPACE — release launch clamps"
+        lines[#lines + 1] = "> SPACE — release launch clamps"
       else
         lines[#lines + 1] = string.format("assembling…  %d / %d parts", #info.parts, part_total)
       end
     end
     if heating > 0.02 then
-      lines[#lines + 1] = string.format("🔥 REENTRY HEATING %s— slow down or climb",
+      lines[#lines + 1] = string.format("[HEAT] REENTRY %s— slow down or climb",
         heating > 0.12 and "(SEVERE) " or "")
     end
     if chutes_deployed then
-      lines[#lines + 1] = string.format("🪂 CHUTES OPEN  %d%%", chute_anim * 100)
+      lines[#lines + 1] = string.format("[CHUTES OPEN]  %d%%", chute_anim * 100)
     end
     -- Damage report: the worst-off surviving part (the smoke tells you where).
     local worst_uid, worst_hp
@@ -2179,11 +2188,11 @@ function fixedUpdate(node, dt)
     end
     if worst_hp then
       local d = bp_by_uid[worst_uid]
-      lines[#lines + 1] = string.format("⚠ DAMAGE  %s %d%%",
+      lines[#lines + 1] = string.format("[DAMAGE]  %s %d%%",
         (d and (d.label or d.id)) or "part", worst_hp * 100)
     end
     lines[#lines + 1] =
-      "F exit·Shift/Ctrl thr·X cut·Z full·WASD/QE rotate·T SAS·1-7 hold·SPACE stage·G gear·./, warp·M map"
+      "[SPACE] stage · [T] SAS · [G] gear · [.,] warp · [M] map · [F] exit"
     set_hud(table.concat(lines, "\n"))
 
     -- The stage list (right edge): SEPARATION EVENTS in the builder's
@@ -2201,7 +2210,7 @@ function fixedUpdate(node, dt)
       string.format("burning: %d engine%s  %d kN", n_act, n_act == 1 and "" or "s", th_act), "" }
     for i = #events, 1, -1 do
       local ev = events[i]
-      local tag = (i == 1) and "  ▶" or ""
+      local tag = (i == 1) and "  «" or ""
       if ev.kind == "ring" then
         local n_eng, th = 0, 0
         for _, e in ipairs(engines) do
@@ -2213,7 +2222,7 @@ function fixedUpdate(node, dt)
         sl[#sl + 1] = string.format("BOOSTER RING ×%d   %d eng  %d kN%s",
           #ev.branches, n_eng, th, tag)
       elseif ev.kind == "chute" then
-        sl[#sl + 1] = string.format("🪂 PARACHUTES ×%d%s", #ev.uids, tag)
+        sl[#sl + 1] = string.format("CHUTES ×%d%s", #ev.uids, tag)
       else
         sl[#sl + 1] = string.format("STAGE SEP   (below y %.1f)%s", ev.y, tag)
       end

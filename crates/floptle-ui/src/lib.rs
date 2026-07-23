@@ -1100,21 +1100,34 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
             // `instanceColor`, alpha = the element's opacity). The shape's corner
             // radius rides along in `radius` so the transpiled shader can clip its
             // output to the element's rounded rect (no spill past the corners).
+            // The element's image (if any) binds at group(1), so the shader can
+            // sample it with `baseTexture(uv)` — the shader then OWNS the image
+            // (the plain image quad below is suppressed).
+            let img_tex = spec
+                .image
+                .as_ref()
+                .map(|i| i.texture.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_default();
+            let img_uv = spec.image.as_ref().map(|i| i.cell_uv()).unwrap_or([0.0, 0.0, 1.0, 1.0]);
             dl.quads.push(Quad {
                 rect: p.rect,
                 color: [1.0, 1.0, 1.0, a],
                 radius: spec.shape.map(|s| s.radius).unwrap_or(0.0),
                 border: 0.0,
                 border_color: [0.0; 4],
-                texture: String::new(),
-                uv: [0.0, 0.0, 1.0, 1.0],
+                texture: img_tex,
+                uv: img_uv,
                 clip,
                 shader: Some((spec.shader.clone(), p.id)),
                 feather: 0.0,
             });
         }
+        // The plain image quad — skipped when a shader owns the element (the
+        // shader draws the image itself via `baseTexture`).
         if let Some(img) = &spec.image
             && !img.texture.is_empty()
+            && spec.shader.is_empty()
         {
             let mut tint = img.tint;
             tint[3] *= a;

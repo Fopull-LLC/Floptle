@@ -232,6 +232,31 @@ shader gauge {
         assert_eq!(parse(&printed).unwrap().stage, Some(Stage::Ui));
     }
 
+    /// A Ui-stage shader can sample the ELEMENT'S OWN image via `baseTexture`
+    /// (bound at group(1) like a material texture) — both with an explicit uv and
+    /// with the default rect UV — and the result validates against the UI seam.
+    #[test]
+    fn ui_shader_samples_element_image() {
+        const DUO: &str = r#"
+shader duo {
+  stage ui
+  uniform dark: color = #101020
+  uniform light: color = #FFE0A0
+  let src = baseTexture(uv)
+  let l = (src.r + src.g + src.b) * 0.3333
+  output color = vec4(mix(dark.rgb, light.rgb, l), src.a) * instanceColor
+}
+"#;
+        let compiled = compile_ui(DUO).expect("compiles");
+        let prelude = format!("{}{}", transpile::UI_TEST_PRELUDE, transpile::UI_FIELD_SHIM);
+        transpile::validate(&prelude, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {} in:\n{}", e.message, compiled.chunk));
+        // `baseTexture()` with no arg uses the element's 0..1 rect UV.
+        let dflt = compile_ui("shader d { stage ui\n  output color = baseTexture() }")
+            .expect("default baseTexture compiles");
+        assert!(dflt.chunk.contains("flsl_uv(in)"), "default UV path: {}", dflt.chunk);
+    }
+
     #[test]
     fn parses_the_plasma_example() {
         let ir = parse(PLASMA).expect("parses");

@@ -444,12 +444,32 @@ impl<'a> Writer<'a> {
                 }
                 "baseTexture" => {
                     match &call.args[0] {
-                        // Omitted → the node's own texture THROUGH its material
-                        // tiling (the raster pass's helper — instance-driven).
-                        ResolvedArg::Default(_) => Ok("base_texel(in)".to_string()),
+                        // Omitted → the element/node's own texture. In a material
+                        // that's the raster helper (instance-driven tiling); in a
+                        // UI shader it's the element's image at the rect UV.
+                        ResolvedArg::Default(_) => match self.ctx {
+                            EmitCtx::Ui => Ok("textureSample(tex, samp, flsl_uv(in))".to_string()),
+                            _ => Ok("base_texel(in)".to_string()),
+                        },
                         a => {
                             let uv = self.emit_resolved(a, Some(Ty::Vec2))?;
                             Ok(format!("textureSample(tex, samp, {uv})"))
+                        }
+                    }
+                }
+                "backdrop" => {
+                    // Default → the scene directly behind this pixel; an arg is a
+                    // screen-uv OFFSET (refraction / distortion).
+                    match &call.args[0] {
+                        ResolvedArg::Default(_) => Ok(
+                            "textureSample(flsl_backdrop, flsl_backdrop_samp, flsl_screen_uv(in))"
+                                .to_string(),
+                        ),
+                        a => {
+                            let off = self.emit_resolved(a, Some(Ty::Vec2))?;
+                            Ok(format!(
+                                "textureSample(flsl_backdrop, flsl_backdrop_samp, flsl_screen_uv(in) + {off})"
+                            ))
                         }
                     }
                 }
@@ -783,11 +803,21 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
     }
     w.line("};".into(), None);
     w.line("@group(2) @binding(0) var<uniform> P: FlslUiParams;".into(), None);
+    // The backdrop: the (blurred) composited scene BEHIND this UI layer, always
+    // bound at group(3) (a 1×1 clear texture when no capture is active) so every
+    // UI pipeline shares one layout. `backdrop()` reads it for frosted glass.
+    w.line("@group(3) @binding(0) var flsl_backdrop: texture_2d<f32>;".into(), None);
+    w.line("@group(3) @binding(1) var flsl_backdrop_samp: sampler;".into(), None);
     w.line(String::new(), None);
     // `uv` spans 0..1 across the element's rect, derived from the rect geometry
     // (the instance's uv_rect belongs to IMAGE atlas coords, not the shader).
     w.line("fn flsl_uv(in: VsOut) -> vec2<f32> {".into(), None);
     w.line("    return in.local / max(in.half_size, vec2<f32>(0.0001)) * 0.5 + vec2<f32>(0.5);".into(), None);
+    w.line("}".into(), None);
+    // Screen UV of this pixel (0..1 across the window) — the backdrop is a
+    // full-screen capture, so this samples the scene directly behind the pixel.
+    w.line("fn flsl_screen_uv(in: VsOut) -> vec2<f32> {".into(), None);
+    w.line("    return in.px / max(globals.viewport.xy, vec2<f32>(1.0));".into(), None);
     w.line("}".into(), None);
 
     w.line("fn flsl_ui_surface(in: VsOut) -> vec4<f32> {".into(), None);

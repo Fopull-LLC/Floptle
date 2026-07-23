@@ -3,10 +3,38 @@
 
 defaults = { action = 1 }
 
-local el, menu
+local el, menu, idle
 
 function start(node)
   el = node:getcomponent("UiElement")
+end
+
+-- Cache the authored idle fill the first time we're hovered (the mirror is live
+-- by then and the fill hasn't been touched yet), so hover/press restore to THIS
+-- button's own color — blue action, red close, green launch, etc.
+local function ensureIdle()
+  if idle or not el then return end
+  idle = { el.fillR or 0.12, el.fillG or 0.2, el.fillB or 0.28, el.fillA or 0.95 }
+end
+
+local function setFill(r, g, b, a)
+  if el then el.fillR = r; el.fillG = g; el.fillB = b; el.fillA = a end
+end
+
+local function idleFill()
+  if idle then setFill(idle[1], idle[2], idle[3], idle[4]) end
+  if el then el.border = 1.0; el.opacity = 1.0 end
+end
+
+local function hoverFill()
+  if not idle then return end
+  setFill(
+    math.min(1.0, idle[1] * 1.45 + 0.06),
+    math.min(1.0, idle[2] * 1.4 + 0.07),
+    math.min(1.0, idle[3] * 1.35 + 0.09),
+    math.min(1.0, idle[4] + 0.05)
+  )
+  if el then el.border = 1.6; el.opacity = 1.0 end
 end
 
 function clicked(node)
@@ -18,9 +46,19 @@ function clicked(node)
 end
 
 function hoverStart(node)
-  if el then el.opacity = 0.78 end
+  ensureIdle()
+  hoverFill()
 end
 
 function hoverEnd(node)
-  if el then el.opacity = 1.0 end
+  idleFill()
+end
+
+function pressed(node)
+  ensureIdle()
+  if idle then setFill(idle[1] * 0.7, idle[2] * 0.7, idle[3] * 0.7, math.min(1.0, idle[4] + 0.05)) end
+end
+
+function released(node)
+  hoverFill()
 end
