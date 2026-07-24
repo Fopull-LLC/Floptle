@@ -2970,33 +2970,34 @@ impl EditorTabViewer<'_> {
             }
         } else {
             // Copy selected transform keys → clipboard (node name + time + pose).
+            // Keep this selection-local value for Cut.  In particular, an empty Cut
+            // must be a no-op — it must never delete whatever happened to be copied
+            // previously (the old code read `key_clipboard` after a failed copy).
+            let mut copied_now = Vec::new();
             if copy_keys {
                 let sel = st.sel_keys.clone();
                 if let Some((_, d)) = st.clip_doc.as_ref() {
-                    let mut cb = Vec::new();
-                    for (ci, t) in sel {
-                        if let Some(ch) = d.channels.get(ci) {
-                            cb.push((ch.node.clone(), t, sample_channel_key(ch, t)));
-                        }
-                    }
-                    if !cb.is_empty() {
-                        st.key_clipboard = cb;
+                    copied_now = copy_transform_keys(d, &sel);
+                    if !copied_now.is_empty() {
+                        st.key_clipboard = copied_now.clone();
                     }
                 }
             }
-            // Cut = delete the just-copied keys (by node+time, robust to reindexing).
+            // Cut = delete only the keys copied from THIS selection (by node+time,
+            // robust to reindexing).  A stale clipboard is deliberately irrelevant.
             if cut_keys {
-                let cb = st.key_clipboard.clone();
-                if let Some((_, d)) = st.clip_doc.as_mut() {
-                    for (node, t, _) in &cb {
+                if !copied_now.is_empty()
+                    && let Some((_, d)) = st.clip_doc.as_mut()
+                {
+                    for (node, t, _) in &copied_now {
                         if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
                             delete_channel_key(&mut d.channels[ci], *t);
                             drop_empty_channel(d, ci);
                         }
                     }
+                    st.sel_keys.clear();
+                    st.clip_dirty = true;
                 }
-                st.sel_keys.clear();
-                st.clip_dirty = true;
             }
             // Paste at the playhead: the earliest copied key lands on the playhead,
             // the rest keep their relative offsets. Reselect the pasted keys.
@@ -3368,6 +3369,23 @@ fn sample_channel_key(ch: &floptle_scene::AnimChannelDoc, t: f32) -> TransformTR
     }
 }
 
+/// Materialize a transform-key selection for copy/cut. Invalid channel indices are
+/// ignored, which makes a selection safely stale after an undo, retime, or channel
+/// cleanup rather than letting a later command target a different key.
+fn copy_transform_keys(
+    doc: &AnimClipDoc,
+    selection: &[(usize, f32)],
+) -> Vec<(String, f32, TransformTRS)> {
+    selection
+        .iter()
+        .filter_map(|&(ci, t)| {
+            doc.channels
+                .get(ci)
+                .map(|ch| (ch.node.clone(), t, sample_channel_key(ch, t)))
+        })
+        .collect()
+}
+
 /// Write (or overwrite) a full TRS key for `chan_name` at time `t`.
 pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &TransformTRS) {
     let ch = match doc.channels.iter_mut().find(|c| c.node == chan_name) {
@@ -3610,6 +3628,41 @@ mod tests {
         write_key(&mut doc, "Hip", 1.25, &got);
         let again = sample_channel_key(&doc.channels[ci], 1.25);
         assert!((again.t - trs.t).length() < 1e-5, "pasted copy matches");
+    }
+
+    #[test]
+    fn clipboard_selection_never_reuses_a_stale_key() {
+        use floptle_core::math::{Quat, Vec3};
+        let mut doc = empty_clip();
+        write_key(
+            &mut doc,
+            "Hand",
+            0.5,
+            &TransformTRS { t: Vec3::X, r: Quat::IDENTITY, s: Vec3::ONE },
+        );
+        let copied = copy_transform_keys(&doc, &[(0, 0.5)]);
+        assert_eq!(copied.len(), 1);
+        // A Cut with no current selection has no targets. Its caller must therefore
+        // leave the prior clipboard alone and, crucially, delete nothing from doc.
+        assert!(copy_transform_keys(&doc, &[]).is_empty());
+        assert_eq!(doc.channels[0].translation.as_ref().unwrap().times, vec![0.5]);
+    }
+
+    #[test]
+    fn clip_undo_redo_swaps_only_the_open_clip() {
+        let mut before = empty_clip();
+        before.name = "before".into();
+        let mut after = before.clone();
+        after.name = "after".into();
+        let mut st = AnimUiState {
+            clip_doc: Some(("animations/test".into(), after)),
+            clip_undo: vec![before],
+            ..Default::default()
+        };
+        assert!(clip_undo_redo(&mut st, false));
+        assert_eq!(st.clip_doc.as_ref().unwrap().1.name, "before");
+        assert!(clip_undo_redo(&mut st, true));
+        assert_eq!(st.clip_doc.as_ref().unwrap().1.name, "after");
     }
 
     /// The recorder's property key write, the timeline's drag-retime, and the

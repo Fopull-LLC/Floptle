@@ -364,6 +364,10 @@ struct EditorCmd {
     /// Set an object/bone's rotation pivot (rigged-mesh entity, node name, pivot xyz in
     /// node-local space) — from the Inspector's numeric pivot fields.
     set_object_pivot: Option<(Entity, String, [f32; 3])>,
+    /// Attach any scene child below a rigged mesh to one of that mesh's bones.  The
+    /// apply pass reparents it directly below the mesh and preserves its world pose
+    /// while deriving the bone-local attachment offset.
+    attach_to_bone: Option<(Entity, Entity, String)>,
 }
 
 /// Lowercase name for a key, for the script `input` API (`input.key("w")`).
@@ -2512,6 +2516,15 @@ impl ApplicationHandler for Editor {
                                                 self.anim_ui.clip_dirty = true;
                                             }
                                         }
+                                        // The Animating panel owns its clip history.  Do not
+                                        // let these raw window events fall through to scene
+                                        // history: egui receives the same key event and applies
+                                        // the clip undo below during its frame.  Routing it here
+                                        // used to restore a scene snapshot while editing keys.
+                                        KeyCode::KeyZ
+                                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
+                                        KeyCode::KeyY
+                                            if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
                                         KeyCode::KeyZ if !in_graph => self.undo(),
                                         KeyCode::KeyY if !in_graph => self.redo(),
                                         KeyCode::KeyS => self.save_all(),
@@ -2948,4 +2961,3 @@ mod export_tests {
         let _ = std::fs::remove_dir_all(&out2);
     }
 }
-

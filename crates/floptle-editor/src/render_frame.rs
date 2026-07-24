@@ -4763,6 +4763,29 @@ impl Editor {
         if let Some((mesh, name, p)) = cmd.set_object_pivot {
             self.apply_object_pivot(mesh, &name, Vec3::from(p));
         }
+        if let Some((child, mesh, bone)) = cmd.attach_to_bone {
+            // A BoneAttach's local Transform is in the target model's space, so it
+            // must be a direct child of that Mesh.  Preserve the scene-world pose as
+            // its bone-local offset before normalizing the hierarchy; this supports
+            // meshes nested under sockets/Empties as well as direct children.
+            let child_world = floptle_core::world_transform(&self.world, child);
+            let offset = crate::anim::bone_world_matrix(
+                &self.anim,
+                &self.world,
+                &self.mesh_registry,
+                mesh,
+                &bone,
+            )
+            .map(|bone_world| {
+                let local = bone_world.inverse() * child_world.world_matrix();
+                local.is_finite()
+                    .then(|| floptle_core::Transform::from_matrix(local))
+                    .unwrap_or(floptle_core::Transform::IDENTITY)
+            })
+            .unwrap_or(floptle_core::Transform::IDENTITY);
+            self.world.insert(child, floptle_core::Parent(mesh));
+            self.world.insert(child, floptle_core::BoneAttach { target: mesh, bone, offset });
+        }
         if let Some((mesh, child, parent)) = cmd.set_object_parent {
             // Persist an object re-parent to the model's `.rig.ron` sidecar, then
             // re-import the model so the new hierarchy takes effect live and every

@@ -2491,13 +2491,32 @@ impl EditorTabViewer<'_> {
                     });
                 }
 
-                // ===== 🔗 Bone attachment (node parented to a rigged mesh) =====
-                if let Some(floptle_core::Parent(mesh)) = world.get::<floptle_core::Parent>(e).copied()
+                // ===== 🔗 Bone attachment (any descendant of a rigged mesh) =====
+                // An equipped mesh is commonly put below an Empty/socket below the
+                // character first. Walk its ancestors instead of requiring the rigged
+                // Mesh to be its immediate Parent; choosing a bone will normalize the
+                // link to that mesh while preserving the child's world pose.
+                let rig_parent = {
+                    let mut at = e;
+                    let mut found = None;
+                    for _ in 0..64 {
+                        let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(at).copied() else {
+                            break;
+                        };
+                        if bone_names.contains_key(&p) {
+                            found = Some(p);
+                            break;
+                        }
+                        at = p;
+                    }
+                    found
+                };
+                if let Some(mesh) = rig_parent
                     && let Some(bones) = bone_names.get(&mesh)
                 {
                     ui.separator();
                     ui.strong("🔗 Bone attachment");
-                    ui.small("ride an object or bone of the parent model (a weapon on a hand)");
+                    ui.small("ride an object or bone of this parent model (a weapon on a hand)");
                     let cur = world.get::<floptle_core::BoneAttach>(e).map(|a| a.bone.clone());
                     egui::ComboBox::from_id_salt("bone_attach_pick")
                         .selected_text(cur.clone().unwrap_or_else(|| "(not attached)".into()))
@@ -2512,16 +2531,10 @@ impl EditorTabViewer<'_> {
                                 let sel = cur.as_deref() == Some(node.name.as_str());
                                 let icon = if node.is_object { "◈" } else { "🔗" };
                                 if ui.selectable_label(sel, format!("{icon} {}", node.name)).clicked() && !sel {
-                                    // Attach snapping the node to the bone (offset kept if
-                                    // re-picking, else identity — then nudge it below).
-                                    let offset = world
-                                        .get::<floptle_core::BoneAttach>(e)
-                                        .map(|a| a.offset)
-                                        .unwrap_or(floptle_core::transform::Transform::IDENTITY);
-                                    world.insert(
-                                        e,
-                                        floptle_core::BoneAttach { target: mesh, bone: node.name.clone(), offset },
-                                    );
+                                    // Deferred because attaching reparents to the mesh and
+                                    // derives a bone-local offset from the current world pose.
+                                    // That keeps a nested weapon/socket exactly where it was.
+                                    cmd.attach_to_bone = Some((e, mesh, node.name.clone()));
                                     cmd.inspector_changed = true;
                                 }
                             }
