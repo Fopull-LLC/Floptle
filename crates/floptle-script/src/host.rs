@@ -2441,7 +2441,7 @@ impl ScriptHost {
     /// script before ANY `update`, so a manager is reachable even by a script that ticks
     /// first.
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
-        let path = scripts_dir.join(format!("{name}.lua"));
+        let path = resolve_script_path(scripts_dir, name);
         let Some(generation) = self.ensure_source(name, &path) else {
             self.record_error(name, format!("{name}: script not found ({})", path.display()));
             return false;
@@ -2776,6 +2776,36 @@ impl ScriptHost {
             src.error = Some(msg.clone());
         }
         self.record_error(name, msg);
+    }
+}
+
+fn resolve_script_path(scripts_dir: &Path, name: &str) -> PathBuf {
+    let direct = scripts_dir.join(format!("{name}.lua"));
+    if direct.exists() {
+        return direct;
+    }
+    let path = scripts_dir.join(name).with_extension("lua");
+    if path.exists() {
+        return path;
+    }
+    direct
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_script_path_supports_nested_script_folders() {
+        let dir = std::env::temp_dir().join(format!("floptle-host-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts/fighterScripts")).unwrap();
+        std::fs::write(dir.join("scripts/fighterScripts/attack.lua"), "return {}\n").unwrap();
+
+        let path = resolve_script_path(&dir.join("scripts"), "fighterScripts/attack");
+        assert_eq!(path, dir.join("scripts/fighterScripts/attack.lua"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

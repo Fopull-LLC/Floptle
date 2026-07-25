@@ -29,10 +29,22 @@ pub(crate) fn is_script(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".lua")
 }
 
-/// The script name (file stem) a `.lua` path refers to — what a `ScriptInst.kind`
-/// stores and what resolves to `scripts/<name>.lua`.
+/// The script name (file stem) a `.lua` path refers to.
 pub(crate) fn script_name_of(path: &str) -> String {
     Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+}
+
+/// The script identity used by [`floptle_core::ScriptInst`]: a path relative to the
+/// project's `scripts/` folder, without the `.lua` extension. This preserves nested
+/// folder organization such as `fighterScripts/attack`.
+pub(crate) fn script_kind_of(path: &str, scripts_dir: &Path) -> String {
+    let p = Path::new(path);
+    let rel = p.strip_prefix(scripts_dir).unwrap_or(p);
+    if rel.is_absolute() {
+        return script_name_of(path);
+    }
+    let kind = rel.with_extension("");
+    kind.to_string_lossy().replace('\\', "/")
 }
 
 pub(crate) fn is_texture(path: &str) -> bool {
@@ -200,6 +212,24 @@ pub(crate) fn collect_script_names(entries: &[AssetEntry], out: &mut Vec<String>
             }
             AssetEntry::File { .. } => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_kind_preserves_nested_paths_relative_to_scripts_dir() {
+        let scripts_dir = Path::new("/tmp/project/scripts");
+        assert_eq!(
+            script_kind_of("/tmp/project/scripts/fighterScripts/attack.lua", scripts_dir),
+            "fighterScripts/attack"
+        );
+        assert_eq!(
+            script_kind_of("/tmp/project/scripts/rotate.lua", scripts_dir),
+            "rotate"
+        );
     }
 }
 

@@ -11,7 +11,7 @@ use floptle_core::math::Mat4;
 use floptle_core::math::Vec3;
 use floptle_core::transform::Transform;
 use std::path::Path;
-use crate::assets::{is_script, script_name_of};
+use crate::assets::{is_script, script_kind_of};
 use crate::dock::{EditorTab};
 use crate::{Editor, grab_cursor};
 
@@ -809,11 +809,11 @@ impl Editor {
             eprintln!("  script not found: {path}");
             return;
         }
-        let name = script_name_of(path);
+        let kind = script_kind_of(path, &self.scripts_dir());
         let (params, ref_decls, strs) = self.script_host.script_defaults(Path::new(path));
         self.record();
         let refs = ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
-        let inst = ScriptInst { kind: name, enabled: true, params, refs, strs };
+        let inst = ScriptInst { kind, enabled: true, params, refs, strs };
         if let Some(scr) = self.world.get_mut::<Scripts>(e) {
             scr.0.push(inst);
         } else {
