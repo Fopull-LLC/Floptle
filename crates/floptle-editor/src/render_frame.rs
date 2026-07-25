@@ -4506,8 +4506,8 @@ impl Editor {
         if let Some((path, e)) = cmd.drop_script_on {
             self.attach_script_file(&path, Some(e));
         }
-        if let Some((name, e)) = cmd.attach_named {
-            let path = self.scripts_dir().join(format!("{name}.lua"));
+        if let Some((script_path, e)) = cmd.attach_named {
+            let path = self.project_root.join(&script_path);
             self.attach_script_file(&path.to_string_lossy(), Some(e));
         }
         if let Some(file) = cmd.open_in_editor {

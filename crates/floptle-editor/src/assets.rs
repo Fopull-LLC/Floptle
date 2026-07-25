@@ -187,15 +187,15 @@ pub(crate) fn collect_model_paths(entries: &[AssetEntry], out: &mut Vec<String>)
     }
 }
 
-/// Collect the names of every `.lua` script in the asset tree (for "Add Script").
+/// Collect the full paths of every `.lua` script in the asset tree (for "Add Script").
+/// Returns paths relative to the project root (e.g., "scripts/character.lua").
 pub(crate) fn collect_script_names(entries: &[AssetEntry], out: &mut Vec<String>) {
     for e in entries {
         match e {
             AssetEntry::Dir(_, children) => collect_script_names(children, out),
             AssetEntry::File { path, .. } if is_script(path) => {
-                let n = script_name_of(path);
-                if !out.contains(&n) {
-                    out.push(n);
+                if !out.contains(path) {
+                    out.push(path.clone());
                 }
             }
             AssetEntry::File { .. } => {}

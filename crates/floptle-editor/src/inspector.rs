@@ -11,7 +11,7 @@ use floptle_core::{Light, Material, Matter, Name, Scripts, Shape};
 
 use crate::assets::{
     collect_model_paths, collect_script_names, collect_texture_paths, is_material, is_model,
-    is_script, is_texture, AssetPayload,
+    is_script, is_texture, script_name_of, AssetPayload,
 };
 use crate::matter_catalog::{matter_icon, matter_kind_label, type_catalog};
 use crate::{anim_ui, EditorTabViewer};
@@ -2699,11 +2699,12 @@ impl EditorTabViewer<'_> {
                         .get::<Scripts>(e)
                         .map(|s| s.0.iter().map(|i| i.kind.clone()).collect())
                         .unwrap_or_default();
-                    let mut snames = Vec::new();
-                    collect_script_names(self.asset_tree, &mut snames);
-                    for n in snames {
-                        if !attached.contains(&n) {
-                            items.push(("Scripts", format!("⚙  {n}"), Add::Script(n)));
+                    let mut script_paths = Vec::new();
+                    collect_script_names(self.asset_tree, &mut script_paths);
+                    for path in script_paths {
+                        let stem = script_name_of(&path);
+                        if !attached.contains(&stem) {
+                            items.push(("Scripts", format!("⚙  {stem}"), Add::Script(path)));
                         }
                     }
                     // Type switch (mutually exclusive). Terrain is special — leave it be.
