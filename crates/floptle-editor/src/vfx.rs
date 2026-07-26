@@ -17,12 +17,13 @@ use floptle_render::{ParticleInstance, RenderCamera, TexId};
 use floptle_scene::{
     VfxBlendDoc, VfxCurveDoc, VfxEffectDoc, VfxForceDoc, VfxInterpDoc, VfxLaneTargetDoc,
     VfxFlipModeDoc, VfxFlipbookDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc,
-    VfxShapeDoc, VfxValueDoc, VFX_EXT,
+    VfxShapeDoc, VfxTrailDoc, VfxValueDoc, VFX_EXT,
 };
 use floptle_vfx::{
     BillboardOrient, Blend, Clip, CompiledEffect, Curve, EffectInstance, Emit, EmitShape,
     EndBehavior, Extrapolate, FlipMode, Flipbook, Force, Interp, Key, Lane, LaneTarget, Look,
-    ParticleEffect, Playback, RenderMode, Space, Track, Value, ValueOrCurve, collect_billboards,
+    ParticleEffect, Playback, RenderMode, Space, Track, Trail, Value, ValueOrCurve,
+    collect_beams, collect_billboards, collect_trails,
 };
 
 use crate::anim::asset_key;
@@ -333,6 +334,23 @@ impl VfxSystem {
                         inst.set_intensity(i);
                     }
                 }
+                // Aim every Beam track at a WORLD point: convert to effect-local
+                // (undo the emitter's rotation/scale) so the beam keeps tracking the
+                // target as the node moves — the sim/draw side only knows local.
+                floptle_script::VfxCmd::SetBeamEnd(p) => {
+                    if let Some((_, inst)) = self.instances.get_mut(&e) {
+                        let tr = floptle_core::world_transform(world, e);
+                        let rel = (DVec3::from_array(p) - tr.translation).as_vec3();
+                        let unrotated = tr.rotation.inverse() * rel;
+                        let safe = |v: f32| if v.abs() > 1e-6 { v } else { 1.0 };
+                        let local = Vec3::new(
+                            unrotated.x / safe(tr.scale.x),
+                            unrotated.y / safe(tr.scale.y),
+                            unrotated.z / safe(tr.scale.z),
+                        );
+                        inst.set_beam_end(local);
+                    }
+                }
             }
         }
     }
@@ -361,6 +379,10 @@ impl VfxSystem {
             collect_billboards(
                 inst, local_xf, world_xf, fwd, cam_right, cam_up, out_instances, &mut draws,
             );
+            // Trails + beams fold into the SAME instance/batch stream — the render
+            // pass draws ribbons as ordinary oriented quads, no extra pipeline.
+            collect_trails(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
+            collect_beams(inst, local_xf, world_xf, cam_right, out_instances, &mut draws);
             for d in draws {
                 out_batches.push(ParticleBatch {
                     texture: d.texture.as_deref().and_then(|p| textures.get(p).copied()),
@@ -388,17 +410,25 @@ impl VfxSystem {
         }
     }
 
-    /// Every texture path any registered effect's billboard tracks reference —
-    /// for the editor's texture pre-warm. Includes the live preview's tracks so
-    /// a just-picked (unsaved) texture resolves next frame.
+    /// Every texture path any registered effect's billboard / beam / trail tracks
+    /// reference — for the editor's texture pre-warm. Includes the live preview's
+    /// tracks so a just-picked (unsaved) texture resolves next frame.
     pub fn texture_paths(&self) -> Vec<String> {
-        let mut out = Vec::new();
+        let mut out: Vec<String> = Vec::new();
         let mut scan = |fx: &CompiledEffect| {
             for track in &fx.tracks {
-                if let RenderMode::Billboard { texture: Some(p) } = &track.look.render
-                    && !out.contains(p)
-                {
-                    out.push(p.clone());
+                let mut push = |p: &String| {
+                    if !out.contains(p) {
+                        out.push(p.clone());
+                    }
+                };
+                match &track.look.render {
+                    RenderMode::Billboard { texture: Some(p) } => push(p),
+                    RenderMode::Beam { texture: Some(p) } => push(p),
+                    _ => {}
+                }
+                if let Some(Trail { texture: Some(p), .. }) = &track.trail {
+                    push(p);
                 }
             }
         };
@@ -535,6 +565,12 @@ pub fn starter_effect_doc(name: &str) -> VfxEffectDoc {
         aspect: 1.0,
         stretch: 1.0,
         flipbook: None,
+        trail: None,
+        segments: 12,
+        beam_end: [0.0, 5.0, 0.0],
+        wave_amplitude: 0.0,
+        wave_frequency: 2.0,
+        scroll: 0.0,
         lit: false,
         cast_shadows: false,
         space: floptle_scene::VfxSpaceDoc::Local,
@@ -699,6 +735,9 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                         VfxRenderDoc::Mesh { asset_path } => {
                             RenderMode::Mesh { asset_path: asset_path.clone() }
                         }
+                        VfxRenderDoc::Beam { texture } => {
+                            RenderMode::Beam { texture: texture.clone() }
+                        }
                     },
                     blend: match t.blend {
                         VfxBlendDoc::Alpha => Blend::Alpha,
@@ -758,12 +797,28 @@ pub fn effect_from_doc(doc: &VfxEffectDoc) -> ParticleEffect {
                 drag: t.drag,
                 inherit_velocity: t.inherit_velocity,
                 forces: t.forces.iter().map(force_from_doc).collect(),
+                trail: t.trail.as_ref().map(trail_from_doc),
+                segments: t.segments,
+                beam_end: Vec3::from_array(t.beam_end),
+                wave_amplitude: t.wave_amplitude,
+                wave_frequency: t.wave_frequency,
+                scroll: t.scroll,
             })
             .collect(),
         gravity_mode: match doc.gravity_mode {
             floptle_scene::VfxGravityDoc::WorldDown => floptle_vfx::GravityMode::WorldDown,
             floptle_scene::VfxGravityDoc::Field => floptle_vfx::GravityMode::Field,
         },
+    }
+}
+
+fn trail_from_doc(t: &VfxTrailDoc) -> Trail {
+    Trail {
+        time: t.time,
+        width: t.width,
+        fade: t.fade,
+        texture: t.texture.clone(),
+        min_distance: t.min_distance,
     }
 }
 

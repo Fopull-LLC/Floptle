@@ -175,7 +175,7 @@ impl GpuMesh {
 }
 
 /// Handle to a mesh registered with the render pass (index into its registry).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(pub u32);
 
 /// A unit-ish cube of half-extent `half`, centered at the origin. Each of the six

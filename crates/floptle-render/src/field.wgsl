@@ -101,6 +101,10 @@ struct Globals {
     star_meta: vec4<f32>,
     star_pos: array<vec4<f32>, 4>,
     star_color: array<vec4<f32>, 4>,
+    // Volumetric fog (Lighting.fog_volumetric): a = (density, layer top WORLD y,
+    // top falloff, noise amount), b = (noise scale, time, camera WORLD y, on).
+    vol_fog_a: vec4<f32>,
+    vol_fog_b: vec4<f32>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -585,6 +589,25 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
     return out;
 }
 
+// Volumetric fog media density at camera-relative `p`: a layer filling world
+// space below `vol_fog_a.y`, its top softened over `vol_fog_a.z` units and
+// broken up by drifting value-noise (reusing the atmosphere's cloud_fbm).
+fn vol_fog_density(p: vec3<f32>) -> f32 {
+    let world_y = p.y + G.vol_fog_b.z; // camera-relative → world height
+    let falloff = max(G.vol_fog_a.z, 1e-3);
+    // 1 inside the layer, fading to 0 across the falloff band above its top.
+    let layer = clamp(1.0 - (world_y - G.vol_fog_a.y) / falloff, 0.0, 1.0);
+    var d = G.vol_fog_a.x * layer;
+    let noise_amt = G.vol_fog_a.w;
+    if (noise_amt > 0.0 && d > 0.0) {
+        let scale = max(G.vol_fog_b.x, 1e-3);
+        let drift = vec3<f32>(G.vol_fog_b.y * 0.6, G.vol_fog_b.y * 0.13, G.vol_fog_b.y * 0.45);
+        let n = cloud_fbm(p / scale + drift);
+        d = d * mix(1.0, clamp(n * 1.6, 0.0, 1.0), noise_amt);
+    }
+    return d;
+}
+
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     // Aerial perspective first: atmosphere + clouds BETWEEN the camera and this
     // surface (haze over a planet seen from orbit, cloud decks over its disc).
@@ -592,8 +615,25 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.fog_params.z < 0.5) {
         return color2;
     }
-    let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
-    var f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    var f = 0.0;
+    if (G.vol_fog_b.w > 0.5) {
+        // VOLUMETRIC: march camera → surface accumulating optical depth. Few
+        // steps + a per-pixel jitter of the start offset hide the banding.
+        let dist = length(pos);
+        let steps = 10u;
+        let dt = dist / f32(steps);
+        let dir = pos / max(dist, 1e-4);
+        let jitter = ign(pix);
+        var od = 0.0;
+        for (var i = 0u; i < steps; i = i + 1u) {
+            let t = (f32(i) + jitter) * dt;
+            od = od + vol_fog_density(dir * t) * dt;
+        }
+        f = 1.0 - exp(-od);
+    } else {
+        let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
+        f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
+    }
     // Optional dither of the fog factor to break up 8-bit banding on slow gradients.
     // Strength rides in the spare fog_color.w lane (0 = off); mode in fog_params.w
     // (0 = Bayer 4×4, 1 = interleaved-gradient noise). A sub-percent nudge is enough.

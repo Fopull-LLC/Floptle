@@ -439,6 +439,9 @@ pub enum VfxCmd {
     /// Live emission scale (0..~2): multiplies rates/burst counts and shades
     /// particle size — `ps:setIntensity(throttle)` drives an engine plume.
     Intensity(f32),
+    /// Aim every Beam track's endpoint at a WORLD-space point — the editor
+    /// converts it to effect-local before applying (`ps:setBeamEnd(x, y, z)`).
+    SetBeamEnd([f64; 3]),
 }
 
 /// Where a script-spawned sound sits: nowhere (flat), a fixed world point, or

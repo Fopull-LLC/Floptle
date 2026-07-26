@@ -32,7 +32,7 @@ use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active}
 use crate::gizmo::build_gizmo;
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
-use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms};
+use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
@@ -881,6 +881,10 @@ impl Editor {
         let mut blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
         // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part).
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
+        // Recycle skinned-buffer clones of deleted entities, then borrow the cache
+        // for the draw loop (disjoint field from mesh_registry/raster).
+        self.skin_variants.prune(&self.world);
+        let skin_variants = &mut self.skin_variants;
         if let Some((path, pos)) = &drag_ghost
             && let Some(asset) = self.mesh_registry.get(path) {
                 let ghost = Transform { translation: *pos, ..Transform::default() };
@@ -961,10 +965,11 @@ impl Editor {
                 Matter::Mesh { asset_path } => {
                     if let Some(asset) = self.mesh_registry.get(asset_path) {
                         let model = t.render_matrix(cam.world_position);
-                        let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                        let mp = mat.as_ref().map(material_params);
+                        let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, &mp, node_paint, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -1067,6 +1072,8 @@ impl Editor {
         };
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
+        let (vol_fog_a, vol_fog_b) =
+            vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
             let mut arr = [[0.0f32; 4]; 16];
             let n = set.len().min(16);
@@ -1119,6 +1126,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                vol_fog_a,
+                vol_fog_b,
                 sky_meta,
                 sky_uniforms,
                 atmo_meta,
@@ -1134,14 +1143,18 @@ impl Editor {
             }
         };
 
-        // Selection outline source: the selected object's silhouette into the mask —
-        // a mesh instance, or (for a blob) a one-blob raymarch so the outline hugs
-        // only the selected blob.
+        // Selection outline source: every selected object's silhouette into the
+        // mask — mesh instances, plus (for blobs/field shapes) a raymarch whose
+        // outline hugs only the selected SDF surfaces. All selected entities get
+        // an outline, not just the primary.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
         // The Game view plays like a build — no selection outline there.
-        if let Some(e) = self.selection.last().copied().filter(|_| !game_view)
-            && let Some(m) = self.world.get::<Matter>(e) {
+        if !game_view {
+            let mut sel_blobs: Vec<(DVec3, f32, MaterialParams)> = Vec::new();
+            let mut sel_shapes: Vec<Entity> = Vec::new();
+            for &e in &self.selection {
+                let Some(m) = self.world.get::<Matter>(e) else { continue };
                 let t = floptle_core::world_transform(&self.world, e);
                 match m {
                     Matter::Primitive { shape, .. } => {
@@ -1160,12 +1173,13 @@ impl Editor {
                                 for (i, &mid) in asset.parts.iter().enumerate() {
                                     if matches!(rig.skins.get(i), Some(Some(_))) {
                                         // A SKINNED part: cpu_skin_part already baked the pose
-                                        // into this mesh's vertex buffer for the visible draw,
-                                        // which uses just `model`. Applying node_world here too
-                                        // would transform it TWICE — the offset outline Ty saw
-                                        // on the astronaut (and Ty.glb). Match the draw exactly.
+                                        // into this ENTITY's variant buffer for the visible
+                                        // draw, which uses just `model`. Applying node_world
+                                        // here too would transform it TWICE — the offset
+                                        // outline Ty saw on the astronaut. Match the draw.
+                                        let vmid = self.skin_variants.get(e, i).unwrap_or(mid);
                                         mask_mesh
-                                            .push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                                            .push((vmid, instance_of(model, [1.0, 1.0, 1.0])));
                                     } else {
                                         let local = rig
                                             .part_nodes
@@ -1192,15 +1206,9 @@ impl Editor {
                             .get::<Material>(e)
                             .map(material_params)
                             .unwrap_or_else(blob_default_material);
-                        mask_blob = Some(make_rm(&[(t.translation, scale * t.scale.x, mp)]));
+                        sel_blobs.push((t.translation, scale * t.scale.x, mp));
                     }
-                    Matter::FieldShape { .. } => {
-                        // Mask through the raymarch with ONLY this shape active,
-                        // so the outline hugs the authored SDF silhouette.
-                        let mut g = make_rm(&[]);
-                        crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, Some(e));
-                        mask_blob = Some(g);
-                    }
+                    Matter::FieldShape { .. } => sel_shapes.push(e),
                     Matter::Empty
                     | Matter::Terrain { .. }
                     | Matter::Camera { .. }
@@ -1210,6 +1218,16 @@ impl Editor {
                     | Matter::PostProcess { .. } => {}
                 }
             }
+            if !sel_blobs.is_empty() || !sel_shapes.is_empty() {
+                // One raymarch mask covers every selected blob (16-blob fold) and
+                // field shape together.
+                let mut g = make_rm(&sel_blobs);
+                if !sel_shapes.is_empty() {
+                    crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, Some(&sel_shapes));
+                }
+                mask_blob = Some(g);
+            }
+        }
 
         // The raymarch pass renders the blob matter (gated by the SDF-matter toggle)
         // and/or the combined terrain volume — and it's ALSO what draws a textured
@@ -2864,6 +2882,12 @@ impl Editor {
             // inside the Scene tab, clipped to its rect.)
         });
         egui.state.handle_platform_output(&window, full_output.platform_output);
+        // egui-winit's cursor-icon handling calls set_cursor_visible(true) whenever
+        // the hover icon changes — un-hiding a cursor the game grabbed. Re-assert
+        // the hide while any lock is held so the pointer can't flicker back.
+        if self.game_trap || self.script_mouse_lock {
+            window.set_cursor_visible(false);
+        }
         if self.project.retro_height != old_retro_h {
             retro.resize(gpu, self.project.retro_height.max(80));
         }
@@ -3560,6 +3584,7 @@ impl Editor {
         self.last = Some(now);
         let dt = self.smooth_dt(raw_dt);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
+        self.fog_time = elapsed; // drifts the volumetric-fog noise (offscreen views too)
         // Don't drive the editor (Scene) camera while the Game viewport is focused — that
         // input belongs to the game (e.g. the mouse is over the Game view in split mode).
         if !game_focused {
@@ -3745,7 +3770,13 @@ impl Editor {
             self.script_errors = self.script_host.errors().to_vec();
             // Apply any mouse lock/unlock a script requested this frame (grab + hide the
             // cursor for free-look, or release it). The state persists until changed/Stop.
-            if let Some(want) = self.script_host.take_mouse_lock() {
+            // DEDUPED against the current state: shipped camera scripts call
+            // setMouseLocked every frame from update(), and re-issuing the OS grab at
+            // frame rate tears down/recreates the pointer lock each time (on Wayland
+            // that reads as a flickering, uncontrollable cursor).
+            if let Some(want) = self.script_host.take_mouse_lock()
+                && want != self.script_mouse_lock
+            {
                 self.script_mouse_lock = want;
                 if let Some(window) = self.window.as_ref() {
                     self.cursor_lock_soft = grab_cursor(window, want);
@@ -4190,12 +4221,33 @@ impl Editor {
                             .iter()
                             .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                             .collect();
+                        let part_meta = model
+                            .parts
+                            .iter()
+                            .map(|p| crate::PartMeta {
+                                material: p.material.clone(),
+                                base_color: p.base_color,
+                                textured: p.texture.is_some(),
+                            })
+                            .collect();
                         let overrides =
                             crate::rig_overrides::RigOverrides::load(std::path::Path::new(&path));
+                        if let Some(f) = overrides.texture_filter {
+                            let s = crate::assets::TexSetting { filter: f, ..Default::default() };
+                            for &mid in &parts {
+                                raster.set_mesh_sampling(gpu, mid, s.to_sampling());
+                            }
+                        }
                         let rig = anim::rig_from_model(&model, &overrides);
                         self.mesh_registry.insert(
                             path.clone(),
-                            MeshAsset { parts, size: model.size, rig: Some(rig) },
+                            MeshAsset {
+                                parts,
+                                part_meta,
+                                tex_filter: overrides.texture_filter,
+                                size: model.size,
+                                rig: Some(rig),
+                            },
                         );
                         continue;
                     }
@@ -4209,8 +4261,25 @@ impl Editor {
                             .iter()
                             .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                             .collect();
-                        self.mesh_registry
-                            .insert(path.clone(), MeshAsset { parts, size: model.size, rig: None });
+                        let part_meta = model
+                            .parts
+                            .iter()
+                            .map(|p| crate::PartMeta {
+                                material: p.material.clone(),
+                                base_color: p.base_color,
+                                textured: p.texture.is_some(),
+                            })
+                            .collect();
+                        self.mesh_registry.insert(
+                            path.clone(),
+                            MeshAsset {
+                                parts,
+                                part_meta,
+                                tex_filter: None,
+                                size: model.size,
+                                rig: None,
+                            },
+                        );
                     }
                     Err(e) => eprintln!("  swap-import {path} failed: {e}"),
                 }
@@ -4769,7 +4838,7 @@ impl Editor {
             // its bone-local offset before normalizing the hierarchy; this supports
             // meshes nested under sockets/Empties as well as direct children.
             let child_world = floptle_core::world_transform(&self.world, child);
-            let offset = crate::anim::bone_world_matrix(
+            let offset = crate::anim::bone_world_transform(
                 &self.anim,
                 &self.world,
                 &self.mesh_registry,
@@ -4777,10 +4846,14 @@ impl Editor {
                 &bone,
             )
             .map(|bone_world| {
-                let local = bone_world.inverse() * child_world.world_matrix();
-                local.is_finite()
-                    .then(|| floptle_core::Transform::from_matrix(local))
-                    .unwrap_or(floptle_core::Transform::IDENTITY)
+                // Componentwise TRS inverse (matches resolve_attachments) — a
+                // mirrored mesh keeps its negative scale on the right axis.
+                let local = bone_world.inv_mul(&child_world);
+                if local.translation.is_finite() && local.scale.is_finite() {
+                    local
+                } else {
+                    floptle_core::Transform::IDENTITY
+                }
             })
             .unwrap_or(floptle_core::Transform::IDENTITY);
             self.world.insert(child, floptle_core::Parent(mesh));
@@ -4807,6 +4880,22 @@ impl Editor {
                 self.anim.revision += 1; // force every instance to rebind
                 self.bone_selection = None; // node indices changed after the re-sort
             }
+        }
+        if let Some((path, filter)) = cmd.set_model_filter {
+            // Persist the embedded-texture filter to the model's sidecar, then drop
+            // the registration — the ensure sweep re-imports it next frame with the
+            // new sampling (skin variants self-heal on the new MeshIds).
+            let abs = self.resolve_asset_path(&path);
+            let mut ov = crate::rig_overrides::RigOverrides::load(&abs);
+            ov.texture_filter = filter;
+            if let Err(e) = ov.save(&abs) {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("saving {}: {e}", abs.display()),
+                    None,
+                );
+            }
+            self.mesh_registry.remove(&path);
         }
         if let Some(mesh) = cmd.mirror_model
             && let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(mesh).cloned()
@@ -4854,6 +4943,15 @@ impl Editor {
             let abs = self.resolve_asset_path(&asset_path);
             match floptle_assets::add_flow_rig(&abs, &object, 5) {
                 Ok(r) => {
+                    // Carry any object re-parenting/pivots onto the rigged model
+                    // (same node names), so the sidecar keeps working after the bake.
+                    let src_side = crate::rig_overrides::RigOverrides::sidecar_path(&abs);
+                    if src_side.exists() {
+                        let _ = std::fs::copy(
+                            &src_side,
+                            crate::rig_overrides::RigOverrides::sidecar_path(&r.output),
+                        );
+                    }
                     let rel = r
                         .output
                         .file_name()
@@ -4961,8 +5059,8 @@ impl Editor {
                     dock.push_to_focused_leaf(EditorTab::AnimGraph);
                 }
             }
-        if let Some((child, parent)) = cmd.reparent {
-            self.reparent(child, parent);
+        if let Some((children, parent)) = cmd.reparent {
+            self.reparent_many(&children, parent);
         }
         if let Some((matter, parent)) = cmd.add_parented {
             self.add_parented(matter, parent);
@@ -5230,13 +5328,20 @@ impl Editor {
                 let path = p.path.clone();
                 self.import_model(&path);
             }
-        // Pre-warm material textures so the gather can resolve them next frame.
-        let tex_paths: Vec<String> = self
+        // Pre-warm material textures so the gather can resolve them next frame —
+        // node Materials AND per-object override materials.
+        let mut tex_paths: Vec<String> = self
             .world
             .query::<Material>()
             .filter_map(|(_, m)| m.texture.clone())
             .filter(|p| !self.texture_registry.contains_key(p))
             .collect();
+        tex_paths.extend(
+            self.world
+                .query::<floptle_core::ObjectMaterials>()
+                .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
+                .filter(|p| !self.texture_registry.contains_key(p)),
+        );
         for p in tex_paths {
             self.ensure_texture(&p);
         }
@@ -5419,14 +5524,14 @@ impl Editor {
                         self.mesh_registry.get(asset_path),
                     ) {
                         let model = t.render_matrix(cam.world_position);
-                        let mp = mat
-                            .as_ref()
-                            .map(material_params)
-                            .unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
+                        let mp = mat.as_ref().map(material_params);
+                        let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*ent);
                         let pose = self.anim.poses.get(ent).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
-                            gpu, raster, asset, pose, model, tex, &mp, node_paint,
+                            gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats,
+                            &self.texture_registry, node_paint,
+                            *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
                         );
                     }
@@ -5477,6 +5582,8 @@ impl Editor {
             let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) =
                 if show_blobs { blob_mat_arrays(&blobs) } else { blob_mat_arrays(&[]) };
             let tm = &terrain_mat;
+            let (vol_fog_a, vol_fog_b) =
+                vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
             let mut g = RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
                 inv_view_proj: view_proj.inverse().to_cols_array_2d(),
@@ -5528,6 +5635,8 @@ impl Editor {
                 prox_rot,
                 fog_color,
                 fog_params,
+                vol_fog_a,
+                vol_fog_b,
                 atmo_meta,
                 atmo_color,
                 atmo_body,
@@ -5664,10 +5773,21 @@ fn push_mesh_instances(
     pose: Option<&[Mat4]>,
     model: Mat4,
     tex: Option<TexId>,
-    mp: &MaterialParams,
+    // The node-level Material's params (None = the node has no Material — parts
+    // fall back to their imported base-color factor, matching runtime builds).
+    mp: Option<&MaterialParams>,
+    // Per-SUB-OBJECT material overrides (the `ObjectMaterials` component) + the
+    // texture registry to resolve their texture paths (pre-warmed each frame).
+    obj_mats: Option<&floptle_core::ObjectMaterials>,
+    texture_registry: &HashMap<String, TexId>,
     // This node's own per-part paint bases (the brush's work). `None` → fall back to
     // whatever the mesh imported with, so Blender paint still shows on unpainted nodes.
     node_paint: Option<&[u32]>,
+    // The drawing entity + the per-entity skinned-buffer cache: each entity bakes
+    // its pose into its OWN clone of a skinned part's vertex buffer, so instances
+    // of one model animate independently.
+    entity: Entity,
+    variants: &mut anim::SkinVariants,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
     flsl: Option<floptle_render::FlslBindingId>,
@@ -5675,15 +5795,37 @@ fn push_mesh_instances(
 ) {
     // A node's custom `.flsl` material routes every part through the shader's
     // pipeline instead of the built-in one — same instance data either way.
-    let mut push = |mid: MeshId, raw: InstanceRaw| match flsl {
-        Some(b) => flsl_out.push((mid, tex, b, raw)),
-        None => instances.push((mid, tex, raw)),
+    let mut push = |mid: MeshId, ptex: Option<TexId>, raw: InstanceRaw| match flsl {
+        Some(b) => flsl_out.push((mid, ptex, b, raw)),
+        None => instances.push((mid, ptex, raw)),
+    };
+    // A part's look: an ObjectMaterials override for its object wins, else the
+    // node Material covers the whole model, else the part's imported base color.
+    let part_look = |asset: &MeshAsset, part: usize| -> (Option<TexId>, MaterialParams) {
+        if let Some(m) = obj_mats.and_then(|om| asset.override_key(part).and_then(|k| om.0.get(k)))
+        {
+            let ptex = m
+                .texture
+                .as_deref()
+                .and_then(|p| texture_registry.get(p).copied())
+                .or(tex);
+            return (ptex, material_params(m));
+        }
+        match mp {
+            Some(m) => (tex, *m),
+            None => (
+                tex,
+                MaterialParams::flat(
+                    asset.part_meta.get(part).map(|pm| pm.base_color).unwrap_or([1.0; 3]),
+                ),
+            ),
+        }
     };
     // Vertex paint is per-PART: import splits a model per-material into parts with
     // their own vertex arrays, so each part owns its own paint block. Instances of a
     // part share its base — same block, same draw call.
-    let painted = |raster: &floptle_render::Raster, mid: MeshId, part: usize| {
-        let mut m = *mp;
+    let painted = |raster: &floptle_render::Raster, mid: MeshId, part: usize, base: MaterialParams| {
+        let mut m = base;
         let brush = node_paint.and_then(|p| p.get(part).copied()).filter(|&b| b != 0);
         // Brush paint modulates 2× (paint light AND shadow); imported glTF COLOR_0 stays a
         // plain ×1 multiply, per the glTF convention (white = identity).
@@ -5693,22 +5835,26 @@ fn push_mesh_instances(
     };
     let Some(rig) = asset.rig.as_ref() else {
         for (i, &mid) in asset.parts.iter().enumerate() {
-            push(mid, instance_of_mat(model, &painted(raster, mid, i)));
+            let (ptex, pmp) = part_look(asset, i);
+            push(mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)));
         }
         return;
     };
     let node_world = pose.unwrap_or(rig.rest_world.as_slice());
     for (i, &mid) in asset.parts.iter().enumerate() {
         let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
+        let (ptex, pmp) = part_look(asset, i);
         if let Some(Some(skin)) = rig.skins.get(i) {
-            // CPU skinning rewrites this part's VERTEX buffer every frame — but paint
-            // lives in `vpaint`, keyed by vertex_index, so the re-upload can't stomp it.
+            // CPU skinning rewrites the part's VERTEX buffer every frame — into this
+            // ENTITY's private clone (paint lives in `vpaint`, keyed by vertex_index,
+            // so the re-upload can't stomp it; paint/texture lookups stay on `mid`).
+            let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);
             anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
-            raster.update_mesh_vertices(gpu, mid, skin_scratch);
-            push(mid, instance_of_mat(model, &painted(raster, mid, i)));
+            raster.update_mesh_vertices(gpu, draw_mid, skin_scratch);
+            push(draw_mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)));
         } else {
             let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
-            push(mid, instance_of_mat(model * local, &painted(raster, mid, i)));
+            push(mid, ptex, instance_of_mat(model * local, &painted(raster, mid, i, pmp)));
         }
     }
 }

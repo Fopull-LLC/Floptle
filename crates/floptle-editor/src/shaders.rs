@@ -536,12 +536,12 @@ pub(crate) fn apply_field_shapes(
     sdf: &SdfCache,
     g: &mut floptle_render::RaymarchGlobals,
     cam_pos: floptle_core::math::DVec3,
-    only: Option<Entity>,
+    only: Option<&[Entity]>,
 ) {
     let count = slots.values().max().map(|m| m + 1).unwrap_or(0);
     g.shape_meta = [count as f32, 0.0, 0.0, 0.0];
     for (&e, &slot) in slots {
-        if only.is_some_and(|o| o != e) || !world.is_alive(e) {
+        if only.is_some_and(|o| !o.contains(&e)) || !world.is_alive(e) {
             // Parked: unreachable position + zero bound = never surfaces.
             g.shape_pos[slot] = [1e7, 1e7, 1e7, 1.0];
             g.shape_aux[slot] = [0.0; 4];

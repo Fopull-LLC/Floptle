@@ -282,6 +282,12 @@ mod line_edit {
     }
 }
 
+const INDENT_WIDTH: usize = 2;
+
+fn indent_unit() -> String {
+    " ".repeat(INDENT_WIDTH)
+}
+
 /// Does `t` end with the word `w` (with a non-identifier char, or nothing, before it)?
 fn ends_with_word(t: &str, w: &str) -> bool {
     if !t.ends_with(w) {
@@ -332,19 +338,24 @@ fn toggle_comment_lines(text: &mut String, a: usize, b: usize) -> (usize, usize)
 fn indent_lines(text: &mut String, a: usize, b: usize, outdent: bool) -> (usize, usize) {
     let (s, e, _) = line_edit::span_bytes(text, a, b);
     let block = text[s..e].to_string();
+    let indent = indent_unit();
     let new: Vec<String> = block
         .split('\n')
         .map(|l| {
             if outdent {
-                l.strip_prefix("  ")
-                    .or_else(|| l.strip_prefix('\t'))
-                    .or_else(|| l.strip_prefix(' '))
-                    .unwrap_or(l)
-                    .to_string()
+                if let Some(rest) = l.strip_prefix(&indent) {
+                    rest.to_string()
+                } else if let Some(rest) = l.strip_prefix('\t') {
+                    rest.to_string()
+                } else if let Some(rest) = l.strip_prefix(' ') {
+                    rest.to_string()
+                } else {
+                    l.to_string()
+                }
             } else if l.trim().is_empty() {
                 l.to_string()
             } else {
-                format!("  {l}")
+                format!("{indent}{l}")
             }
         })
         .collect();
@@ -400,6 +411,7 @@ fn auto_indent_newline(text: &mut String, a: usize, b: usize) -> usize {
     let line_start = text[..ba].rfind('\n').map(|p| p + 1).unwrap_or(0);
     let before_caret = &text[line_start..ba];
     let indent: String = before_caret.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let body_indent = format!("{indent}{}", indent_unit());
     let t = before_caret.trim_end();
     let opener = ends_with_word(t, "then")
         || ends_with_word(t, "do")
@@ -418,15 +430,37 @@ fn auto_indent_newline(text: &mut String, a: usize, b: usize) -> usize {
         || (t.ends_with(')') && t.contains("function")))
         && block_balance(text) > 0;
     let ins = if closes {
-        format!("\n{indent}  \n{indent}end")
+        format!("\n{body_indent}\n{indent}end")
     } else if opener {
-        format!("\n{indent}  ")
+        format!("\n{body_indent}")
     } else {
         format!("\n{indent}")
     };
     text.replace_range(ba..bb, &ins);
     // Caret on the body line (before the auto-inserted end, when present).
-    let caret_bytes = if closes { ba + 1 + indent.len() + 2 } else { ba + ins.len() };
+    let caret_bytes = if closes { ba + 1 + body_indent.len() } else { ba + ins.len() };
+    line_edit::char_of_byte(text, caret_bytes)
+}
+
+/// Insert or replace text at `[a, b]`, with smart whole-line paste support when
+/// the caret sits before a newline and the pasted content is a single line.
+fn paste_text(text: &mut String, a: usize, b: usize, replacement: &str) -> usize {
+    let ba = line_edit::byte_of_char(text, a);
+    let bb = line_edit::byte_of_char(text, b);
+    let at_eol = a == b && ba < text.len() && text.as_bytes()[ba] == b'\n';
+    let single_line = replacement.ends_with('\n')
+        && !replacement[..replacement.len().saturating_sub(1)].contains('\n');
+    let insert_at = if at_eol && single_line { ba + 1 } else { ba };
+    if a == b && at_eol && single_line {
+        text.insert_str(insert_at, replacement);
+    } else {
+        text.replace_range(ba..bb, replacement);
+    }
+    let caret_bytes = if at_eol && single_line {
+        insert_at + replacement.trim_end_matches('\n').len()
+    } else {
+        insert_at + replacement.len()
+    };
     line_edit::char_of_byte(text, caret_bytes)
 }
 
@@ -1528,6 +1562,24 @@ impl EditorTabViewer<'_> {
         let goto = self.ide.goto.take();
         let find_hl = (self.ide.find_open && !self.ide.find_query.is_empty())
             .then(|| (self.ide.find_query.clone(), self.ide.find_case, self.ide.find_idx));
+        // Selected-text occurrences: highlight the OTHER instances of a short,
+        // single-line selection (standard IDE behavior). Skipped while the find
+        // bar has a query so the two highlights never fight.
+        let occ_hl = if find_hl.is_none() {
+            ide_selection(ui.ctx(), editor_id).and_then(|(a, b, _)| {
+                let text = &self.ide.open[i].text;
+                if a == b {
+                    return None;
+                }
+                let (ba, bb) =
+                    (line_edit::byte_of_char(text, a), line_edit::byte_of_char(text, b));
+                let sel = &text[ba..bb];
+                (sel.len() >= 2 && sel.len() <= 200 && !sel.contains('\n') && !sel.trim().is_empty())
+                    .then(|| (sel.to_string(), ba, bb))
+            })
+        } else {
+            None
+        };
         let diag_line = self.ide_diag.map(|(l, _)| *l);
         let output = egui::ScrollArea::both()
             .id_salt("ide_scroll")
@@ -1599,6 +1651,30 @@ impl EditorTabViewer<'_> {
                                     egui::StrokeKind::Outside,
                                 );
                             }
+                        }
+                    }
+                }
+                // Other occurrences of the selected text, in a cool wash (the
+                // selection itself is already drawn by the TextEdit).
+                if let Some((sel, ba, bb)) = &occ_hl {
+                    let hl = egui::Color32::from_rgba_unmultiplied(110, 170, 255, 40);
+                    for (bs, be) in find_ranges(text, sel, true) {
+                        if bs == *ba && be == *bb {
+                            continue;
+                        }
+                        let line = text[..bs].matches('\n').count();
+                        let line_start = text[..bs].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                        let col = text[line_start..bs].chars().count();
+                        let len = text[bs..be].chars().count();
+                        if let Some(r) = out.galley.rows.get(line) {
+                            let rr = r.rect();
+                            let x0 = out.galley_pos.x + rr.left() + col as f32 * char_w;
+                            let x1 = x0 + len as f32 * char_w;
+                            let rect = egui::Rect::from_min_max(
+                                egui::pos2(x0, out.galley_pos.y + rr.top()),
+                                egui::pos2(x1, out.galley_pos.y + rr.bottom()),
+                            );
+                            painter.rect_filled(rect, 2.0, hl);
                         }
                     }
                 }
@@ -1885,33 +1961,39 @@ impl EditorTabViewer<'_> {
         let Some((sel_a, sel_b, caret)) = ide_selection(ui.ctx(), editor_id) else { return };
         let empty_sel = sel_a == sel_b;
 
-        // Ctrl+C / Ctrl+X with no selection → whole current line. egui-winit turns
-        // those chords into Copy/Cut EVENTS (they never arrive as key presses), so
-        // intercept the events; with a selection they pass through to the editor.
-        if empty_sel {
-            let (mut do_copy, mut do_cut) = (false, false);
-            ui.input_mut(|inp| {
-                inp.events.retain(|e| match e {
-                    egui::Event::Copy => {
-                        do_copy = true;
-                        false
+        let mut pasted = None;
+        ui.input_mut(|inp| {
+            inp.events.retain(|e| match e {
+                egui::Event::Paste(text) => {
+                    pasted = Some(text.clone());
+                    false
+                }
+                egui::Event::Copy => {
+                    if empty_sel {
+                        ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
                     }
-                    egui::Event::Cut => {
-                        do_cut = true;
-                        false
+                    false
+                }
+                egui::Event::Cut => {
+                    if empty_sel {
+                        let clip = line_edit::line_with_newline(&self.ide.open[i].text, caret);
+                        ui.ctx().copy_text(clip);
+                        let new_caret = delete_lines(&mut self.ide.open[i].text, caret, caret);
+                        self.ide.open[i].dirty = true;
+                        set_ide_caret(ui.ctx(), editor_id, new_caret);
                     }
-                    _ => true,
-                });
+                    false
+                }
+                _ => true,
             });
-            if do_copy {
-                ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
-            }
-            if do_cut {
-                let clip = line_edit::line_with_newline(&self.ide.open[i].text, caret);
-                ui.ctx().copy_text(clip);
-                let new_caret = delete_lines(&mut self.ide.open[i].text, caret, caret);
-                self.ide.open[i].dirty = true;
+        });
+        if let Some(pasted) = pasted {
+            let new_caret = paste_text(&mut self.ide.open[i].text, sel_a, sel_b, &pasted);
+            self.ide.open[i].dirty = true;
+            if empty_sel {
                 set_ide_caret(ui.ctx(), editor_id, new_caret);
+            } else {
+                set_ide_selection(ui.ctx(), editor_id, sel_a, sel_b);
             }
         }
         // Ctrl+Shift+K → delete the current line / selected lines (no clipboard).
@@ -1952,22 +2034,25 @@ impl EditorTabViewer<'_> {
                 set_ide_selection(ui.ctx(), editor_id, a, b);
             }
         }
-        // Tab / Shift+Tab → block indent/outdent. Plain Tab only when the selection
-        // spans lines (a caret Tab should still insert an indent), and never when
-        // the autocomplete popup already claimed it.
+        // Tab / Shift+Tab → block indent/outdent. Plain Tab uses the same indent
+        // width as auto-indent so the editor feels consistent, and never when the
+        // autocomplete popup already claimed it.
         let multi_line = !empty_sel && {
             let text = &self.ide.open[i].text;
             let (ba, bb) =
                 (line_edit::byte_of_char(text, sel_a), line_edit::byte_of_char(text, sel_b));
             text[ba..bb].contains('\n')
         };
-        if !tab_accept
-            && multi_line
-            && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-        {
-            let (a, b) = indent_lines(&mut self.ide.open[i].text, sel_a, sel_b, false);
-            self.ide.open[i].dirty = true;
-            set_ide_selection(ui.ctx(), editor_id, a, b);
+        if !tab_accept && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            if multi_line {
+                let (a, b) = indent_lines(&mut self.ide.open[i].text, sel_a, sel_b, false);
+                self.ide.open[i].dirty = true;
+                set_ide_selection(ui.ctx(), editor_id, a, b);
+            } else {
+                let new_caret = paste_text(&mut self.ide.open[i].text, sel_a, sel_b, &indent_unit());
+                self.ide.open[i].dirty = true;
+                set_ide_caret(ui.ctx(), editor_id, new_caret);
+            }
         }
         if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)) {
             let (a, b) = indent_lines(&mut self.ide.open[i].text, sel_a, sel_b, true);
@@ -2631,7 +2716,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:setPrimitive", insert: ":setPrimitive(", doc: "node:setPrimitive(\"Sphere\" [, {r,g,b}]) — make the node a primitive (Cube/Sphere/Capsule/Plane)." },
     ApiEntry { label: "destroy", insert: "destroy(", doc: "destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn)." },
     ApiEntry { label: "node:destroy", insert: ":destroy()", doc: "node:destroy() — remove this node and its children (same as destroy(node)). The classic pickup: onTriggerEnter → award score → node:destroy()." },
-    ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
+    ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setBeamEnd. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },
     ApiEntry { label: "node:sound", insert: "node:sound()", doc: "node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip(\"audio/x.ogg\"), :seek(secs), :isPlaying(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent(\"AudioSource\")." },
     ApiEntry { label: "audio.play", insert: "audio.play(", doc: "audio.play(clip [, node | x, y, z] [, opts]) — play a clip with no setup: audio.play(\"audio/ding.ogg\") is flat 2D; pass x,y,z for a world point; pass a node to follow it. opts: {volume, pitch, pan, mode=\"Spatial|Distance|Flat\", falloff=\"Inverse|Linear|Exponential\", minDistance, maxDistance, track, endBehavior=\"Stop|Destroy|Loop\", loop=true}. Returns a sound handle: :stop/:pause/:resume/:setVolume/:setPitch/:setPan/:setTrack/:setPosition/:seek/:isPlaying/:position. e.g. audio.play(\"audio/hit.ogg\", h.x, h.y, h.z, { maxDistance = 35, track = \"SFX\" })" },
     ApiEntry { label: "audio.stopAll", insert: "audio.stopAll()", doc: "audio.stopAll() — stop every playing sound (sources and one-shots), with a click-free fade." },
@@ -2639,6 +2724,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "particles:play", insert: ":play()", doc: "particles:play() — start emitting if the effect is idle (spawns a fresh instance). No-op if already playing." },
     ApiEntry { label: "particles:stop", insert: ":stop()", doc: "particles:stop() — stop + despawn the effect; its live particles vanish." },
     ApiEntry { label: "particles:restart", insert: ":restart()", doc: "particles:restart() — re-spawn from t=0 (re-fire a one-shot burst, e.g. a muzzle flash on each shot)." },
+    ApiEntry { label: "particles:setIntensity", insert: ":setIntensity(1.0)", doc: "particles:setIntensity(i) — live emission scale (0..~2): multiplies rates/burst counts and shades particle size. Drive an engine plume off the throttle without touching the asset." },
+    ApiEntry { label: "particles:setBeamEnd", insert: ":setBeamEnd(x, y, z)", doc: "particles:setBeamEnd(x, y, z) — aim every Beam track's endpoint at a WORLD-space point (the engine converts it to effect-local, so the beam keeps tracking the target as the node moves). Re-call per tick to follow a moving target." },
     ApiEntry { label: "particles:isPlaying", insert: ":isPlaying()", doc: "particles:isPlaying() — true while an instance is emitting/ageing on this node." },
     ApiEntry { label: "particles:alive", insert: ":alive()", doc: "particles:alive() — live particle count across the effect's tracks (0 when stopped)." },
     ApiEntry { label: "particles:asset", insert: ":asset()", doc: "particles:asset() — the effect asset key this node's Particle System references, or nil." },
@@ -3056,6 +3143,8 @@ start and stop effects on cue, and read their live state:
   • p:play()        start emitting if idle (spawns a fresh instance)
   • p:stop()        stop + despawn — the live particles vanish
   • p:restart()     re-spawn from t=0 (re-fire a one-shot burst)
+  • p:setIntensity(i)     live emission scale 0..~2 (throttle a plume)
+  • p:setBeamEnd(x, y, z) aim every Beam track at a WORLD point (laser targeting)
   Getters: p:isPlaying()   p:alive()   p:asset()
 
     -- muzzle flash on each shot; thruster smoke only while accelerating
@@ -3217,6 +3306,15 @@ mod tests {
         let caret = delete_lines(&mut t, 4, 9); // selection touching "two" + "three"
         assert_eq!(t, "one\n");
         assert_eq!(caret, 4);
+    }
+
+    #[test]
+    fn whole_line_paste_at_eol_inserts_on_next_line() {
+        let mut t = "alpha\n".to_string();
+        let caret = "alpha".chars().count();
+        let new_caret = paste_text(&mut t, caret, caret, "beta\n");
+        assert_eq!(t, "alpha\nbeta\n");
+        assert_eq!(new_caret, "alpha\nbeta".chars().count());
     }
 
     #[test]

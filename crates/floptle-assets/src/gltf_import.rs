@@ -36,6 +36,9 @@ pub struct ImportedModel {
 #[derive(Clone, Debug)]
 pub struct ImportedPart {
     pub mesh: MeshData,
+    /// The glTF material's name (`Material N` when unnamed) — surfaced in the
+    /// editor's materials list and usable as an override key.
+    pub material: String,
     /// Base-color factor (rgb) — a tint multiplied onto the texture.
     pub base_color: [f32; 3],
     /// Index into [`ImportedModel::textures`], if the material has a base-color map.
@@ -107,8 +110,13 @@ impl Parts {
         let pbr = material.pbr_metallic_roughness();
         let bcf = pbr.base_color_factor();
         let texture = pbr.base_color_texture().map(|info| info.texture().source().index());
+        let name = material
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Material {}", material.index().map_or(0, |i| i + 1)));
         self.list.push(ImportedPart {
             mesh: MeshData::default(),
+            material: name,
             base_color: [bcf[0], bcf[1], bcf[2]],
             texture,
         });

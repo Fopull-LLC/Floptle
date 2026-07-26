@@ -60,6 +60,12 @@ pub enum RenderMode {
     Billboard { texture: Option<String> },
     /// An instanced mesh drawn through the raster pass.
     Mesh { asset_path: String },
+    /// A single camera-facing ribbon from the effect origin to the track's
+    /// [`Track::beam_end`], subdivided into [`Track::segments`] quads (lasers,
+    /// energy beams, tethers). The track ignores emission/particles entirely;
+    /// width and color come from its `size` / `color` properties sampled at the
+    /// EFFECT's normalized time. `None` texture = plain tinted ribbon.
+    Beam { texture: Option<String> },
 }
 
 impl Default for RenderMode {
@@ -255,6 +261,32 @@ impl Default for Flipbook {
     }
 }
 
+/// A ribbon each particle drags behind itself (billboard tracks only — mesh and
+/// beam tracks ignore it): sword slashes, wind streaks, projectile trails. The sim
+/// records a bounded position history per particle (see `sim::TRAIL_MAX_POINTS`)
+/// and the draw pass connects it into camera-facing segments, UV `v` running 0→1
+/// tail→head. A trailed track's flipbook is ignored on the ribbon — the flipbook
+/// UV rect and the ribbon's per-segment `v` slice share the same instance lanes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trail {
+    /// Seconds of history the ribbon spans (older points expire off the tail).
+    pub time: f32,
+    /// Ribbon width in world units at the head (the tail tapers when `fade`).
+    pub width: f32,
+    /// Taper width AND alpha to zero at the tail.
+    pub fade: bool,
+    /// Ribbon texture (`None` = the track's own texture, or a soft untextured strip).
+    pub texture: Option<String>,
+    /// A new history point is recorded only after the particle moves this far.
+    pub min_distance: f32,
+}
+
+impl Default for Trail {
+    fn default() -> Self {
+        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05 }
+    }
+}
+
 /// The rendered look of a track. Lighting and shadow casting are per-track opt-ins,
 /// both OFF by default (classic crisp VFX costs nothing until asked).
 #[derive(Debug, Clone, PartialEq)]
@@ -336,6 +368,21 @@ pub struct Track {
     /// Force fields (wind / attractor / vortex / turbulence) added to velocity each
     /// step — the "make it feel alive" layer. Empty = none (zero cost).
     pub forces: Vec<Force>,
+    /// Per-particle ribbon trail (billboard tracks only; `None` = no trail, so
+    /// untrailed tracks record no history and pay nothing).
+    pub trail: Option<Trail>,
+    /// Beam tracks only: how many quads the origin→`beam_end` ribbon subdivides into.
+    pub segments: u32,
+    /// Beam tracks only: the ribbon's endpoint, a LOCAL offset from the effect origin
+    /// (scripts override it per instance via `setBeamEnd`).
+    pub beam_end: Vec3,
+    /// Beam tracks only: sine-ripple amplitude across the chain (0 = straight).
+    pub wave_amplitude: f32,
+    /// Beam tracks only: ripple cycles along the beam, animated by effect time.
+    pub wave_frequency: f32,
+    /// Beam tracks only: UV scroll speed (texture-lengths/sec) so the texture flows
+    /// along the beam.
+    pub scroll: f32,
 }
 
 impl Default for Track {
@@ -358,6 +405,12 @@ impl Default for Track {
             drag: 0.0,
             inherit_velocity: 0.0,
             forces: Vec::new(),
+            trail: None,
+            segments: 12,
+            beam_end: Vec3::new(0.0, 5.0, 0.0),
+            wave_amplitude: 0.0,
+            wave_frequency: 2.0,
+            scroll: 0.0,
         }
     }
 }
@@ -426,6 +479,14 @@ pub struct CompiledTrack {
     pub inherit_velocity: f32,
     /// Force fields (copied straight from the authoring track — no baking needed).
     pub forces: Vec<Force>,
+    /// Per-particle ribbon trail (see [`Track::trail`]; `None` = no history recorded).
+    pub trail: Option<Trail>,
+    /// Beam subdivision + shape knobs (see the [`Track`] fields; beam tracks only).
+    pub segments: u32,
+    pub beam_end: Vec3,
+    pub wave_amplitude: f32,
+    pub wave_frequency: f32,
+    pub scroll: f32,
 
     // Automation lanes folded per target, domain = effect time normalized [0..1].
     pub lane_rate: Prop1,
@@ -563,6 +624,12 @@ impl Track {
             drag: self.drag.max(0.0),
             inherit_velocity: self.inherit_velocity,
             forces: self.forces.clone(),
+            trail: self.trail.clone(),
+            segments: self.segments.max(1),
+            beam_end: self.beam_end,
+            wave_amplitude: self.wave_amplitude,
+            wave_frequency: self.wave_frequency,
+            scroll: self.scroll,
             lane_rate,
             lane_count,
             lane_speed: fold_lanes1(&self.automation, LaneTarget::Speed, lifetime),

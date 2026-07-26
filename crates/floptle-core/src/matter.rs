@@ -398,6 +398,21 @@ pub struct Light {
     pub fog_dither: bool,
     /// Dither amplitude (0..1); scaled to a sub-percent nudge of the fog factor.
     pub fog_dither_strength: f32,
+    /// VOLUMETRIC mode: instead of a flat distance ramp, march real fog media —
+    /// a height-bounded layer with drifting noise, so hills poke out of ground
+    /// mist and beams of distance thicken naturally. Uses `fog_color` and the
+    /// dither settings; `fog_start`/`fog_end` don't apply.
+    pub fog_volumetric: bool,
+    /// Media density per world unit (how quickly things disappear into it).
+    pub fog_density: f32,
+    /// World height (y) of the fog layer's top — media fills below this.
+    pub fog_height: f32,
+    /// Softness of the layer's top edge in world units (bigger = mistier boundary).
+    pub fog_falloff: f32,
+    /// How much drifting noise breaks up the media (0 = uniform, 1 = patchy).
+    pub fog_noise: f32,
+    /// Noise feature size, world units per pattern repeat (bigger = broader wisps).
+    pub fog_noise_scale: f32,
 }
 
 impl Default for Light {
@@ -421,6 +436,12 @@ impl Default for Light {
             fog_end: 200.0,
             fog_dither: false,
             fog_dither_strength: 0.5,
+            fog_volumetric: false,
+            fog_density: 0.02,
+            fog_height: 6.0,
+            fog_falloff: 8.0,
+            fog_noise: 0.5,
+            fog_noise_scale: 24.0,
         }
     }
 }

@@ -285,7 +285,9 @@ impl Editor {
                     if snap {
                         p = snap_dvec3(p, step);
                     }
-                    self.set_world_transform(e, Transform { translation: p, ..start });
+                    let xf = Transform { translation: p, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 } else {
                     // Center handle: free move in the camera plane.
                     let rot = cam.rotation;
@@ -298,7 +300,9 @@ impl Editor {
                     if snap {
                         p = snap_dvec3(p, step);
                     }
-                    self.set_world_transform(e, Transform { translation: p, ..start });
+                    let xf = Transform { translation: p, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 }
             }
             Tool::Rotate => {
@@ -314,13 +318,15 @@ impl Editor {
                         return;
                     }
                     let mut angle = (v1.x * v2.y - v1.y * v2.x).atan2(v1.x * v2.x + v1.y * v2.y);
-                    // Screen-y points down; flip when the axis faces away from the camera
+                    // Screen-y points down; flip when the axis faces toward the camera
                     // so a drag always spins the visible way.
-                    if dir.dot((start.translation - cam_world).as_vec3()) > 0.0 {
+                    if dir.dot((start.translation - cam_world).as_vec3()) < 0.0 {
                         angle = -angle;
                     }
                     let rot = (Quat::from_axis_angle(dir, angle) * start.rotation).normalize();
-                    self.set_world_transform(e, Transform { rotation: rot, ..start });
+                    let xf = Transform { rotation: rot, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 } else {
                     // Center handle: free / trackball rotate about the camera axes —
                     // drag horizontally to spin about camera-up, vertically about
@@ -330,7 +336,9 @@ impl Editor {
                     let q = Quat::from_axis_angle(cam_up, cursor_delta.x * TRACKBALL_SENS)
                         * Quat::from_axis_angle(cam_right, cursor_delta.y * TRACKBALL_SENS);
                     let rot = (q * start.rotation).normalize();
-                    self.set_world_transform(e, Transform { rotation: rot, ..start });
+                    let xf = Transform { rotation: rot, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 }
             }
             Tool::Scale => {
@@ -345,8 +353,13 @@ impl Editor {
                     let n = (s1 - s0).normalize_or_zero();
                     let factor = 1.0 + cursor_delta.dot(n) * SCALE_SENS;
                     let mut sc = start.scale;
-                    sc[i] = (start.scale[i] * factor).max(0.01);
-                    self.set_world_transform(e, Transform { scale: sc, ..start });
+                    // Floor the MAGNITUDE, keep the sign — a mirrored (negative-scale)
+                    // node must stay mirrored (`.max(0.01)` used to snap -1 to +0.01).
+                    let s = start.scale[i] * factor;
+                    sc[i] = s.abs().max(0.01).copysign(if s == 0.0 { start.scale[i] } else { s });
+                    let xf = Transform { scale: sc, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 } else {
                     // Center handle: uniform scale by the cursor's distance ratio.
                     let Some(center) = project(start.translation, cam_world, vp, w, h) else {
@@ -355,8 +368,14 @@ impl Editor {
                     let d0 = (drag.cursor_start - center).length().max(1.0);
                     let d1 = (cursor - center).length();
                     let factor = (d1 / d0).max(0.01);
-                    let sc = (start.scale * factor).max(Vec3::splat(0.01));
-                    self.set_world_transform(e, Transform { scale: sc, ..start });
+                    // Per-component magnitude floor that keeps each axis's sign, so a
+                    // mirrored node can be uniformly scaled without losing its mirror.
+                    let f = |v: f32| v.abs().max(0.01).copysign(v);
+                    let s = start.scale * factor;
+                    let sc = Vec3::new(f(s.x), f(s.y), f(s.z));
+                    let xf = Transform { scale: sc, ..start };
+                    self.set_world_transform(e, xf);
+                    self.apply_group_transform(start, xf);
                 }
             }
             Tool::Rect => {
@@ -390,10 +409,47 @@ impl Editor {
                 let mut sc = start.scale;
                 sc[i] = start.scale[i] * (extent / (2.0 * h0));
                 let p = start.translation + (outward * (applied * 0.5)).as_dvec3();
-                self.set_world_transform(e, Transform { translation: p, scale: sc, ..start });
+                let xf = Transform { translation: p, scale: sc, ..start };
+                self.set_world_transform(e, xf);
+                self.apply_group_transform(start, xf);
             }
             Tool::Select | Tool::Sculpt | Tool::Paint => {}
         }
+    }
+
+    /// Mirror a gizmo drag onto the rest of a multi-selection: whatever delta the
+    /// drag applied to the primary (`start` → `new`) is applied to every entity in
+    /// `drag_group`, relative to the primary's start frame — so a group Move slides
+    /// everything together, a group Rotate orbits the others around the primary,
+    /// and a group Scale scales their offsets too. No-op for single selections
+    /// and bone drags (the group is only populated on an entity grab).
+    pub(crate) fn apply_group_transform(&mut self, start: Transform, new: Transform) {
+        if self.drag_group.is_empty() {
+            return;
+        }
+        let dq = (new.rotation * start.rotation.inverse()).normalize();
+        // Per-axis scale ratio in the primary's local frame; guard divisions by a
+        // (floored/zero) start scale.
+        let safe = |n: f32, d: f32| if d.abs() > 1e-6 { n / d } else { 1.0 };
+        let ds = Vec3::new(
+            safe(new.scale.x, start.scale.x),
+            safe(new.scale.y, start.scale.y),
+            safe(new.scale.z, start.scale.z),
+        );
+        let group = std::mem::take(&mut self.drag_group);
+        for &(e, s) in &group {
+            // Offset from the primary, scaled in the primary's start frame, then
+            // re-rotated by the drag's rotation delta.
+            let rel = (s.translation - start.translation).as_vec3();
+            let rel = new.rotation * ((start.rotation.inverse() * rel) * ds);
+            let xf = Transform {
+                translation: new.translation + rel.as_dvec3(),
+                rotation: (dq * s.rotation).normalize(),
+                scale: s.scale * ds,
+            };
+            self.set_world_transform(e, xf);
+        }
+        self.drag_group = group;
     }
 
     /// Write `world_xf` (an absolute transform) to `e`, converting it back to the
@@ -413,10 +469,11 @@ impl Editor {
         }
         // A bone-attached node's Transform is regenerated from BoneAttach.offset every
         // frame by resolve_attachments, so writing Transform here would be clobbered next
-        // frame (the node snaps back onto the bone). Edit the offset instead — in the
-        // bone's world frame: offset = (mesh_world · bone_local)⁻¹ · world_xf.
+        // frame (the node snaps back onto the bone). Edit the offset instead — bone-local,
+        // via the componentwise TRS inverse (so a mirrored mesh's negative scale stays on
+        // the right axis; a matrix decomposition would pin it to X and pop the node).
         if let Some(a) = self.world.get::<floptle_core::BoneAttach>(e).cloned()
-            && let Some(bone_world) = crate::anim::bone_world_matrix(
+            && let Some(bone_world) = crate::anim::bone_world_transform(
                 &self.anim,
                 &self.world,
                 &self.mesh_registry,
@@ -424,24 +481,25 @@ impl Editor {
                 &a.bone,
             )
         {
-            // Guard against a degenerate bone frame (e.g. a zero-scale mesh) whose inverse
-            // is non-finite — writing a NaN offset would corrupt the attachment.
-            let offset_m = bone_world.inverse() * world_xf.world_matrix();
-            if offset_m.is_finite() {
-                let offset = Transform::from_matrix(offset_m);
-                if let Some(at) = self.world.get_mut::<floptle_core::BoneAttach>(e) {
-                    at.offset = offset;
-                }
+            let offset = bone_world.inv_mul(&world_xf);
+            // Guard against a degenerate bone frame (e.g. a zero-scale mesh) —
+            // writing a NaN offset would corrupt the attachment.
+            if offset.translation.is_finite()
+                && offset.scale.is_finite()
+                && let Some(at) = self.world.get_mut::<floptle_core::BoneAttach>(e)
+            {
+                at.offset = offset;
             }
             return;
         }
         let local = match self.world.get::<floptle_core::Parent>(e).copied() {
             None => world_xf,
             Some(floptle_core::Parent(p)) => {
+                // Componentwise TRS inverse of the scene graph's own composition —
+                // exact for mirrored (negative-scale) parents, unlike a matrix
+                // inverse + decomposition.
                 let pw = floptle_core::world_transform(&self.world, p);
-                let lm = pw.world_matrix().inverse() * world_xf.world_matrix();
-                let (s, r, t) = lm.to_scale_rotation_translation();
-                Transform { translation: t, rotation: r.as_quat(), scale: s.as_vec3() }
+                pw.inv_mul(&world_xf)
             }
         };
         if let Some(t) = self.world.get_mut::<Transform>(e) {

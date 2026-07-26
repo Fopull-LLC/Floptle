@@ -77,6 +77,14 @@ pub enum VfxRenderDoc {
     },
     /// An instanced mesh (phase 4).
     Mesh { asset_path: String },
+    /// A single camera-facing ribbon from the effect origin to the track's
+    /// `beam_end`, subdivided into `segments` — energy beams, lasers, tethers.
+    /// The track ignores emission entirely; width/color come from its `size` /
+    /// `color` properties sampled at the EFFECT's normalized time.
+    Beam {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        texture: Option<String>,
+    },
 }
 
 impl Default for VfxRenderDoc {
@@ -114,6 +122,33 @@ pub struct VfxFlipbookDoc {
     pub mode: VfxFlipModeDoc,
     #[serde(default = "twelve_f32")]
     pub fps: f32,
+}
+
+/// A ribbon each particle drags behind itself (billboard tracks only) — sword
+/// slashes, wind streaks, projectile trails. `None` on the track = no trail.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct VfxTrailDoc {
+    /// Seconds of history the ribbon spans (older points expire off the tail).
+    #[serde(default = "quarter_f32")]
+    pub time: f32,
+    /// Ribbon width in world units (at the head; the tail tapers when `fade`).
+    #[serde(default = "trail_width_f32")]
+    pub width: f32,
+    /// Taper width AND alpha to zero at the tail (default on).
+    #[serde(default = "true_bool")]
+    pub fade: bool,
+    /// Ribbon texture (`None` = the track's own texture, or a soft untextured strip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<String>,
+    /// A new history point is recorded only after the particle moves this far.
+    #[serde(default = "trail_min_dist_f32")]
+    pub min_distance: f32,
+}
+
+impl Default for VfxTrailDoc {
+    fn default() -> Self {
+        Self { time: 0.25, width: 0.15, fade: true, texture: None, min_distance: 0.05 }
+    }
 }
 
 /// How a billboard quad is oriented in the world (billboard tracks only).
@@ -284,6 +319,25 @@ pub struct VfxTrackDoc {
     /// Sprite-sheet flipbook (None = a plain single-frame texture).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flipbook: Option<VfxFlipbookDoc>,
+    /// Per-particle ribbon trail (billboard tracks only; None = no trail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trail: Option<VfxTrailDoc>,
+    /// Beam tracks only: how many quads the origin→`beam_end` ribbon subdivides into.
+    #[serde(default = "twelve_u32", skip_serializing_if = "is_twelve_u32")]
+    pub segments: u32,
+    /// Beam tracks only: the ribbon's endpoint as a LOCAL offset from the effect origin.
+    #[serde(default = "default_beam_end", skip_serializing_if = "is_default_beam_end")]
+    pub beam_end: [f32; 3],
+    /// Beam tracks only: sine-ripple amplitude across the segment chain (0 = straight).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub wave_amplitude: f32,
+    /// Beam tracks only: ripple cycles along the beam (animated by effect time).
+    #[serde(default = "two_f32", skip_serializing_if = "is_two")]
+    pub wave_frequency: f32,
+    /// Beam tracks only: UV scroll speed (texture-lengths/sec) so the texture flows
+    /// along the beam (0 = static).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub scroll: f32,
     /// Full scene lighting per particle (default off — classic crisp VFX).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lit: bool,
@@ -448,6 +502,33 @@ fn twelve_f32() -> f32 {
 fn one_u32() -> u32 {
     1
 }
+fn quarter_f32() -> f32 {
+    0.25
+}
+fn trail_width_f32() -> f32 {
+    0.15
+}
+fn trail_min_dist_f32() -> f32 {
+    0.05
+}
+fn twelve_u32() -> u32 {
+    12
+}
+fn is_twelve_u32(v: &u32) -> bool {
+    *v == 12
+}
+fn default_beam_end() -> [f32; 3] {
+    [0.0, 5.0, 0.0]
+}
+fn is_default_beam_end(v: &[f32; 3]) -> bool {
+    *v == [0.0, 5.0, 0.0]
+}
+fn two_f32() -> f32 {
+    2.0
+}
+fn is_two(v: &f32) -> bool {
+    *v == 2.0
+}
 fn default_velocity() -> VfxPropDoc {
     VfxPropDoc::Const(VfxValueDoc::Vec3([0.0, 1.0, 0.0]))
 }
@@ -579,6 +660,18 @@ mod tests {
                     mode: VfxFlipModeDoc::LoopFps,
                     fps: 24.0,
                 }),
+                trail: Some(VfxTrailDoc {
+                    time: 0.3,
+                    width: 0.2,
+                    fade: true,
+                    texture: Some("vfx/streak.png".into()),
+                    min_distance: 0.02,
+                }),
+                segments: 12,
+                beam_end: [0.0, 5.0, 0.0],
+                wave_amplitude: 0.0,
+                wave_frequency: 2.0,
+                scroll: 0.0,
                 lit: false,
                 cast_shadows: false,
                 space: VfxSpaceDoc::Local,
@@ -831,6 +924,46 @@ mod tests {
         let mut again = doc.clone();
         again.tracks.iter_mut().for_each(migrate_clips);
         assert_eq!(again, doc, "migration is idempotent");
+    }
+
+    #[test]
+    fn pre_trail_track_loads_with_no_trail_and_beam_defaults() {
+        // A track authored before trails/beams existed must load unchanged: no
+        // trail, and the beam knobs at their (never-serialized) defaults.
+        let doc: VfxEffectDoc =
+            ron::from_str(r#"(name: "Old", tracks: [(name: "T")])"#).unwrap();
+        let t = &doc.tracks[0];
+        assert!(t.trail.is_none());
+        assert_eq!(t.segments, 12);
+        assert_eq!(t.beam_end, [0.0, 5.0, 0.0]);
+        assert_eq!(t.wave_amplitude, 0.0);
+        assert_eq!(t.wave_frequency, 2.0);
+        assert_eq!(t.scroll, 0.0);
+        // …and the defaults don't bloat a fresh save.
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        for field in ["trail", "segments", "beam_end", "wave_amplitude", "wave_frequency", "scroll"] {
+            assert!(!text.contains(field), "default {field} must not serialize: {text}");
+        }
+    }
+
+    #[test]
+    fn beam_render_and_trail_round_trip() {
+        let mut track = minimal_track();
+        track.render = VfxRenderDoc::Beam { texture: Some("vfx/beam.png".into()) };
+        track.segments = 24;
+        track.beam_end = [1.0, 0.0, -3.0];
+        track.wave_amplitude = 0.4;
+        track.wave_frequency = 3.0;
+        track.scroll = 1.5;
+        let mut trailed = minimal_track();
+        trailed.trail = Some(VfxTrailDoc::default());
+        let mut doc: VfxEffectDoc = ron::from_str(r#"(name: "Beamy")"#).unwrap();
+        doc.tracks = vec![track, trailed];
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        let back: VfxEffectDoc = ron::from_str(&text).unwrap();
+        assert_eq!(doc, back);
+        assert!(matches!(back.tracks[0].render, VfxRenderDoc::Beam { texture: Some(_) }));
+        assert_eq!(back.tracks[1].trail, Some(VfxTrailDoc::default()));
     }
 
     /// A minimal track for tests that only care about a couple of fields.

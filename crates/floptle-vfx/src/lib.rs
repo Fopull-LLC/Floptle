@@ -18,10 +18,13 @@ pub mod effect;
 pub mod sim;
 
 pub use curve::{Curve, Extrapolate, Interp, Key, Value, ValueOrCurve};
-pub use draw::{BillboardDraw, MeshDraw, collect_billboards, collect_mesh_particles};
+pub use draw::{
+    BillboardDraw, MeshDraw, collect_beams, collect_billboards, collect_mesh_particles,
+    collect_trails,
+};
 pub use effect::{
     BillboardOrient, Blend, Clip, CompiledEffect, CompiledTrack, Emit, EmitShape, EndBehavior,
     FlipMode, Flipbook, Force, GravityMode, Lane, LaneTarget, Look, ParticleEffect, Playback,
-    RenderMode, Space, Track,
+    RenderMode, Space, Track, Trail,
 };
-pub use sim::{EffectInstance, ParticleSample, SCRUB_STEP};
+pub use sim::{EffectInstance, ParticleSample, SCRUB_STEP, TRAIL_MAX_POINTS};

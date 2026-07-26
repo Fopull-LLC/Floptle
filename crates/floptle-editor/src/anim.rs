@@ -23,7 +23,7 @@ use floptle_anim::{
     Clip, Controller, Interp, Layer, NodeChannels, PropValue, PropertyTrack, SkelNode, Skeleton,
     State, Track, TransformTRS,
 };
-use floptle_core::math::{DMat4, Mat3, Mat4, Quat, Vec3};
+use floptle_core::math::{Mat3, Mat4, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
@@ -32,6 +32,7 @@ use floptle_scene::{
 };
 
 use crate::MeshAsset;
+use floptle_render::MeshId;
 
 /// A rigged model's shared animation data, kept on its [`MeshAsset`].
 pub struct RigAsset {
@@ -119,6 +120,63 @@ pub fn cpu_skin_part(
             pos: pos.to_array(),
             normal: normal.to_array(),
             uv: v.uv,
+        });
+    }
+}
+
+/// Per-entity vertex-buffer clones for CPU-SKINNED parts. The skinning bake
+/// writes world-pose vertices into a mesh's vertex buffer — so two entities
+/// sharing one .glb must NOT share one buffer, or the last entity baked wins
+/// for both (the "player 1's hair follows player 2's animation" bug). Each
+/// (entity, part) lazily gets a private clone of the part's buffer; buffers of
+/// dead entities pool by source mesh for reuse by later spawns of the asset.
+#[derive(Default)]
+pub struct SkinVariants {
+    live: HashMap<(Entity, usize), (MeshId, MeshId)>, // (variant, source)
+    pool: HashMap<MeshId, Vec<MeshId>>,               // source ⏵ retired variants
+}
+
+impl SkinVariants {
+    /// The entity's private buffer for source part `src` (created/reused on
+    /// demand). Falls back to `src` itself if the GPU clone fails.
+    pub fn variant_for(
+        &mut self,
+        gpu: &floptle_render::Gpu,
+        raster: &mut floptle_render::Raster,
+        e: Entity,
+        part: usize,
+        src: MeshId,
+    ) -> MeshId {
+        if let Some(&(mid, s)) = self.live.get(&(e, part)) {
+            if s == src {
+                return mid;
+            }
+            // The asset was re-imported (new part meshes) — retire the stale clone.
+            self.pool.entry(s).or_default().push(mid);
+        }
+        let mid = self
+            .pool
+            .get_mut(&src)
+            .and_then(Vec::pop)
+            .or_else(|| raster.clone_mesh(gpu, src))
+            .unwrap_or(src);
+        self.live.insert((e, part), (mid, src));
+        mid
+    }
+
+    /// Peek at an existing variant without creating one (selection outline).
+    pub fn get(&self, e: Entity, part: usize) -> Option<MeshId> {
+        self.live.get(&(e, part)).map(|&(mid, _)| mid)
+    }
+
+    /// Return dead entities' buffers to the pool (called once per frame).
+    pub fn prune(&mut self, world: &World) {
+        let Self { live, pool } = self;
+        live.retain(|&(e, _), &mut (mid, src)| {
+            world.is_alive(e) || {
+                pool.entry(src).or_default().push(mid);
+                false
+            }
         });
     }
 }
@@ -978,28 +1036,33 @@ pub fn resolve_attachments(
             .or_else(|| rig.rest_world.get(idx))
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        // Model-space: bone matrix · bone-local offset. Decomposed to the child's LOCAL
-        // transform; world_transform re-applies the mesh f64 world (Parent chain intact).
-        let local = Transform::from_matrix(bone_local.as_dmat4() * offset.world_matrix());
+        // Model-space: bone TRS ∘ bone-local offset, composed COMPONENTWISE (the
+        // scene graph's own rule) — not via matrices, whose decomposition would
+        // pin a mirrored offset's negative scale to the X axis. The result is the
+        // child's LOCAL transform; world_transform re-applies the mesh f64 world
+        // (Parent chain intact), so a negative-scale mesh mirrors consistently.
+        let local = Transform::from_matrix(bone_local.as_dmat4()).mul_transform(&offset);
         if let Some(t) = world.get_mut::<Transform>(child) {
             *t = local;
         }
     }
 }
 
-/// World matrix of `bone` on rigged mesh `mesh` — i.e. `mesh_world · bone_model_local`,
-/// the exact frame `resolve_attachments` places a `BoneAttach` into (uses the current
-/// animated pose, else the rig rest pose, matching that function's bone lookup). Invert
-/// it to turn a desired child WORLD transform into a `BoneAttach.offset` (bone-local) so
-/// the move gizmo edits the attachment instead of a `Transform` the resolve would clobber.
-/// `None` if `mesh` isn't a rigged mesh or the bone name is gone (e.g. after a re-import).
-pub fn bone_world_matrix(
+/// World TRS of `bone` on rigged mesh `mesh` — i.e. `mesh_world ∘ bone_model_local`
+/// under the scene graph's componentwise composition, the exact frame
+/// `resolve_attachments` places a `BoneAttach` into (uses the current animated pose,
+/// else the rig rest pose, matching that function's bone lookup). `inv_mul` it against
+/// a desired child WORLD transform to get the `BoneAttach.offset` (bone-local) so the
+/// move gizmo edits the attachment instead of a `Transform` the resolve would clobber
+/// — TRS end-to-end, so a mirrored (negative-scale) mesh keeps its sign on the right
+/// axis. `None` if `mesh` isn't a rigged mesh or the bone name is gone (re-import).
+pub fn bone_world_transform(
     system: &AnimSystem,
     world: &World,
     mesh_registry: &HashMap<String, MeshAsset>,
     mesh: Entity,
     bone: &str,
-) -> Option<DMat4> {
+) -> Option<Transform> {
     let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(mesh) else { return None };
     let rig = mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())?;
     let idx = rig.skeleton.index_of(bone)?;
@@ -1010,7 +1073,10 @@ pub fn bone_world_matrix(
         .or_else(|| rig.rest_world.get(idx))
         .copied()
         .unwrap_or(Mat4::IDENTITY);
-    Some(floptle_core::world_transform(world, mesh).world_matrix() * bone_local.as_dmat4())
+    Some(
+        floptle_core::world_transform(world, mesh)
+            .mul_transform(&Transform::from_matrix(bone_local.as_dmat4())),
+    )
 }
 
 /// Preview (edit-mode) apply for ONE entity at an explicit time: bind if
@@ -1354,7 +1420,36 @@ pub fn rig_from_model(
     // (parts, skin joints, clip channels) is threaded through the old→new remap.
     let mut skeleton = model.skeleton.clone();
     let mut part_nodes: Vec<usize> = model.parts.iter().map(|p| p.node).collect();
-    let remap = (!overrides.reparent.is_empty()).then(|| apply_reparent(&mut skeleton, &overrides.reparent));
+    // FOLLOW-THE-OBJECT for skinned chains: skinned vertices follow their JOINTS,
+    // never the mesh node — so a flow-rig bone chain whose root sits at the model
+    // root ignores the hair object being parented under "Head" (the hair stays
+    // put while the head turns). Auto-parent each skin's ROOT joints under the
+    // skinned part's own effective parent, so wherever the user parents the hair
+    // object, the chain — and thus the hair — rides along. Only unparented chain
+    // roots are touched (a proper rig's structure is left alone), an explicit
+    // sidecar entry for the root always wins, and the keep-in-place rest
+    // recompute means existing clips replay identically at rest.
+    let mut reparent = overrides.reparent.clone();
+    for part in &model.parts {
+        let Some(skin) = &part.skin else { continue };
+        let mesh_name = &model.skeleton.nodes[part.node].name;
+        // The mesh node's EFFECTIVE parent: sidecar override first, else source.
+        let parent_name = match overrides.reparent.get(mesh_name) {
+            Some(p) if !p.is_empty() => p.clone(),
+            Some(_) => continue, // explicitly rooted — nothing to follow
+            None => match model.skeleton.nodes[part.node].parent {
+                Some(pi) => model.skeleton.nodes[pi].name.clone(),
+                None => continue, // object at model root — chain has nothing to follow
+            },
+        };
+        for &j in &skin.joint_nodes {
+            let n = &model.skeleton.nodes[j];
+            if n.parent.is_none() && n.name != parent_name {
+                reparent.entry(n.name.clone()).or_insert_with(|| parent_name.clone());
+            }
+        }
+    }
+    let remap = (!reparent.is_empty()).then(|| apply_reparent(&mut skeleton, &reparent));
     if let Some(rm) = &remap {
         for pn in part_nodes.iter_mut() {
             *pn = rm[*pn];

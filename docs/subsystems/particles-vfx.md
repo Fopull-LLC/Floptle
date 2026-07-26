@@ -483,6 +483,55 @@ lifetime-long timeline ready (step 4). From there you **Add Group** ("Crescents,
 then "Smoke"), set each group's Emit Behavior, and draw curves. Saving round-trips
 to RON; the asset database assigns a stable id and hot-reloads spawned instances.
 
+## Beams & trails
+
+Two ribbon features ride the existing billboard pass — each ribbon segment is an
+ordinary oriented particle quad (its up-basis IS the segment vector, its right
+basis faces the camera via `cross(view, segment)`), so there is **no new
+pipeline**. The flipbook UV-rect instance lanes carry the ribbon's along-length
+`v` slice instead, which is why ribbons and flipbooks are mutually exclusive
+(trails/beams simply ignore the track's flipbook).
+
+### Particle trails (per-track opt-in, billboard tracks)
+
+Turn on **trail** in a billboard track's Look section and every particle drags a
+fading ribbon behind itself — sword slashes, wind streaks, tracers, projectile
+smoke lines. Knobs:
+
+- **time** — seconds of history the ribbon spans (older points expire off the tail)
+- **width** — world units at the head
+- **fade** — width AND alpha taper to zero at the tail (default on)
+- **texture** — ribbon texture; empty = the track's own texture (or a soft
+  untextured strip). UV `v` runs 0→1 tail→head, `u` across the width
+- **min distance** — a new history point is recorded only after the particle
+  moves this far (movement-driven sampling, so a hovering particle doesn't churn)
+
+The sim records a bounded per-particle history (32 points max — the oldest drops
+first), colored with the particle's *current* color, deterministic under
+scrubbing like everything else. Mesh tracks ignore the trail; tracks without one
+record no history and pay nothing.
+
+### Beam tracks (a render mode)
+
+Pick **beam** as a track's render mode and the track stops being a particle
+emitter entirely: it renders ONE ribbon from the effect's origin to an endpoint
+— energy beams, lasers, tethers, lightning-ish crackle. Emission, shapes and
+forces are ignored (the sections hide in the inspector); instead:
+
+- **width** = the track's `size` property, **tint** = its `color` property, both
+  sampled at the EFFECT's normalized timeline position — curve them to make the
+  beam swell and fade over the effect
+- **segments** — how many quads subdivide the ribbon (default 12; more = smoother waves)
+- **end** — the endpoint, a LOCAL offset from the node (default `(0, 5, 0)`)
+- **wave / freq** — a sine ripple across the chain, pinned at both endpoints and
+  animated by effect time (energy crackle)
+- **scroll** — UV flow speed along the beam in texture-lengths/sec (use a
+  seamlessly tiling texture; the wrap seam lands inside a single segment)
+
+From a script, `node:particles():setBeamEnd(x, y, z)` aims every Beam track of
+that node's effect at a WORLD point — the engine converts to effect-local each
+call, so re-aim per tick to track a moving target.
+
 ## Out of scope
 
 To keep the flow simple and fast, Floptle deliberately does **not** ship:

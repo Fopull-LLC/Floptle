@@ -8,6 +8,10 @@ use std::path::Path;
 /// The default Lua scripts every project ships with (ADR-0003): the engine's
 /// built-in behaviors, now plain hot-reloadable Lua the user can read and edit.
 pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
+    // The default new-scene camera's flycam (hold RMB to look, WASD to move) —
+    // default_camera_node() attaches `freelook`, so this MUST ship or a fresh
+    // project's camera references a script that doesn't exist.
+    ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
     ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
     ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
     ("float.lua", include_str!("../../../assets/scripts/float.lua")),

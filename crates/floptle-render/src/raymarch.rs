@@ -157,6 +157,13 @@ pub struct RaymarchGlobals {
     /// Per star: rgb = light color, w = K where irradiance = K / d²
     /// (K = luminosity × 1e6; capped in-shader near the star).
     pub star_color: [[f32; 4]; 4],
+    /// Volumetric fog (Lighting.fog_volumetric): x = density/unit, y = layer top
+    /// (WORLD y), z = top falloff, w = noise amount 0..1. Appended at the END to
+    /// keep the WGSL `Globals` byte-identical.
+    pub vol_fog_a: [f32; 4],
+    /// Volumetric fog: x = noise scale (world units), y = time (s, drifts the
+    /// noise), z = camera WORLD y, w = enabled (0/1).
+    pub vol_fog_b: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -226,6 +233,8 @@ impl Default for RaymarchGlobals {
             star_meta: [0.0; 4],
             star_pos: [[0.0; 4]; 4],
             star_color: [[0.0; 4]; 4],
+            vol_fog_a: [0.0; 4],
+            vol_fog_b: [0.0; 4],
         }
     }
 }

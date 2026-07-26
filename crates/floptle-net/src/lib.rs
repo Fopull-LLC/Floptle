@@ -235,6 +235,7 @@ mod tests {
             },
             scripts: Vec::new(),
             material: None,
+            object_materials: Default::default(),
             rigidbody: None,
             celestial: None,
             mesh_collider: false,

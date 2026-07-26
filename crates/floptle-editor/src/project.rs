@@ -203,13 +203,34 @@ impl Editor {
                     .iter()
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
+                let part_meta = model
+                    .parts
+                    .iter()
+                    .map(|p| crate::PartMeta {
+                        material: p.material.clone(),
+                        base_color: p.base_color,
+                        textured: p.texture.is_some(),
+                    })
+                    .collect();
                 let overrides = crate::rig_overrides::RigOverrides::load(&file);
+                if let Some(f) = overrides.texture_filter {
+                    let s = crate::assets::TexSetting { filter: f, ..Default::default() };
+                    for &mid in &parts {
+                        raster.set_mesh_sampling(gpu, mid, s.to_sampling());
+                    }
+                }
                 let rig = anim::rig_from_model(&model, &overrides);
                 let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(
                     path.to_string(),
-                    MeshAsset { parts, size: model.size, rig: Some(rig) },
+                    MeshAsset {
+                        parts,
+                        part_meta,
+                        tex_filter: overrides.texture_filter,
+                        size: model.size,
+                        rig: Some(rig),
+                    },
                 );
                 // Surface the import stats to the Console so an incomplete import (e.g. a
                 // Blender Mirror modifier that wasn't applied at export, which drops half
@@ -236,8 +257,32 @@ impl Editor {
                     .iter()
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
                     .collect();
-                self.mesh_registry
-                    .insert(path.to_string(), MeshAsset { parts, size: model.size, rig: None });
+                let part_meta = model
+                    .parts
+                    .iter()
+                    .map(|p| crate::PartMeta {
+                        material: p.material.clone(),
+                        base_color: p.base_color,
+                        textured: p.texture.is_some(),
+                    })
+                    .collect();
+                let overrides = crate::rig_overrides::RigOverrides::load(&file);
+                if let Some(f) = overrides.texture_filter {
+                    let s = crate::assets::TexSetting { filter: f, ..Default::default() };
+                    for &mid in &parts {
+                        raster.set_mesh_sampling(gpu, mid, s.to_sampling());
+                    }
+                }
+                self.mesh_registry.insert(
+                    path.to_string(),
+                    MeshAsset {
+                        parts,
+                        part_meta,
+                        tex_filter: overrides.texture_filter,
+                        size: model.size,
+                        rig: None,
+                    },
+                );
                 println!("  imported {path}");
                 true
             }
@@ -870,7 +915,8 @@ impl Editor {
         let _ = std::fs::create_dir_all(root.join("scripts"));
         // A starter scene if none exists yet.
         let first = root.join("scenes/first.ron");
-        if !first.exists() {
+        let fresh = !first.exists();
+        if fresh {
             let _ = floptle_scene::save(&default_scene(), &first);
         }
         // Ship the default Lua scripts so the IDE/docs have something to show.
@@ -878,6 +924,30 @@ impl Editor {
         seed_example_shaders(&root);
         crate::ui_shader_lib::seed_ui_effects(&root);
         self.open_project(root);
+        if fresh {
+            // The polished blank slate: full-resolution rendering (retro is one
+            // click away in the toolbar, but a new project shouldn't start
+            // pixelated), and a sculpt-ready grassy ground slab under the
+            // starter physics shapes. Terrain lives in sidecar field files, so
+            // it can't ship inside the scene template — generate + save it here.
+            self.project.retro = false;
+            let _ = floptle_scene::save_project(&self.project, &self.project_cfg_path());
+            self.create_terrain(&crate::terrain_ui::NewTerrainCfg {
+                size_xz: 48.0,
+                thickness: 12.0,
+                color: [0.35, 0.6, 0.28],
+                texture: String::new(),
+            });
+            if let Some(e) = self.active_terrain
+                && let Some(t) = self.world.get_mut::<floptle_core::Transform>(e)
+            {
+                t.translation = floptle_core::math::DVec3::ZERO;
+            }
+            self.selection.clear();
+            self.history = History::default(); // a template isn't an undoable edit
+            self.save_scene();
+            self.scene_dirty = false;
+        }
     }
 
     /// Close the current project: empty world, no selection, clean history.
@@ -1281,6 +1351,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             strs: Vec::new(),
         }],
         material: None,
+        object_materials: Default::default(),
         rigidbody: None,
         celestial: None,
         mesh_collider: false,
@@ -1313,95 +1384,76 @@ fn empty_scene() -> floptle_scene::SceneDoc {
 
 /// A tiny built-in scene used if `assets/scenes/first.ron` is missing.
 pub(crate) fn default_scene() -> floptle_scene::SceneDoc {
-    use floptle_scene::*;
-    SceneDoc {
-        name: "first".into(),
-        lighting: LightDoc::default(),
-        nodes: vec![
-            NodeDoc {
-                terrain_gen: None,
-                name: "cube".into(),
-                transform: TransformDoc { translation: [-2.0, 0.0, 0.0], ..Default::default() },
-                matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.45, 0.35] },
-                scripts: Vec::new(),
-                material: None,
-                rigidbody: None,
-                celestial: None,
-                mesh_collider: false,
-                paint: None,
-                tex_paint: None,
-                collidable: false,
-                trigger: false,
-                visible: true,
-                cast_shadow: true,
-                anim_controller: None,
-                particles: None,
-                parent: None,
-                attachment: None,
-                net: None,
-                ui_layer: None,
-                ui: None,
-                audio: None,
-                layer: None,
-                tags: Vec::new(),
-            },
-            NodeDoc {
-                terrain_gen: None,
-                name: "sphere".into(),
-                transform: TransformDoc { translation: [2.0, 0.0, 0.0], ..Default::default() },
-                matter: MatterDoc::Primitive { shape: ShapeDoc::Sphere, color: [0.4, 0.7, 0.95] },
-                scripts: Vec::new(),
-                material: None,
-                rigidbody: None,
-                celestial: None,
-                mesh_collider: false,
-                paint: None,
-                tex_paint: None,
-                collidable: false,
-                trigger: false,
-                visible: true,
-                cast_shadow: true,
-                anim_controller: None,
-                particles: None,
-                parent: None,
-                attachment: None,
-                net: None,
-                ui_layer: None,
-                ui: None,
-                audio: None,
-                layer: None,
-                tags: Vec::new(),
-            },
-            NodeDoc {
-                terrain_gen: None,
-                name: "blob".into(),
-                transform: TransformDoc { translation: [0.0, 1.6, 0.0], ..Default::default() },
-                matter: MatterDoc::Blob { scale: 1.0 },
-                scripts: Vec::new(),
-                material: None,
-                rigidbody: None,
-                celestial: None,
-                mesh_collider: false,
-                paint: None,
-                tex_paint: None,
-                collidable: false,
-                trigger: false,
-                visible: true,
-                cast_shadow: true,
-                anim_controller: None,
-                particles: None,
-                parent: None,
-                attachment: None,
-                net: None,
-                ui_layer: None,
-                ui: None,
-                audio: None,
-                layer: None,
-                tags: Vec::new(),
-            },
-            default_camera_node(),
+    // A polished blank slate (RON so serde defaults fill the long NodeDoc tail):
+    // a warm sun with soft dithered distance fog, a Down gravity volume, and a
+    // few physics shapes hovering over the ground — press Play and they tumble.
+    // The camera flies (freelook). The ground terrain itself is generated by
+    // `new_project` (terrain lives in sidecar field files, not scene RON).
+    let mut doc: floptle_scene::SceneDoc = ron::from_str(
+        r#"(
+        name: "first",
+        lighting: (
+            direction: (0.35, 0.85, 0.4),
+            color: (1.0, 0.97, 0.9),
+            ambient: (0.16, 0.17, 0.21),
+            intensity: 1.0,
+            fog: true,
+            fog_color: (0.63, 0.68, 0.78),
+            fog_start: 45.0,
+            fog_end: 220.0,
+            fog_dither: true,
+            fog_dither_strength: 0.4,
+        ),
+        nodes: [
+            (
+                name: "Gravity",
+                transform: (
+                    translation: (0.0, 0.0, 0.0),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                matter: GravityVolume(radial: false, strength: 9.81, radius: 80.0),
+                scripts: [],
+            ),
+            (
+                name: "crate",
+                transform: (
+                    translation: (-1.6, 2.2, 0.3),
+                    rotation: (0.0, 0.13, 0.0, 0.99),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                matter: Primitive(shape: Cube, color: (0.85, 0.55, 0.35)),
+                scripts: [],
+                rigidbody: Some((boxed: true, half_extents: (0.5, 0.5, 0.5))),
+            ),
+            (
+                name: "ball",
+                transform: (
+                    translation: (1.4, 3.2, -0.4),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                matter: Primitive(shape: Sphere, color: (0.4, 0.7, 0.95)),
+                scripts: [],
+                rigidbody: Some((radius: 0.5, restitution: 0.45)),
+            ),
+            (
+                name: "capsule",
+                transform: (
+                    translation: (0.3, 4.4, -1.4),
+                    rotation: (0.0, 0.0, 0.0, 1.0),
+                    scale: (1.0, 1.0, 1.0),
+                ),
+                matter: Primitive(shape: Capsule, color: (0.65, 0.85, 0.5)),
+                scripts: [],
+                rigidbody: Some((capsule: true, radius: 0.5, height: 2.0)),
+            ),
         ],
-    }
+    )"#,
+    )
+    .expect("default scene template");
+    doc.nodes.push(default_camera_node());
+    doc
 }
 
 /// Recursively copy `src` (a directory) to `dst`, creating `dst` and every
@@ -1424,6 +1476,28 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    /// The starter-scene RON template must parse (it's an `expect` at project
+    /// creation) and actually contain the polished-blank-slate pieces: gravity,
+    /// physics shapes, fog on, and a camera.
+    #[test]
+    fn default_scene_template_parses_with_the_starter_pieces() {
+        let d = default_scene();
+        assert!(d.lighting.fog);
+        assert!(d
+            .nodes
+            .iter()
+            .any(|n| matches!(n.matter, floptle_scene::MatterDoc::GravityVolume { .. })));
+        assert!(d.nodes.iter().filter(|n| n.rigidbody.is_some()).count() >= 3);
+        let cam = d
+            .nodes
+            .iter()
+            .find(|n| matches!(n.matter, floptle_scene::MatterDoc::Camera { .. }))
+            .expect("camera node");
+        assert!(cam.scripts.iter().any(|s| s.kind == "freelook"));
+        // …and the flycam script it references is actually seeded into projects.
+        assert!(crate::lua_support::DEFAULT_SCRIPTS.iter().any(|(n, _)| *n == "freelook.lua"));
+    }
 
     /// The bug this guards: the asset picker stores paths as walked from
     /// `project_root` (default: the RELATIVE `assets`), and joining that root on

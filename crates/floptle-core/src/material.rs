@@ -105,3 +105,11 @@ impl Material {
         Self { color, ..Self::default() }
     }
 }
+
+/// Per-sub-object material overrides on a Mesh node (a component): object name
+/// (or, for a flattened single-object model, material name) ⏵ the Material that
+/// part draws with — so ONE object inside a multi-part model can be re-skinned
+/// without touching its siblings. A node-level [`Material`] still overrides the
+/// whole model; entries here win for their object.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjectMaterials(pub std::collections::BTreeMap<String, Material>);

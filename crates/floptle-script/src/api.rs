@@ -1639,6 +1639,20 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             )?;
         }
         {
+            // ps:setBeamEnd(x, y, z) — aim every Beam track of the node's effect at a
+            // WORLD-space point (the engine converts it to effect-local, so the beam
+            // tracks the target as the emitter moves/rotates).
+            let cmds = shared.vfx_commands.clone();
+            vfx_methods.set(
+                "setBeamEnd",
+                lua.create_function(move |_, (this, x, y, z): (Table, f64, f64, f64)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    cmds.borrow_mut().push((e, VfxCmd::SetBeamEnd([x, y, z])));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
             let inf = shared.vfx_info.clone();
             vfx_methods.set(
                 "isPlaying",

@@ -1753,6 +1753,55 @@ impl Raster {
         id
     }
 
+    /// Re-derive a registered mesh's texture bind group with different sampling —
+    /// how a model's EMBEDDED textures pick a filter after registration (loose
+    /// image assets go through `register_texture`'s settings instead). No-op for
+    /// meshes without their own texture (the shared default stays crisp).
+    pub fn set_mesh_sampling(&mut self, gpu: &Gpu, id: MeshId, sampling: TexSampling) {
+        let sampler = self.sampler_for(gpu, sampling);
+        let Some(m) = self.meshes.get_mut(id.0 as usize) else { return };
+        let Some(tex) = m._texture.as_ref() else { return };
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        m.tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raster-mesh-tex"),
+            layout: &self.tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+    }
+
+    /// Clone a registered mesh into a new slot with its OWN vertex buffer, sharing
+    /// the source's index buffer, texture bind group, and paint block. Made for CPU
+    /// vertex skinning: each entity instancing a skinned part gets a private buffer
+    /// to bake its pose into, so two characters sharing a model never fight over
+    /// one buffer. The new vertex buffer starts uninitialized — the caller must
+    /// `update_mesh_vertices` before the first draw (skinning does, every frame).
+    pub fn clone_mesh(&mut self, gpu: &Gpu, src: MeshId) -> Option<MeshId> {
+        let m = self.meshes.get(src.0 as usize)?;
+        let vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mesh-verts-skin-variant"),
+            size: m.gpu_mesh.vbuf.size(),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let clone = RegisteredMesh {
+            gpu_mesh: GpuMesh {
+                vbuf,
+                ibuf: m.gpu_mesh.ibuf.clone(),
+                index_count: m.gpu_mesh.index_count,
+            },
+            tex_bind: m.tex_bind.clone(),
+            _texture: None, // the source slot keeps the texture alive
+            paint_base: m.paint_base,
+            dynamic: None,
+        };
+        let id = MeshId(self.meshes.len() as u32);
+        self.meshes.push(clone);
+        Some(id)
+    }
+
     /// Re-upload a registered mesh's vertex data in place (its buffer is `COPY_DST`).
     /// Used by CPU vertex skinning to push each frame's deformed vertices. `verts` must
     /// have the same length the mesh was registered with (the index buffer is unchanged);

@@ -107,6 +107,13 @@ impl Editor {
             })
             .unwrap_or_default();
         let material = self.world.get::<Material>(e).map(MaterialDoc::from_material);
+        let object_materials = self
+            .world
+            .get::<floptle_core::ObjectMaterials>(e)
+            .map(|om| {
+                om.0.iter().map(|(k, m)| (k.clone(), MaterialDoc::from_material(m))).collect()
+            })
+            .unwrap_or_default();
         let rigidbody =
             self.world.get::<floptle_core::RigidBody>(e).map(floptle_scene::RigidBodyDoc::from_rigidbody);
         let celestial = self
@@ -148,6 +155,7 @@ impl Editor {
             matter: MatterDoc::from(matter),
             scripts,
             material,
+            object_materials,
             rigidbody,
             celestial,
             mesh_collider,
@@ -191,6 +199,17 @@ impl Editor {
         }
         if let Some(m) = &node.material {
             self.world.insert(e, m.to_material());
+        }
+        if !node.object_materials.is_empty() {
+            self.world.insert(
+                e,
+                floptle_core::ObjectMaterials(
+                    node.object_materials
+                        .iter()
+                        .map(|(k, m)| (k.clone(), m.to_material()))
+                        .collect(),
+                ),
+            );
         }
         if let Some(rb) = &node.rigidbody {
             self.world.insert(e, rb.to_rigidbody());
@@ -252,6 +271,7 @@ impl Editor {
             matter,
             scripts: Vec::new(),
             material: None,
+            object_materials: Default::default(),
             rigidbody: None,
             celestial: None,
             mesh_collider: false,
@@ -302,6 +322,7 @@ impl Editor {
                 matter: MatterDoc::Mesh { asset_path: path.to_string() },
                 scripts: Vec::new(),
                 material: None,
+                object_materials: Default::default(),
                 rigidbody: None,
                 celestial: None,
                 mesh_collider: false,
@@ -544,25 +565,37 @@ impl Editor {
         false
     }
 
-    /// Re-parent `child` under `parent` (or make it a root if `None`), preserving
-    /// its world placement. Rejects cycles (can't parent under your own descendant).
-    pub(crate) fn reparent(&mut self, child: Entity, parent: Option<Entity>) {
-        if let Some(p) = parent
-            && self.is_descendant(p, child) {
-                return;
-            }
-        self.record();
-        let world = floptle_core::world_transform(&self.world, child);
-        // Moving a node in the hierarchy detaches it from any bone (else BoneAttach's
-        // target would diverge from the new Parent and resolve the wrong mesh).
-        self.world.remove::<floptle_core::BoneAttach>(child);
-        match parent {
-            Some(p) => self.world.insert(child, floptle_core::Parent(p)),
-            None => {
-                self.world.remove::<floptle_core::Parent>(child);
-            }
+    /// Re-parent every node in `children` under `parent` (or make them roots if
+    /// `None`) as ONE undo step, preserving each node's world placement. Filters
+    /// out the target itself, cycles (can't parent under your own descendant),
+    /// and any node whose ancestor is also moving (the ancestor's move carries it).
+    pub(crate) fn reparent_many(&mut self, children: &[Entity], parent: Option<Entity>) {
+        let moved: Vec<Entity> = children
+            .iter()
+            .copied()
+            .filter(|&c| {
+                parent != Some(c)
+                    && !parent.is_some_and(|p| self.is_descendant(p, c))
+                    && !children.iter().any(|&a| a != c && self.is_descendant(c, a))
+            })
+            .collect();
+        if moved.is_empty() {
+            return;
         }
-        self.set_world_transform(child, world); // keep the same world placement
+        self.record();
+        for child in moved {
+            let world = floptle_core::world_transform(&self.world, child);
+            // Moving a node in the hierarchy detaches it from any bone (else BoneAttach's
+            // target would diverge from the new Parent and resolve the wrong mesh).
+            self.world.remove::<floptle_core::BoneAttach>(child);
+            match parent {
+                Some(p) => self.world.insert(child, floptle_core::Parent(p)),
+                None => {
+                    self.world.remove::<floptle_core::Parent>(child);
+                }
+            }
+            self.set_world_transform(child, world); // keep the same world placement
+        }
     }
 
     /// Spawn a new node as a child of `parent`, sitting at the parent's origin.

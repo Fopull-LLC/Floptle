@@ -225,7 +225,7 @@ struct EditorCmd {
     /// Extract a model's embedded textures into assets/textures/ (a model path).
     extract_textures: Option<String>,
     /// Re-parent a node: (child, new parent or None = make it a root).
-    reparent: Option<(Entity, Option<Entity>)>,
+    reparent: Option<(Vec<Entity>, Option<Entity>)>,
     /// Add a new node as a child of an entity (matter, parent).
     add_parented: Option<(MatterDoc, Entity)>,
     /// Open the "new terrain" size/thickness/color/texture dialog.
@@ -364,6 +364,9 @@ struct EditorCmd {
     /// Set an object/bone's rotation pivot (rigged-mesh entity, node name, pivot xyz in
     /// node-local space) — from the Inspector's numeric pivot fields.
     set_object_pivot: Option<(Entity, String, [f32; 3])>,
+    /// Set a model asset's EMBEDDED-texture filter (`None` = back to crisp),
+    /// persisted in its `.rig.ron` sidecar; the model re-imports live.
+    set_model_filter: Option<(String, Option<crate::assets::FilterMode>)>,
     /// Attach any scene child below a rigged mesh to one of that mesh's bones.  The
     /// apply pass reparents it directly below the mesh and preserves its world pose
     /// while deriving the bone-local attachment offset.
@@ -1429,6 +1432,9 @@ struct Editor {
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models, keyed by asset path ⏵ registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
+    /// Per-entity vertex buffers for CPU-skinned parts (two characters sharing
+    /// a model must not bake their poses into one buffer).
+    skin_variants: anim::SkinVariants,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
     /// The game-UI render pass (instanced quads + glyph atlas).
@@ -1894,6 +1900,13 @@ struct Editor {
     grabbed: Option<Handle>,
     /// Start-of-drag snapshot for the grabbed handle.
     drag: Option<DragState>,
+    /// Start transforms of the OTHER selected entities in a multi-select gizmo
+    /// drag (primary excluded; so is any node whose ancestor is also selected —
+    /// the parent's move already carries it). The whole selection moves together.
+    drag_group: Vec<(Entity, Transform)>,
+    /// Seconds since editor start, sampled each frame — drifts the volumetric
+    /// fog's noise in every view (main + offscreen share one clock).
+    fog_time: f32,
     /// Modifier key state (tracked from key events).
     ctrl: bool,
     shift: bool,
@@ -2126,8 +2139,38 @@ struct Egui {
 /// and each part's node binding, so the draw arm can pose parts per frame.
 struct MeshAsset {
     parts: Vec<MeshId>,
+    /// Per-part import metadata, parallel to `parts` (material name, base-color
+    /// factor, whether the material carried a texture) — drives the Inspector's
+    /// embedded-materials list and per-object material overrides.
+    part_meta: Vec<PartMeta>,
+    /// The model's embedded-texture filter (from its `.rig.ron` sidecar);
+    /// `None` = the crisp default.
+    tex_filter: Option<crate::assets::FilterMode>,
     size: f32,
     rig: Option<anim::RigAsset>,
+}
+
+/// One part's import-time material facts (see [`MeshAsset::part_meta`]).
+#[derive(Clone)]
+pub(crate) struct PartMeta {
+    pub(crate) material: String,
+    pub(crate) base_color: [f32; 3],
+    pub(crate) textured: bool,
+}
+
+impl MeshAsset {
+    /// The override key a part answers to in [`floptle_core::ObjectMaterials`]:
+    /// its owning OBJECT's name on a structured model, else its material name
+    /// (a flattened single-object prop has no per-object identity).
+    fn override_key(&self, part: usize) -> Option<&str> {
+        if let Some(rig) = &self.rig
+            && let Some(&node) = rig.part_nodes.get(part)
+            && let Some(n) = rig.skeleton.nodes.get(node)
+        {
+            return Some(&n.name);
+        }
+        self.part_meta.get(part).map(|m| m.material.as_str())
+    }
 }
 
 /// One selectable node of a model's structure, for the Hierarchy tree + Inspector
@@ -2247,8 +2290,16 @@ impl ApplicationHandler for Editor {
         for (key, _) in crate::vfx::BUILTIN_PARTICLE_MESHES {
             if let Some(data) = crate::vfx::builtin_particle_mesh_data(key) {
                 let id = raster.register(&gpu, &data, None);
-                self.mesh_registry
-                    .insert((*key).to_string(), MeshAsset { parts: vec![id], size: 1.0, rig: None });
+                self.mesh_registry.insert(
+                    (*key).to_string(),
+                    MeshAsset {
+                        parts: vec![id],
+                        part_meta: Vec::new(),
+                        tex_filter: None,
+                        size: 1.0,
+                        rig: None,
+                    },
+                );
             }
         }
 
@@ -2453,8 +2504,12 @@ impl ApplicationHandler for Editor {
                                 // graph window, and never silently discard unsaved work.
                                 // A BUILD (player mode) only ever frees the cursor — games
                                 // don't quit on Escape.
-                                if self.game_trap {
+                                if self.game_trap || self.script_mouse_lock {
+                                    // Free BOTH lock owners — a script that holds the
+                                    // mouse (setMouseLocked) must not survive Escape,
+                                    // or the cursor stays gone with no way back.
                                     self.game_trap = false;
+                                    self.script_mouse_lock = false;
                                     if let Some(window) = self.window.as_ref() {
                                         self.cursor_lock_soft = grab_cursor(window, false);
                                     }
@@ -2655,6 +2710,22 @@ impl ApplicationHandler for Editor {
                                     start_xf,
                                     cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
                                 });
+                                // Multi-select: snapshot every OTHER selected node so the
+                                // drag moves them all. Nodes whose ancestor is also in the
+                                // selection are skipped (the parent's move carries them).
+                                self.drag_group = self
+                                    .selection
+                                    .iter()
+                                    .copied()
+                                    .filter(|&o| {
+                                        o != e
+                                            && self.world.get::<Transform>(o).is_some()
+                                            && !self.selection.iter().any(|&a| {
+                                                a != o && self.is_descendant(o, a)
+                                            })
+                                    })
+                                    .map(|o| (o, floptle_core::world_transform(&self.world, o)))
+                                    .collect();
                             }
                         } else if let (Some(h), Some((mesh, idx, start_xf))) =
                             (hovered, self.bone_gizmo_target())
@@ -2662,6 +2733,7 @@ impl ApplicationHandler for Editor {
                             // On a gizmo handle while an armature BONE is selected: grab
                             // it to pose the bone. No begin_edit — the clip has its own
                             // coalesced save (clip_dirty), bones aren't scene undo.
+                            self.drag_group.clear(); // bones never group-drag
                             self.grabbed = Some(h);
                             self.drag = Some(DragState {
                                 handle: h,
@@ -2671,11 +2743,12 @@ impl ApplicationHandler for Editor {
                                 cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
                             });
                         } else if let Some(cursor) = self.cursor {
-                            // Empty viewport ⏵ pick: single-select, or Shift to add.
+                            // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
+                            // (Ctrl matches the Hierarchy's toggle-select).
                             match self.pick(cursor) {
-                                Some(e) if self.shift => self.select_toggle(e),
+                                Some(e) if self.shift || self.ctrl => self.select_toggle(e),
                                 Some(e) => self.select_single(e),
-                                None if !self.shift => self.selection.clear(),
+                                None if !self.shift && !self.ctrl => self.selection.clear(),
                                 None => {}
                             }
                         }
@@ -2683,6 +2756,7 @@ impl ApplicationHandler for Editor {
                 } else {
                     self.grabbed = None;
                     self.drag = None;
+                    self.drag_group.clear();
                     self.editing = false;
                     self.sculpting = false;
                     // End of a paint stroke: bank the whole stroke as ONE undo step.

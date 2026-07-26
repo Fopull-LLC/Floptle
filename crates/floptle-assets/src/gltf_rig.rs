@@ -50,6 +50,9 @@ pub struct RiggedModel {
 #[derive(Debug)]
 pub struct RiggedPart {
     pub mesh: MeshData,
+    /// The glTF material's name (`Material N` when unnamed) — surfaced in the
+    /// editor's materials list.
+    pub material: String,
     pub base_color: [f32; 3],
     pub texture: Option<usize>,
     /// Index into `RiggedModel::skeleton` — the node whose animated world
@@ -208,6 +211,10 @@ pub fn import_rigged(path: &Path) -> Result<Option<RiggedModel>, ImportError> {
                 let bcf = pbr.base_color_factor();
                 parts.push(RiggedPart {
                     mesh: MeshData::default(),
+                    material: mat
+                        .name()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Material {}", mat.index().map_or(0, |i| i + 1))),
                     base_color: [bcf[0], bcf[1], bcf[2]],
                     texture: pbr
                         .base_color_texture()

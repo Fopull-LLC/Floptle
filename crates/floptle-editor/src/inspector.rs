@@ -594,6 +594,66 @@ impl EditorTabViewer<'_> {
             self.cmd.set_object_pivot = Some((mesh, bone_name.clone(), [p.x, p.y, p.z]));
         }
 
+        // ---- ◑ per-object material override (objects only — bones have no faces) ----
+        if is_object {
+            ui.separator();
+            let has_override = self
+                .world
+                .get::<floptle_core::ObjectMaterials>(mesh)
+                .is_some_and(|om| om.0.contains_key(&bone_name));
+            if has_override {
+                let mut clear = false;
+                ui.horizontal(|ui| {
+                    ui.strong("◑ Material (this object)");
+                    clear = ui
+                        .small_button("🗑 clear")
+                        .on_hover_text("remove this object's override — back to the model's own look")
+                        .clicked();
+                });
+                ui.small("overrides the model's imported look for JUST this object");
+                let mut save_as = None;
+                if let Some(mat) = self
+                    .world
+                    .get_mut::<floptle_core::ObjectMaterials>(mesh)
+                    .and_then(|om| om.0.get_mut(&bone_name))
+                {
+                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                    self.cmd.inspector_changed |= res.changed;
+                    clear |= res.remove;
+                    if let Some(name) = res.save_as {
+                        save_as =
+                            Some((name, floptle_scene::MaterialDoc::from_material(mat)));
+                    }
+                }
+                self.cmd.save_material = save_as.or(self.cmd.save_material.take());
+                if clear {
+                    if let Some(om) = self.world.get_mut::<floptle_core::ObjectMaterials>(mesh) {
+                        om.0.remove(&bone_name);
+                        if om.0.is_empty() {
+                            self.world.remove::<floptle_core::ObjectMaterials>(mesh);
+                        }
+                    }
+                    self.cmd.inspector_changed = true;
+                }
+            } else if ui
+                .button("◑ Override material for this object")
+                .on_hover_text(
+                    "give JUST this sub-object its own material (color/texture/shader) \
+                     while the rest of the model keeps its imported look",
+                )
+                .clicked()
+            {
+                let mut om = self
+                    .world
+                    .get::<floptle_core::ObjectMaterials>(mesh)
+                    .cloned()
+                    .unwrap_or_default();
+                om.0.insert(bone_name.clone(), floptle_core::Material::default());
+                self.world.insert(mesh, om);
+                self.cmd.inspector_changed = true;
+            }
+        }
+
         // Auto-key into the open clip at the playhead — but only when the Animating tab is
         // targeting THIS mesh with a clip open (bone channels are name-bound to this
         // skeleton, so writing into another mesh's clip would be wrong).
@@ -616,6 +676,84 @@ impl EditorTabViewer<'_> {
                 egui::Color32::from_rgb(235, 200, 90),
                 "⚠ pick this mesh + a clip in the Animating tab to keyframe this bone",
             );
+        }
+    }
+
+    /// "◑ Materials" for a selected model ASSET: every embedded material — its
+    /// tint, whether it has a texture, and which sub-objects draw with it — plus
+    /// the per-model embedded-texture filter (persisted in the `.rig.ron`
+    /// sidecar). The registry only knows models something has loaded; a model
+    /// never placed in a scene shows a hint instead.
+    fn model_asset_materials_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        ui.separator();
+        ui.strong("◑ Materials");
+        let Some(asset) = self.mesh_registry.get(path) else {
+            ui.small("drag the model into a scene once to inspect its materials");
+            return;
+        };
+        if asset.part_meta.is_empty() {
+            ui.small("no material metadata (re-import: touch the file or restart)");
+            return;
+        }
+        // Group parts by material name, keeping the objects each covers.
+        let mut by_mat: std::collections::BTreeMap<&str, Vec<usize>> = Default::default();
+        for (i, m) in asset.part_meta.iter().enumerate() {
+            by_mat.entry(m.material.as_str()).or_default().push(i);
+        }
+        for (mat, parts) in &by_mat {
+            let meta = &asset.part_meta[parts[0]];
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    2.0,
+                    egui::Color32::from_rgb(
+                        (meta.base_color[0] * 255.0) as u8,
+                        (meta.base_color[1] * 255.0) as u8,
+                        (meta.base_color[2] * 255.0) as u8,
+                    ),
+                );
+                ui.label(*mat);
+                if meta.textured {
+                    ui.small("🖼 textured");
+                }
+            });
+            // Which sub-objects use it (also the override keys).
+            let objs: Vec<&str> = parts.iter().filter_map(|&i| asset.override_key(i)).collect();
+            if objs.len() > 1 || objs.first().is_some_and(|o| *o != *mat) {
+                ui.small(format!("   on: {}", objs.join(", ")));
+            }
+        }
+        ui.small(
+            "to change ONE object's look: expand the model in the Hierarchy, select \
+             the object, then \"◑ Override material\" in its inspector",
+        );
+        // Embedded-texture filtering (the whole model's baked-in textures).
+        if asset.part_meta.iter().any(|m| m.textured) {
+            let cur = asset.tex_filter;
+            let label = |f: Option<crate::assets::FilterMode>| match f {
+                None | Some(crate::assets::FilterMode::Pixelated) => "crisp (pixelated)",
+                Some(crate::assets::FilterMode::Smooth) => "smooth",
+                Some(crate::assets::FilterMode::SmoothMipmaps) => "smooth + mipmaps",
+            };
+            ui.horizontal(|ui| {
+                ui.label("embedded texture filter");
+                egui::ComboBox::from_id_salt(("model_tex_filter", path))
+                    .selected_text(label(cur))
+                    .show_ui(ui, |ui| {
+                        for opt in [
+                            None,
+                            Some(crate::assets::FilterMode::Smooth),
+                            Some(crate::assets::FilterMode::SmoothMipmaps),
+                        ] {
+                            if ui.selectable_label(cur == opt, label(opt)).clicked() && cur != opt
+                            {
+                                self.cmd.set_model_filter = Some((path.to_string(), opt));
+                            }
+                        }
+                    });
+            });
         }
     }
 
@@ -643,6 +781,7 @@ impl EditorTabViewer<'_> {
             if is_model(&path) {
                 ui.label("glTF model — drag onto the scene to place it.");
                 self.asset_preview_ui(ui);
+                self.model_asset_materials_ui(ui, &path);
                 self.model_asset_anim_ui(ui, &path);
             } else if anim_ui::is_anim_clip(&path) {
                 self.clip_asset_ui(ui, &path);
@@ -767,13 +906,33 @@ impl EditorTabViewer<'_> {
                             .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
                             .changed();
                     });
-                    // Depth fog — dirt-cheap distance haze (independent of shadows).
+                    // Fog — distance haze (depth ramp) or real marched media (volumetric).
                     ui.separator();
                     cmd.inspector_changed |= ui
-                        .checkbox(&mut l.fog, "depth fog")
-                        .on_hover_text("fade the scene toward a color with distance — cheap atmosphere; the skybox stays crisp")
+                        .checkbox(&mut l.fog, "fog")
+                        .on_hover_text("fade the scene into a color — cheap depth ramp or a marched volumetric layer; the skybox stays crisp")
                         .changed();
                     ui.add_enabled_ui(l.fog, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("mode");
+                            egui::ComboBox::from_id_salt("fog_mode")
+                                .selected_text(if l.fog_volumetric { "volumetric" } else { "depth" })
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(!l.fog_volumetric, "depth").clicked() && l.fog_volumetric {
+                                        l.fog_volumetric = false;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if ui
+                                        .selectable_label(l.fog_volumetric, "volumetric")
+                                        .on_hover_text("a height-bounded layer of drifting mist marched per pixel — hills poke out of ground fog, patches roll by")
+                                        .clicked()
+                                        && !l.fog_volumetric
+                                    {
+                                        l.fog_volumetric = true;
+                                        cmd.inspector_changed = true;
+                                    }
+                                });
+                        });
                         ui.horizontal(|ui| {
                             ui.label("color");
                             cmd.inspector_changed |= ui
@@ -781,16 +940,50 @@ impl EditorTabViewer<'_> {
                                 .on_hover_text("match the horizon / background so no seam shows at the skybox")
                                 .changed();
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("start");
-                            cmd.inspector_changed |= ui
-                                .add(egui::DragValue::new(&mut l.fog_start).speed(0.5).range(0.0..=10000.0).suffix("m"))
-                                .changed();
-                            ui.label("end");
-                            cmd.inspector_changed |= ui
-                                .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
-                                .changed();
-                        });
+                        if l.fog_volumetric {
+                            ui.horizontal(|ui| {
+                                ui.label("density");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_density).speed(0.001).range(0.0..=2.0))
+                                    .on_hover_text("media thickness per world unit — how fast things vanish into it")
+                                    .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("layer top");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_height).speed(0.1).suffix("m"))
+                                    .on_hover_text("world height the fog fills up to")
+                                    .changed();
+                                ui.label("softness");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_falloff).speed(0.1).range(0.01..=1000.0).suffix("m"))
+                                    .on_hover_text("how gradually the layer thins out above its top")
+                                    .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("noise");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(&mut l.fog_noise, 0.0..=1.0))
+                                    .on_hover_text("break the media into drifting patches (0 = uniform)")
+                                    .changed();
+                                ui.label("scale");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_noise_scale).speed(0.5).range(0.5..=1000.0).suffix("m"))
+                                    .on_hover_text("wisp size in world units")
+                                    .changed();
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.label("start");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_start).speed(0.5).range(0.0..=10000.0).suffix("m"))
+                                    .changed();
+                                ui.label("end");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_end).speed(0.5).range(0.1..=10000.0).suffix("m"))
+                                    .changed();
+                            });
+                        }
                         // Dither: hide 8-bit banding on long, slow fog ramps.
                         ui.horizontal(|ui| {
                             cmd.inspector_changed |= ui
@@ -2454,7 +2647,10 @@ impl EditorTabViewer<'_> {
                         list_group(ui, format!("◈ Objects ({})", objects.len()), &objects, true);
                     }
                     if !bones_only.is_empty() {
-                        list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, false);
+                        // Bones re-parent too: a flow-rig chain root under "Head"
+                        // makes skinned hair ride the head (skinned verts follow
+                        // JOINTS, so parenting the hair object alone isn't enough).
+                        list_group(ui, format!("🔗 Bones ({})", bones_only.len()), &bones_only, true);
                     }
 
                     // ---- tools ----
@@ -2571,7 +2767,12 @@ impl EditorTabViewer<'_> {
                         ui.horizontal(|ui| {
                             ui.label("scale");
                             let mut s = off.scale.x;
-                            if ui.add(egui::DragValue::new(&mut s).speed(0.01).range(0.001..=100.0)).changed() {
+                            // Negative allowed (a mirrored attachment); only the
+                            // degenerate |s| < 0.001 band is nudged out.
+                            if ui.add(egui::DragValue::new(&mut s).speed(0.01).range(-100.0..=100.0)).changed() {
+                                if s.abs() < 0.001 {
+                                    s = 0.001f32.copysign(if s == 0.0 { 1.0 } else { s });
+                                }
                                 off.scale = floptle_core::math::Vec3::splat(s);
                                 ch = true;
                             }

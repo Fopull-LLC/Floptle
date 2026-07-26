@@ -222,6 +222,26 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 /// AND the particle globals so meshes, matter, terrain and particles fog together —
 /// and band-break identically. Packing into the two already-spare `.w` lanes keeps
 /// the uniform layout (and its byte-sync with the WGSL structs) unchanged.
+/// Volumetric-fog uniform lanes (`vol_fog_a/b`): densities/heights straight off
+/// the Lighting node, `time` drifting the noise, and the camera's WORLD height
+/// so the shader can map camera-relative positions back to world y.
+pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [f32; 4]) {
+    (
+        [
+            l.fog_density.max(0.0),
+            l.fog_height,
+            l.fog_falloff.max(1e-3),
+            l.fog_noise.clamp(0.0, 1.0),
+        ],
+        [
+            l.fog_noise_scale.max(1e-3),
+            time,
+            cam_y,
+            if l.fog && l.fog_volumetric { 1.0 } else { 0.0 },
+        ],
+    )
+}
+
 pub(crate) fn fog_uniforms(l: &Light) -> ([f32; 4], [f32; 4]) {
     let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
     (

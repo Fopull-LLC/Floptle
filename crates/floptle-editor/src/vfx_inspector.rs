@@ -7,7 +7,7 @@
 
 use floptle_scene::{
     VfxBlendDoc, VfxEmitDoc, VfxFlipModeDoc, VfxFlipbookDoc, VfxForceDoc, VfxInterpDoc,
-    VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxValueDoc,
+    VfxOrientDoc, VfxRenderDoc, VfxShapeDoc, VfxSpaceDoc, VfxTrailDoc, VfxValueDoc,
 };
 
 use crate::EditorTabViewer;
@@ -104,18 +104,25 @@ impl EditorTabViewer<'_> {
                     .default_open(open)
                     .show(ui, |ui| body(ui));
             };
+            // A beam track has no particles: emission/forces don't apply, so hide
+            // them (the same gating idea `is_mesh` uses inside the Look section).
+            let is_beam = matches!(track.render, VfxRenderDoc::Beam { .. });
             section(ui, "vfx_look", "🎨  Look", true, &mut |ui| {
                 look_section(ui, track, tree, root, &model_list, &mut dirty)
             });
-            section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
-                emission_section(ui, ti, track, &mut dirty)
-            });
+            if !is_beam {
+                section(ui, "vfx_emit", "✳  Emission", true, &mut |ui| {
+                    emission_section(ui, ti, track, &mut dirty)
+                });
+            }
             section(ui, "vfx_life", "📈  Over each particle's life", true, &mut |ui| {
                 particle_section(ui, track, st, &mut dirty)
             });
-            section(ui, "vfx_forces", "💨  Forces", false, &mut |ui| {
-                forces_section(ui, track, &mut dirty)
-            });
+            if !is_beam {
+                section(ui, "vfx_forces", "💨  Forces", false, &mut |ui| {
+                    forces_section(ui, track, &mut dirty)
+                });
+            }
             ui.add_space(2.0);
             selected_point_section(ui, ti, track, st, dur, &mut dirty);
         });
@@ -242,12 +249,21 @@ fn look_section(
     model_list: &[String],
     dirty: &mut bool,
 ) {
-    // Render mode: billboard (textured quad) vs instanced mesh.
+    // Render mode: billboard (textured quad) vs instanced mesh vs beam ribbon.
     let is_mesh = matches!(track.render, VfxRenderDoc::Mesh { .. });
+    let is_beam = matches!(track.render, VfxRenderDoc::Beam { .. });
     egui::ComboBox::from_id_salt("vfx_rendermode")
-        .selected_text(if is_mesh { "3D mesh" } else { "billboard" })
+        .selected_text(if is_mesh {
+            "3D mesh"
+        } else if is_beam {
+            "beam"
+        } else {
+            "billboard"
+        })
         .show_ui(ui, |ui| {
-            if ui.selectable_label(!is_mesh, "billboard (flat quad)").clicked() && is_mesh {
+            let is_billboard = !is_mesh && !is_beam;
+            if ui.selectable_label(is_billboard, "billboard (flat quad)").clicked() && !is_billboard
+            {
                 track.render = VfxRenderDoc::Billboard { texture: None };
                 *dirty = true;
             }
@@ -255,6 +271,10 @@ fn look_section(
                 // Default to a built-in sphere so a fresh mesh track renders immediately
                 // instead of showing nothing until you pick an asset.
                 track.render = VfxRenderDoc::Mesh { asset_path: "builtin://sphere".to_string() };
+                *dirty = true;
+            }
+            if ui.selectable_label(is_beam, "beam (origin → end ribbon)").clicked() && !is_beam {
+                track.render = VfxRenderDoc::Beam { texture: None };
                 *dirty = true;
             }
         });
@@ -276,30 +296,24 @@ fn look_section(
                     *dirty = true;
                 }
             });
-            // Blend only matters for billboards (mesh particles composite through
-            // the raster transparent pass by alpha).
-            egui::ComboBox::from_id_salt("vfx_blend")
-                .selected_text(match track.blend {
-                    VfxBlendDoc::Alpha => "blend: alpha",
-                    VfxBlendDoc::Additive => "blend: additive (glow)",
-                    VfxBlendDoc::Premultiplied => "blend: premultiplied",
-                    VfxBlendDoc::Screen => "blend: screen (lighten)",
-                    VfxBlendDoc::Multiply => "blend: multiply (darken)",
-                })
-                .show_ui(ui, |ui| {
-                    for (v, l) in [
-                        (VfxBlendDoc::Alpha, "alpha"),
-                        (VfxBlendDoc::Additive, "additive (glow)"),
-                        (VfxBlendDoc::Premultiplied, "premultiplied"),
-                        (VfxBlendDoc::Screen, "screen (lighten)"),
-                        (VfxBlendDoc::Multiply, "multiply (darken)"),
-                    ] {
-                        if ui.selectable_label(track.blend == v, l).clicked() && track.blend != v {
-                            track.blend = v;
-                            *dirty = true;
-                        }
-                    }
-                });
+        }
+        VfxRenderDoc::Beam { texture } => {
+            ui.horizontal(|ui| {
+                ui.label("texture");
+                if let Some(pick) = crate::ui_widgets::asset_picker(
+                    ui,
+                    egui::Id::new("vfx_beam_tex"),
+                    project_root,
+                    &short(texture.as_deref().unwrap_or("(plain ribbon)")),
+                    Some("(plain ribbon)"),
+                    asset_tree,
+                    crate::assets::is_texture,
+                    160.0,
+                ) {
+                    *texture = pick;
+                    *dirty = true;
+                }
+            });
         }
         VfxRenderDoc::Mesh { asset_path } => {
             ui.horizontal(|ui| {
@@ -336,10 +350,40 @@ fn look_section(
             ui.small("mesh particles are lit + sun-shadowed like scene meshes");
         }
     }
-    // Billboard alignment + flipbook: both apply only to billboard tracks.
+    // Blend applies to the particle pass — billboards AND beams (mesh particles
+    // composite through the raster transparent pass by alpha).
     if !is_mesh {
+        egui::ComboBox::from_id_salt("vfx_blend")
+            .selected_text(match track.blend {
+                VfxBlendDoc::Alpha => "blend: alpha",
+                VfxBlendDoc::Additive => "blend: additive (glow)",
+                VfxBlendDoc::Premultiplied => "blend: premultiplied",
+                VfxBlendDoc::Screen => "blend: screen (lighten)",
+                VfxBlendDoc::Multiply => "blend: multiply (darken)",
+            })
+            .show_ui(ui, |ui| {
+                for (v, l) in [
+                    (VfxBlendDoc::Alpha, "alpha"),
+                    (VfxBlendDoc::Additive, "additive (glow)"),
+                    (VfxBlendDoc::Premultiplied, "premultiplied"),
+                    (VfxBlendDoc::Screen, "screen (lighten)"),
+                    (VfxBlendDoc::Multiply, "multiply (darken)"),
+                ] {
+                    if ui.selectable_label(track.blend == v, l).clicked() && track.blend != v {
+                        track.blend = v;
+                        *dirty = true;
+                    }
+                }
+            });
+    }
+    if is_beam {
+        beam_editor(ui, track, dirty);
+    }
+    // Billboard alignment + flipbook + trail: billboard tracks only.
+    if !is_mesh && !is_beam {
         orient_editor(ui, track, dirty);
         flipbook_editor(ui, track, dirty);
+        trail_editor(ui, track, asset_tree, project_root, dirty);
     }
     // Lighting / shadow opt-ins (off by default — proposal §5). They only affect
     // MESH particles — the billboard pass draws unlit textured quads — so grey them
@@ -416,6 +460,109 @@ fn orient_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirt
                 .on_hover_text("how far the quad stretches along its motion")
                 .changed();
         }
+    });
+}
+
+/// Beam controls (beam tracks): the origin→endpoint ribbon's subdivision, endpoint,
+/// wave ripple, and texture scroll. Width/color come from the track's size/color
+/// rows sampled at the effect's timeline position, not per particle.
+fn beam_editor(ui: &mut egui::Ui, track: &mut floptle_scene::VfxTrackDoc, dirty: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label("segments");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.segments).speed(0.2).range(1..=256))
+            .on_hover_text("quads the ribbon subdivides into (more = smoother waves)")
+            .changed();
+        ui.label("scroll");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.scroll).speed(0.02).suffix("/s"))
+            .on_hover_text("texture flow speed along the beam (texture-lengths per second)")
+            .changed();
+    });
+    ui.horizontal(|ui| {
+        ui.label("end").on_hover_text("the beam's endpoint — a LOCAL offset from the node");
+        for (i, p) in ["x", "y", "z"].iter().enumerate() {
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut track.beam_end[i]).speed(0.05).prefix(*p))
+                .changed();
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("wave");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.wave_amplitude).speed(0.01).range(0.0..=100.0))
+            .on_hover_text("sine-ripple amplitude across the chain (0 = straight)")
+            .changed();
+        ui.label("freq");
+        *dirty |= ui
+            .add(egui::DragValue::new(&mut track.wave_frequency).speed(0.05).range(0.0..=64.0))
+            .on_hover_text("ripple cycles along the beam, animated by effect time")
+            .changed();
+    });
+    ui.small(
+        "one origin→end ribbon; emission is ignored. Width = the size row, tint = the \
+         color row, both sampled at the effect's timeline position. From a script: \
+         node:particles():setBeamEnd(x, y, z) aims it at a world point.",
+    );
+}
+
+/// Ribbon-trail controls (billboard tracks): each particle drags a fading ribbon —
+/// sword slashes, wind streaks, tracers.
+fn trail_editor(
+    ui: &mut egui::Ui,
+    track: &mut floptle_scene::VfxTrackDoc,
+    asset_tree: &[crate::assets::AssetEntry],
+    project_root: &std::path::Path,
+    dirty: &mut bool,
+) {
+    let mut on = track.trail.is_some();
+    if ui
+        .checkbox(&mut on, "trail")
+        .on_hover_text("each particle leaves a fading ribbon behind it — slashes, streaks, tracers")
+        .changed()
+    {
+        track.trail = on.then(VfxTrailDoc::default);
+        *dirty = true;
+    }
+    let Some(t) = &mut track.trail else { return };
+    ui.indent("vfx_trail_settings", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("time");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut t.time).speed(0.01).range(0.01..=10.0).suffix("s"))
+                .on_hover_text("seconds of history the ribbon spans")
+                .changed();
+            ui.label("width");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut t.width).speed(0.01).range(0.0..=100.0))
+                .on_hover_text("ribbon width in world units (at the head)")
+                .changed();
+            *dirty |= ui
+                .checkbox(&mut t.fade, "fade")
+                .on_hover_text("taper width and alpha to zero at the tail")
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("min dist");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut t.min_distance).speed(0.005).range(0.001..=10.0))
+                .on_hover_text("a new ribbon point is recorded only after the particle moves this far")
+                .changed();
+            ui.label("texture");
+            if let Some(pick) = crate::ui_widgets::asset_picker(
+                ui,
+                egui::Id::new("vfx_trail_tex"),
+                project_root,
+                &short(t.texture.as_deref().unwrap_or("(track texture)")),
+                Some("(track texture)"),
+                asset_tree,
+                crate::assets::is_texture,
+                140.0,
+            ) {
+                t.texture = pick;
+                *dirty = true;
+            }
+        });
     });
 }
 

@@ -29,7 +29,7 @@ pub use vfx::{
     VfxEffectDoc, VfxEmitDoc, VfxEndDoc, VfxExtrapolateDoc, VfxFlipModeDoc, VfxFlipbookDoc,
     VfxForceDoc, VfxGravityDoc, VfxInterpDoc, VfxKeyDoc, VfxLaneDoc, VfxLaneTargetDoc,
     VfxLifetimeScaleDoc, VfxOrientDoc, VfxPlaybackDoc, VfxPropDoc, VfxRenderDoc, VfxShapeDoc,
-    VfxSpaceDoc, VfxTrackDoc, VfxValueDoc,
+    VfxSpaceDoc, VfxTrackDoc, VfxTrailDoc, VfxValueDoc,
     VFX_EXT,
 };
 
@@ -69,6 +69,11 @@ pub struct NodeDoc {
     /// The node's material (surface look). `None` = the engine's default look.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<MaterialDoc>,
+    /// Per-SUB-OBJECT material overrides on a Mesh node: object name (or, for a
+    /// flattened model, material name) ⏵ that part's material. See
+    /// [`floptle_core::ObjectMaterials`]. Empty = none (old scenes untouched).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub object_materials: std::collections::BTreeMap<String, MaterialDoc>,
     /// A physics rigidbody on this node (`None` = not a physics body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rigidbody: Option<RigidBodyDoc>,
@@ -912,6 +917,20 @@ pub struct LightDoc {
     pub fog_dither: bool,
     #[serde(default = "default_fog_dither_strength")]
     pub fog_dither_strength: f32,
+    /// Volumetric mode: a height-bounded, noise-broken fog layer marched per
+    /// pixel instead of the flat distance ramp. Pre-volumetric scenes → off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fog_volumetric: bool,
+    #[serde(default = "default_fog_density")]
+    pub fog_density: f32,
+    #[serde(default = "default_fog_height")]
+    pub fog_height: f32,
+    #[serde(default = "default_fog_falloff")]
+    pub fog_falloff: f32,
+    #[serde(default = "default_fog_noise")]
+    pub fog_noise: f32,
+    #[serde(default = "default_fog_noise_scale")]
+    pub fog_noise_scale: f32,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -931,6 +950,21 @@ fn default_fog_end() -> f32 {
 }
 fn default_fog_dither_strength() -> f32 {
     0.5
+}
+fn default_fog_density() -> f32 {
+    0.02
+}
+fn default_fog_height() -> f32 {
+    6.0
+}
+fn default_fog_falloff() -> f32 {
+    8.0
+}
+fn default_fog_noise() -> f32 {
+    0.5
+}
+fn default_fog_noise_scale() -> f32 {
+    24.0
 }
 
 impl Default for LightDoc {
@@ -960,6 +994,12 @@ impl From<&Light> for LightDoc {
             fog_end: l.fog_end,
             fog_dither: l.fog_dither,
             fog_dither_strength: l.fog_dither_strength,
+            fog_volumetric: l.fog_volumetric,
+            fog_density: l.fog_density,
+            fog_height: l.fog_height,
+            fog_falloff: l.fog_falloff,
+            fog_noise: l.fog_noise,
+            fog_noise_scale: l.fog_noise_scale,
         }
     }
 }
@@ -985,6 +1025,12 @@ impl LightDoc {
             fog_end: self.fog_end,
             fog_dither: self.fog_dither,
             fog_dither_strength: self.fog_dither_strength,
+            fog_volumetric: self.fog_volumetric,
+            fog_density: self.fog_density,
+            fog_height: self.fog_height,
+            fog_falloff: self.fog_falloff,
+            fog_noise: self.fog_noise,
+            fog_noise_scale: self.fog_noise_scale,
         }
     }
 }
@@ -1392,6 +1438,17 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(m) = &node.material {
         world.insert(e, m.to_material());
     }
+    if !node.object_materials.is_empty() {
+        world.insert(
+            e,
+            floptle_core::ObjectMaterials(
+                node.object_materials
+                    .iter()
+                    .map(|(k, m)| (k.clone(), m.to_material()))
+                    .collect(),
+            ),
+        );
+    }
     if let Some(rb) = &node.rigidbody {
         world.insert(e, rb.to_rigidbody());
     }
@@ -1538,6 +1595,12 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .map(|s| s.0.iter().map(ScriptDoc::from_inst).collect())
             .unwrap_or_default();
         let material = world.get::<Material>(e).map(MaterialDoc::from_material);
+        let object_materials = world
+            .get::<floptle_core::ObjectMaterials>(e)
+            .map(|om| {
+                om.0.iter().map(|(k, m)| (k.clone(), MaterialDoc::from_material(m))).collect()
+            })
+            .unwrap_or_default();
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let celestial =
             world.get::<floptle_core::CelestialBody>(e).map(CelestialBodyDoc::from_body);
@@ -1571,6 +1634,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             matter: MatterDoc::from(matter),
             scripts,
             material,
+            object_materials,
             rigidbody,
             celestial,
             mesh_collider,
@@ -1619,6 +1683,7 @@ mod tests {
                     name: "cube".into(),
                     transform: TransformDoc { translation: [1.0, 2.0, 3.0], ..Default::default() },
                     matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.4, 0.3] },
+                    object_materials: Default::default(),
                     scripts: vec![ScriptDoc {
                         kind: "pulsate".into(),
                         enabled: true,
@@ -1743,6 +1808,7 @@ mod tests {
                     name: "blob".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
+                    object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -1773,6 +1839,7 @@ mod tests {
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 },
+                    object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -1800,6 +1867,7 @@ mod tests {
                     name: "eye".into(),
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX },
+                    object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,

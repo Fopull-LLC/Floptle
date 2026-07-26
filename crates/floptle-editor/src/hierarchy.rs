@@ -15,6 +15,19 @@ use crate::{EditorCmd, EditorTabViewer};
 /// another row re-parents it.
 #[derive(Clone)]
 pub(crate) struct NodePayload(pub(crate) Entity);
+
+impl EditorTabViewer<'_> {
+    /// What a hierarchy drag actually moves: the whole selection when the dragged
+    /// row is part of a multi-selection, else just the dragged row (same rule as
+    /// the Assets panel's `move_sources`).
+    fn drag_sources(&self, dragged: Entity) -> Vec<Entity> {
+        if self.selection.len() > 1 && self.selection.contains(&dragged) {
+            self.selection.clone()
+        } else {
+            vec![dragged]
+        }
+    }
+}
 impl<'a> EditorTabViewer<'a> {
     pub(crate) fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
         // Scene name + save at the top of the hierarchy.
@@ -73,7 +86,7 @@ impl<'a> EditorTabViewer<'a> {
             // (create at scene root).
             let bg = ui.allocate_response(ui.available_size(), egui::Sense::click());
             if let Some(p) = bg.dnd_release_payload::<NodePayload>() {
-                self.cmd.reparent = Some((p.0, None));
+                self.cmd.reparent = Some((self.drag_sources(p.0), None));
             }
             if let Some(p) = bg.dnd_release_payload::<AssetPayload>()
                 && crate::assets::is_prefab(&p.path)
@@ -319,7 +332,7 @@ impl EditorTabViewer<'_> {
         resp.context_menu(|ui| {
             ui.menu_button("✚ Add child", |ui| self.node_new_menu(ui, Some(e)));
             if self.world.get::<floptle_core::Parent>(e).is_some() && ui.button("⮪ Unparent").clicked() {
-                self.cmd.reparent = Some((e, None));
+                self.cmd.reparent = Some((vec![e], None));
                 ui.close();
             }
             if ui
@@ -353,7 +366,10 @@ impl EditorTabViewer<'_> {
         // asset spawns an instance as my child.
         if let Some(p) = resp.dnd_release_payload::<NodePayload>()
             && p.0 != e {
-                self.cmd.reparent = Some((p.0, Some(e)));
+                // Dragging a node that's part of a multi-selection re-parents the
+                // WHOLE selection under the drop target (the target itself and any
+                // node whose ancestor is also moving are filtered in reparent_many).
+                self.cmd.reparent = Some((self.drag_sources(p.0), Some(e)));
             }
         if let Some(p) = resp.dnd_release_payload::<AssetPayload>() {
             if is_script(&p.path) {

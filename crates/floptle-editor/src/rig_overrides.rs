@@ -23,6 +23,10 @@ pub(crate) struct RigOverrides {
     /// baked object whose origin is at the model root rotate about its real joint.
     #[serde(default)]
     pub pivot: BTreeMap<String, [f32; 3]>,
+    /// Filtering for the model's EMBEDDED textures (all of them — per-model, not
+    /// per-image). Absent = the engine default (crisp/pixelated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture_filter: Option<crate::assets::FilterMode>,
 }
 
 impl RigOverrides {
@@ -45,7 +49,7 @@ impl RigOverrides {
     /// fully-cleared reparent doesn't linger on disk.
     pub fn save(&self, model_abs: &Path) -> std::io::Result<()> {
         let p = Self::sidecar_path(model_abs);
-        if self.reparent.is_empty() && self.pivot.is_empty() {
+        if self.reparent.is_empty() && self.pivot.is_empty() && self.texture_filter.is_none() {
             let _ = std::fs::remove_file(&p);
             return Ok(());
         }

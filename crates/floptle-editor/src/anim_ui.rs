@@ -2985,19 +2985,18 @@ impl EditorTabViewer<'_> {
             }
             // Cut = delete only the keys copied from THIS selection (by node+time,
             // robust to reindexing).  A stale clipboard is deliberately irrelevant.
-            if cut_keys {
-                if !copied_now.is_empty()
-                    && let Some((_, d)) = st.clip_doc.as_mut()
-                {
-                    for (node, t, _) in &copied_now {
-                        if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
-                            delete_channel_key(&mut d.channels[ci], *t);
-                            drop_empty_channel(d, ci);
-                        }
+            if cut_keys
+                && !copied_now.is_empty()
+                && let Some((_, d)) = st.clip_doc.as_mut()
+            {
+                for (node, t, _) in &copied_now {
+                    if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
+                        delete_channel_key(&mut d.channels[ci], *t);
+                        drop_empty_channel(d, ci);
                     }
-                    st.sel_keys.clear();
-                    st.clip_dirty = true;
                 }
+                st.sel_keys.clear();
+                st.clip_dirty = true;
             }
             // Paste at the playhead: the earliest copied key lands on the playhead,
             // the rest keep their relative offsets. Reselect the pasted keys.

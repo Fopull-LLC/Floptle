@@ -69,6 +69,27 @@ impl Transform {
             scale: self.scale * child.scale,
         }
     }
+
+    /// The local transform `L` with `self.mul_transform(&L) == world` — the exact
+    /// inverse of [`Self::mul_transform`]'s componentwise TRS composition. Use this
+    /// (not matrix inverse + [`Self::from_matrix`]) to convert a world transform
+    /// into a parent's space: a matrix decomposition attributes a mirrored parent's
+    /// negative determinant to the X axis regardless of which axis is actually
+    /// flipped, so gizmo drags under a negative-scale parent (a mirrored character)
+    /// pop and mis-rotate. Componentwise TRS keeps mirror semantics identical to
+    /// the scene graph's own composition. Near-zero parent scale is floored (sign
+    /// kept) instead of dividing to infinity.
+    pub fn inv_mul(&self, world: &Transform) -> Transform {
+        let safe = |v: f32| if v.abs() > 1e-8 { v } else { 1e-8_f32.copysign(v) };
+        let s = glam::Vec3::new(safe(self.scale.x), safe(self.scale.y), safe(self.scale.z));
+        let inv_r = self.rotation.inverse();
+        Transform {
+            translation: (inv_r.as_dquat() * (world.translation - self.translation))
+                / s.as_dvec3(),
+            rotation: (inv_r * world.rotation).normalize(),
+            scale: world.scale / s,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -91,5 +112,26 @@ mod tests {
         let t = Transform::IDENTITY;
         let m = t.render_matrix(DVec3::ZERO);
         assert_eq!(m, Mat4::IDENTITY);
+    }
+
+    #[test]
+    fn inv_mul_round_trips_under_a_mirrored_parent() {
+        // A parent mirrored on Y (the case a matrix decomposition mis-attributes
+        // to X): inv_mul must be the exact inverse of mul_transform.
+        let parent = Transform {
+            translation: DVec3::new(3.0, -1.0, 2.0),
+            rotation: glam::Quat::from_rotation_y(0.7),
+            scale: glam::Vec3::new(2.0, -1.0, 1.5),
+        };
+        let world = Transform {
+            translation: DVec3::new(-4.0, 5.0, 0.5),
+            rotation: glam::Quat::from_rotation_x(0.3),
+            scale: glam::Vec3::new(1.0, 1.0, -3.0),
+        };
+        let local = parent.inv_mul(&world);
+        let back = parent.mul_transform(&local);
+        assert!((back.translation - world.translation).length() < 1e-5, "{back:?}");
+        assert!((back.scale - world.scale).length() < 1e-5, "{back:?}");
+        assert!(back.rotation.dot(world.rotation).abs() > 1.0 - 1e-5, "{back:?}");
     }
 }

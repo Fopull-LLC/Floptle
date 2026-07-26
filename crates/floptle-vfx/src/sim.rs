@@ -133,6 +133,12 @@ fn force_accel(f: &Force, pos: Vec3, world: Vec3) -> Vec3 {
 // SoA particle storage
 // ---------------------------------------------------------------------------
 
+/// Hard cap on ribbon-trail history points per particle: enough for a smooth curve
+/// over a `Trail::time` window at `min_distance` spacing while bounding memory
+/// (32 × vec4 = 512 B per trailed particle, worst case). The oldest point drops
+/// when the cap is hit, so the ribbon shortens rather than the sim allocating.
+pub const TRAIL_MAX_POINTS: usize = 32;
+
 /// Live particles of one track — structure-of-arrays, capacity-allocated once,
 /// retired by swap-remove so the arrays stay dense. Field packing is std430-ready:
 /// `pos_age` = position.xyz + age, `vel_life` = velocity.xyz + total lifetime,
@@ -143,17 +149,22 @@ pub struct TrackParticles {
     pub frame: Vec<Vec4>,
     pub misc: Vec<Vec4>,
     pub seed: Vec<u32>,
+    /// Ribbon-trail history, parallel to the particle arrays — `None` for tracks
+    /// without a trail (they pay nothing). Each particle's history is oldest→newest
+    /// `position.xyz + age-at-record` samples, bounded by [`TRAIL_MAX_POINTS`].
+    pub trail: Option<Vec<Vec<Vec4>>>,
     pub count: usize,
 }
 
 impl TrackParticles {
-    fn with_capacity(cap: usize) -> Self {
+    fn with_capacity(cap: usize, with_trail: bool) -> Self {
         Self {
             pos_age: Vec::with_capacity(cap),
             vel_life: Vec::with_capacity(cap),
             frame: Vec::with_capacity(cap),
             misc: Vec::with_capacity(cap),
             seed: Vec::with_capacity(cap),
+            trail: with_trail.then(|| Vec::with_capacity(cap)),
             count: 0,
         }
     }
@@ -164,6 +175,9 @@ impl TrackParticles {
         self.frame.clear();
         self.misc.clear();
         self.seed.clear();
+        if let Some(t) = &mut self.trail {
+            t.clear();
+        }
         self.count = 0;
     }
 
@@ -173,6 +187,9 @@ impl TrackParticles {
         self.frame.swap_remove(i);
         self.misc.swap_remove(i);
         self.seed.swap_remove(i);
+        if let Some(t) = &mut self.trail {
+            t.swap_remove(i); // lockstep with every other parallel array
+        }
         self.count -= 1;
     }
 
@@ -183,6 +200,10 @@ impl TrackParticles {
         self.frame.push(Vec4::new(frame.x, frame.y, frame.z, frame.w));
         self.misc.push(misc);
         self.seed.push(seed);
+        if let Some(t) = &mut self.trail {
+            // The birth position seeds the history so the ribbon starts immediately.
+            t.push(vec![pos.extend(age)]);
+        }
         self.count += 1;
     }
 }
@@ -226,6 +247,9 @@ pub struct EffectInstance {
     /// `advance`/`advance_at` never inherits stale motion. Newborns on World tracks
     /// add `inherit_velocity * this` at birth.
     pending_emit_vel: Vec3,
+    /// Script override for every Beam track's endpoint (effect-LOCAL offset), set
+    /// via [`Self::set_beam_end`]. `None` = each track's authored `beam_end`.
+    beam_end_override: Option<Vec3>,
 }
 
 /// Epsilon the playhead starts *before*, so events placed exactly at `t = 0`
@@ -238,7 +262,7 @@ impl EffectInstance {
             .tracks
             .iter()
             .map(|ct| TrackState {
-                particles: TrackParticles::with_capacity(ct.capacity as usize),
+                particles: TrackParticles::with_capacity(ct.capacity as usize, ct.trail.is_some()),
                 acc: vec![0.0; ct.clips.len()],
                 emit_counter: 0,
             })
@@ -254,7 +278,20 @@ impl EffectInstance {
             anchor: DVec3::ZERO,
             anchored: false,
             pending_emit_vel: Vec3::ZERO,
+            beam_end_override: None,
         }
+    }
+
+    /// Override every Beam track's endpoint for this instance — an effect-LOCAL
+    /// offset from the origin (the `setBeamEnd` script path; the host converts a
+    /// world point to local before calling). `None`-able only by a fresh instance.
+    pub fn set_beam_end(&mut self, local: Vec3) {
+        self.beam_end_override = Some(local);
+    }
+
+    /// The endpoint a Beam track's ribbon reaches (script override, else authored).
+    pub fn beam_end(&self, track: usize) -> Vec3 {
+        self.beam_end_override.unwrap_or(self.effect.tracks[track].beam_end)
     }
 
     /// Set the live emission scale (clamped 0..4). 1 = the authored effect.
@@ -355,6 +392,16 @@ impl EffectInstance {
                             let np = pa.truncate() - delta;
                             *pa = np.extend(pa.w);
                         }
+                        // Trail history is stored in the same anchor-relative space —
+                        // shift it in lockstep so ribbons stay put in the world.
+                        if let Some(trails) = &mut self.tracks[ti].particles.trail {
+                            for hist in trails {
+                                for pt in hist {
+                                    let np = pt.truncate() - delta;
+                                    *pt = np.extend(pt.w);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -403,7 +450,9 @@ impl EffectInstance {
         let inst_seed = hash(self.instance_seed ^ hash(effect.seed));
         let lifetime = effect.lifetime;
         for (ti, ct) in effect.tracks.iter().enumerate() {
-            if !ct.enabled {
+            // Beam tracks render one origin→endpoint ribbon and ignore emission
+            // entirely — no particles are ever born on them.
+            if !ct.enabled || matches!(ct.look.render, RenderMode::Beam { .. }) {
                 continue;
             }
             let ts = &mut self.tracks[ti];
@@ -513,6 +562,29 @@ impl EffectInstance {
                 let pos = p.pos_age[i].truncate() + (vel + base) * dt;
                 p.pos_age[i] = pos.extend(age);
                 p.vel_life[i] = vel.extend(life);
+                // Ribbon-trail history: record a point once the particle has moved
+                // `min_distance` from the last one, expire points older than the
+                // trail window, and bound the buffer (drop-oldest) — see
+                // [`TRAIL_MAX_POINTS`]. Untrailed tracks skip all of this.
+                if let (Some(trail), Some(trails)) = (&ct.trail, &mut p.trail) {
+                    let hist = &mut trails[i];
+                    let min_d2 = trail.min_distance.max(1e-4).powi(2);
+                    let moved = hist
+                        .last()
+                        .is_none_or(|l| (pos - l.truncate()).length_squared() >= min_d2);
+                    if moved {
+                        if hist.len() >= TRAIL_MAX_POINTS {
+                            hist.remove(0);
+                        }
+                        hist.push(pos.extend(age));
+                    }
+                    // Expire off the tail: a point's own age = particle age − record age.
+                    let cutoff = age - trail.time.max(1e-3);
+                    let expired = hist.partition_point(|pt| pt.w < cutoff);
+                    if expired > 0 {
+                        hist.drain(..expired);
+                    }
+                }
                 i += 1;
             }
         }
@@ -663,6 +735,12 @@ impl EffectInstance {
     /// Sample every live particle of `track` for drawing. Size/rotation/color come
     /// from the life-curve LUTs at `age/life`, scaled by the birth-lane snapshot.
     pub fn sample_track(&self, track: usize, mut f: impl FnMut(ParticleSample)) {
+        self.sample_track_indexed(track, |_, s| f(s));
+    }
+
+    /// [`sample_track`] with the particle's SoA index — trail collection pairs the
+    /// sample with the particle's history buffer at the same index.
+    pub fn sample_track_indexed(&self, track: usize, mut f: impl FnMut(usize, ParticleSample)) {
         let ct = &self.effect.tracks[track];
         let p = &self.tracks[track].particles;
         let tint = ct.lane_tint.sample(self.t / self.effect.lifetime);
@@ -690,7 +768,7 @@ impl EffectInstance {
             if ct.velocity_is_curve {
                 velocity += frame * ct.velocity.sample_vec3(u) * p.misc[i].y;
             }
-            f(ParticleSample {
+            f(i, ParticleSample {
                 pos: p.pos_age[i].truncate(),
                 velocity,
                 frame,
@@ -729,6 +807,15 @@ impl EffectInstance {
             .iter()
             .enumerate()
             .filter(|(_, ct)| ct.enabled && matches!(ct.look.render, RenderMode::Mesh { .. }))
+    }
+
+    /// Iterate the tracks that draw as origin→endpoint beam ribbons.
+    pub fn beam_tracks(&self) -> impl Iterator<Item = (usize, &CompiledTrack)> {
+        self.effect
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, ct)| ct.enabled && matches!(ct.look.render, RenderMode::Beam { .. }))
     }
 }
 
@@ -1112,6 +1199,116 @@ mod tests {
         let y = inst.track_particles(0).pos_age[0].y;
         // Analytic: −½·g·t² = −5; fixed-step integration lands close.
         assert!((-5.5..=-4.5).contains(&y), "fell to {y}");
+    }
+
+    #[test]
+    fn trail_history_records_by_distance_and_expires() {
+        use crate::effect::Trail;
+        // One particle rising at 2 u/s with a 0.2 s / 0.1 u trail: history points
+        // must be ≥ min_distance apart, oldest→newest, and none older than the
+        // trail window — the tail expires as the particle flies on.
+        let track = Track {
+            clips: vec![burst_clip(0.0, 1, 10.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
+            trail: Some(Trail { time: 0.2, width: 0.1, fade: true, texture: None, min_distance: 0.1 }),
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::OneShot);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.8, NO_G);
+        let p = inst.track_particles(0);
+        let hist = &p.trail.as_ref().expect("trailed track allocates history")[0];
+        assert!(hist.len() >= 2, "a moving particle must accumulate history ({} pts)", hist.len());
+        let age = p.pos_age[0].w;
+        for w in hist.windows(2) {
+            assert!(w[1].w > w[0].w, "history must be oldest→newest by record age");
+            let d = (w[1].truncate() - w[0].truncate()).length();
+            assert!(d >= 0.1 - 1e-4, "points must be min_distance apart, got {d}");
+        }
+        for pt in hist.iter() {
+            assert!(age - pt.w <= 0.2 + 1e-3, "expired point survived: age {}", age - pt.w);
+        }
+        // At 2 u/s over a 0.2 s window with 0.1 u spacing, ~4-5 points remain.
+        assert!(hist.len() <= 8, "expiry must bound the window ({} pts)", hist.len());
+    }
+
+    #[test]
+    fn trail_history_is_bounded_and_untrailed_tracks_pay_nothing() {
+        use crate::effect::Trail;
+        // A tiny min_distance + long window would record every step — the cap must
+        // hold the buffer at TRAIL_MAX_POINTS (drop-oldest, never reallocate-grow).
+        let track = Track {
+            clips: vec![burst_clip(0.0, 1, 10.0)],
+            velocity: ValueOrCurve::Const(Value::Vec3(Vec3::new(0.0, 2.0, 0.0))),
+            trail: Some(Trail { time: 100.0, width: 0.1, fade: true, texture: None, min_distance: 1e-3 }),
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::OneShot);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.9, NO_G);
+        let hist = &inst.track_particles(0).trail.as_ref().unwrap()[0];
+        assert_eq!(hist.len(), TRAIL_MAX_POINTS, "cap must hold exactly");
+        // …and a track with no trail allocates no history at all.
+        let plain = one_track_effect(
+            Track { clips: vec![burst_clip(0.0, 4, 10.0)], ..Track::default() },
+            1.0,
+            Playback::OneShot,
+        );
+        let mut inst2 = EffectInstance::new(plain, 1);
+        inst2.simulate_to(0.5, NO_G);
+        assert!(inst2.track_particles(0).trail.is_none());
+    }
+
+    #[test]
+    fn trail_scrub_is_deterministic() {
+        use crate::effect::Trail;
+        let mk = || {
+            one_track_effect(
+                Track {
+                    clips: vec![rate_clip(0.0, 0.8, 20.0)],
+                    shape: crate::effect::EmitShape::Sphere { radius: 0.5, shell: false },
+                    trail: Some(Trail::default()),
+                    ..Track::default()
+                },
+                1.0,
+                Playback::OneShot,
+            )
+        };
+        let mut a = EffectInstance::new(mk(), 5);
+        let mut b = EffectInstance::new(mk(), 5);
+        a.simulate_to(0.7, NO_G);
+        b.simulate_to(0.7, NO_G);
+        let (ta, tb) = (
+            a.track_particles(0).trail.as_ref().unwrap(),
+            b.track_particles(0).trail.as_ref().unwrap(),
+        );
+        assert_eq!(ta.len(), tb.len());
+        for (ha, hb) in ta.iter().zip(tb.iter()) {
+            assert_eq!(ha, hb, "trail history must re-simulate bit-for-bit");
+        }
+    }
+
+    #[test]
+    fn beam_tracks_never_emit_and_endpoint_overrides() {
+        use crate::effect::RenderMode;
+        // A Beam track ignores its clips entirely — no particles, ever.
+        let track = Track {
+            clips: vec![burst_clip(0.0, 100, 10.0), rate_clip(0.0, 1.0, 500.0)],
+            look: crate::effect::Look {
+                render: RenderMode::Beam { texture: None },
+                ..crate::effect::Look::default()
+            },
+            beam_end: Vec3::new(0.0, 3.0, 0.0),
+            ..Track::default()
+        };
+        let fx = one_track_effect(track, 1.0, Playback::Looping);
+        let mut inst = EffectInstance::new(fx, 1);
+        inst.simulate_to(0.5, NO_G);
+        assert_eq!(inst.alive(), 0, "beam tracks must not spawn particles");
+        // The endpoint is the authored one until a script overrides it.
+        assert_eq!(inst.beam_end(0), Vec3::new(0.0, 3.0, 0.0));
+        inst.set_beam_end(Vec3::new(4.0, 0.0, 1.0));
+        assert_eq!(inst.beam_end(0), Vec3::new(4.0, 0.0, 1.0));
     }
 
     #[test]

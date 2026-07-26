@@ -1063,6 +1063,8 @@ end
 | `p:play()` | start emitting if idle (spawns a fresh instance); no-op if already playing |
 | `p:stop()` | stop + despawn — the live particles vanish |
 | `p:restart()` | re-spawn from `t=0` (re-fire a one-shot burst) |
+| `p:setIntensity(i)` | live emission scale 0..~2 — throttle a plume without touching the asset |
+| `p:setBeamEnd(x, y, z)` | aim every **Beam** track's endpoint at a WORLD point (converted to effect-local, so the beam tracks the target as the node moves) |
 | `p:isPlaying()` | is an instance emitting/ageing right now |
 | `p:alive()` | live particle count across the effect's tracks |
 | `p:asset()` | the effect asset key this node references, or `nil` |
