@@ -6,7 +6,7 @@ use floptle_core::World;
 use floptle_core::math::Mat3;
 use floptle_core::math::Quat;
 use floptle_core::math::Vec3;
-use floptle_render::TexId;
+use floptle_render::{MeshId, TexId};
 use floptle_scene::MaterialDoc;
 use floptle_scene::MatterDoc;
 use floptle_scene::SceneDoc;
@@ -198,7 +198,7 @@ impl Editor {
         // clips (parts stay node-local and get posed each frame).
         match floptle_assets::import_rigged(&file) {
             Ok(Some(model)) => {
-                let parts = model
+                let parts: Vec<MeshId> = model
                     .parts
                     .iter()
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
@@ -252,7 +252,7 @@ impl Editor {
         }
         match floptle_assets::gltf_import::import(&file) {
             Ok(model) => {
-                let parts = model
+                let parts: Vec<MeshId> = model
                     .parts
                     .iter()
                     .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))

@@ -4216,7 +4216,7 @@ impl Editor {
                 // Rigged first (animated glTF keeps its node tree + clips).
                 match floptle_assets::import_rigged(std::path::Path::new(&path)) {
                     Ok(Some(model)) => {
-                        let parts = model
+                        let parts: Vec<MeshId> = model
                             .parts
                             .iter()
                             .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
@@ -4256,7 +4256,7 @@ impl Editor {
                 }
                 match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
                     Ok(model) => {
-                        let parts = model
+                        let parts: Vec<MeshId> = model
                             .parts
                             .iter()
                             .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
