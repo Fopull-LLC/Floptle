@@ -8,16 +8,20 @@
 --      Idle / Walk / Run / Jump states for full control).
 --   3. Make a Camera node, mark it Active, attach third_person_camera.lua.
 --
---   W A S D            move relative to the camera
---   SPACE               jump (when grounded)
---   DOUBLE-TAP a move key to RUN — release movement to drop back to a walk
---                       (single presses just walk)
---   SHIFT               toggle shift lock (the camera script owns the mode;
---                       while locked — or in first person — the character
---                       faces the camera's yaw instead of its travel)
+--   Move       WASD or the left stick — relative to the camera
+--   Jump       Space or the pad's South button (when grounded)
+--   Sprint     Shift or L3 (hold) to run — OR double-tap a direction, which
+--              works on a stick flick just as well as on a key
+--   ShiftLock  Shift / R3 toggles shift lock (the camera script owns the mode;
+--              while locked — or in first person — the character faces the
+--              camera's yaw instead of its travel)
 --
--- Movement is camera-relative: pushing W walks away from the camera, and the
--- "Model" child smoothly turns to face where you're going. Animation states
+-- Every control is a NAMED ACTION from Project Settings → Input, so this works
+-- on a keyboard, on a gamepad, or on both at once, and any of it can be rebound
+-- without touching the code.
+--
+-- Movement is camera-relative: pushing forward walks away from the camera, and
+-- the "Model" child smoothly turns to face where you're going. Animation states
 -- are driven from the body's real velocity + grounded flag each frame — calls
 -- like anim:play("Run") are safe every frame (re-playing never restarts).
 
@@ -39,8 +43,9 @@ local cam         -- the third_person_camera script (for camera-relative moves)
 local heading = 0 -- the model's current facing (smoothed)
 local states      -- resolved animation state names (see resolve_states)
 local rig
-local running = false               -- run mode: armed by a double-tap
-local tap = { w = -10, a = -10, s = -10, d = -10 } -- last press time per key
+local running = false  -- run mode: armed by a double-tap
+local lastTap = -10    -- when movement last STARTED (for double-tap detection)
+local wasMoving = false
 
 local function normalize(x, y, z)
   local l = math.sqrt(x * x + y * y + z * z)
@@ -102,25 +107,23 @@ function update(node, dt)
   local rd = rx * ux + ry * uy + rz * uz
   rx, ry, rz = normalize(rx - ux * rd, ry - uy * rd, rz - uz * rd)
 
-  local f, s = 0, 0
-  if input.key("w") then f = f + 1 end
-  if input.key("s") then f = f - 1 end
-  if input.key("d") then s = s + 1 end
-  if input.key("a") then s = s - 1 end
-  local il = math.sqrt(f * f + s * s)
-  if il > 1 then f, s = f / il, s / il end
+  -- Movement: WASD or the left stick. Already deadzoned, SOCD-resolved and
+  -- clamped to the unit disk, so there's nothing left to normalise.
+  local s, f = input.axis2("Move")
 
-  -- RUN = double-tap any movement key. Releasing all movement drops back to
-  -- a walk; you run again only on the next double-tap (single taps walk).
-  for _, k in ipairs({ "w", "a", "s", "d" }) do
-    if input.pressed(k) then
-      if time - tap[k] < params.double_tap then running = true end
-      tap[k] = time
-    end
+  -- RUN, two ways. Holding Sprint (Shift / L3) is the obvious one. The other
+  -- is a double-tap — detected on the MOVE AXIS starting from rest rather than
+  -- on a key edge, so a stick flick arms it exactly like tapping W does.
+  -- Releasing all movement drops back to a walk.
+  local moving = (f ~= 0 or s ~= 0)
+  if moving and not wasMoving then
+    if time - lastTap < params.double_tap then running = true end
+    lastTap = time
   end
-  if f == 0 and s == 0 then running = false end
+  wasMoving = moving
+  if not moving then running = false end
 
-  local speed = running and params.run or params.walk
+  local speed = (running or input.action("Sprint")) and params.run or params.walk
 
   -- Grounding, with forgiveness: the physics contact flag OR a short ray
   -- straight down — running down a slope leaves the ground for a few frames
@@ -143,7 +146,7 @@ function update(node, dt)
   -- Keep the vertical (gravity/jump) part, steer the horizontal part.
   local vup = node.vx * ux + node.vy * uy + node.vz * uz
   local startingJump = false
-  if grounded and input.pressed("space") then
+  if grounded and input.justPressed("Jump") then
     vup = params.jump
     startingJump = true
   end
@@ -160,7 +163,6 @@ function update(node, dt)
   -- camera script is local to this machine, so in multiplayer the server's
   -- replay may face a remote model slightly differently — cosmetic only (the
   -- movement itself uses input.aimYaw(), which rides the input command).
-  local moving = (f ~= 0 or s ~= 0)
   if not cam then cam = findScript("third_person_camera") end
   local locked = cam and (cam.shiftlock or cam.firstPerson)
   if model and (moving or locked) then

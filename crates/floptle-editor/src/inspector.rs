@@ -1722,7 +1722,7 @@ impl EditorTabViewer<'_> {
                     let root = self.project_root;
                     let track_names: Vec<String> =
                         std::iter::once(floptle_audio::MASTER.to_string())
-                            .chain(self.mixer.tracks.iter().map(|t| t.name.clone()))
+                            .chain(self.project.mixer.tracks.iter().map(|t| t.name.clone()))
                             .collect();
                     ui.indent("audio_props", |ui| {
                         if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(e) {

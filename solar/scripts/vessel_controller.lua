@@ -74,7 +74,7 @@ local function gear_lerp(a, b, f) return a + (b - a) * f end
 -- the detection, keybind, HUD tag and per-tick actuation all come along.
 local DEVICES = {
   gear = {
-    key = "g", label = "GEAR",
+    key = "g", label = "GEAR", order = 1,
     detect = function(d) return (d.legs or 0) == 1 end,
     parts = {},      -- blueprint uids, filled by load_bp
     on = true,       -- legs spawn deployed (the pad handshake needs them)
@@ -106,7 +106,7 @@ local DEVICES = {
     end,
   },
   comms = {
-    key = "u", label = "COMMS DISH",
+    key = "u", label = "COMMS DISH", order = 2,
     detect = function(d) return (d.comms or 0) == 1 end,
     parts = {},
     on = false,      -- dishes stow for launch, deploy in space (U)
@@ -124,7 +124,7 @@ local DEVICES = {
   -- stub; deployed they unfold to full span and tip up to catch the sun. Power
   -- generation (only while deployed AND sunlit) lives in power_tick.
   solar = {
-    key = "u", label = "SOLAR PANELS",
+    key = "u", label = "SOLAR PANELS", order = 3,
     detect = function(d) return (d.solar or 0) == 1 end,
     parts = {},
     on = false,
@@ -335,8 +335,10 @@ local function part_axis(d)
   return -cy * sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz
 end
 
-local function load_bp()
-  bp = save.get("shipyard.blueprint")
+-- `override` is the blueprint an UNDOCKED module is handed at the seam (see
+-- `undock`); without one we're the shipyard's launch and read the saved build.
+local function load_bp(override)
+  bp = override or save.get("shipyard.blueprint")
   engines, tanks, events, part_total, fuel_cap = {}, {}, {}, 0, 0.0
   elec.cap, elec.gen, elec.comms = 0.0, 0.0, false
   local decouplers, boosters = {}, {}
@@ -471,6 +473,10 @@ local function load_bp()
   for _, d in pairs(bp.parts) do part_hp[d.uid] = 1.0 end
   destroyed = false
   chutes_deployed = false
+  -- Docking ports are peripherals, not staging events — they're rescanned here
+  -- and again after every dock/undock rewrites the tree.
+  dock.ports, dock.latched, dock.pending, dock.target = {}, 0, nil, nil
+  dockRescan()
 end
 
 
@@ -1100,6 +1106,685 @@ local function debris_kick(junk, hx, hy, hz, dv)
     (oz + uz * 0.5) * dv * m), ji.com)
 end
 
+-- ── docking ─────────────────────────────────────────────────────────────────
+-- A DOCKING PORT is the one part that both JOINS two craft and CUTS one back in
+-- half, and it's driven entirely from the peripherals panel — no staging, no
+-- one-way commitment. The mission it exists for: park a mothership in orbit,
+-- undock the lander, go down, come back up, latch on again, fly home.
+--
+-- CAPTURE is honest soft docking. Bring two free ports face to face — inside
+-- the capture radius, roughly square to each other, closing slowly — and the
+-- latch takes. Physically the two compounds MERGE into one rigid body carrying
+-- their combined momentum (`assembly.merge`), so an off-centre catch spins the
+-- stack exactly as much as it should and nothing is created out of nothing.
+--
+-- ABSORPTION is what makes undocking free. The captured craft's blueprint is
+-- folded into ours — its parts, engines, tanks, batteries, panels and its own
+-- ports all become ours — and its tree is RE-ROOTED at the port that mated, so
+-- the merged attachment tree records exactly which parts arrived through which
+-- seam. Cutting there is then the same topological split a decoupler does,
+-- except the departing half comes away as a LIVE craft (`assembly.split` roots
+-- it at the Vessel prefab, scripts and all) carrying a blueprint we hand it at
+-- the seam. Take control of it and fly it.
+--
+-- Everything here is deliberately GLOBAL: the peripherals panel reads this
+-- state cross-script, and `fixedUpdate` sits at Lua's 60-upvalue ceiling — a
+-- global reference costs it nothing where another local would break it.
+local DOCK_CAPTURE_R = 0.55   -- port faces this close latch (metres)
+local DOCK_ALIGN = 0.80       -- ...if they're at least this square to each other
+local DOCK_CLOSE_V = 1.5      -- ...and closing/drifting no faster than this (m/s)
+local DOCK_ASSIST_R = 6.0     -- soft-capture magnetism reaches this far
+local DOCK_LOCKOUT = 2.5      -- s of no-recapture after an undock (or you'd re-latch)
+
+dock = {
+  ports = {},      -- every mating face on the craft, vessel-local
+  assist = true,   -- soft-capture magnetism (the panel toggles it)
+  target = nil,    -- live approach readout: range / align / closing / lateral
+  latched = 0,     -- how many of our ports are currently mated
+  arm = 0.0,       -- `time` before which capture is locked out (post-undock)
+  pending = nil,   -- a capture in flight, folded in on the tick the merge lands
+  msg = "",        -- one-line status the panel and HUD show
+  node = nil,      -- our own root (stashed so the cross-script hooks can reach it)
+  next_uid = 1,    -- uid allocator for absorbed parts
+}
+
+-- Find one of our port records by blueprint uid.
+local function dock_port(uid)
+  for _, p in ipairs(dock.ports) do
+    if p.uid == uid then return p end
+  end
+  return nil
+end
+
+-- Rebuild the attachment tree + the staging caches from the CURRENT blueprint.
+-- Every dock and undock rewrites the tree, and `axial_departing` memoises off
+-- it — stale caches there would cut the wrong half off the ship.
+local function dock_retree()
+  bp_kids = {}
+  for u, d in pairs(bp_by_uid) do
+    local pu = d.parent or 0
+    if pu ~= 0 and bp_by_uid[pu] then
+      bp_kids[pu] = bp_kids[pu] or {}
+      bp_kids[pu][#bp_kids[pu] + 1] = u
+    end
+  end
+  axial_set_cache = {}
+end
+
+-- Which way does this port FACE? A port welded into a stack has an axial
+-- neighbour on one side and open space on the other, and only the open face can
+-- mate. Read straight off the attachment tree (its own axial mount + its axial
+-- children) — geometry guessing gets this wrong the moment a part is nudged.
+-- Returns +1 / −1 along the part's own +Y, or nil when BOTH faces are occupied
+-- (a port buried mid-stack, or one that's already docked).
+local function dock_free_face(d)
+  local ax, ay, az = part_axis(d)
+  local plus, minus = false, false
+  local function mark(q)
+    if not q then return end
+    local proj = (q.x - d.x) * ax + (q.y - d.y) * ay + (q.z - d.z) * az
+    if proj > 0.01 then
+      plus = true
+    elseif proj < -0.01 then
+      minus = true
+    end
+  end
+  if (d.att or "") ~= "radial" then mark(bp_by_uid[d.parent or 0]) end
+  for _, u in ipairs(bp_kids[d.uid] or {}) do
+    local q = bp_by_uid[u]
+    if q and (q.att or "") ~= "radial" then mark(q) end
+  end
+  if plus and minus then return nil end
+  if plus then return -1 end
+  return 1
+end
+
+-- (Re)build the port list from the current blueprint — after load, after every
+-- dock and after every undock. Existing port records are kept (their latch
+-- state and cached light node ride along) and re-posed.
+function dockRescan()
+  local keep = {}
+  for _, p in ipairs(dock.ports) do keep[p.uid] = p end
+  dock.ports, dock.latched = {}, 0
+  for u, d in pairs(bp_by_uid) do
+    if u >= dock.next_uid then dock.next_uid = u + 1 end
+    if (d.dock or 0) == 1 and (part_hp[u] or 0) > 0 then
+      local p = keep[u] or { uid = u }
+      p.x, p.y, p.z = d.x, d.y, d.z
+      local sign = dock_free_face(d)
+      local ax, ay, az = part_axis(d)
+      p.buried = (sign == nil)
+      sign = sign or 1
+      p.ax, p.ay, p.az = ax * sign, ay * sign, az * sign
+      if p.mate and not bp_by_uid[p.mate] then p.mate = nil end
+      if p.mate then dock.latched = dock.latched + 1 end
+      dock.ports[#dock.ports + 1] = p
+    end
+  end
+end
+
+-- A port's world position + outward axis, from the PHYSICS-fresh vessel frame
+-- (`info.origin`, not the node pose — see `base_of`: on an orbiting world the
+-- node lags the rails carry by a tick, which is metres at orbital speed and
+-- would put every capture test off the real hardware).
+local function dock_world(node, info, p)
+  local rx, up, rz = basis(node)
+  local bx, by, bz = base_of(node, info)
+  return bx + rx.x * p.x + up.x * p.y + rz.x * p.z,
+         by + rx.y * p.x + up.y * p.y + rz.y * p.z,
+         bz + rx.z * p.x + up.z * p.y + rz.z * p.z,
+         rx.x * p.ax + up.x * p.ay + rz.x * p.az,
+         rx.y * p.ax + up.y * p.ay + rz.y * p.az,
+         rx.z * p.ax + up.z * p.ay + rz.z * p.az
+end
+
+-- The live child node for a port uid, cached (ports don't move within the hull).
+local function dock_light(node, p)
+  if p.light and p.light.valid then return p.light end
+  local c = child_of_uid(node, p.uid)
+  if not c then return nil end
+  for _, g in ipairs(c:children()) do
+    if g.name == "Dock Light" then
+      p.light = g
+      return g
+    end
+  end
+  return nil
+end
+
+-- The capture indicator on the port itself: dark idle, amber while a target is
+-- inside the soft-capture cone, green once latched. The whole approach reads
+-- off the hardware — you can fly a dock without ever looking at the HUD.
+local function dock_lamp(node, p, mode)
+  local l = dock_light(node, p)
+  if not l then return end
+  local el = l:getcomponent("PointLight")
+  if not el then return end
+  if mode == "latched" then
+    el.r, el.g, el.b, el.intensity = 0.25, 1.0, 0.35, 1.6
+  elseif mode == "near" then
+    el.r, el.g, el.b, el.intensity = 1.0, 0.72, 0.2, 1.2
+  else
+    el.intensity = 0.0
+  end
+end
+
+-- ── cross-script handshake ─────────────────────────────────────────────────
+-- Every port this craft can currently mate through, in WORLD space. The other
+-- vessel's controller calls this to find us — including while we're derelict,
+-- unpiloted or a bare station module, which is exactly when it matters.
+function dockFaces()
+  local out = {}
+  local node = dock.node
+  if destroyed or not node or not node.valid then return out end
+  local info = assembly.info(node)
+  if not info then return out end
+  for _, p in ipairs(dock.ports) do
+    if not p.buried and not p.mate then
+      local x, y, z, ax, ay, az = dock_world(node, info, p)
+      out[#out + 1] = { uid = p.uid, x = x, y = y, z = z, ax = ax, ay = ay, az = az }
+    end
+  end
+  return out
+end
+
+-- Everything the vessel absorbing us needs to fold our blueprint into theirs.
+-- Parts are handed over with their live ENTITY ids: after the merge that's the
+-- only way to find them again, because their coordinates are about to be
+-- re-expressed in the other craft's frame (the engine re-parents them).
+function dockManifest(port_uid)
+  local node = dock.node
+  if not node or not node.valid then return nil end
+  local parts = {}
+  for _, c in ipairs(node:children()) do
+    local best, bd = nil, 1e9
+    for u, d in pairs(bp_by_uid) do
+      local dx, dy, dz = (c.x or 0) - d.x, (c.y or 0) - d.y, (c.z or 0) - d.z
+      local dd = dx * dx + dy * dy + dz * dz
+      if dd < bd then bd, best = dd, u end
+    end
+    if best and bd < 0.06 then
+      parts[#parts + 1] = { eid = c.id, uid = best, rec = bp_by_uid[best],
+                            hp = part_hp[best] or 1.0 }
+    end
+  end
+  return { name = node.name or "Module", parts = parts, portUid = port_uid,
+           fuel = fuel, charge = elec.charge, piloted = piloting }
+end
+
+-- Stand down: our root is about to be retired by the merge. Release the pilot's
+-- instruments so the absorbing craft owns the screen cleanly.
+function dockAbsorbed()
+  piloting = false
+  throttle = 0.0
+  silence_loops()
+  dock.msg = "absorbed"
+end
+
+-- ── control transfer ───────────────────────────────────────────────────────
+-- The pilot rides whichever pod you're flying. Undocking a lander and taking it
+-- down is then one click instead of an EVA in orbit.
+function releaseControl()
+  if not piloting then return end
+  piloting = false
+  throttle = 0.0
+  if dock.node and dock.node.valid then set_flames(dock.node, 0) end
+  silence_loops()
+  throttle_prev = 0.0
+  set_hud(nil)
+  set_stage_list(nil)
+  set_navball(false)
+end
+
+function takeControl()
+  local node = dock.node
+  if destroyed or not node or not node.valid then return false end
+  if not pod_uid then
+    dock.msg = "no pod aboard — this craft can't be crewed"
+    return false
+  end
+  for _, v in ipairs(findScripts("vessel_controller")) do
+    if v.releaseControl and v.node and v.node.id ~= node.id then v.releaseControl() end
+  end
+  if not astronaut or not astronaut.valid then astronaut = find("Astronaut") end
+  if astronaut then astronaut.visible = false end
+  piloting = true
+  set_navball(true)
+  sas_mode, sas_last = "stability", "stability"
+  log("control transferred to " .. (node.name or "vessel"))
+  return true
+end
+
+-- ── capture ────────────────────────────────────────────────────────────────
+-- ONE side does the work. The piloted craft drives if there is one, otherwise
+-- the lower node id — both controllers see identical geometry, so they agree on
+-- who's master without a handshake and the latch never fires twice.
+local function dock_is_master(node, v)
+  if piloting ~= (v.piloting or false) then return piloting end
+  return (node.id or 0) < (v.node.id or 0)
+end
+
+-- Fold a captured module's blueprint into ours. Runs the tick AFTER the merge
+-- was queued — by then every absorbed part is one of OUR children and its LOCAL
+-- pose is already expressed in our frame, so we read the merged geometry
+-- straight off the live nodes instead of re-deriving it from port maths.
+-- Whatever the physics welded IS, by definition, where the parts are.
+local function dock_absorb(node)
+  local pend = dock.pending
+  local man = pend.manifest
+  local live = {}
+  for _, c in ipairs(node:children()) do live[c.id] = c end
+  local remap, absorbed = {}, {}
+  for _, p in ipairs(man.parts) do
+    local c = live[p.eid]
+    if c then
+      local u = dock.next_uid
+      dock.next_uid = u + 1
+      remap[p.uid] = u
+      local rec = {}
+      for k, val in pairs(p.rec) do rec[k] = val end
+      rec.uid = u
+      rec.x, rec.y, rec.z = c.x or 0, c.y or 0, c.z or 0
+      rec.yaw, rec.pitch, rec.roll = c.yaw or 0, c.pitch or 0, c.roll or 0
+      rec.stage = 0                -- staging order is the host's business now
+      bp_by_uid[u] = rec
+      part_hp[u] = p.hp
+      eid_uid[p.eid] = u           -- exact, so the damage model needs no guess
+      absorbed[#absorbed + 1] = u
+    end
+  end
+  if #absorbed == 0 then
+    dock.pending = nil
+    dock.msg = "capture failed — the module's parts never arrived"
+    return
+  end
+  for _, u in ipairs(absorbed) do
+    local rec = bp_by_uid[u]
+    rec.parent = remap[rec.parent or 0] or 0
+  end
+  -- RE-ROOT the module's tree at the port that mated, then hang that port off
+  -- ours. Without the re-root, an undock at this seam would only take the part
+  -- of the module BELOW the port with it — the module's own tree head, and
+  -- everything between, would stay welded to us.
+  local mate = remap[man.portUid]
+  if mate then
+    local function reroot(u)
+      local pu = bp_by_uid[u] and bp_by_uid[u].parent or 0
+      if pu == 0 or not bp_by_uid[pu] then return end
+      reroot(pu)
+      bp_by_uid[pu].parent = u
+    end
+    reroot(mate)
+    bp_by_uid[mate].parent = pend.port.uid
+  end
+  -- Pools: the module's engines, tanks, batteries and panels are ours now, and
+  -- it brings its own propellant and charge rather than diluting ours.
+  for _, u in ipairs(absorbed) do
+    local d = bp_by_uid[u]
+    part_total = part_total + 1
+    if (d.thrust or 0) > 0 then
+      local ax, ay, az = part_axis(d)
+      engines[#engines + 1] = { x = d.x, y = d.y, z = d.z, dx = ax, dy = ay, dz = az,
+                                thrust = d.thrust, burn = d.burn or 1, uid = u }
+    end
+    if (d.fuel or 0) > 0 then
+      tanks[#tanks + 1] = { y = d.y, fuel = d.fuel, uid = u }
+      fuel_cap = fuel_cap + d.fuel
+    end
+    if (d.power or 0) == 1 then elec.cap = elec.cap + (d.ec or 0) end
+    if (d.solar or 0) == 1 then elec.gen = elec.gen + (d.gen or 0) end
+    if (d.comms or 0) == 1 then elec.comms = true end
+    for _, dev in pairs(DEVICES) do
+      if dev.detect(d) then dev.parts[#dev.parts + 1] = u end
+    end
+  end
+  for _, dev in pairs(DEVICES) do dev.anim_applied = nil end -- re-pose the newcomers
+  fuel = math.min(fuel_cap, fuel + (man.fuel or 0))
+  elec.charge = math.min(elec.cap, elec.charge + (man.charge or 0))
+  dock_retree()
+  dockRescan()
+  local pm, qm = dock_port(pend.port.uid), mate and dock_port(mate)
+  if pm and qm then
+    pm.mate, qm.mate = qm.uid, pm.uid
+    dock.latched = dock.latched + 2
+  end
+  dock.pending = nil
+  dock.arm = time + DOCK_LOCKOUT
+  dock.msg = string.format("DOCKED — %s (%d parts)", man.name or "module", #absorbed)
+  log(dock.msg)
+end
+
+-- ── undock ─────────────────────────────────────────────────────────────────
+-- Cut the stack at a mated seam and send the far half away as a LIVE craft.
+-- Same topological split a decoupler fires (the mate plus everything hanging
+-- off it departs, the pod side stays), but rooted at the Vessel prefab so its
+-- own controller wakes up — with the blueprint we hand it at the seam.
+function undock(port_uid)
+  local node = dock.node
+  if destroyed or not node or not node.valid then return false end
+  local p = port_uid and dock_port(port_uid)
+  if not p then
+    for _, q in ipairs(dock.ports) do
+      if q.mate then p = q; break end
+    end
+  end
+  if not p or not p.mate then
+    dock.msg = "nothing docked at that port"
+    return false
+  end
+  local info = assembly.info(node)
+  if not info then return false end
+  -- The seam sits BETWEEN the two mated ports, and each keeps its own half —
+  -- so the cut anchor is whichever of the pair hangs off the other, whichever
+  -- row you clicked. Anchoring on the near side instead would send our own
+  -- port away with the module (and it did, until this).
+  local anchor = p.mate
+  if (bp_by_uid[p.uid] or {}).parent == p.mate then anchor = p.uid end
+  local dep = axial_departing(anchor)
+  local parts_nodes = {}
+  for _, child in ipairs(node:children()) do
+    if child_departs_axial(child, anchor) then parts_nodes[#parts_nodes + 1] = child end
+  end
+  if #parts_nodes == 0 then
+    dock.msg = "undock failed — the module's parts aren't on this hull"
+    return false
+  end
+  -- The departing half's own blueprint, in OUR frame for now; the split
+  -- callback re-bases it onto the new craft's origin once physics has placed it.
+  local sub, n = { parts = {} }, 0
+  for u in pairs(dep) do
+    local d = bp_by_uid[u]
+    if d then
+      n = n + 1
+      local rec = {}
+      for k, val in pairs(d) do rec[k] = val end
+      rec.stage = 0
+      if not dep[rec.parent or 0] then rec.parent = 0 end -- the seam is its new root
+      sub.parts[n] = rec
+    end
+  end
+  -- Pools + bookkeeping: fuel/engines/tanks by the departing set, then strip
+  -- the module out of the blueprint, the devices and the electrical system.
+  -- What the module takes with it is what `drop_departing` stops counting as
+  -- ours — it flies away with its own propellant, not a full set of tanks.
+  local fuel_before, cap_before = fuel, elec.cap
+  drop_departing(anchor)
+  sub.fuel = math.max(0.0, fuel_before - fuel)
+  -- The departing half gets the SAME re-capture lockout we do. The lockout is
+  -- per-craft, and a freshly born controller has no memory of having just
+  -- undocked — without this it would drive a capture on its very first frame,
+  -- still touching the port it just left, and the module would never get clear.
+  sub.lockout = DOCK_LOCKOUT
+  for _, dev in pairs(DEVICES) do
+    local keep = {}
+    for _, u in ipairs(dev.parts) do
+      if dep[u] then
+        dev.pose[u], dev.nodes[u] = nil, nil
+      else
+        keep[#keep + 1] = u
+      end
+    end
+    dev.parts = keep
+  end
+  for u in pairs(dep) do
+    local d = bp_by_uid[u]
+    if d then
+      if (d.power or 0) == 1 then elec.cap = math.max(0.0, elec.cap - (d.ec or 0)) end
+      if (d.solar or 0) == 1 then elec.gen = math.max(0.0, elec.gen - (d.gen or 0)) end
+      part_total = math.max(0, part_total - 1)
+      bp_by_uid[u], part_hp[u] = nil, nil
+    end
+  end
+  -- Charge splits by battery capacity: the module leaves with the share its own
+  -- batteries were holding, and our bus keeps the rest.
+  local charge_before = elec.charge
+  elec.charge = (cap_before > 0) and (charge_before * elec.cap / cap_before) or 0.0
+  sub.charge = math.max(0.0, charge_before - elec.charge)
+  elec.comms = false
+  for _, d in pairs(bp_by_uid) do
+    if (d.comms or 0) == 1 then elec.comms = true end
+  end
+  for eid, u in pairs(eid_uid) do
+    if dep[u] then eid_uid[eid] = nil end
+  end
+  -- The seam's world pose, captured BEFORE the split (the closure pushes the
+  -- module out along the port's own axis, so it leaves squarely, not sideways).
+  local sx, sy, sz, sax, say, saz = dock_world(node, info, p)
+  local name = (node.name or "Vessel") .. " module"
+  quench(parts_nodes)
+  sfx3(SFX.clamp, sx, sy, sz, 0.7, 1.25)
+  assembly.split(node, parts_nodes, function(stage)
+    if not stage then return end
+    local si = assembly.info(stage)
+    if si and si.origin then
+      -- Re-base the handoff blueprint onto the new craft's own origin: its
+      -- controller reads part coordinates as offsets from ITS root, and the
+      -- split rooted it at the detached half's centre of mass. Both halves
+      -- share our orientation at this instant, so the basis is still ours.
+      local rx, up, rz = basis(node)
+      local bx2, by2, bz2 = base_of(node, assembly.info(node) or si)
+      local dx, dy, dz = si.origin.x - bx2, si.origin.y - by2, si.origin.z - bz2
+      local lx = dx * rx.x + dy * rx.y + dz * rx.z
+      local ly = dx * up.x + dy * up.y + dz * up.z
+      local lz = dx * rz.x + dy * rz.y + dz * rz.z
+      for _, rec in ipairs(sub.parts) do
+        rec.x, rec.y, rec.z = rec.x - lx, rec.y - ly, rec.z - lz
+      end
+      save.set("dock.handoff." .. tostring(stage.id or 0), sub)
+      -- A gentle spring push ALONG the port axis — enough to open a gap the
+      -- solver won't immediately re-close, nowhere near enough to tumble it.
+      -- The axis is signed against where the departing half actually sits: a
+      -- mated port's own +Y points INTO its partner, so taking it at face value
+      -- shoves the module straight back through the ship it just left.
+      local ax, ay, az = sax, say, saz
+      if (si.com.x - sx) * ax + (si.com.y - sy) * ay + (si.com.z - sz) * az < 0 then
+        ax, ay, az = -ax, -ay, -az
+      end
+      local dv, m = 0.45, math.max(0.1, si.mass or 1.0)
+      assembly.teleport(stage, vec3(si.origin.x + ax * 0.18,
+                                    si.origin.y + ay * 0.18,
+                                    si.origin.z + az * 0.18))
+      assembly.impulseAt(stage, vec3(ax * dv * m, ay * dv * m, az * dv * m), si.com)
+      spawnEffect("SepPuff", si.com.x, si.com.y, si.com.z)
+    end
+    stage.name = name
+    log(string.format("UNDOCKED — %s away (%d parts)", name, n))
+  end, "Vessel")
+  -- Both halves of the seam come free — whichever side actually departed, the
+  -- surviving port must not be left believing it's still mated.
+  local partner = dock_port(p.mate)
+  p.mate = nil
+  if partner then partner.mate = nil end
+  dock_retree()
+  dockRescan()
+  dock.arm = time + DOCK_LOCKOUT
+  dock.msg = "UNDOCKED"
+  return true
+end
+
+-- ── the docking tick ───────────────────────────────────────────────────────
+-- Publish the approach readout, run soft-capture magnetism, drive the port
+-- lamps, and take the latch when the geometry says we've arrived. Global so
+-- `fixedUpdate` can call it without spending one of its last upvalues.
+function dockTick(node, info, dt)
+  dock.node = node
+  if destroyed or #dock.ports == 0 then
+    dock.target = nil
+    return
+  end
+  if dock.pending then
+    -- The engine re-parents the absorbed part nodes when it performs the merge,
+    -- at the end of the tick that queued it. Fold the module in the moment they
+    -- actually show up as OUR children — asking whether the part COUNT grew
+    -- would be fooled by a merge that lands inside this same pass (and by a
+    -- part breaking off in the meantime).
+    local want = dock.pending.manifest.parts[1]
+    local arrived = false
+    for _, c in ipairs(node:children()) do
+      if want and c.id == want.eid then
+        arrived = true
+        break
+      end
+    end
+    if arrived then
+      dock_absorb(node)
+    elseif time - dock.pending.t > 2.0 then
+      dock.pending = nil
+      dock.msg = "capture timed out"
+    end
+    return
+  end
+  local mine = {}
+  for _, p in ipairs(dock.ports) do
+    if p.mate then
+      dock_lamp(node, p, "latched")
+    elseif not p.buried then
+      local x, y, z, ax, ay, az = dock_world(node, info, p)
+      mine[#mine + 1] = { p = p, x = x, y = y, z = z, ax = ax, ay = ay, az = az }
+    else
+      dock_lamp(node, p, "off")
+    end
+  end
+  if #mine == 0 then
+    dock.target = nil
+    return
+  end
+  -- Nearest facing pair across every other live craft. Craft obviously out of
+  -- reach are rejected on their ROOT position first — a system full of parked
+  -- probes must not cost a per-port sweep sixty times a second.
+  local best
+  local bx0, by0, bz0 = base_of(node, info)
+  for _, v in ipairs(findScripts("vessel_controller")) do
+    local far = false
+    if v.node and v.node.valid then
+      local dx0, dy0, dz0 = v.node.x - bx0, v.node.y - by0, v.node.z - bz0
+      far = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0) > (DOCK_ASSIST_R + 60.0) ^ 2
+    end
+    if v.dockFaces and v.node and v.node.valid and v.node.id ~= node.id and not far then
+      for _, q in ipairs(v.dockFaces()) do
+        for _, m in ipairs(mine) do
+          local dx, dy, dz = q.x - m.x, q.y - m.y, q.z - m.z
+          local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+          local align = -(m.ax * q.ax + m.ay * q.ay + m.az * q.az)
+          if d < DOCK_ASSIST_R and align > 0.15 and (not best or d < best.d) then
+            local inv = 1.0 / math.max(d, 1e-6)
+            best = { d = d, align = align, m = m, q = q, v = v,
+                     ux = dx * inv, uy = dy * inv, uz = dz * inv }
+          end
+        end
+      end
+    end
+  end
+  for _, m in ipairs(mine) do
+    dock_lamp(node, m.p, (best and best.m == m) and "near" or "off")
+  end
+  if not best then
+    dock.target = nil
+    return
+  end
+  -- Relative motion at the seam (theirs minus ours): + closing = coming together.
+  local oi = assembly.info(best.v.node)
+  local rvx = (oi and oi.vel.x or 0) - info.vel.x
+  local rvy = (oi and oi.vel.y or 0) - info.vel.y
+  local rvz = (oi and oi.vel.z or 0) - info.vel.z
+  local closing = -(rvx * best.ux + rvy * best.uy + rvz * best.uz)
+  local drift = math.sqrt(rvx * rvx + rvy * rvy + rvz * rvz)
+  local proj = (best.q.x - best.m.x) * best.m.ax + (best.q.y - best.m.y) * best.m.ay
+             + (best.q.z - best.m.z) * best.m.az
+  dock.target = {
+    name = best.v.node.name or "craft", range = best.d, align = best.align,
+    closing = closing, drift = drift,
+    lateral = math.sqrt(math.max(0.0, best.d * best.d - proj * proj)),
+    port = best.m.p.uid,
+  }
+  -- SOFT CAPTURE: a spring toward their port plus a damper on the relative
+  -- motion. The SPRING is applied at our port, so it swings the craft square as
+  -- well as pulling it in; the DAMPER goes through the centre of mass, because
+  -- braking is not supposed to be a steering input — off-centre damping fights
+  -- the very rotation the spring is trying to settle and the pair wallows.
+  -- Both craft run this and each pulls only ITSELF, so the pair behaves like one
+  -- mutual magnet: a station never gets dragged around by a probe. Everything
+  -- scales with our own mass, so a heavy tug and a light lander handle alike.
+  if dock.assist and best.align > 0.35 and not info.anchored and time > dock.arm then
+    local m = math.max(0.1, info.mass or 1.0)
+    local pull = math.min(1.0, (DOCK_ASSIST_R - best.d) / DOCK_ASSIST_R) * best.align
+    local k, c = 2.2 * m * pull, 1.6 * m * pull
+    assembly.forceAt(node, vec3(best.ux * k, best.uy * k, best.uz * k),
+      vec3(best.m.x, best.m.y, best.m.z))
+    assembly.force(node, vec3(rvx * c, rvy * c, rvz * c))
+  end
+  -- LATCH. Close enough, square enough, slow enough — and past the lockout that
+  -- stops a fresh undock snapping straight back on.
+  if best.d < DOCK_CAPTURE_R and best.align > DOCK_ALIGN and drift < DOCK_CLOSE_V
+    and time > dock.arm and dock_is_master(node, best.v) then
+    local man = best.v.dockManifest and best.v.dockManifest(best.q.uid)
+    if man and #man.parts > 0 then
+      best.v.dockAbsorbed()
+      assembly.merge(node, best.v.node)
+      dock.pending = { port = best.m.p, manifest = man, t = time }
+      dock.target = nil
+      add_shake(0.12)
+      sfx3(SFX.clamp, best.m.x, best.m.y, best.m.z, 0.85, 1.15)
+      spawnEffect("SepPuff", best.m.x, best.m.y, best.m.z)
+      dock.msg = "capture — latching"
+    end
+  end
+end
+
+-- ── the peripherals interface ──────────────────────────────────────────────
+-- What the peripherals panel talks to. It's a GENERIC device browser: it asks
+-- for the fitted device list and toggles entries by id, so a new peripheral
+-- appears in the UI the moment it's in the DEVICES registry above — no panel
+-- edits, no new scene nodes, no second place to keep in sync.
+function peripherals()
+  local out = {}
+  for id, dev in pairs(DEVICES) do
+    if #dev.parts > 0 then
+      out[#out + 1] = { id = id, label = dev.label, key = dev.key, on = dev.on,
+                        anim = dev.anim, count = #dev.parts, order = dev.order or 50 }
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.order ~= b.order then return a.order < b.order end
+    return a.label < b.label
+  end)
+  return out
+end
+
+-- Toggle (or set) one device. Same path the keybind takes, so the panel button
+-- and the key are genuinely the same control — never two half-wired ones.
+function setPeripheral(id, on)
+  local dev = DEVICES[id]
+  if not dev or #dev.parts == 0 then return false end
+  if on == nil then on = not dev.on end
+  if dev.on == on then return true end
+  dev.on = on
+  if id == "gear" then gear_deployed = on end
+  local node = dock.node
+  if node and node.valid then
+    local i = assembly.info(node)
+    local bx, by, bz = base_of(node, i)
+    sfx3(SFX.gear, bx, by, bz, 0.7, on and 1.0 or 0.9)
+  end
+  log(dev.label .. (on and " deployed" or " retracted"))
+  return true
+end
+
+-- The docking rows: one entry per port, in a stable order, with everything the
+-- panel needs to draw and act on it.
+function dockPorts()
+  local out = {}
+  for _, p in ipairs(dock.ports) do
+    out[#out + 1] = { uid = p.uid, mate = p.mate, buried = p.buried and not p.mate,
+                      y = p.y }
+  end
+  table.sort(out, function(a, b)
+    if a.y ~= b.y then return a.y > b.y end
+    return a.uid < b.uid
+  end)
+  return out
+end
+
 -- Forward-declared: a tank blast can chain into neighbors breaking.
 local break_part
 
@@ -1431,7 +2116,25 @@ end
 
 -- ── lifecycle ───────────────────────────────────────────────────────────────
 function start(node)
-  load_bp()
+  dock.node = node
+  -- A craft that just UNDOCKED wakes up with the blueprint the vessel it left
+  -- handed it at the seam, keyed by this root's own id (see `undock`) — not the
+  -- shipyard's launch build, which describes a completely different ship.
+  local hk = "dock.handoff." .. tostring(node.id or 0)
+  local handoff = save.get(hk)
+  if handoff and handoff.parts then
+    save.set(hk, false)
+    load_bp(handoff)
+    -- `load_bp` rolls a fresh build out of the VAB with full tanks; an undocked
+    -- module arrives with exactly what it was carrying at the seam.
+    fuel = math.min(fuel_cap, handoff.fuel or fuel_cap)
+    elec.charge = math.min(elec.cap, handoff.charge or elec.cap)
+    dock.arm = time + (handoff.lockout or 0.0)   -- drift clear before re-latching
+    log(string.format("%s: undocked module online (%d parts, %.0f fuel)",
+      node.name or "vessel", part_total, fuel))
+  else
+    load_bp()
+  end
   if (save.get("shipyard.pilot") or 0) == 1 then
     save.set("shipyard.pilot", 0)
     boarding = true
@@ -1507,6 +2210,11 @@ function fixedUpdate(node, dt)
   -- Runs piloted OR derelict — a parked ship hit by falling wreckage breaks
   -- all the same. (While clamped/anchored the sim makes no contacts.)
   if info then damage_tick(node, info, dt) end
+  -- DOCKING runs piloted or not — a station module has to keep its ports live
+  -- so a lander can find them, and the soft-capture magnetism is mutual. Global
+  -- call: `fixedUpdate` is at Lua's 60-upvalue ceiling and a global costs it
+  -- nothing (same reason `power_tick` was exiled to lateUpdate).
+  if info and not destroyed then dockTick(node, info, dt) end
   -- (Electrical power_tick runs in lateUpdate — fixedUpdate is at Lua's upvalue
   -- ceiling, so the power system lives in the post-writeback pass instead.)
   if destroyed then
@@ -2191,8 +2899,21 @@ function fixedUpdate(node, dt)
       lines[#lines + 1] = string.format("[DAMAGE]  %s %d%%",
         (d and (d.label or d.id)) or "part", worst_hp * 100)
     end
+    -- DOCKING: while a mating face is in reach this is the whole approach —
+    -- range, how square the two ports are, and the closing rate. Green numbers
+    -- in the panel; here it's one line you can fly off.
+    if dock.target then
+      local t = dock.target
+      lines[#lines + 1] = string.format(
+        "[DOCK]  %s  %.2f m   align %3d%%   lat %.2f   %+.2f m/s%s",
+        t.name, t.range, t.align * 100, t.lateral, t.closing,
+        dock.assist and "   MAG" or "")
+    elseif dock.latched > 0 then
+      lines[#lines + 1] = string.format("[DOCK]  %d port%s latched   [P] peripherals",
+        dock.latched, dock.latched == 1 and "" or "s")
+    end
     lines[#lines + 1] =
-      "[SPACE] stage · [T] SAS · [G] gear · [.,] warp · [M] map · [F] exit"
+      "[SPACE] stage · [T] SAS · [G] gear · [P] peripherals · [.,] warp · [M] map · [F] exit"
     set_hud(table.concat(lines, "\n"))
 
     -- The stage list (right edge): SEPARATION EVENTS in the builder's

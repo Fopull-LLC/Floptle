@@ -9,7 +9,7 @@ defaults = { part = 1 }
 local IDS = { "pod", "chute", "tankS", "tankM", "engineS", "engineM",
               "decoupler", "legs", "radialDec",
               "nose", "fins", "battery", "dish", "solar",
-              "skipper", "radialTank" }
+              "skipper", "radialTank", "dockPort" }
 
 local el, builder, idle
 

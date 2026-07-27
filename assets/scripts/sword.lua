@@ -57,7 +57,7 @@ local function judge(ox, oy, oz, dx, dy, dz, peer)
 end
 
 function update(node, dt)
-  if input.clicked(0) and time >= next_swing then
+  if input.justPressed("Fire") and time >= next_swing then
     next_swing = time + params.cooldown
     local dx, dy, dz = aimDir()
     local ox, oy, oz = node.x, node.y + params.eye, node.z

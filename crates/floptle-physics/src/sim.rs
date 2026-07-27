@@ -1201,6 +1201,36 @@ impl Sim {
         true
     }
 
+    /// MERGE the assembly rooted at `other_eid` into the one rooted at
+    /// `root_eid` — the inverse of [`Self::split_compound`], and the physics
+    /// half of a docking latch: the two compounds become one rigid body with
+    /// their combined momentum ([`Compound::merge`]), and `other_eid`'s
+    /// compound is retired. The caller re-parents the absorbed part NODES under
+    /// the surviving root and disposes of the old one (their shape ids are
+    /// unchanged, so contact attribution keeps working across the join).
+    /// Returns false if either root has no compound, or they're the same one.
+    pub fn merge_compound(&mut self, root_eid: u32, other_eid: u32) -> bool {
+        if root_eid == other_eid {
+            return false;
+        }
+        let Some(ai) = self.cmap.iter().position(|l| l.entity.index() == root_eid) else {
+            return false;
+        };
+        let Some(bi) = self.cmap.iter().position(|l| l.entity.index() == other_eid) else {
+            return false;
+        };
+        let (a, b) = (self.cmap[ai].compound, self.cmap[bi].compound);
+        if a == b {
+            return false;
+        }
+        let other = self.world.compounds[b].clone();
+        self.world.compounds[a].merge(&other);
+        // Retire the absorbed compound (swap-remove + link fixups + the same
+        // transient clears a despawn does).
+        self.remove_compound(other_eid);
+        true
+    }
+
     /// Register a compound for a RUNTIME-SPAWNED assembly root (prefab spawn
     /// of a whole vessel) — the assembly counterpart of [`Self::add_body_for`].
     /// Gathers the root's RigidBody-bearing descendants exactly like build.

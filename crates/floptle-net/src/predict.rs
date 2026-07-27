@@ -174,15 +174,17 @@ mod tests {
         PredictedState { pos: [x, 0.0, 0.0], rot: [0.0, 0.0, 0.0, 1.0], vel: [1.0, 0.0, 0.0], grounded: true }
     }
 
-    fn input(tag: &str) -> NetInput {
-        NetInput { keys_down: vec![tag.into()], ..Default::default() }
+    /// A distinguishable input per tick: the tick number as an action bitmask,
+    /// so a replay that reorders or drops commands is detectable.
+    fn input(tag: u64) -> NetInput {
+        NetInput { actions: tag, ..Default::default() }
     }
 
     #[test]
     fn confirmed_prediction_replays_nothing() {
         let mut p = Predictor::new();
         for t in 1..=10 {
-            p.record(t, input(&format!("k{t}")), state(t as f64));
+            p.record(t, input(t), state(t as f64));
         }
         // Server agrees with tick 5 (within eps): no replay, history trimmed.
         assert_eq!(p.reconcile(5, &state(5.0 + 1e-6), DEFAULT_EPSILON), None);
@@ -194,14 +196,14 @@ mod tests {
     fn divergence_replays_unacked_inputs_in_order() {
         let mut p = Predictor::new();
         for t in 1..=10 {
-            p.record(t, input(&format!("k{t}")), state(t as f64));
+            p.record(t, input(t), state(t as f64));
         }
         // Server says tick 6 was actually at x=3 (we predicted 6): replay 7..10.
         let replay = p.reconcile(6, &state(3.0), DEFAULT_EPSILON).expect("must replay");
         assert_eq!(replay.len(), 4);
         assert_eq!(replay[0].0, 7);
         assert_eq!(replay[3].0, 10);
-        assert_eq!(replay[1].1.keys_down, vec!["k8".to_string()], "inputs preserved");
+        assert_eq!(replay[1].1.actions, 8, "inputs preserved, in order");
         // Visual error captured: predicted 6.0 vs server 3.0.
         assert!((p.error_offset[0] - 3.0).abs() < 1e-9);
         // Replay rerecords corrected states.
@@ -222,7 +224,7 @@ mod tests {
     #[test]
     fn huge_corrections_snap_instead_of_gliding() {
         let mut p = Predictor::new();
-        p.record(1, input("w"), state(100.0));
+        p.record(1, input(1), state(100.0));
         // Server says we're actually at 0 — a 100 m desync: snap (no offset).
         let replay = p.reconcile(1, &state(0.0), DEFAULT_EPSILON);
         assert!(replay.is_some());
@@ -234,7 +236,7 @@ mod tests {
     fn unknown_tick_adopts_server_and_replays_everything_left() {
         let mut p = Predictor::new();
         for t in 100..=103 {
-            p.record(t, input("w"), state(t as f64));
+            p.record(t, input(1), state(t as f64));
         }
         // Server reports tick 50 — older than anything we kept.
         let replay = p.reconcile(50, &state(0.0), DEFAULT_EPSILON).expect("adopt + replay");

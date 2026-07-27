@@ -640,8 +640,8 @@ mod tests {
         let port = server_t.local_port();
         let client_t = QuicClient::connect(&format!("127.0.0.1:{port}")).expect("connect");
 
-        let mut server = crate::NetSession::server(Box::new(server_t));
-        let mut client = crate::NetSession::client(Box::new(client_t));
+        let mut server = crate::NetSession::server(Box::new(server_t), 0);
+        let mut client = crate::NetSession::client(Box::new(client_t), 0);
         let (mut sw, se) = world_with(2);
         let (mut cw, ce) = world_with(2);
         server.register_scene(&sw);

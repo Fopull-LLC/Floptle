@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 8;
+pub const PROTO_VERSION: u16 = 9;
 
 /// One controller layer's playback in a snapshot, quantized for the wire:
 /// state index (`u16::MAX` = the layer is stopped/released), clip time in
@@ -92,18 +92,32 @@ pub struct SnapEntry {
 
 /// A serializable per-tick input snapshot — what a client's `fixedUpdate` saw,
 /// shipped to the server so the SAME controller script re-runs there with the
-/// SAME input (`docs/netcode-design.md` §6, the one-script model). Key/button
-/// sets are sorted Vecs so encoding is deterministic.
+/// SAME input (`docs/netcode-design.md` §6, the one-script model).
+///
+/// This carries **resolved actions**, not raw keys: bitmasks and axis values,
+/// which are both device-agnostic and fixed-size, so encoding is inherently
+/// deterministic (no set iteration order to sort away).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NetInput {
-    pub keys_down: Vec<String>,
-    pub keys_pressed: Vec<String>,
-    pub keys_released: Vec<String>,
-    pub mouse: (f32, f32),
-    pub mouse_delta: (f32, f32),
-    pub scroll: f32,
-    pub buttons_down: [bool; 3],
-    pub buttons_pressed: [bool; 3],
+    /// Actions held this tick, as a bitmask indexed by the action's position in
+    /// the project's `input.ron`.
+    ///
+    /// **Actions, not keys.** A pad player and a keyboard player who both press
+    /// "Jump" produce the identical command, so one controller script replays
+    /// the same on client, server, and rollback. It is also far smaller than
+    /// shipping key-name strings every tick.
+    ///
+    /// The cost of indexing by position: both sides must agree on the map's
+    /// ORDER, which is what [`Msg::Hello`]'s `input_map` hash enforces.
+    pub actions: u64,
+    /// Actions whose down-edge landed on this tick.
+    pub just_pressed: u64,
+    /// Actions whose up-edge landed on this tick.
+    pub just_released: u64,
+    /// 1D axis values, in `input.ron` order.
+    pub axes1: Vec<f32>,
+    /// 2D axis values, in `input.ron` order.
+    pub axes2: Vec<(f32, f32)>,
     /// The owner's view direction — active-camera (yaw, pitch) at the tick.
     /// Camera-relative controllers read it via `input.aimYaw()` so movement is
     /// IDENTICAL on client, server, and replay (a local camera node can't be).
@@ -130,7 +144,14 @@ pub struct SyncedEntry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Msg {
     /// Client → server, first message on connect.
-    Hello { proto: u16 },
+    ///
+    /// `input_map` is [`floptle_input::InputMap::hash`] — a fingerprint of the
+    /// action map's SHAPE (its ordered names). Input commands index actions by
+    /// position, so two peers running differently-ordered maps would decode
+    /// each other's input as the wrong actions and desync with no error
+    /// anywhere. Refusing the connection is the only safe answer; a player's
+    /// personal rebinds deliberately don't affect the hash.
+    Hello { proto: u16, input_map: u64 },
     /// Server → client: accepted; your peer id, the current tick, the snapshot
     /// cadence (ticks between snapshots), and the CURRENT scene (project-root-
     /// relative path + its epoch) — a late joiner lands in the scene the

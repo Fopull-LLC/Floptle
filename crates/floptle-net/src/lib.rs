@@ -81,9 +81,45 @@ mod tests {
     }
 
     fn connect_pair(hub: &MemoryHub) -> (NetSession, NetSession) {
-        let server = NetSession::server(Box::new(hub.server_endpoint()));
-        let client = NetSession::client(Box::new(hub.connect()));
+        let server = NetSession::server(Box::new(hub.server_endpoint()), 0);
+        let client = NetSession::client(Box::new(hub.connect()), 0);
         (server, client)
+    }
+
+    #[test]
+    fn a_mismatched_input_map_is_refused_at_hello() {
+        // Input commands index actions by their POSITION in input.ron. Two
+        // builds with differently-ordered maps would decode each other's
+        // commands as the wrong actions and just play wrong, with no error
+        // anywhere — so the handshake has to catch it.
+        let hub = MemoryHub::new();
+        let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0xABCD);
+        let mut client = NetSession::client(Box::new(hub.connect()), 0x1234);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+
+        let refused = client
+            .take_events()
+            .into_iter()
+            .any(|e| matches!(e, NetEvent::Disconnected(r) if r.contains("input.ron")));
+        assert!(refused, "a differing action map must refuse the connection");
+    }
+
+    #[test]
+    fn a_matching_input_map_connects() {
+        let hub = MemoryHub::new();
+        let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0xABCD);
+        let mut client = NetSession::client(Box::new(hub.connect()), 0xABCD);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+
+        let connected =
+            client.take_events().into_iter().any(|e| matches!(e, NetEvent::Connected));
+        assert!(connected, "identical maps must connect");
     }
 
     #[test]
@@ -216,7 +252,7 @@ mod tests {
     #[test]
     fn runtime_spawn_despawn_and_late_join() {
         let hub = MemoryHub::new();
-        let mut server = NetSession::server(Box::new(hub.server_endpoint()));
+        let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0);
         let (mut sw, _) = world_with(1);
         server.register_scene(&sw);
 
@@ -264,7 +300,7 @@ mod tests {
         }
 
         // NOW a client joins late: it must receive the spawn + a baseline.
-        let mut client = NetSession::client(Box::new(hub.connect()));
+        let mut client = NetSession::client(Box::new(hub.connect()), 0);
         let (mut cw, _) = world_with(1);
         client.register_scene(&cw);
         let before = cw.query::<Replicated>().count();
@@ -315,12 +351,12 @@ mod tests {
             hub.set_now(t);
             client.send_input(
                 t,
-                NetInput { keys_down: vec![format!("k{t}")], ..Default::default() },
+                NetInput { actions: t, ..Default::default() },
             );
             client.tick_client(&mut cw); // ships the input window
             server.pump_server(&sw, t); // tick START: consume inputs
             let inp = server.input_for(1, t);
-            if inp.keys_down == vec![format!("k{t}")] {
+            if inp.actions == t {
                 exact_hits += 1;
             }
             // server "simulates": the node moves, body state refreshed
@@ -397,11 +433,11 @@ mod tests {
         assert!(client.welcome_tick().is_some(), "Welcome carries the server tick");
 
         client.set_input_stamp_offset(100);
-        client.send_input(5, NetInput { keys_down: vec!["w".into()], ..Default::default() });
+        client.send_input(5, NetInput { actions: 0b101, ..Default::default() });
         let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, mid, 3, |_, _| {});
         server.pump_server(&sw, 105);
         let inp = server.input_for(1, 105);
-        assert_eq!(inp.keys_down, vec!["w".to_string()], "local tick 5 lands at server tick 105");
+        assert_eq!(inp.actions, 0b101, "local tick 5 lands at server tick 105");
         assert_eq!(server.late_inputs(), 0, "the stamped tick was an exact hit");
     }
 

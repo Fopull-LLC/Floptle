@@ -3,13 +3,16 @@
 -- SETUP: attach to a Camera node and mark it Active. It finds the character
 -- automatically (the node running third_person.lua — or a node named "Player").
 --
---   RIGHT MOUSE (hold)  orbit around the character
---   SCROLL WHEEL        zoom in / out
---   SHIFT               toggle SHIFT LOCK: the cursor locks, the mouse steers
---                       the camera, and the character faces the camera's yaw
+--   Look       hold RIGHT MOUSE to orbit, or use the RIGHT STICK (always live)
+--   Zoom       the scroll wheel, or the pad's d-pad up/down
+--   ShiftLock  Shift / R3 toggles SHIFT LOCK: the cursor locks, the mouse
+--              steers the camera, and the character faces the camera's yaw
 --   zoom all the way in → FIRST PERSON: the camera sits at head height, the
---   character model hides, you free-look (always shift-locked); scroll back
+--   character model hides, you free-look (always shift-locked); zoom back
 --   out to return.
+--
+-- Every control is a NAMED ACTION from Project Settings → Input, so this works
+-- on a keyboard, on a gamepad, or on both at once.
 --
 -- The camera raycasts against the world so walls never cut between you and
 -- the character (it slides in closer instead of clipping through geometry).
@@ -27,8 +30,8 @@ defaults = {
   min_distance = 1.2,   -- zooming closer than this switches to first person
   max_distance = 14.0,
   height = 1.4,         -- look-at point above the character's origin
-  sensitivity = 0.3,
-  zoom_speed = 1.0,
+  sensitivity = 1.0,   -- look speed multiplier
+  zoom_speed = 4.0,
   start_pitch = -0.35,  -- initial down-tilt (radians)
 }
 
@@ -73,30 +76,34 @@ function lateUpdate(node, dt)
   end
   if not (target and target.valid) then return end
 
-  -- SHIFT toggles shift lock; first person forces it below.
-  if input.pressed("shift") then shiftlock = not shiftlock end
+  -- ShiftLock toggles shift lock; first person forces it below.
+  if input.justPressed("ShiftLock") then shiftlock = not shiftlock end
 
-  -- Scroll zooms. `params.distance` is two-way: the write persists across
-  -- frames and shows live in the Inspector. Crossing min_distance toggles
-  -- first person.
-  params.distance = params.distance - input.scroll() * params.zoom_speed
+  -- Zoom: the wheel, or the pad's d-pad. `params.distance` is two-way: the
+  -- write persists across frames and shows live in the Inspector. Crossing
+  -- min_distance toggles first person. The wheel arrives as a per-frame
+  -- impulse and the d-pad as a held direction, so `* dt` keeps a held d-pad
+  -- from depending on framerate while a single click still steps cleanly.
+  params.distance = params.distance - input.axis1("Zoom") * params.zoom_speed * dt
   if params.distance > params.max_distance then params.distance = params.max_distance end
   if params.distance < 0.0 then params.distance = 0.0 end
   firstPerson = params.distance < params.min_distance
 
-  -- The camera looks (and the cursor captures) while: first person, shift
-  -- lock, or the RIGHT mouse button is dragging. Otherwise the cursor is
-  -- free and the camera holds its angle.
-  local looking = firstPerson or shiftlock or input.button(1)
-  input.setMouseLocked(looking)
-  if looking then
-    local dx, dy = input.mouse_delta()
-    local s = params.sensitivity * 0.01
-    node.yaw = node.yaw - dx * s
-    node.pitch = node.pitch - dy * s
-    if node.pitch > PITCH_LIMIT then node.pitch = PITCH_LIMIT end
-    if node.pitch < -PITCH_LIMIT then node.pitch = -PITCH_LIMIT end
-  end
+  -- Capture the cursor while the MOUSE is steering: first person, shift lock,
+  -- or a right-button drag. A pad needs none of this — its stick recentres
+  -- itself, so the `Look` axis leaves the stick ungated and it is always live.
+  local mouseSteering = firstPerson or shiftlock or input.action("LookEnable")
+  input.setMouseLocked(mouseSteering)
+
+  -- One axis, both devices, both arriving as radians per second — so a single
+  -- `* dt` is correct for either and identical at any framerate. While we own
+  -- the cursor there is no free pointer to protect, so read the ungated
+  -- "LookFree" axis; otherwise "Look", whose mouse half needs the right button.
+  local lx, ly = input.axis2(mouseSteering and "LookFree" or "Look")
+  node.yaw = node.yaw - lx * params.sensitivity * dt
+  node.pitch = node.pitch - ly * params.sensitivity * dt
+  if node.pitch > PITCH_LIMIT then node.pitch = PITCH_LIMIT end
+  if node.pitch < -PITCH_LIMIT then node.pitch = -PITCH_LIMIT end
 
   -- Show/hide the character model when the view mode flips.
   if model and model.valid then

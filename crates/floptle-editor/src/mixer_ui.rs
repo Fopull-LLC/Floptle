@@ -65,15 +65,15 @@ impl crate::EditorTabViewer<'_> {
             ui.horizontal_top(|ui| {
                 // Master strip first (slot 0), then user tracks.
                 changed |= self.track_strip_ui(ui, 0);
-                let n = self.mixer.tracks.len();
+                let n = self.project.mixer.tracks.len();
                 for i in 0..n {
                     changed |= self.track_strip_ui(ui, i + 1);
                 }
                 ui.vertical(|ui| {
                     ui.add_space(6.0);
                     if ui.button("✚ Track").on_hover_text("Add a mixer track").clicked() {
-                        let name = self.mixer.fresh_name("Track");
-                        self.mixer.tracks.push(TrackDesc::new(name));
+                        let name = self.project.mixer.fresh_name("Track");
+                        self.project.mixer.tracks.push(TrackDesc::new(name));
                         changed = true;
                     }
                 });
@@ -106,7 +106,7 @@ impl crate::EditorTabViewer<'_> {
                             egui::Label::new(egui::RichText::new(MASTER).strong()),
                         );
                     } else {
-                        let track = &mut self.mixer.tracks[slot - 1];
+                        let track = &mut self.project.mixer.tracks[slot - 1];
                         let mut name = track.name.clone();
                         let resp = ui.add_sized(
                             [STRIP_W - 26.0, 18.0],
@@ -129,9 +129,9 @@ impl crate::EditorTabViewer<'_> {
                 ui.add_space(6.0);
                 {
                     let track = if is_master {
-                        &mut self.mixer.master
+                        &mut self.project.mixer.master
                     } else {
-                        &mut self.mixer.tracks[slot - 1]
+                        &mut self.project.mixer.tracks[slot - 1]
                     };
                     ui.horizontal(|ui| {
                         ui.weak("Pan");
@@ -223,13 +223,13 @@ impl crate::EditorTabViewer<'_> {
                 if is_master {
                     ui.weak("→ output device");
                 } else {
-                    let current = self.mixer.tracks[slot - 1]
+                    let current = self.project.mixer.tracks[slot - 1]
                         .output
                         .clone()
                         .unwrap_or_else(|| MASTER.to_string());
                     let others: Vec<String> = std::iter::once(MASTER.to_string())
                         .chain(
-                            self.mixer
+                            self.project.mixer
                                 .tracks
                                 .iter()
                                 .enumerate()
@@ -249,7 +249,7 @@ impl crate::EditorTabViewer<'_> {
                             }
                         });
                     if let Some(p) = pick {
-                        self.mixer.tracks[slot - 1].output =
+                        self.project.mixer.tracks[slot - 1].output =
                             if p == MASTER { None } else { Some(p) };
                         changed = true;
                     }
@@ -259,17 +259,17 @@ impl crate::EditorTabViewer<'_> {
 
         if let Some((old, new)) = rename {
             // Keep routing + selection coherent through the rename.
-            for t in &mut self.mixer.tracks {
+            for t in &mut self.project.mixer.tracks {
                 if t.output.as_deref() == Some(old.as_str()) {
                     t.output = Some(new.clone());
                 }
             }
-            self.mixer.tracks[slot - 1].name = new;
+            self.project.mixer.tracks[slot - 1].name = new;
             changed = true;
         }
         if delete {
-            let dead = self.mixer.tracks.remove(slot - 1).name;
-            for t in &mut self.mixer.tracks {
+            let dead = self.project.mixer.tracks.remove(slot - 1).name;
+            for t in &mut self.project.mixer.tracks {
                 if t.output.as_deref() == Some(dead.as_str()) {
                     t.output = None;
                 }
@@ -307,9 +307,9 @@ impl crate::EditorTabViewer<'_> {
                 .max_height(FX_H)
                 .show(ui, |ui| {
                     let track = if is_master {
-                        &mut self.mixer.master
+                        &mut self.project.mixer.master
                     } else {
-                        &mut self.mixer.tracks[slot - 1]
+                        &mut self.project.mixer.tracks[slot - 1]
                     };
                     let n = track.effects.len();
                     if n == 0 {
@@ -404,7 +404,7 @@ impl crate::EditorTabViewer<'_> {
             self.mixer_ui.fx_clipboard = Some(fx);
         }
         let track =
-            if is_master { &mut self.mixer.master } else { &mut self.mixer.tracks[slot - 1] };
+            if is_master { &mut self.project.mixer.master } else { &mut self.project.mixer.tracks[slot - 1] };
         if let Some(i) = paste_into
             && let Some(clip) = &self.mixer_ui.fx_clipboard
         {
@@ -447,9 +447,9 @@ impl crate::EditorTabViewer<'_> {
             return false;
         };
         let track = if slot == 0 {
-            &mut self.mixer.master
+            &mut self.project.mixer.master
         } else {
-            match self.mixer.tracks.get_mut(slot - 1) {
+            match self.project.mixer.tracks.get_mut(slot - 1) {
                 Some(t) => t,
                 None => {
                     self.mixer_ui.selected = None;

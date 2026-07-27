@@ -365,7 +365,7 @@ impl Editor {
             return;
         }
         let hub = floptle_net::MemoryHub::new();
-        let mut s = NetSession::server(Box::new(hub.server_endpoint()));
+        let mut s = NetSession::server(Box::new(hub.server_endpoint()), self.input_map_hash());
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.set_scene(&self.scene_rel_or_default());
         s.register_scene(&self.world);
@@ -393,7 +393,7 @@ impl Editor {
         let mut cw = World::default();
         floptle_scene::spawn_into(&doc, &mut cw);
         let hub = self.net_hub.as_ref().unwrap();
-        let mut c = NetSession::client(Box::new(hub.connect()));
+        let mut c = NetSession::client(Box::new(hub.connect()), self.input_map_hash());
         c.register_scene(&cw);
         self.net_client = Some((c, cw));
         self.net_ghosts = true;
@@ -707,7 +707,7 @@ impl Editor {
         let slots = remote.len();
         self.net_remote_predicted = remote;
         self.net_apply_host_filters();
-        let mut s = NetSession::server(transport);
+        let mut s = NetSession::server(transport, self.input_map_hash());
         s.set_tick_dt(self.game_tick.step); // the animator time predictor's clock
         s.set_scene(&self.scene_rel_or_default()); // joiners land in OUR scene
         s.register_scene(&self.world);
@@ -782,7 +782,7 @@ impl Editor {
     /// The transport-agnostic tail of joining a real session.
     fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
         Self::net_assign_scene_owners(&mut self.world);
-        let mut client = NetSession::client(transport);
+        let mut client = NetSession::client(transport, self.input_map_hash());
         client.register_scene(&self.world);
         // Which slot is ours depends on the peer id the server assigns —
         // everything is snapshot-driven until the Welcome binds our avatar.
@@ -869,9 +869,9 @@ impl Editor {
         // Sessions over the simulated link; skew frozen from the CURRENT slider.
         let hub = floptle_net::MemoryHub::new();
         hub.set_conditions(self.net_latency_ticks, self.net_loss);
-        let mut server = NetSession::server(Box::new(hub.server_endpoint()));
+        let mut server = NetSession::server(Box::new(hub.server_endpoint()), self.input_map_hash());
         server.register_scene(&sworld);
-        let mut client = NetSession::client(Box::new(hub.connect()));
+        let mut client = NetSession::client(Box::new(hub.connect()), self.input_map_hash());
         client.register_scene(&self.world);
         let predicted = self.net_client_side_setup(Some(1), true);
         if let Some(pe) = predicted {
@@ -901,6 +901,12 @@ impl Editor {
         }
         let host = floptle_script::ScriptHost::new();
         host.set_project_root(self.project_root.clone());
+        // The hidden server runs the SAME controller scripts, so it needs the
+        // SAME action map — its own ScriptHost starts with an empty one, and an
+        // empty map resolves every `input.action(...)` to false. The server
+        // would then compute a motionless character while the client predicted
+        // a moving one: a total desync that looks like rubber-banding.
+        host.set_input_map(self.script_host.input_system().borrow().map().clone());
         server.set_tick_dt(self.game_tick.step);
         // The hidden server runs REAL animators (state machines, no rendering):
         // same clip/controller registries as the editor, its own instances.
@@ -960,7 +966,7 @@ impl Editor {
         // The one-script model: the server's `input.*` IS the client's
         // replayed input for this tick (single-client harness).
         let inp = hs.session.input_for(hs.peer, st);
-        hs.host.set_input(floptle_script::net_to_input(&inp));
+        crate::input_actions::apply_net_input_to(&hs.host, &inp);
         hs.host.set_net_state(NetState {
             role: NetRoleState::Server,
             peers: hs.session.peers().to_vec(),
@@ -1160,8 +1166,12 @@ impl Editor {
     /// snapshots (others interpolate; our node reconciles + rewind-replays).
     fn net_client_tick(&mut self, tick: u64) {
         let step = self.game_tick.step;
+        if self.net_play_client.is_none() {
+            return;
+        }
+        // Read the tick's actions BEFORE borrowing the session mutably.
+        let ni = self.current_net_input();
         let Some(cs) = self.net_play_client.as_mut() else { return };
-        let ni = floptle_script::input_to_net(&self.last_tick_input);
         cs.send_input(tick, ni.clone());
         // Record this tick's prediction (post-physics state of our node).
         if let (Some((pe, pred)), Some(sim)) = (self.net_predictor.as_mut(), self.sim.as_ref())
@@ -1297,7 +1307,7 @@ impl Editor {
             // (e.g. a controller's rig.friction toggle) reaching the body.
             for (rtick, rinput) in replay {
                 let rt = rtick as f32 * step;
-                self.script_host.set_input(floptle_script::net_to_input(&rinput));
+                crate::input_actions::apply_net_input_to(&self.script_host, &rinput);
                 // Body state for the replayed tick: the body's CURRENT
                 // (being-replayed) state, so node.grounded/vx reads are right.
                 if let Some(sim) = self.sim.as_ref()

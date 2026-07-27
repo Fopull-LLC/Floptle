@@ -45,8 +45,13 @@ mod dock;
 mod gizmo;
 mod hierarchy;
 mod history;
+mod icons;
 mod ide;
+mod input_actions;
+mod input_scan;
+mod input_ui;
 mod inspector;
+mod settings_ui;
 mod lua_support;
 mod map_edit;
 mod map_ui;
@@ -210,6 +215,12 @@ struct EditorCmd {
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,
+    /// Open (or focus) the ⚙ Settings dock tab.
+    open_settings: bool,
+    /// project.ron changed in the Settings tab.
+    save_project: bool,
+    /// Edits the Settings tab's Input section collected this frame.
+    input_edits: Option<crate::input_ui::InputEdits>,
     /// Change a node's "type" (its `Matter`) — geometry/camera/light/… are mutually
     /// exclusive, so picking one in "Add Component" replaces the current type.
     set_matter: Option<(Entity, Matter)>,
@@ -634,7 +645,10 @@ struct EditorTabViewer<'a> {
     /// Mixer tab UI state.
     mixer_ui: &'a mut mixer_ui::MixerUiState,
     /// The project-wide mixer graph being edited (saved with the project).
-    mixer: &'a mut floptle_audio::MixerDesc,
+    /// The project config. Borrowed WHOLE (rather than field-by-field) so the
+    /// ⚙ Settings and 🎛 Mixer tabs can both reach it — two `&mut` borrows of
+    /// different fields of the same struct can't both live in this struct.
+    project: &'a mut floptle_scene::ProjectConfigDoc,
     /// The Particles tab is visible this frame — so the Inspector swaps to the
     /// selected track's settings (VFX artists edit tracks in the Inspector, not a
     /// cramped bottom panel).
@@ -651,6 +665,8 @@ struct EditorTabViewer<'a> {
     pointer_down: bool,
     /// Play mode is running (the Animating tab disables preview/record).
     playing: bool,
+    /// ⚙ Settings tab state (borrows; changes report through `cmd`).
+    settings: crate::settings_ui::SettingsCtx<'a>,
     cmd: &'a mut EditorCmd,
 }
 
@@ -723,6 +739,14 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Mixer => self.mixer_ui(ui),
             EditorTab::ShaderGraph => self.shader_graph_ui(ui),
             EditorTab::Map => self.map_ui(ui),
+            EditorTab::Settings => {
+                let out = self.settings.ui(ui, self.project);
+                self.cmd.save_project |= out.save_project;
+                if out.rename_layer.is_some() {
+                    self.cmd.rename_layer = out.rename_layer;
+                }
+                self.cmd.input_edits = Some(out.input);
+            }
         }
     }
 }
@@ -1414,6 +1438,13 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
         Ok(None) => {} // no project.ron — leave it that way.
         Err(e) => eprintln!("leaving project.ron untouched (won't parse: {e})"),
     }
+    // Top up `input.ron` with any starter binding it lacks. A project made
+    // before the action layer has none at all, and its shipped default scripts
+    // (freelook on the default camera, first/third person) now resolve named
+    // actions — so without this an upgraded project's camera would not move.
+    // Gap-filling only: existing bindings and custom actions are untouched.
+    let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
+    ed.seed_input_map();
     println!("migrated {migrated} effect(s) in {}", path.display());
     0
 }
@@ -1838,6 +1869,37 @@ struct Editor {
     tick_buttons_pressed: [bool; 3],
     tick_mouse_delta: (f32, f32),
     tick_scroll: f32,
+    /// The ACTION layer's device truth: physical key levels, mouse, and per-slot
+    /// pad state. Filled from the same winit events as the string sets above
+    /// (both, so raw-key scripts and action scripts always agree), plus the
+    /// gamepad pump. See `crate::input_actions`.
+    raw_input: floptle_input::RawInput,
+    /// Source edges banked since the last TICK resolve — the action-layer twin
+    /// of `tick_keys_pressed`. Drained per gameplay tick so a button tapped
+    /// between two ticks still reaches `fixedUpdate`.
+    tick_input_edges: (
+        std::collections::HashSet<floptle_input::Source>,
+        std::collections::HashSet<floptle_input::Source>,
+    ),
+    /// The gamepad backend. Polled once per frame; absent hardware is fine.
+    pads: floptle_input::Pads,
+    /// `input.ron`'s last-seen mtime, so an external edit hot-reloads the map
+    /// exactly once (the same trick the shader and script watchers use).
+    input_map_mtime: Option<std::time::SystemTime>,
+    /// Which actions the project's scripts actually reference, deduped — the
+    /// Input settings list is driven by this rather than by memory.
+    input_scan: crate::input_scan::InputScan,
+    /// "new action…" text in the Input settings.
+    input_new_action: String,
+    /// Which ⚙ Settings section is showing, and the cross-section search box.
+    settings_section: crate::settings_ui::SettingsSection,
+    settings_search: String,
+    /// A live resolve of the CURRENT devices for the Input settings' tester,
+    /// deliberately independent of the gameplay one: you edit bindings with the
+    /// game view unfocused, which is exactly when gameplay input reads neutral,
+    /// so a tester sharing that state would always look dead.
+    input_test_rt: floptle_input::ActionRuntime,
+    input_test_state: floptle_input::ActionState,
     /// The 60 Hz gameplay-tick accumulator driving `fixedUpdate` + physics, and the
     /// tick counter (the netcode timebase). Reset on Play.
     game_tick: floptle_core::FixedTimestep,
@@ -2426,6 +2488,11 @@ impl ApplicationHandler for Editor {
             self.check_autosave(); // offer crash recovery if an autosave is newer
         }
         self.project = floptle_scene::load_project(&self.project_cfg_path());
+        // The action map, on the SAME boot path an exported game takes — the
+        // File ⏵ Open route loads it too, but a launched build never goes
+        // through that, so without this every shipped game would start with no
+        // actions bound and nothing would respond.
+        self.load_input_map();
         self.migrate_legacy_post(&doc);
         self.asset_tree = build_assets(&self.project_root);
         self.materials = self.load_materials();
@@ -2604,6 +2671,10 @@ impl ApplicationHandler for Editor {
                             self.tick_keys_released.insert(name.to_string());
                         }
                     }
+                    // …and the same event into the ACTION layer. Both views of
+                    // the keyboard are filled here so they can never disagree
+                    // within a frame.
+                    self.note_action_key(code, pressed);
                     // A Map keybind being re-recorded swallows the next key.
                     if pressed && !typing && self.map_rebind.is_some() {
                         self.capture_map_rebind(code);

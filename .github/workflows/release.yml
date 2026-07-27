@@ -33,16 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Linux needs the windowing/GPU dev headers to build the editor (wgpu + winit)
-      # and ALSA for the audio backend (cpal → alsa-sys; macOS/Windows use the OS
-      # audio APIs and need nothing extra).
+      # Linux needs the windowing/GPU dev headers to build the editor (wgpu + winit),
+      # ALSA for the audio backend (cpal → alsa-sys) and udev for the gamepad backend
+      # (gilrs → libudev-sys, whose build script does an unconditional
+      # `pkg_config::find_library("libudev").unwrap()` and PANICS without the .pc file).
+      # macOS/Windows use OS APIs for all three and need nothing extra.
       - name: Linux build deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev libasound2-dev
+            libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

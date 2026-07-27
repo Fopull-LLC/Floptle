@@ -2171,5 +2171,48 @@
                 opacity: 1.0,
             )),
         ),
+        // Catalogue button (part 17 = Docking Port).
+        (
+            name: "Cat Dock Port",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "catalog_button",
+                    enabled: true,
+                    params: [
+                        ("part", 17.0),
+                    ],
+                ),
+            ],
+            parent: Some(41),
+            ui: Some((
+                place: Free(
+                    pos: (12.0, 846.0),
+                ),
+                size: (Fixed(166.0), Fixed(44.0)),
+                shape: Some((
+                    fill: (0.1, 0.16, 0.22, 0.92),
+                    radius: 7.0,
+                    border: 1.0,
+                    border_color: (0.42, 0.62, 0.8, 0.7),
+                )),
+                text: Some((
+                    text: "Docking Port",
+                    size: 15.0,
+                    color: (0.72, 0.88, 1.0, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
     ],
 )

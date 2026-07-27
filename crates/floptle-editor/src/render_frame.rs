@@ -119,6 +119,12 @@ impl Editor {
         // Scene view stays fully interactive.
         let game_focused = self.game_view() || self.game_trap;
 
+        // Poll the gamepads and refresh the action layer's device levels. Must
+        // run before anything resolves, and before the early-out below so a pad
+        // plugged in during startup is already slotted.
+        self.pump_input_devices();
+        self.poll_input_map_reload();
+
         // Nothing to drive until the window + GPU stack exist. (The borrows
         // themselves are taken per stage, and by the gather/draw core below.)
         if self.gpu.is_none()
@@ -1361,11 +1367,6 @@ impl Editor {
             });
         }
         // The entry-scene picker's options (only scanned while the window is up).
-        let scene_files = if self.show_project_settings {
-            crate::project::scene_files_in(&self.project_root)
-        } else {
-            Vec::new()
-        };
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
         let maps = &self.maps;
@@ -1397,7 +1398,6 @@ impl Editor {
         let preview_spinning = &mut self.preview_spinning;
         let preview_material = &mut self.preview_material;
         let project = &mut self.project;
-        let show_project_settings = &mut self.show_project_settings;
         let layer_new = &mut self.layer_new;
         let show_project_mgr = &mut self.show_project_mgr;
         let project_path_buf = &mut self.project_path_buf;
@@ -1574,6 +1574,29 @@ impl Editor {
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
         let net_ghosts = &mut self.net_ghosts;
+        // ⚙ Settings tab inputs. Only gathered when the tab is actually open,
+        // so a closed Settings tab costs nothing per frame.
+        let settings_open = dock_state.find_tab(&crate::dock::EditorTab::Settings).is_some();
+        let settings_scene_files = if settings_open {
+            crate::project::scene_files_in(&self.project_root)
+        } else {
+            Vec::new()
+        };
+        let settings_pad_names =
+            if settings_open { self.pads.slot_names() } else { Vec::new() };
+        let (settings_input_map, settings_input_pending) = {
+            let sys = self.script_host.input_system().borrow();
+            if settings_open {
+                (sys.map().clone(), sys.pending_rebind().cloned())
+            } else {
+                (floptle_input::InputMap::default(), None)
+            }
+        };
+        let settings_section = &mut self.settings_section;
+        let settings_search = &mut self.settings_search;
+        let input_scan = &self.input_scan;
+        let input_new_action = &mut self.input_new_action;
+        let input_test_state = &self.input_test_state;
         let mut cmd = EditorCmd::default();
         let mut want_save = false;
         let mut want_save_project = false;
@@ -1644,8 +1667,10 @@ impl Editor {
                         if ui.add_enabled(has_selection, egui::Button::new("Duplicate  (Ctrl+D)")).clicked() { cmd.duplicate = true; ui.close(); }
                         if ui.add_enabled(has_selection, egui::Button::new("Delete  (Del)")).clicked() { cmd.delete = true; ui.close(); }
                         ui.separator();
-                        if ui.button("Project Settings…").clicked() {
-                            *show_project_settings = true;
+                        if ui.button("Project Settings").on_hover_text(
+                            "Opens the ⚙ Settings tab — drag it wherever you like, or dock it beside the viewport.",
+                        ).clicked() {
+                            cmd.open_settings = true;
                             ui.close();
                         }
                         if ui.button("Preferences…").clicked() {
@@ -2083,7 +2108,7 @@ impl Editor {
                 vfx_ui: vfx_ui_state,
                 audio: audio_sys,
                 mixer_ui: mixer_ui_state,
-                mixer: &mut project.mixer,
+                project,
                 particles_active,
                 anim_ui: anim_ui_state,
                 shader_graph: shader_graph_state,
@@ -2091,6 +2116,18 @@ impl Editor {
                 mesh_registry,
                 pointer_down,
                 playing,
+                settings: crate::settings_ui::SettingsCtx {
+                    scene_files: &settings_scene_files,
+                    layer_new,
+                    section: settings_section,
+                    search: settings_search,
+                    input_map: &settings_input_map,
+                    input_pending: settings_input_pending.as_ref(),
+                    input_scan,
+                    input_test: input_test_state,
+                    pad_names: &settings_pad_names,
+                    input_new_action,
+                },
                 cmd: &mut cmd,
             };
             // Fullscreen: one tab maximized over the whole window (double-click a tab to
@@ -2251,205 +2288,9 @@ impl Editor {
                     });
             }
 
-            // ---- project settings window (project-wide rendering) ----
-            egui::Window::new("Project Settings")
-                .open(show_project_settings)
-                .resizable(false)
-                .default_width(280.0)
-                .show(ui.ctx(), |ui| {
-                    ui.label("Game — what a build ships as");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("title");
-                        let mut t = project.title.clone().unwrap_or_default();
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut t)
-                                    .desired_width(170.0)
-                                    .hint_text("My Game"),
-                            )
-                            .changed()
-                        {
-                            project.title = (!t.trim().is_empty()).then_some(t);
-                            want_save_project = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("entry scene");
-                        let current = project
-                            .entry_scene
-                            .clone()
-                            .unwrap_or_else(|| "scenes/first.ron".into());
-                        let stem = |s: &str| {
-                            std::path::Path::new(s)
-                                .file_stem()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| s.to_string())
-                        };
-                        egui::ComboBox::from_id_salt("entry_scene_pick")
-                            .width(170.0)
-                            .selected_text(stem(&current))
-                            .show_ui(ui, |ui| {
-                                for s in &scene_files {
-                                    if ui
-                                        .selectable_label(current == *s, stem(s))
-                                        .on_hover_text(s)
-                                        .clicked()
-                                    {
-                                        project.entry_scene = Some(s.clone());
-                                        want_save_project = true;
-                                    }
-                                }
-                            });
-                    });
-                    ui.small("the scene a build boots into — the editor opens it on project load too");
-
-                    ui.add_space(8.0);
-                    ui.label("Rendering — applies to every scene");
-                    ui.separator();
-                    if ui.checkbox(&mut project.retro, "retro pixelization").changed() {
-                        want_save_project = true;
-                    }
-                    if ui
-                        .add(egui::Slider::new(&mut project.retro_height, 80u32..=1080).text("pixel rows"))
-                        .changed()
-                    {
-                        want_save_project = true;
-                    }
-                    if ui.checkbox(&mut project.matter, "SDF matter").changed() {
-                        want_save_project = true;
-                    }
-
-                    ui.add_space(8.0);
-                    ui.small("Post-processing (bloom, vignette, ambient occlusion) moved to each scene's ✨ Post Processing node — select it in the Hierarchy.");
-
-                    ui.add_space(8.0);
-                    ui.label("Layers — collision & query groups");
-                    ui.separator();
-                    ui.small("nodes pick a layer in the Inspector; scripts read/write node.layer and filter raycasts by name");
-                    // "Default" is implicit (always bit 0, can't be removed) —
-                    // the rows below edit the project's CUSTOM layers.
-                    let mut remove_idx: Option<usize> = None;
-                    for i in 0..project.layers.len() {
-                        ui.horizontal(|ui| {
-                            let before = project.layers[i].clone();
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut project.layers[i])
-                                    .desired_width(150.0),
-                            );
-                            if resp.changed() {
-                                let after = project.layers[i].clone();
-                                // The rename follows through: exception pairs here,
-                                // the open scene's nodes via cmd (per keystroke, so
-                                // they never detach mid-edit). Other scene FILES
-                                // keep the old name — they warn at Play.
-                                for (a, b) in project.no_collide.iter_mut() {
-                                    if *a == before {
-                                        *a = after.clone();
-                                    }
-                                    if *b == before {
-                                        *b = after.clone();
-                                    }
-                                }
-                                cmd.rename_layer = Some((before, after));
-                                want_save_project = true;
-                            }
-                            // Removal is destructive and NOT undoable, so it's a
-                            // two-step click: 🗑 arms this row, ✔ commits, ✖ (or
-                            // clicking 🗑 on another row) disarms.
-                            let arm_id = egui::Id::new("layer-delete-armed");
-                            let armed: Option<usize> =
-                                ui.ctx().data(|d| d.get_temp(arm_id)).flatten();
-                            if armed == Some(i) {
-                                ui.small("delete?");
-                                if ui.small_button("✔").on_hover_text("yes, remove it — nodes still naming it act as Default (and warn at Play)").clicked() {
-                                    remove_idx = Some(i);
-                                    ui.ctx().data_mut(|d| d.insert_temp(arm_id, None::<usize>));
-                                }
-                                if ui.small_button("✖").clicked() {
-                                    ui.ctx().data_mut(|d| d.insert_temp(arm_id, None::<usize>));
-                                }
-                            } else if ui
-                                .small_button("🗑")
-                                .on_hover_text("remove this layer (asks to confirm)")
-                                .clicked()
-                            {
-                                ui.ctx().data_mut(|d| d.insert_temp(arm_id, Some(i)));
-                            }
-                        });
-                    }
-                    if let Some(i) = remove_idx {
-                        let name = project.layers.remove(i);
-                        project.no_collide.retain(|(a, b)| *a != name && *b != name);
-                        want_save_project = true;
-                    }
-                    let resolved = project.build_layers();
-                    ui.horizontal(|ui| {
-                        let full = resolved.names.len() >= floptle_core::layers::MAX_LAYERS;
-                        let resp = ui.add(
-                            egui::TextEdit::singleline(layer_new)
-                                .hint_text("new layer…")
-                                .desired_width(150.0),
-                        );
-                        let commit = (resp.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                            || ui.small_button("➕").clicked();
-                        if commit && !layer_new.trim().is_empty() {
-                            let name = layer_new.trim().to_string();
-                            if !full && resolved.index_of(&name).is_none() {
-                                project.layers.push(name);
-                                want_save_project = true;
-                            }
-                            layer_new.clear();
-                        }
-                        if full {
-                            ui.small("32-layer max");
-                        }
-                    });
-                    // The collision matrix: an unchecked pair passes through each
-                    // other (bodies vs colliders AND unfiltered rays still hit
-                    // everything — rays only filter when a script asks).
-                    let resolved = project.build_layers();
-                    if resolved.names.len() > 1 {
-                        ui.add_space(4.0);
-                        ui.small("collision matrix — unchecked pairs pass through each other");
-                        egui::Grid::new("layer_matrix").spacing([4.0, 2.0]).show(ui, |ui| {
-                            ui.label("");
-                            for (j, name) in resolved.names.iter().enumerate() {
-                                ui.small(format!("{j}")).on_hover_text(name);
-                            }
-                            ui.end_row();
-                            for (i, a) in resolved.names.iter().enumerate() {
-                                ui.small(format!("{i} {a}"));
-                                for (j, b) in resolved.names.iter().enumerate() {
-                                    if j < i {
-                                        ui.label("");
-                                        continue;
-                                    }
-                                    let mut on = resolved.collides(i as u8, j as u8);
-                                    if ui
-                                        .checkbox(&mut on, "")
-                                        .on_hover_text(format!("{a} × {b}"))
-                                        .changed()
-                                    {
-                                        if on {
-                                            project.no_collide.retain(|(x, y)| {
-                                                !((x == a && y == b) || (x == b && y == a))
-                                            });
-                                        } else {
-                                            project.no_collide.push((a.clone(), b.clone()));
-                                        }
-                                        want_save_project = true;
-                                    }
-                                }
-                                ui.end_row();
-                            }
-                        });
-                    }
-
-                    ui.add_space(6.0);
-                    ui.small("saved to assets/project.ron");
-                });
+            // Project Settings used to be a fixed-size modal window here. It's
+            // now the ⚙ Settings DOCK TAB (see `settings_ui.rs`): draggable,
+            // dockable beside the viewport, searchable, and closed by default.
 
             // ---- preferences window (user-wide editor settings) ----
             egui::Window::new("Preferences")
@@ -3382,10 +3223,34 @@ impl Editor {
         } else if want_save || cmd.save_scene {
             self.save_scene();
         }
-        if want_save_project
+        if (want_save_project || cmd.save_project)
             && let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
                 eprintln!("  save project failed: {e}");
             }
+        // Edit ⏵ Project Settings opens (or focuses) the ⚙ Settings TAB — it
+        // docks like anything else, so there is no modal to dismiss.
+        if cmd.open_settings && let Some(d) = self.dock_state.as_mut() {
+            crate::dock::focus_settings_tab(d);
+        }
+        if let Some(edits) = cmd.input_edits.take() {
+            self.apply_input_edits(edits);
+        }
+        // The ⚙ Settings tab drives its own edits (it has `&mut self`); what
+        // remains here is the per-frame upkeep it needs while VISIBLE: keep the
+        // script scan fresh, and settle a press-to-bind that just landed.
+        let settings_front = self
+            .dock_state
+            .as_ref()
+            .is_some_and(|d| crate::dock::tab_is_front(d, crate::dock::EditorTab::Settings));
+        if settings_front {
+            let dir = self.project_root.join("scripts");
+            let now = self.play_t.max(elapsed);
+            self.input_scan.poll(&dir, now);
+            // Auto-commit a capture — click +, press the input, done. Escape
+            // always backs out, so an accidental arm is never a trap.
+            let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            self.settle_pending_rebind(escape);
+        }
         // A quit decision (Save & Quit / Discard & Quit): the save above has run, so leave
         // now — `about_to_wait` sees this and exits the winit loop.
         if want_exit {
@@ -3835,6 +3700,10 @@ impl Editor {
                 floptle_script::InputSnapshot { aim, ..Default::default() }
             };
             self.script_host.set_input(frame_input.clone());
+            // …and the ACTION layer's frame domain, off the same devices and
+            // the same focus rule, so `input.action(...)` and `input.key(...)`
+            // agree about whether the game is being played this frame.
+            self.resolve_frame_actions(sdt, game_focused);
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
             // (physics doesn't step until after scripts, so this is safe). The sim
             // origin rides along so ray coordinates convert world ↔ sim frame.
@@ -3993,6 +3862,10 @@ impl Editor {
                     // Keep what the scripts saw: prediction records + ships it.
                     self.last_tick_input = snap.clone();
                     self.script_host.set_input(snap);
+                    // The action layer's tick domain — the one with input
+                    // history, so motions and buffers advance exactly once per
+                    // tick regardless of framerate. Drains the banked edges.
+                    self.resolve_tick_actions(self.game_tick.step, game_focused);
                     if let Some(sim) = self.sim.as_mut() {
                         // Fresh body state for THIS tick (post previous tick's physics).
                         let mut states = HashMap::new();
@@ -4042,7 +3915,7 @@ impl Editor {
                         for (e, owner) in self.net_remote_predicted.clone() {
                             let Some(s) = self.net_server.as_mut() else { break };
                             let inp = s.input_for(owner, self.game_tick_no);
-                            self.script_host.set_input(floptle_script::net_to_input(&inp));
+                            crate::input_actions::apply_net_input_to(&self.script_host, &inp);
                             self.script_host.run_frame_for(
                                 &mut self.world,
                                 e.index(),
@@ -4408,6 +4281,11 @@ impl Editor {
             self.tick_buttons_pressed = [false; 3];
             self.tick_mouse_delta = (0.0, 0.0);
             self.tick_scroll = 0.0;
+            // Same for the action layer's banked edges, and for the same
+            // reason: nothing consumes them outside Play, so they would grow
+            // without bound and then all fire at once on the first tick.
+            self.tick_input_edges.0.clear();
+            self.tick_input_edges.1.clear();
         }
         // A CONFINE-only grab (X11 has no OS cursor lock) still lets the pointer
         // wander inside the window — pin it ourselves while a look/pan/lock/trap is

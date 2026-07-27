@@ -490,8 +490,8 @@ mod tests {
             }
             (w, ents)
         };
-        let mut server = crate::NetSession::server(Box::new(host_t));
-        let mut client = crate::NetSession::client(Box::new(client_t));
+        let mut server = crate::NetSession::server(Box::new(host_t), 0);
+        let mut client = crate::NetSession::client(Box::new(client_t), 0);
         let (mut sw, se) = world_with(1);
         let (mut cw, ce) = world_with(1);
         server.register_scene(&sw);

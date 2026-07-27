@@ -102,6 +102,14 @@ local REG = {
   -- fin (ring it with symmetry); its fuel joins the shared pool, and a radial
   -- decoupler kicks it (and its ring) away when spent.
   radialTank = { prefab = "PartRadialTank", label = "Radial Tank",  h = 1.00, rx = 0.50, rz = 0.50, mass = 1.4,  cost = 140, top = false, bottom = false, kind = "tank", fuel = 70, radial_orient = true },
+  -- DOCKING PORT: the androgynous latch two craft mate through. It stacks like
+  -- a decoupler (same collar footprint) and hosts side mounts, so you can put
+  -- one on the nose of a lander and another under a station module. In flight
+  -- it is BOTH halves of the job: bring two ports face to face and it captures
+  -- (the assemblies weld into one vessel); press its UNDOCK control and it
+  -- splits the stack right back apart at that seam, sending the far half away
+  -- as a live craft you can fly. That's the whole orbit → land → return loop.
+  dockPort  = { prefab = "PartDockPort",  label = "Docking Port", h = 0.28, rx = 0.53, rz = 0.53, mass = 0.18, cost = 180, top = true,  bottom = true,  kind = "structural", dock = true, side = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
@@ -1176,6 +1184,9 @@ local function save_blueprint()
       -- and their ratings (EC capacity / charge rate) through to the vessel.
       power = d.power and 1 or 0, solar = d.solar and 1 or 0,
       ec = d.ec or 0, gen = d.gen or 0,
+      -- Docking ports are peripherals, not staging events: the flight side
+      -- reads this to find every mating face on the craft.
+      dock = d.dock and 1 or 0,
     }
   end
   save.set("shipyard.blueprint", bp)

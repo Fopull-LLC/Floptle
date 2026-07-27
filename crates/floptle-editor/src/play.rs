@@ -489,6 +489,10 @@ impl Editor {
         self.script_host.clear_anim_state();
         self.script_gizmos.clear();
         self.script_lines.clear();
+        // Both directions of the Play toggle wipe action state: a key held
+        // while editing must not read as a press the instant Play starts, and a
+        // half-finished motion must not survive into (or out of) the session.
+        self.reset_action_state();
         if self.playing {
             self.playing = false;
             self.paused = false;

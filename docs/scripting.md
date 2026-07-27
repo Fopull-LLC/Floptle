@@ -217,6 +217,35 @@ assembly.split(node, { boosterA, boosterB }, function(stage)
 end)
 ```
 
+**Splitting off something FLYABLE:** pass a prefab name as the fourth argument
+and the detached half is rooted at a fresh instance of it — scripts and all —
+instead of a bare node. That's the difference between shedding debris and
+undocking a lander that can fly home:
+
+```lua
+assembly.split(node, moduleParts, function(craft)
+  save.set("handoff." .. craft.id, subBlueprint)   -- its controller reads this in start()
+end, "Vessel")                                     -- prefab root: needs an assembly RigidBody
+```
+
+**Docking, cranes, construction — `assembly.merge(node, other)`:** the inverse
+of `split`. Two compounds become ONE rigid body carrying their combined
+momentum, `other`'s part nodes re-parent under this root with their world pose
+kept, and `other`'s root is retired. The join is perfectly **inelastic**: an
+off-centre catch spins the pair up exactly as much as it should, and whatever
+relative motion is left at the instant of the latch is felt as a jolt — so aim
+for a slow, aligned closing (or add your own magnetism to make one). Absorbed
+parts keep their entity ids, so per-part contact attribution
+(`assembly.impacts`) carries straight across the join. Latching onto something
+`setAnchored`'d pins the pair.
+
+```lua
+-- A docking latch, in full: line the two up, then weld.
+if range < 0.5 and align > 0.8 and closingSpeed < 1.5 then
+  assembly.merge(myVessel, theirVessel)   -- next tick, their parts are my children
+end
+```
+
 `assembly.force(node, f)` pushes through the CoM; `assembly.impulseAt` is a
 one-shot kick (explosions, docking bumps). All vectors are world-space
 `vec3`s. Forces are **held per tick** and applied through every physics

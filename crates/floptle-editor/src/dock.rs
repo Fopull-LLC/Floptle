@@ -28,6 +28,10 @@ pub(crate) enum EditorTab {
     /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
     /// per-face material slots (docs/map-tools-proposal.md).
     Map,
+    /// Project Settings: game/rendering/layers/input, searchable by section.
+    /// Opened from Edit ⏵ Project Settings; a real dock tab, so it can be
+    /// dragged anywhere, split beside the viewport, or left closed.
+    Settings,
 }
 
 impl EditorTab {
@@ -36,19 +40,53 @@ impl EditorTab {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
             EditorTab::Terrain => "Δ Terrain",
-            EditorTab::Map => "⬢ Map",
+            EditorTab::Map => "▦ Map",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
             EditorTab::Scene => "⌖ Scene",
             EditorTab::Game => "⏵ Game",
             EditorTab::Scripting => "Scripting",
-            EditorTab::Animation => "✏ Animating",
+            EditorTab::Animation => "⏱ Animating",
             EditorTab::AnimGraph => "◎ Controller",
-            EditorTab::Particles => "✨ Particles",
-            EditorTab::Mixer => "🎧 Mixer",
+            EditorTab::Particles => "✱ Particles",
+            EditorTab::Mixer => "≣ Mixer",
             EditorTab::ShaderGraph => "◈ Shaders",
-            EditorTab::Paint => "🖌 Paint",
+            EditorTab::Paint => "◨ Paint",
+            EditorTab::Settings => "⚙ Settings",
         }
+    }
+
+    /// Every tab, for the tab-title glyph test.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const ALL: &'static [EditorTab] = &[
+        EditorTab::Hierarchy,
+        EditorTab::Inspector,
+        EditorTab::Terrain,
+        EditorTab::Assets,
+        EditorTab::Console,
+        EditorTab::Scene,
+        EditorTab::Game,
+        EditorTab::Scripting,
+        EditorTab::Animation,
+        EditorTab::AnimGraph,
+        EditorTab::Particles,
+        EditorTab::Mixer,
+        EditorTab::ShaderGraph,
+        EditorTab::Paint,
+        EditorTab::Map,
+        EditorTab::Settings,
+    ];
+}
+
+/// Focus the ⚙ Settings dock tab — creating it if it isn't open. Project
+/// Settings is a TAB, not a modal window: it can be dragged into any panel,
+/// split beside the viewport, or closed like anything else. It is deliberately
+/// absent from the default layout — you open it when you need it.
+pub(crate) fn focus_settings_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Settings) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Settings);
     }
 }
 

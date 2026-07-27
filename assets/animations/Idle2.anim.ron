@@ -1,0 +1,884 @@
+(
+    name: "Idle",
+    duration: 2.0,
+    source_model: "assets/models/Sae.mirrored.rigged.mirrored.glb",
+    channels: [
+        (
+            node: "Calf.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Calf.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Calf.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Calf.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Cube.003",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Forearm.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0000000000000004440892, 0.7298835),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Forearm.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Forearm.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Forearm.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hand.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hand.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hand.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hand.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Head",
+            translation: Some((
+                times: [
+                    0.0,
+                    1.0625774,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                    1.0625774,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                    (0.0, 0.0, -0.18319428, 0.98307675),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                    1.0625774,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Heel.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Heel.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Heel.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Heel.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hip",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Soulder.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Soulder.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Soulder.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Soulder.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Thigh.L.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Thigh.L.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Thigh.R.R",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Thigh.R.L",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Torso",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+        (
+            node: "Hair",
+            translation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0),
+                ],
+                step: false,
+            )),
+            rotation: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (0.0, 0.0, 0.0, 1.0),
+                ],
+                step: false,
+            )),
+            scale: Some((
+                times: [
+                    0.0,
+                ],
+                values: [
+                    (1.0, 1.0, 1.0),
+                ],
+                step: false,
+            )),
+        ),
+    ],
+    events: [],
+)

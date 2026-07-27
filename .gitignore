@@ -63,3 +63,21 @@ assets/shaders/examples/ui/
 
 # Offscreen render-probe outputs (ui_shader_probe, etc.)
 *_probe.png
+
+# --- Agent / tooling scratch --------------------------------------------------
+# Claude Code's per-project state (session transcripts, local settings). Machine-
+# and person-specific, and it can carry conversation content — never in history.
+.claude/
+
+# Local packaging output (scripts/package.sh writes bundles + releases.json here;
+# real releases are built by CI and published to GitHub Releases).
+/dist/
+/builds/
+builds.zip
+
+# --- Dev capture scratch ------------------------------------------------------
+# Ad-hoc screenshots and render probes people drop at the repo root while
+# debugging. The named *_probe.png rule above only catches the ones that follow
+# the convention; these are the rest.
+/*.png
+!/docs/**/*.png

@@ -120,42 +120,49 @@ impl SharedNet {
     }
 }
 
-/// Convert a per-tick [`crate::InputSnapshot`] into the wire form (sorted for
-/// deterministic encoding) — what a predicted node's owner ships to the server.
-pub fn input_to_net(s: &crate::InputSnapshot) -> floptle_net::NetInput {
-    let sorted = |set: &std::collections::HashSet<String>| {
-        let mut v: Vec<String> = set.iter().cloned().collect();
-        v.sort();
-        v
-    };
+/// A resolved tick of ACTIONS into the wire form — what a predicted node's
+/// owner ships to the server.
+///
+/// The wire carries actions, not keys: a pad player and a keyboard player who
+/// both press "Jump" produce byte-identical commands, so the one controller
+/// script replays the same everywhere. `aim` rides along because a
+/// camera-relative controller's view angle is genuinely part of the input.
+pub fn input_to_net(
+    state: &floptle_input::ActionState,
+    aim: Option<[f32; 2]>,
+) -> floptle_net::NetInput {
     floptle_net::NetInput {
-        keys_down: sorted(&s.keys_down),
-        keys_pressed: sorted(&s.keys_pressed),
-        keys_released: sorted(&s.keys_released),
-        mouse: s.mouse,
-        mouse_delta: s.mouse_delta,
-        scroll: s.scroll,
-        buttons_down: s.buttons_down,
-        buttons_pressed: s.buttons_pressed,
-        aim: s.aim,
+        actions: state.held,
+        just_pressed: state.just_pressed,
+        just_released: state.just_released,
+        axes1: state.axes1.clone(),
+        axes2: state.axes2.clone(),
+        aim,
     }
 }
 
-/// The wire form back into a host input snapshot — what the server (and the
+/// The wire form back into a resolved action state — what the server (and the
 /// client's replay) feed `fixedUpdate` so the SAME controller runs on both
 /// sides (`docs/netcode-design.md` §6, the one-script model).
-pub fn net_to_input(n: &floptle_net::NetInput) -> crate::InputSnapshot {
-    crate::InputSnapshot {
-        keys_down: n.keys_down.iter().cloned().collect(),
-        keys_pressed: n.keys_pressed.iter().cloned().collect(),
-        keys_released: n.keys_released.iter().cloned().collect(),
-        mouse: n.mouse,
-        mouse_delta: n.mouse_delta,
-        scroll: n.scroll,
-        buttons_down: n.buttons_down,
-        buttons_pressed: n.buttons_pressed,
-        aim: n.aim,
+///
+/// `held_secs` is NOT transmitted: it's derivable and would cost 4 bytes per
+/// action every tick. It is reconstructed by the receiver advancing its own
+/// timer, which is exact as long as the tick stream is (and if it isn't, the
+/// hold time is the least of the problems).
+pub fn net_to_input(n: &floptle_net::NetInput, action_count: usize) -> floptle_input::ActionState {
+    floptle_input::ActionState {
+        held: n.actions,
+        just_pressed: n.just_pressed,
+        just_released: n.just_released,
+        held_secs: vec![0.0; action_count],
+        axes1: n.axes1.clone(),
+        axes2: n.axes2.clone(),
     }
+}
+
+/// The `aim` a wire input carried, for feeding the legacy raw snapshot.
+pub fn net_aim(n: &floptle_net::NetInput) -> Option<[f32; 2]> {
+    n.aim
 }
 
 /// Convert a Lua value to a [`NetValue`], enforcing the §13.2 guardrails at

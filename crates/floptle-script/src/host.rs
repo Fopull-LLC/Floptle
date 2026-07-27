@@ -222,6 +222,12 @@ impl ScriptHost {
         // The `input` global: a table of functions reading this frame's input
         // snapshot (so games can poll the keyboard/mouse).
         let input: Rc<RefCell<InputSnapshot>> = Rc::new(RefCell::new(InputSnapshot::default()));
+        // The action layer, shared with the driver: it resolves devices into
+        // this, scripts read named actions out of it.
+        let input_sys: crate::input_api::SharedInput =
+            Rc::new(RefCell::new(floptle_input::InputSystem::default()));
+        let input_domain: crate::input_api::SharedDomain =
+            Rc::new(std::cell::Cell::new(floptle_input::Domain::Frame));
         // Mouse-lock request channel (drained by the editor each frame). See the field docs.
         let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
         if let Ok(t) = lua.create_table() {
@@ -350,6 +356,10 @@ impl ScriptHost {
                 })
                 .ok(),
             );
+            // The ACTION layer sits on the same table, so a project can migrate
+            // one call at a time: `input.key("w")` and `input.action("Jump")`
+            // coexist for as long as a game wants them to.
+            crate::input_api::install(&lua, &t, &input_sys, &input_domain);
             let _ = lua.globals().set("input", t);
         }
         // The `net.*` bridge state — created early so the raycast closure can
@@ -1182,6 +1192,8 @@ impl ScriptHost {
             errors: Vec::new(),
             logs,
             input,
+            input_sys,
+            input_domain,
             bodies: shared.bodies.clone(),
             ui_rects: shared.ui_rects.clone(),
             body_changes: shared.body_changes.clone(),
@@ -1890,6 +1902,21 @@ impl ScriptHost {
         *self.input.borrow_mut() = snapshot;
     }
 
+    /// The shared action layer. The driver resolves devices into it (see
+    /// [`floptle_input::InputSystem::resolve_frame`] /
+    /// [`resolve_tick`](floptle_input::InputSystem::resolve_tick)) and the Lua
+    /// `input.action(...)` family reads out of it.
+    pub fn input_system(&self) -> &crate::input_api::SharedInput {
+        &self.input_sys
+    }
+
+    /// Install the project's action map (call at project load and whenever
+    /// `input.ron` changes on disk). Resets per-player state, since action
+    /// indices may have moved.
+    pub fn set_input_map(&self, map: floptle_input::InputMap) {
+        self.input_sys.borrow_mut().set_map(map);
+    }
+
     /// Lend the project's resolved layer table (call at Play start, alongside
     /// the sim build). Validates `node.layer` writes and resolves the named
     /// `layers` filter in `raycast(...)` to a bitmask.
@@ -2017,7 +2044,7 @@ impl ScriptHost {
             }
         }
         // Pass 2: run each script's start/update.
-        self.run_pass(world, &work, dt, time, Pass::Frame);
+        self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         self.flush_writes(world);
 
         // Drop environments whose (node, script) no longer exists.
@@ -2052,7 +2079,7 @@ impl ScriptHost {
         crate::sched_api::tick(&self.sched, &self.logs, dt as f64);
         let work: Vec<(Entity, Scripts)> =
             world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
-        self.run_pass(world, &work, dt, time, Pass::Fixed);
+        self.run_pass(world, &work, dt, time, Pass::Fixed, floptle_input::Domain::Tick);
         self.flush_writes(world);
     }
 
@@ -2067,7 +2094,7 @@ impl ScriptHost {
         self.sync_scene(world);
         let work: Vec<(Entity, Scripts)> =
             world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
-        self.run_pass(world, &work, dt, time, Pass::Late);
+        self.run_pass(world, &work, dt, time, Pass::Late, floptle_input::Domain::Frame);
         self.flush_writes(world);
     }
 
@@ -2101,7 +2128,18 @@ impl ScriptHost {
             std::mem::take(&mut self.script_skip),
             std::mem::take(&mut self.frame_skip),
         );
-        self.run_pass(world, &work, dt, time, if fixed { Pass::Fixed } else { Pass::Frame });
+        // BOTH targeted passes run on the gameplay tick, including the `update`
+        // one — that is the whole point of `run_frame_for`. So a predicted
+        // node's `update` reads TICK input, or client and server would resolve
+        // different edges and every snapshot would read as a misprediction.
+        self.run_pass(
+            world,
+            &work,
+            dt,
+            time,
+            if fixed { Pass::Fixed } else { Pass::Frame },
+            floptle_input::Domain::Tick,
+        );
         self.script_skip = skip;
         self.frame_skip = fskip;
         self.flush_writes(world);
@@ -2124,7 +2162,19 @@ impl ScriptHost {
     /// One lifecycle pass over `work`: per-frame (`start`/`update`), per-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`), with the same self-move
     /// write-back rules.
-    fn run_pass(&mut self, world: &mut World, work: &[(Entity, Scripts)], dt: f32, time: f32, pass: Pass) {
+    fn run_pass(
+        &mut self,
+        world: &mut World,
+        work: &[(Entity, Scripts)],
+        dt: f32,
+        time: f32,
+        pass: Pass,
+        domain: floptle_input::Domain,
+    ) {
+        // Point the action API at this pass's input domain before any script
+        // runs. It is passed in rather than derived from `pass` because the
+        // prediction paths run an `update` pass on the TICK clock.
+        self.input_domain.set(domain);
         for (e, scripts) in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots

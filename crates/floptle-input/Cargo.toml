@@ -1,3 +1,11 @@
+# floptle-input — the engine's action-mapping layer.
+#
+# Gameplay code names ACTIONS ("Jump", "Punch", "Move"); this crate resolves
+# them from whatever the player is actually holding — keyboard, mouse, or one
+# of several gamepads. Deliberately free of winit and gilrs types in its public
+# model so the whole thing is testable headlessly: producers (the editor, the
+# runtime) translate their device events into `RawInput` at the boundary.
+
 [package]
 name = "floptle-input"
 description = "Input: bind keyboard/mouse/gamepad to named actions; scripts react to actions."
@@ -8,5 +16,20 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# The pure half (map, resolution, history) has no native deps, so data-model
+# crates can depend on it without dragging in udev/IOKit/XInput. The editor and
+# runtime enable "pads" to actually talk to controllers.
+default = ["pads"]
+pads = ["dep:gilrs"]
+
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+serde.workspace = true
+ron.workspace = true
+log.workspace = true
+gilrs = { workspace = true, optional = true }   # gamepads + hot-plug — ADR-0024
+
+[dev-dependencies]
+ron.workspace = true
+env_logger.workspace = true   # the pad_probe example

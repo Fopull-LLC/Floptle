@@ -74,8 +74,14 @@ pub enum AssemblyCmd {
     /// Instantaneous impulse at a world point.
     Impulse { root: u32, imp: [f64; 3], at: [f64; 3] },
     /// Detach `parts` (entity indices) into a new vessel; `cb` (if any) is
-    /// called with the new root's node table.
-    Split { root: u32, parts: Vec<u32>, cb: Option<RegistryKey> },
+    /// called with the new root's node table. `prefab` roots the detached half
+    /// at a fresh instance of that prefab instead of a bare node — that's how a
+    /// detached half comes away ALIVE (its scripts run), rather than as debris.
+    Split { root: u32, parts: Vec<u32>, cb: Option<RegistryKey>, prefab: Option<String> },
+    /// Absorb the assembly rooted at `other` into the one rooted at `root`:
+    /// one rigid body, combined momentum, `other`'s root retired (a docking
+    /// latch closing, a crane taking its load).
+    Merge { root: u32, other: u32 },
     /// Re-gather the compound from the root's current descendants — call
     /// after script-assembling a vessel (spawning parts under the root).
     Rebuild { root: u32 },
@@ -192,13 +198,25 @@ pub(crate) fn install_assembly_api(
         })?;
         t.set("impulseAt", f)?;
     }
-    // assembly.split(node, parts [, fn]) — detach part nodes (a node or a list
-    // of nodes) into a NEW vessel. The detach happens after this script pass;
-    // fn(newRoot) is called with the fresh vessel's node when it exists.
+    // assembly.split(node, parts [, fn] [, prefab]) — detach part nodes (a node
+    // or a list of nodes) into a NEW vessel. The detach happens after this
+    // script pass; fn(newRoot) is called with the fresh vessel's node when it
+    // exists. Pass a PREFAB name and the detached half is rooted at a fresh
+    // instance of it (which must carry an assembly RigidBody) instead of a bare
+    // node — so the half that comes away is a LIVE, scripted craft (an undocked
+    // lander that can fly home), not inert debris. Give it a BARE root: the
+    // detached parts are the compound's shapes, and any RigidBody the prefab
+    // brings of its own would sit outside it.
     {
         let q = cmds.clone();
         let f = lua.create_function(
-            move |lua, (node, parts, cb): (Value, Value, Option<mlua::Function>)| {
+            move |lua,
+                  (node, parts, cb, prefab): (
+                Value,
+                Value,
+                Option<mlua::Function>,
+                Option<String>,
+            )| {
                 let root = node_eid(&node, "assembly.split(node, parts)")?;
                 let mut eids = Vec::new();
                 match &parts {
@@ -216,11 +234,30 @@ pub(crate) fn install_assembly_api(
                     Some(f) => Some(lua.create_registry_value(f)?),
                     None => None,
                 };
-                q.borrow_mut().push(AssemblyCmd::Split { root, parts: eids, cb });
+                let prefab = prefab.filter(|p| !p.trim().is_empty());
+                q.borrow_mut().push(AssemblyCmd::Split { root, parts: eids, cb, prefab });
                 Ok(())
             },
         )?;
         t.set("split", f)?;
+    }
+    // assembly.merge(node, other) — LATCH `other`'s assembly onto this one: the
+    // two compounds become ONE rigid body with their combined momentum, the
+    // absorbed part nodes re-parent under this root (world pose kept), and
+    // `other`'s root node is retired. The inverse of `assembly.split`; this is
+    // how a docking port, a crane hook or a construction weld closes. Aim for
+    // a gentle, aligned closing — the merge is perfectly inelastic, so whatever
+    // relative motion is left at the instant of the latch becomes a jolt (and
+    // an off-center grab spins the pair up, exactly as it should).
+    {
+        let q = cmds.clone();
+        let f = lua.create_function(move |_, (node, other): (Value, Value)| {
+            let root = node_eid(&node, "assembly.merge(node, other)")?;
+            let other = node_eid(&other, "assembly.merge: other")?;
+            q.borrow_mut().push(AssemblyCmd::Merge { root, other });
+            Ok(())
+        })?;
+        t.set("merge", f)?;
     }
     // assembly.rebuild(node) — re-gather the compound from the root's CURRENT
     // part children. Call once after spawning parts under an assembly root

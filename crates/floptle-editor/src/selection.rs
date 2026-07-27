@@ -122,6 +122,8 @@ impl Editor {
     /// edge banks in both the per-frame set (`update`) and the per-tick accumulator
     /// (`fixedUpdate`).
     pub(crate) fn track_mouse_button(&mut self, i: usize, pressed: bool) {
+        // The action layer tracks all five buttons, not just the first three.
+        self.note_action_button(i, pressed);
         if i < 3 {
             if pressed && !self.input_buttons[i] {
                 self.input_buttons_pressed[i] = true;

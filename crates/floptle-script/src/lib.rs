@@ -81,6 +81,7 @@ mod api;
 mod audio_api;
 mod env;
 mod host;
+mod input_api;
 mod math_api;
 mod net_api;
 mod preprocess;
@@ -96,7 +97,8 @@ pub(crate) use api::install_handle_api;
 /// `mirror_components` reads them back (numeric) — the animation recorder diffs
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
-pub use net_api::{input_to_net, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
+pub use input_api::{SharedDomain, SharedInput};
+pub use net_api::{input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
@@ -179,6 +181,14 @@ pub struct ScriptHost {
     logs: Rc<RefCell<Vec<ScriptLog>>>,
     /// This frame's player input, shared with the Lua `input` table's functions.
     input: Rc<RefCell<InputSnapshot>>,
+    /// The action map + per-player resolved state, shared with the Lua action
+    /// API (`input.action("Jump")`). The driver resolves into it each frame and
+    /// tick; scripts read through it, and `input.consume` writes to it.
+    input_sys: crate::input_api::SharedInput,
+    /// Which domain the running pass reads: `fixedUpdate` sees the tick domain
+    /// (the one with input history), `update` the frame domain. Flipped by
+    /// [`ScriptHost::run_pass`] so a script never has to ask.
+    input_domain: crate::input_api::SharedDomain,
     /// This frame's physics body state per entity index (velocity + grounded), fed in
     /// before `run` so scripts can read `node.vx/vy/vz/grounded`.
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
@@ -678,6 +688,46 @@ pub struct BodyState {
 impl Default for BodyState {
     fn default() -> Self {
         Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false, height: 2.0 }
+    }
+}
+
+/// The Lua scripts shipped into every new project, for the compile check below.
+/// Kept beside the host rather than in the editor so a syntax error is caught by
+/// the crate that would actually have to run it.
+#[cfg(test)]
+const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
+    ("freelook.lua", include_str!("../../../assets/scripts/freelook.lua")),
+    ("first_person.lua", include_str!("../../../assets/scripts/first_person.lua")),
+    ("third_person.lua", include_str!("../../../assets/scripts/third_person.lua")),
+    (
+        "third_person_camera.lua",
+        include_str!("../../../assets/scripts/third_person_camera.lua"),
+    ),
+    ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
+    ("character.lua", include_str!("../../../assets/scripts/character.lua")),
+    ("sword.lua", include_str!("../../../assets/scripts/sword.lua")),
+    ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
+    ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
+    ("float.lua", include_str!("../../../assets/scripts/float.lua")),
+];
+
+#[cfg(test)]
+mod shipped_script_tests {
+    use super::SHIPPED_SCRIPTS;
+
+    /// Every shipped script must at least COMPILE.
+    ///
+    /// A script only reports a syntax error when something in a scene happens
+    /// to run it, so a broken default could sit in a release unnoticed — and
+    /// `freelook.lua` is attached to every new project's camera.
+    #[test]
+    fn shipped_scripts_compile() {
+        let lua = mlua::Lua::new();
+        for (name, body) in SHIPPED_SCRIPTS {
+            if let Err(e) = lua.load(*body).set_name(*name).into_function() {
+                panic!("{name} does not compile:\n{e}");
+            }
+        }
     }
 }
 

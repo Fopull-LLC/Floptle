@@ -326,6 +326,75 @@ impl Compound {
         Some(detached)
     }
 
+    /// Absorb `other` INTO self — the exact inverse of [`Self::split`]: two
+    /// assemblies become ONE rigid body. A docking latch closing, a crane
+    /// grabbing its load, an in-space construction weld, a magnet picking up
+    /// scrap. `other`'s shapes are re-expressed in self's body frame from both
+    /// bodies' CURRENT poses, so the merged body keeps exactly the geometry you
+    /// can see — callers snap the two into alignment first (or don't, and get a
+    /// crooked weld, honestly).
+    ///
+    /// Momentum is conserved as a perfectly INELASTIC join: the combined linear
+    /// momentum sets the merged CoM velocity, and the combined ANGULAR momentum
+    /// about the new CoM sets the merged spin — each half contributing both its
+    /// own spin and the moment of its linear momentum, so a module latching on
+    /// off-center makes the stack rotate exactly as it should. The closing
+    /// energy that isn't conserved is what the latch absorbed; that's what
+    /// makes a soft dock soft, and it's why docking never adds energy.
+    ///
+    /// Self keeps tracking its own assembly origin (its root node stays the
+    /// merged vessel's root); `other`'s root is the caller's to retire.
+    pub fn merge(&mut self, other: &Compound) {
+        // Authored frame for the rebuild = self's CURRENT (CoM, orientation);
+        // self's offsets are already about that point.
+        let p0 = self.pos;
+        let r0 = self.orient;
+        let inv_r0 = r0.inverse();
+        let mut shapes = std::mem::take(&mut self.shapes);
+        shapes.reserve(other.shapes.len());
+        for s in &other.shapes {
+            let world_center = other.pos + other.orient * s.offset;
+            shapes.push(CompoundShape {
+                geom: s.geom,
+                offset: inv_r0 * (world_center - p0),
+                rot: (inv_r0 * other.orient * s.rot).normalize(),
+                mass: s.mass,
+                id: s.id,
+            });
+        }
+        // Pre-merge momentum, gathered about the OLD centers of mass.
+        let (m1, m2) = (self.mass, other.mass);
+        let (c1, c2) = (self.pos, other.pos);
+        let (v1, v2) = (self.vel, other.vel);
+        let (w1, w2) = (self.ang_vel, other.ang_vel);
+        let l_spin = inertia_times(self.world_inv_inertia(), w1)
+            + inertia_times(other.world_inv_inertia(), w2);
+
+        let origin1 = self.local_origin;
+        let mut merged = Compound::new(p0, r0, shapes);
+        // Self's root node keeps naming the merged assembly's origin: that
+        // world point sat at `origin1` in the old CoM frame, and the new CoM
+        // frame is shifted from it by the CoM delta (same rule as `split`'s
+        // kept half).
+        merged.local_origin = origin1 - inv_r0 * (merged.pos - p0);
+        let c = merged.pos;
+        merged.vel = (v1 * m1 + v2 * m2) / merged.mass;
+        // L about the new CoM = Σ (I_i ω_i + m_i (c_i − c) × v_i).
+        let l = l_spin + (c1 - c).cross(v1) * m1 + (c2 - c).cross(v2) * m2;
+        merged.ang_vel = merged.world_inv_inertia() * l;
+        merged.prev_pos = merged.pos;
+        merged.prev_orient = merged.orient;
+        merged.restitution = self.restitution;
+        merged.friction = self.friction;
+        merged.use_gravity = self.use_gravity;
+        merged.layer = self.layer;
+        merged.active = self.active;
+        // Latching onto something PINNED pins the pair (docking at a launch
+        // clamp / a construction hold): the anchor is the stronger claim.
+        merged.anchored = self.anchored || other.anchored;
+        *self = merged;
+    }
+
     /// The shape sample points for collision, like `Body::sample_centers` but
     /// per shape and orientation-aware: sphere → its center (radius r),
     /// capsule → both end-sphere centers (radius r), box → 8 corners + center
@@ -381,6 +450,14 @@ fn compose_inertia(shapes: &[CompoundShape]) -> Mat3 {
         total = add_mat3(total, add_mat3(local, pa));
     }
     total
+}
+
+/// Angular momentum `I ω` from the INVERSE inertia tensor (what a compound
+/// stores) — invert it back and apply. A degenerate tensor contributes nothing
+/// rather than poisoning the merge with NaN.
+fn inertia_times(inv_inertia_world: Mat3, w: Vec3) -> Vec3 {
+    let l = inv_inertia_world.inverse() * w;
+    if l.is_finite() { l } else { Vec3::ZERO }
 }
 
 fn add_mat3(a: Mat3, b: Mat3) -> Mat3 {
@@ -603,6 +680,114 @@ mod tests {
         // Degenerate splits refuse.
         assert!(c.split(&[999]).is_none());
         assert!(c.split(&[1]).is_none(), "can't detach the last shape");
+    }
+
+    #[test]
+    fn merge_is_the_inverse_of_split() {
+        // Split a spinning dumbbell, then dock the halves straight back
+        // together: geometry, mass, CoM, origin AND motion must come back
+        // exactly — a split immediately followed by a merge is a no-op.
+        let make = || {
+            let mut c = Compound::new(
+                Vec3::new(5.0, 0.0, 0.0),
+                Quat::IDENTITY,
+                vec![
+                    ball(Vec3::new(-1.0, 0.0, 0.0), 0.4, 2.0, 1),
+                    ball(Vec3::new(1.0, 0.0, 0.0), 0.4, 2.0, 2),
+                ],
+            );
+            c.vel = Vec3::new(0.0, 3.0, 0.0);
+            c.ang_vel = Vec3::new(0.0, 0.0, 2.0);
+            c
+        };
+        let before = make();
+        let mut kept = make();
+        let detached = kept.split(&[2]).expect("split succeeds");
+        kept.merge(&detached);
+        assert_eq!(kept.shapes.len(), 2);
+        assert!((kept.mass - before.mass).abs() < 1e-4);
+        assert!((kept.pos - before.pos).length() < 1e-4, "CoM restored: {:?}", kept.pos);
+        assert!(
+            (kept.origin() - before.origin()).length() < 1e-4,
+            "the root keeps naming the same origin: {:?}",
+            kept.origin()
+        );
+        assert!((kept.vel - before.vel).length() < 1e-4, "linear momentum: {:?}", kept.vel);
+        assert!((kept.ang_vel - before.ang_vel).length() < 1e-3, "spin: {:?}", kept.ang_vel);
+        // Both balls are back, in their original places.
+        for id in [1u64, 2] {
+            let s = kept.shapes.iter().find(|s| s.id == id).expect("shape survives");
+            let want = if id == 1 { Vec3::new(-1.0, 0.0, 0.0) } else { Vec3::new(1.0, 0.0, 0.0) };
+            assert!((kept.pos + s.offset - (Vec3::new(5.0, 0.0, 0.0) + want)).length() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn merge_conserves_momentum_on_an_off_center_dock() {
+        // A lander closing on one side of a stationary station: the pair must
+        // end up with the combined linear momentum AND pick up the spin the
+        // off-center impact implies (angular momentum about the joint CoM).
+        // Nothing may be created — a soft dock only ever absorbs energy.
+        let mut station = Compound::new(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            vec![ball(Vec3::ZERO, 0.5, 8.0, 1)],
+        );
+        let mut lander = Compound::new(
+            Vec3::new(0.0, 2.0, 0.0),
+            Quat::IDENTITY,
+            vec![ball(Vec3::ZERO, 0.3, 2.0, 2)],
+        );
+        lander.vel = Vec3::new(1.0, 0.0, 0.0); // closing sideways: off-center
+        let p_before = station.vel * station.mass + lander.vel * lander.mass;
+        // Angular momentum about the (soon to be) joint CoM, computed by hand.
+        let m_total = station.mass + lander.mass;
+        let com = (station.pos * station.mass + lander.pos * lander.mass) / m_total;
+        let l_before = (station.pos - com).cross(station.vel) * station.mass
+            + (lander.pos - com).cross(lander.vel) * lander.mass;
+
+        station.merge(&lander);
+        assert_eq!(station.shapes.len(), 2);
+        assert!((station.mass - m_total).abs() < 1e-4);
+        assert!((station.pos - com).length() < 1e-4, "joint CoM: {:?}", station.pos);
+        assert!(
+            (station.vel * station.mass - p_before).length() < 1e-3,
+            "linear momentum: {:?}",
+            station.vel
+        );
+        let l_after = inertia_times(station.world_inv_inertia(), station.ang_vel);
+        assert!((l_after - l_before).length() < 1e-3, "angular momentum: {l_after:?} vs {l_before:?}");
+        assert!(station.ang_vel.z < -1e-3, "the off-center dock spins the pair up");
+    }
+
+    #[test]
+    fn merge_carries_the_anchor_and_rotated_geometry() {
+        // Docking onto something PINNED (a launch clamp, a construction hold)
+        // pins the pair; and a module that arrives ROTATED keeps its attitude
+        // through the weld — the merged body is what you saw before the latch.
+        let mut clamped = Compound::new(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            vec![boxs(Vec3::ZERO, Vec3::splat(0.5), 4.0, 1)],
+        );
+        clamped.anchored = true;
+        let spin = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let module = Compound::new(
+            Vec3::new(0.0, 3.0, 0.0),
+            spin,
+            vec![boxs(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.25, 1.0, 0.25), 1.0, 2)],
+        );
+        let module_shape_world = module.pos + module.orient * module.shapes[0].offset;
+        clamped.merge(&module);
+        assert!(clamped.anchored, "the anchor is the stronger claim");
+        let s = clamped.shapes.iter().find(|s| s.id == 2).expect("module shape");
+        assert!(
+            (clamped.pos + clamped.orient * s.offset - module_shape_world).length() < 1e-4,
+            "the module's geometry doesn't move through the weld"
+        );
+        // Its box is still on its side (rotated ~90° about Z) in the body frame.
+        let axis = clamped.orient * s.rot * Vec3::Y;
+        assert!(axis.x.abs() > 0.99, "module attitude preserved: {axis:?}");
     }
 
     #[test]

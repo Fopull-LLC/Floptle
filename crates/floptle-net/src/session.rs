@@ -199,6 +199,10 @@ pub struct NetSession {
     /// Per-peer last input actually used — the repeat-last fallback when a
     /// tick's command hasn't arrived (late/lost).
     last_input: HashMap<PeerId, NetInput>,
+    /// This peer's action-map fingerprint, compared at hello time. Zero means
+    /// "no map" — a project that hasn't defined actions yet, which is fine as
+    /// long as both sides agree.
+    input_map_hash: u64,
     /// Per-peer input-buffer margin, EWMA over [`Self::input_for`] calls:
     /// newest buffered stamp − the tick being consumed. Shipped back in
     /// [`Msg::InputAck`] so the owner can auto-tune its lead.
@@ -272,15 +276,23 @@ pub struct NetSession {
 }
 
 impl NetSession {
-    pub fn server(transport: Box<dyn Transport>) -> Self {
-        Self::new(NetRole::Server, transport)
+    /// `input_map_hash` is this peer's `floptle_input::InputMap::hash()`.
+    /// Input commands index actions by position in that map, so a joiner whose
+    /// map has a different SHAPE is refused rather than allowed to desync.
+    pub fn server(transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
+        let mut s = Self::new(NetRole::Server, transport);
+        s.input_map_hash = input_map_hash;
+        s
     }
 
     /// Client: says hello immediately; `Connected` arrives via events once the
     /// server welcomes us.
-    pub fn client(mut transport: Box<dyn Transport>) -> Self {
-        transport.send(SERVER, Channel::Reliable, &Msg::Hello { proto: PROTO_VERSION }.encode());
-        Self::new(NetRole::Client, transport)
+    pub fn client(mut transport: Box<dyn Transport>, input_map_hash: u64) -> Self {
+        let hello = Msg::Hello { proto: PROTO_VERSION, input_map: input_map_hash };
+        transport.send(SERVER, Channel::Reliable, &hello.encode());
+        let mut s = Self::new(NetRole::Client, transport);
+        s.input_map_hash = input_map_hash;
+        s
     }
 
     fn new(role: NetRole, transport: Box<dyn Transport>) -> Self {
@@ -289,6 +301,7 @@ impl NetSession {
             transport,
             net_to_ent: HashMap::new(),
             ent_to_net: HashMap::new(),
+            input_map_hash: 0,
             next_id: 1,
             peers: Vec::new(),
             last_sent: HashMap::new(),
@@ -803,10 +816,23 @@ impl NetSession {
 
     fn server_message(&mut self, world: &World, from: PeerId, msg: Msg, tick: u64) {
         match msg {
-            Msg::Hello { proto } => {
+            Msg::Hello { proto, input_map } => {
                 if proto != PROTO_VERSION {
                     let refuse = Msg::Refused {
                         reason: format!("protocol {proto} != {PROTO_VERSION}"),
+                    };
+                    self.transport.send(from, Channel::Reliable, &refuse.encode());
+                    return;
+                }
+                // Input commands index actions by their position in input.ron.
+                // A joiner whose map has a different shape would decode every
+                // command as the wrong actions — and nothing would report an
+                // error, it would just play wrong. Refuse instead.
+                if input_map != self.input_map_hash {
+                    let refuse = Msg::Refused {
+                        reason: "input.ron differs from the host's — actions are indexed by \
+                                 their order in the map, so the two builds must match"
+                            .to_string(),
                     };
                     self.transport.send(from, Channel::Reliable, &refuse.encode());
                     return;

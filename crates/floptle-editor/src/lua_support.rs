@@ -23,6 +23,10 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
         "third_person_camera.lua",
         include_str!("../../../assets/scripts/third_person_camera.lua"),
     ),
+    // An arcade fighter on named actions: local versus off one script, with
+    // input buffering and motion inputs. The worked example for the whole
+    // action layer.
+    ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
 ];
 
 /// EmmyLua type annotations for the engine API, so an external Lua language server
@@ -463,6 +467,128 @@ function input.button(i) end
 ---@param i integer
 ---@return boolean
 function input.clicked(i) end
+
+--- ACTIONS ---------------------------------------------------------------
+--- Named actions from Project Settings → Input. Prefer these over the raw
+--- polls above: they work on a gamepad, the player can rebind them, and they
+--- are what multiplayer replicates (raw polls read NEUTRAL on a Predicted
+--- node, because the wire carries actions).
+
+---True while the named action is held — any of its bindings (a key, a mouse
+---button, a pad button, a trigger past its threshold).
+---@param name string
+---@return boolean
+function input.action(name) end
+---True only on the frame/tick the action goes down.
+---@param name string
+---@return boolean
+function input.justPressed(name) end
+---True only on the frame/tick the action goes up.
+---@param name string
+---@return boolean
+function input.justReleased(name) end
+---How long the action has been continuously held, in seconds. 0 when up.
+---Use it for hold-to-charge without tracking your own timer.
+---@param name string
+---@return number
+function input.heldSecs(name) end
+---A named 1D axis in -1..1 (triggers, the wheel, a key pair).
+---@param name string
+---@return number
+function input.axis1(name) end
+---A named 2D axis, clamped to the unit disk: `local x, y = input.axis2(\"Move\")`.
+---Reads identically whether the player is on WASD or a stick.
+---@param name string
+---@return number, number
+function input.axis2(name) end
+
+--- FIGHTER LAYER (fixedUpdate only) --------------------------------------
+--- These read the input HISTORY, which advances once per gameplay tick. Call
+--- them from `fixedUpdate`; from `update` they answer about the last tick.
+
+---The current numpad direction from the \"Move\" axis, written from the
+---character's point of view (see input.setFacing):
+---  7 8 9      up-back    up     up-forward
+---  4 5 6  =   back     neutral    forward
+---  1 2 3      dn-back   down   dn-forward
+---@return integer
+function input.dir() end
+---How many consecutive ticks a numpad direction has been held — build your own
+---charge or leniency rules on top of it.
+---@param dir integer
+---@return integer
+function input.dirHeldTicks(dir) end
+---Was the action pressed within the last `ticks` ticks and not yet consumed?
+---This is the input buffer: a player who hits Punch two frames before their
+---recovery ends still gets the punch. `ticks` defaults to 3.
+---@param name string
+---@param ticks integer|nil
+---@return boolean
+function input.buffered(name, ticks) end
+---Spend a buffered press so it fires exactly once. Without this a 4-tick
+---buffer fires your attack on all four ticks.
+---@param name string
+---@param ticks integer|nil
+---@return boolean
+function input.consume(name, ticks) end
+---Has the named motion been completed recently? Motions are defined in
+---input.ron; the standard set ships seeded: qcf, qcb, dp, rdp, hcf, hcb, dd,
+---ff, bb, chargeF, chargeU. `window` overrides the map's tick window.
+---@param name string
+---@param window integer|nil
+---@return boolean
+function input.motion(name, window) end
+---Which way this player faces: +1 normal, -1 mirrored. Directions are flipped
+---before they reach the history, so `motion(\"qcf\")` keeps meaning \"toward the
+---opponent\" after a cross-up. The engine has no opinion about who faces where.
+---@param facing number
+function input.setFacing(facing) end
+---@return number
+function input.facing() end
+
+--- LOCAL MULTIPLAYER ------------------------------------------------------
+
+---The same input API bound to another local player (1-based). Two characters
+---can run the SAME script: pass the slot in as a script param —
+---  local me = input.player(params.player)
+---  if me.justPressed(\"Punch\") then ... end
+---@param n integer
+---@return Input
+function input.player(n) end
+
+--- CONTEXTS + REBINDING (settings menus) ----------------------------------
+
+---Push a named input layer. A `consume` layer swallows every action it doesn't
+---list, so a menu can eat movement without the player controller knowing:
+---  input.pushContext(\"menu\", { priority = 100, consume = true, enabled = { \"Pause\" } })
+---@param name string
+---@param opts table|nil
+function input.pushContext(name, opts) end
+---Pop a layer by name. Returns whether one was removed.
+---@param name string
+---@return boolean
+function input.popContext(name) end
+---Every action name in the map — for drawing a settings screen.
+---@return string[]
+function input.actions() end
+---An action's bindings as printable chips (e.g. \"⌨ Space\", \"🎮 South\").
+---@param name string
+---@return string[]
+function input.bindingsOf(name) end
+---Arm press-to-bind for an action. `filter` is \"keyboard\", \"pad\", \"axis\", or
+---nil for any button. Escape always cancels rather than binding.
+---@param name string
+---@param filter string|nil
+function input.startRebind(name, filter) end
+---The captured binding's chip once something was pressed, \"\" while waiting,
+---or nil when nothing is armed.
+---@return string|nil
+function input.pendingRebind() end
+---Apply the captured binding. Returns false if nothing was captured, or if
+---that binding already existed.
+---@return boolean
+function input.commitRebind() end
+function input.cancelRebind() end
 
 ---The active game camera's projection — turn a world point into a screen pixel
 ---(and back). The pixels are in the SAME space `input.mouse()` reports, so you

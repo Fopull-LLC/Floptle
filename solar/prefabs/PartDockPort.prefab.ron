@@ -1,0 +1,58 @@
+// DOCKING PORT — the androgynous latch every craft mates through. Built on the
+// decoupler's proven collar geometry (a short, wide disc that sits flush in a
+// stack) so it stacks and collides exactly like one, but finished in a bright
+// guidance blue so you can pick the mating face out from across an orbit.
+//
+// The "Dock Light" child is the capture indicator the vessel controller drives:
+// dark when nothing's near, amber while a target is inside the soft-capture
+// cone, green the instant the latch closes. Its intensity is the whole state
+// machine's readout — no HUD required to know whether you're about to dock.
+[
+    (
+        name: "PartDockPort",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.06, 0.34, 1.06),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/rocket_fuelA.glb",
+        ),
+        material: Some((
+            color: (0.42, 0.6, 0.78),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.42, 0.6, 0.78, 1.0),
+            },
+        )),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Kinematic,
+            radius: 0.5,
+            height: 2.0,
+            half_extents: (0.53, 0.09, 0.53),
+            restitution: 0.05,
+            friction: 0.6,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            mass: 0.18,
+        )),
+    ),
+    (
+        name: "Dock Light",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.0, 1.0),
+        ),
+        matter: PointLight(
+            color: (1.0, 0.72, 0.2),
+            intensity: 0.0,
+            range: 9.0,
+        ),
+        scripts: [],
+        parent: Some(0),
+    ),
+]

@@ -1611,10 +1611,10 @@
                 )),
                 shader: "shaders/examples/ui/ui_frosted.flsl",
                 shader_params: {
+                    "alpha": (0.9, 0.0, 0.0, 0.0),
+                    "blur": (0.005, 0.0, 0.0, 0.0),
                     "tint": (0.66, 0.78, 1.0, 1.0),
                     "tintAmount": (0.22, 0.0, 0.0, 0.0),
-                    "blur": (0.005, 0.0, 0.0, 0.0),
-                    "alpha": (0.9, 0.0, 0.0, 0.0),
                 },
                 visible: false,
                 opacity: 1.0,
@@ -1795,10 +1795,10 @@
                 )),
                 shader: "shaders/examples/ui/ui_scanline.flsl",
                 shader_params: {
-                    "tint": (0.2, 1.0, 0.62, 1.0),
                     "count": (150.0, 0.0, 0.0, 0.0),
-                    "strength": (0.06, 0.0, 0.0, 0.0),
                     "speed": (3.0, 0.0, 0.0, 0.0),
+                    "strength": (0.06, 0.0, 0.0, 0.0),
+                    "tint": (0.2, 1.0, 0.62, 1.0),
                 },
                 visible: false,
                 opacity: 0.97,
@@ -1841,13 +1841,590 @@
                 )),
                 shader: "shaders/examples/ui/ui_scanline.flsl",
                 shader_params: {
-                    "tint": (0.35, 0.72, 1.0, 1.0),
                     "count": (150.0, 0.0, 0.0, 0.0),
-                    "strength": (0.06, 0.0, 0.0, 0.0),
                     "speed": (3.0, 0.0, 0.0, 0.0),
+                    "strength": (0.06, 0.0, 0.0, 0.0),
+                    "tint": (0.35, 0.72, 1.0, 1.0),
                 },
                 visible: false,
                 opacity: 0.97,
+            )),
+        ),
+        // ── PERIPHERALS CONSOLE (P while flying) ──────────────────────────────
+        // The ship's device console: every fitted peripheral and every docking
+        // port, each with its live state and a control you can click. The rows
+        // are generic — `peripheral_row` draws whatever the vessel reports as
+        // fitted, `dock_row` whatever ports it carries — so new hardware shows
+        // up here without touching this scene.
+        (
+            name: "Peripherals Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "peripheral_panel",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Right,
+                    offset: (-12.0, 40.0),
+                ),
+                size: (Fixed(380.0), Fit),
+                stack: Some((
+                    dir: Column,
+                    gap: 5.0,
+                    pad: 14.0,
+                    align: Start,
+                    justify: Start,
+                )),
+                shape: Some((
+                    fill: (0.02, 0.05, 0.09, 0.74),
+                    radius: 9.0,
+                    border: 1.2,
+                    border_color: (0.32, 0.66, 0.92, 0.75),
+                    shadow: Some((
+                        color: (0.0, 0.0, 0.0, 0.6),
+                        offset: (0.0, 10.0),
+                        blur: 26.0,
+                        spread: 2.0,
+                    )),
+                )),
+                shader: "shaders/examples/ui/ui_scanline.flsl",
+                shader_params: {
+                    "count": (150.0, 0.0, 0.0, 0.0),
+                    "speed": (3.0, 0.0, 0.0, 0.0),
+                    "strength": (0.05, 0.0, 0.0, 0.0),
+                    "tint": (0.35, 0.72, 1.0, 1.0),
+                },
+                visible: false,
+                opacity: 0.97,
+            )),
+        ),
+        (
+            name: "Peripherals Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(52.0)),
+                text: Some((
+                    text: "PERIPHERALS",
+                    size: 14.0,
+                    color: (0.68, 0.9, 1.0, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Periph Row 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "peripheral_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Periph Row 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "peripheral_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Periph Row 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "peripheral_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Periph Row 4",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "peripheral_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 4.0),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Docking Header",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(22.0)),
+                text: Some((
+                    text: "  DOCKING",
+                    size: 12.0,
+                    color: (0.5, 0.68, 0.82, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Port Row 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "port"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Port Row 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                    strs: [
+                        ("kind", "port"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Port Row 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                    strs: [
+                        ("kind", "port"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Port Row 4",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 4.0),
+                    ],
+                    strs: [
+                        ("kind", "port"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Assist Row",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "assist"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.1, 0.26, 0.34, 0.92),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.7, 0.86, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Switch Row",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "switch"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.16, 0.13, 0.3, 0.92),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.55, 0.5, 0.85, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Peripherals Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(20.0)),
+                text: Some((
+                    text: "  P closes  ·  a latched port undocks on click",
+                    size: 11.0,
+                    color: (0.45, 0.6, 0.72, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
             )),
         ),
     ],

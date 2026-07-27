@@ -1,14 +1,19 @@
 -- First-person character controller (the default FPS setup).
+-- Works on a keyboard, on a gamepad, or on both at once.
 --
 -- SETUP: make a Camera node, mark it Active, give it a *Capsule* Rigidbody
 -- (Inspector → ◆ Rigidbody → shape: Capsule), then attach this script. On Play
 -- you ARE that capsule: it moves under physics and the camera rides along.
 --
---   hold RIGHT MOUSE   free-look (yaw + pitch)
---   W A S D            move along the ground, relative to where you face
---   SPACE              jump (only when grounded)
---   SHIFT (hold)       run
---   C (hold)           crouch — shrinks the capsule (you duck) and slows you
+--   Look     hold RIGHT MOUSE to free-look, or use the RIGHT STICK (always live)
+--   Move     WASD or the left stick — along the ground, relative to where you face
+--   Jump     Space or the pad's South button (only when grounded)
+--   Sprint   Shift or L3 (hold) — run
+--   Crouch   C or the pad's East button (hold) — shrinks the capsule and slows you
+--
+-- Every control is a NAMED ACTION from Project Settings → Input, so this script
+-- never asks which device you are on, and any of it can be rebound without
+-- touching the code.
 --
 -- It is genuinely rig-driven: each frame it reads the body's own velocity /
 -- grounded / up from the physics sim, modifies the velocity, and writes it
@@ -23,7 +28,7 @@ defaults = {
   run = 10.0,
   crouch_walk = 3.0,
   jump = 7.0,
-  sensitivity = 0.3,
+  sensitivity = 1.0, -- look speed multiplier
   stand_height = 2.0,
   crouch_height = 1.1,
   ground_ray = 1.5, -- downward probe length for the forgiving ground check
@@ -37,18 +42,17 @@ local function normalize(x, y, z)
 end
 
 function update(node, dt)
-  -- Free-look while holding right mouse (yaw turns, pitch looks up/down).
-  if input.button(1) then
-    input.setMouseLocked(true)
-    local dx, dy = input.mouse_delta()
-    node.yaw = node.yaw - dx * params.sensitivity * 0.01
-    node.pitch = node.pitch - dy * params.sensitivity * 0.01
-    local lim = math.pi * 0.5 - 0.02 -- don't let the view flip over
-    if node.pitch > lim then node.pitch = lim end
-    if node.pitch < -lim then node.pitch = -lim end
-  else
-    input.setMouseLocked(false)
-  end
+  -- One "Look" axis serves mouse and stick alike: the mouse half is gated on
+  -- the right button in the input map (a free cursor must not spin the view),
+  -- the stick half is always live. Both arrive as radians per second, so a
+  -- single `* dt` is correct — and frame-rate independent — for either.
+  local lx, ly = input.axis2("Look")
+  input.setMouseLocked(input.action("LookEnable"))
+  node.yaw = node.yaw - lx * params.sensitivity * dt
+  node.pitch = node.pitch - ly * params.sensitivity * dt
+  local lim = math.pi * 0.5 - 0.02 -- don't let the view flip over
+  if node.pitch > lim then node.pitch = lim end
+  if node.pitch < -lim then node.pitch = -lim end
 
   -- "up" = −gravity (Y on a flat world, radial on a planet).
   local ux, uy, uz = node.up_x, node.up_y, node.up_z
@@ -63,23 +67,19 @@ function update(node, dt)
   local rd = rx * ux + ry * uy + rz * uz
   rx, ry, rz = normalize(rx - ux * rd, ry - uy * rd, rz - uz * rd)
 
-  -- Movement input (normalized so diagonals aren't faster).
-  local f, s = 0, 0
-  if input.key("w") then f = f + 1 end
-  if input.key("s") then f = f - 1 end
-  if input.key("d") then s = s + 1 end
-  if input.key("a") then s = s - 1 end
-  local il = math.sqrt(f * f + s * s)
-  if il > 1 then f, s = f / il, s / il end
+  -- Movement: WASD or the left stick. Already deadzoned, SOCD-resolved, and
+  -- clamped to the unit disk, so diagonals aren't faster and there is nothing
+  -- left to normalise here.
+  local s, f = input.axis2("Move")
 
   -- Crouch: the engine resizes the capsule, feet planted.
-  local crouching = input.key("c")
+  local crouching = input.action("Crouch")
   if crouching then node.height = params.crouch_height else node.height = params.stand_height end
 
   local speed = params.walk
   if crouching then
     speed = params.crouch_walk
-  elseif input.key("shift") then
+  elseif input.action("Sprint") then
     speed = params.run
   end
 
@@ -104,7 +104,7 @@ function update(node, dt)
   -- READ the body's velocity, keep its vertical (gravity/jump) part, MODIFY
   -- the horizontal part, WRITE it back — physics integrates it next step.
   local vup = node.vx * ux + node.vy * uy + node.vz * uz
-  if grounded and input.pressed("space") then
+  if grounded and input.justPressed("Jump") then
     vup = params.jump
   end
 

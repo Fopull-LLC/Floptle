@@ -781,9 +781,35 @@ impl Editor {
             }
         }
         seed_default_scripts(&self.scripts_dir());
+        // The action map those scripts are written against — every entry bound
+        // on BOTH keyboard and gamepad. Seeded HERE rather than in `new_project`
+        // so the headless `--new` path (what the Hub uses) gets it too:
+        // otherwise a Hub-created project ships the converted default scripts
+        // with no map for them to resolve against.
+        self.seed_input_map();
         seed_example_shaders(&self.project_root);
         crate::ui_shader_lib::seed_ui_effects(&self.project_root);
         write_lua_support(&self.project_root);
+    }
+
+    /// Write `input.ron` if absent, and top up an existing one with any starter
+    /// binding it lacks. Never overwrites: your bindings, your own actions and
+    /// your SOCD choices survive, which is what makes this safe to run on every
+    /// project open and from `--migrate`.
+    pub(crate) fn seed_input_map(&self) {
+        let mut map = match floptle_input::load_map(&self.project_root) {
+            Ok(Some(m)) => m,
+            Ok(None) => floptle_input::InputMap::default(),
+            // Don't touch a file we couldn't parse — the editor reports it and
+            // keeps the previous map; clobbering it here would destroy work.
+            Err(_) => return,
+        };
+        if map.merge_missing(&floptle_input::InputMap::starter()) == 0 {
+            return;
+        }
+        if let Err(e) = floptle_input::save_map(&map, &self.project_root) {
+            eprintln!("  could not seed input.ron: {e}");
+        }
     }
 
     pub(crate) fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
@@ -865,6 +891,10 @@ impl Editor {
         self.adopt_tex_paint();
         self.adopt_maps();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
+        // The action map belongs to the project, so it reloads with it —
+        // otherwise the new project's scripts would resolve against the old
+        // project's actions.
+        self.load_input_map();
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
         self.materials = self.load_materials();
@@ -923,6 +953,8 @@ impl Editor {
             let _ = floptle_scene::save(&default_scene(), &first);
         }
         // Ship the default Lua scripts so the IDE/docs have something to show.
+        // (`input.ron`, the action map they're written against, is seeded by
+        // `seed_project_dirs` — shared with the headless `--new` path.)
         seed_default_scripts(&root.join("scripts"));
         seed_example_shaders(&root);
         crate::ui_shader_lib::seed_ui_effects(&root);

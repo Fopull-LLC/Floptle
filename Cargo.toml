@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]
@@ -66,6 +66,7 @@ image = { version = "0.25", default-features = false, features = [
     "png", "jpeg", "webp", "bmp", "tga", "tiff", "gif", "qoi",
 ] } # loose texture decode — the formats VFX/game texture packs actually ship
 naga = { version = "29", features = ["wgsl-in"] }        # .flsl → WGSL validation — ADR-0007
+gilrs = "0.11.2"                                         # gamepads: buttons/sticks/hot-plug — ADR-0024
 
 # Promoted in later phases:
 # mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003

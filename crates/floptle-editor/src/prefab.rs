@@ -437,23 +437,42 @@ impl Editor {
                         sim.resync_compound_shapes(root, &self.world);
                     }
                 }
-                floptle_script::AssemblyCmd::Split { root, parts, cb } => {
-                    let new_root = self.perform_assembly_split(root, &parts);
+                floptle_script::AssemblyCmd::Split { root, parts, cb, prefab } => {
+                    let new_root = self.perform_assembly_split(root, &parts, prefab.as_deref());
                     match (new_root, cb) {
                         (Some(nr), Some(cb)) => {
+                            // Re-feed the mirror FIRST: the callback's whole job
+                            // is to act on the fresh half (`assembly.info(stage)`
+                            // → kick it clear, place it, read its mass), and the
+                            // mirror it would otherwise see was fed before this
+                            // split existed — so every such read came back nil
+                            // and the separation kick silently did nothing.
+                            self.feed_assembly_info();
                             self.script_host.call_spawn_callback(&mut self.world, cb, nr);
                         }
                         (_, Some(cb)) => self.script_host.drop_registry_value(cb),
                         _ => {}
                     }
                 }
+                floptle_script::AssemblyCmd::Merge { root, other } => {
+                    self.perform_assembly_merge(root, other);
+                }
             }
         }
     }
 
     /// Split `parts` out of the assembly rooted at `root_eid` into a NEW root
-    /// node named after the old vessel. Returns the new root's entity index.
-    fn perform_assembly_split(&mut self, root_eid: u32, parts: &[u32]) -> Option<u32> {
+    /// node named after the old vessel. With `prefab`, the detached half is
+    /// rooted at a fresh instance of that prefab (so it comes away as a LIVE,
+    /// scripted craft — an undocked lander — instead of inert debris); the
+    /// prefab's own RigidBody must carry the assembly flag. Returns the new
+    /// root's entity index.
+    fn perform_assembly_split(
+        &mut self,
+        root_eid: u32,
+        parts: &[u32],
+        prefab: Option<&str>,
+    ) -> Option<u32> {
         use floptle_core::{Name, Parent, RigidBody};
         use floptle_core::transform::Transform;
         self.sim.as_ref()?;
@@ -462,22 +481,29 @@ impl Editor {
             .query::<RigidBody>()
             .map(|(e, _)| e)
             .find(|e| e.index() == root_eid)?;
-        // The fresh vessel root: inherits the old root's RigidBody (assembly
-        // flag, friction...) and a derived name.
-        let new_root = self.world.spawn();
-        self.world.insert(new_root, Transform::IDENTITY);
-        if let Some(rb) = self.world.get::<RigidBody>(root_ent).copied() {
-            self.world.insert(new_root, rb);
-        }
-        let base = self
-            .world
-            .get::<Name>(root_ent)
-            .map(|n| n.0.clone())
-            .unwrap_or_else(|| "Vessel".into());
-        self.world.insert(new_root, Name(format!("{base} (stage)")));
+        // The fresh vessel root: a prefab instance when asked for (scripts and
+        // all), otherwise a bare node inheriting the old root's RigidBody
+        // (assembly flag, friction...) and a derived name.
+        let new_root = match prefab.and_then(|p| self.spawn_split_root(p)) {
+            Some(e) => e,
+            None => {
+                let e = self.world.spawn();
+                self.world.insert(e, Transform::IDENTITY);
+                if let Some(rb) = self.world.get::<RigidBody>(root_ent).copied() {
+                    self.world.insert(e, rb);
+                }
+                let base = self
+                    .world
+                    .get::<Name>(root_ent)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| "Vessel".into());
+                self.world.insert(e, Name(format!("{base} (stage)")));
+                e
+            }
+        };
         let sim = self.sim.as_mut()?;
         if !sim.split_compound(root_eid, parts, new_root, &mut self.world) {
-            self.world.despawn(new_root);
+            self.despawn_subtree(new_root); // a prefab root can carry children
             return None;
         }
         // Re-parent each detached part under the new root, preserving its
@@ -506,6 +532,129 @@ impl Editor {
             self.world.insert(pe, Parent(new_root));
         }
         Some(new_root.index())
+    }
+
+    /// Instantiate `prefab` as the root for a detached assembly half. It must
+    /// carry an assembly-flagged RigidBody — without one the split has no body
+    /// to land on, so we refuse (and say so) rather than silently dropping the
+    /// detached parts into a node the physics never sees.
+    fn spawn_split_root(&mut self, prefab: &str) -> Option<Entity> {
+        let Some(path) = self.resolve_prefab_request(prefab) else {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!("assembly.split: no such prefab \"{prefab}\" (looked in prefabs/)"),
+                None,
+            );
+            return None;
+        };
+        let docs = self.cached_prefab_docs(&path)?;
+        if docs.is_empty() {
+            return None;
+        }
+        let ents = self.spawn_docs(&docs);
+        let root = ents.iter().zip(&docs).find(|(_, d)| d.parent.is_none()).map(|(&e, _)| e)?;
+        if !self
+            .world
+            .get::<floptle_core::RigidBody>(root)
+            .is_some_and(|rb| rb.assembly)
+        {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!(
+                    "assembly.split: prefab \"{prefab}\" isn't an assembly root \
+                     (its RigidBody needs the assembly flag)"
+                ),
+                None,
+            );
+            self.despawn_subtree(root);
+            return None;
+        }
+        if docs.iter().any(|d| matches!(d.matter, floptle_scene::MatterDoc::Mesh { .. })) {
+            self.register_scene_meshes();
+        }
+        Some(root)
+    }
+
+    /// Absorb the assembly rooted at `other_eid` into the one rooted at
+    /// `root_eid` — the docking latch closing. The physics compounds merge
+    /// (combined momentum, [`floptle_physics::Compound::merge`]), every node
+    /// hanging off the absorbed root re-parents under the surviving one with
+    /// its world pose kept, and the emptied root is retired. Absorbed parts
+    /// keep their entity ids, so per-part contact attribution
+    /// (`assembly.impacts`) carries straight across the join.
+    fn perform_assembly_merge(&mut self, root_eid: u32, other_eid: u32) -> bool {
+        use floptle_core::{Parent, RigidBody};
+        use floptle_core::transform::Transform;
+        let find = |w: &floptle_core::World, id: u32| {
+            w.query::<RigidBody>().map(|(e, _)| e).find(|e| e.index() == id)
+        };
+        let (Some(root_ent), Some(other_ent)) =
+            (find(&self.world, root_eid), find(&self.world, other_eid))
+        else {
+            return false;
+        };
+        // World poses BEFORE anything moves — the absorbed subtree must not
+        // shift a millimetre through the weld.
+        let moving: Vec<Entity> = self
+            .world
+            .query::<Parent>()
+            .filter(|(_, p)| p.0 == other_ent)
+            .map(|(e, _)| e)
+            .collect();
+        let poses: Vec<(Entity, Transform)> = moving
+            .into_iter()
+            .map(|e| (e, floptle_core::world_transform(&self.world, e)))
+            .collect();
+        let Some(sim) = self.sim.as_mut() else { return false };
+        if !sim.merge_compound(root_eid, other_eid) {
+            return false;
+        }
+        // The surviving root keeps naming the merged assembly's origin, so its
+        // world transform is unchanged by the merge — re-parent against it.
+        let rw = floptle_core::world_transform(&self.world, root_ent);
+        let inv_rot = rw.rotation.inverse();
+        for (e, pw) in poses {
+            let local = Transform {
+                translation: inv_rot.as_dquat() * (pw.translation - rw.translation)
+                    / rw.scale.as_dvec3().max(floptle_core::math::DVec3::splat(1e-9)),
+                rotation: (inv_rot * pw.rotation).normalize(),
+                scale: pw.scale / rw.scale.max(floptle_core::math::Vec3::splat(1e-9)),
+            };
+            if let Some(t) = self.world.get_mut::<Transform>(e) {
+                *t = local;
+            }
+            self.world.insert(e, Parent(root_ent));
+        }
+        self.lod_keep_live.remove(&other_eid);
+        self.despawn_subtree(other_ent);
+        true
+    }
+
+    /// Despawn a node and everything under it, clearing its physics
+    /// registrations. The engine-internal counterpart of a scripted
+    /// `destroy()` (no net-authority checks — these are lifecycle moves the
+    /// engine itself makes: a retired docking root, a refused split root).
+    fn despawn_subtree(&mut self, root: Entity) {
+        let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
+            std::collections::HashMap::new();
+        for (e, p) in self.world.query::<floptle_core::Parent>() {
+            kids.entry(p.0).or_default().push(e);
+        }
+        let mut doomed = Vec::new();
+        let mut queue: std::collections::VecDeque<Entity> = [root].into();
+        while let Some(e) = queue.pop_front() {
+            doomed.push(e);
+            queue.extend(kids.get(&e).map(|v| v.as_slice()).unwrap_or(&[]));
+        }
+        for e in doomed {
+            let idx = e.index();
+            self.world.despawn(e);
+            if let Some(sim) = self.sim.as_mut() {
+                sim.remove_body(idx);
+                sim.remove_compound(idx);
+            }
+        }
+        self.selection.retain(|&e| self.world.is_alive(e));
     }
 
     fn apply_destroys(&mut self, destroys: Vec<u32>) {
