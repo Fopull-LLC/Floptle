@@ -1146,6 +1146,7 @@ impl ScriptHost {
         // while scripts keep running (loading screens, cutscenes, pause menus).
         let physics_pause_request: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
         let physics_paused: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        let frame_step_request: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         {
             let t = lua.create_table().expect("physics table");
             let req = physics_pause_request.clone();
@@ -1161,6 +1162,20 @@ impl ScriptHost {
                 .create_function(move |_, ()| Ok(mirror.get()))
                 .expect("physics.isPaused");
             t.set("isPaused", f).expect("physics.isPaused");
+            // `physics.step([n])` — frame-step the whole gameplay tick, the same thing
+            // the editor's ⏭ button does, so a game can build its own training-mode
+            // stepper. Freezing first is implied: advancing one frame while running
+            // isn't a thing. Call it from `update` (the frame pass still runs while the
+            // tick is frozen); a `fixedUpdate` caller would never get a second turn.
+            let steps = frame_step_request.clone();
+            let f = lua
+                .create_function(move |_, n: Option<u32>| {
+                    let n = n.unwrap_or(1).min(600);
+                    steps.set(steps.get().saturating_add(n));
+                    Ok(())
+                })
+                .expect("physics.step");
+            t.set("step", f).expect("physics.step");
             lua.globals().set("physics", t).expect("physics global");
         }
         // The `assembly.*` API: compound-vessel forces/splits out, per-frame
@@ -1228,6 +1243,7 @@ impl ScriptHost {
             view_info,
             warp_request,
             physics_pause_request,
+            frame_step_request,
             physics_paused,
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
@@ -1344,6 +1360,11 @@ impl ScriptHost {
     /// Drain a pending `physics.pause(on)` request (the editor gates its step).
     pub fn take_physics_pause_request(&self) -> Option<bool> {
         self.physics_pause_request.borrow_mut().take()
+    }
+
+    /// Gameplay ticks a script asked to frame-step through `physics.step([n])`.
+    pub fn take_frame_steps(&self) -> u32 {
+        self.frame_step_request.replace(0)
     }
 
     /// Mirror the editor's physics-paused state into `physics.isPaused()`.
@@ -2529,7 +2550,13 @@ impl ScriptHost {
                         Ok(reg) => {
                             self.instances.insert(
                                 key.clone(),
-                                Instance { env: reg, generation, started: false, seen: true },
+                                Instance {
+                                    env: reg,
+                                    generation,
+                                    started: false,
+                                    seen: true,
+                                    node: None,
+                                },
                             );
                         }
                         Err(err) => {
@@ -2574,7 +2601,7 @@ impl ScriptHost {
         pass: Pass,
     ) {
         let key = (e.index(), name.to_string());
-        let (first, env) = {
+        let (first, env, mut node_slot) = {
             let Some(inst) = self.instances.get_mut(&key) else { return };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
             // instance waits for the next frame pass to start it first.
@@ -2586,7 +2613,8 @@ impl ScriptHost {
                 inst.started = true;
             }
             let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
-            (first, env)
+            // Taken out and put back, because `tick` borrows `self` while it runs.
+            (first, env, inst.node.take())
         };
         let eid = e.index();
         let body = self.bodies.borrow().get(&eid).copied();
@@ -2631,9 +2659,24 @@ impl ScriptHost {
         };
         // Mark the current instance while its hooks run (`net.on` ownership).
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
-        let result =
-            self.tick(&env, params, &resolved, strs, tr, dt, time, first, eid, body, pass);
+        let result = self.tick(
+            &env,
+            params,
+            &resolved,
+            strs,
+            tr,
+            dt,
+            time,
+            first,
+            eid,
+            body,
+            pass,
+            &mut node_slot,
+        );
         *self.net.current.borrow_mut() = None;
+        if let Some(inst) = self.instances.get_mut(&key) {
+            inst.node = node_slot;
+        }
         match result {
             Ok(()) => self.collect_param_writes(&env, name, eid, params, strs),
             Err(err) => self.fail(name, format!("{name}: {err}")),
@@ -2732,41 +2775,96 @@ impl ScriptHost {
         eid: u32,
         body: Option<BodyState>,
         pass: Pass,
+        slot: &mut Option<(Table, crate::env::NodeStamp)>,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 
-        let node = node_table(&self.lua, eid, tr, body)?;
+        // ONE node table per instance, re-stamped each hook — see `node_table`. A handle
+        // kept from `start()` is therefore the same table, and stays live.
+        let node = match slot {
+            // Entity indices are reused after a despawn; a table tagged with a different
+            // one is not this node's, so start over.
+            Some((t, _)) if t.raw_get::<u32>("__id").ok() == Some(eid) => t.clone(),
+            _ => {
+                let t = node_table(&self.lua, eid, tr, body)?;
+                *slot = Some((t.clone(), crate::env::node_stamp(&t, tr)));
+                t
+            }
+        };
+        if let Some((_, stamp)) = slot.as_ref() {
+            // Writes made through a stashed handle from OUTSIDE this script's hooks (a
+            // cross-script `other:knockBack()`, a timer callback) land after the last
+            // read-back has drained. Apply them now, before the re-stamp overwrites them.
+            let drained = crate::env::drain_node_writes(&node, stamp, tr)?;
+            if drained.moved && body.is_some() {
+                self.body_pos_changes.borrow_mut().insert(
+                    eid,
+                    [tr.translation.x, tr.translation.y, tr.translation.z],
+                );
+            }
+            if let Some(v) = drained.vel {
+                self.body_changes.borrow_mut().insert(eid, v);
+            }
+            if let Some(h) = drained.height {
+                self.body_height_changes.borrow_mut().insert(eid, h);
+            }
+        }
+        crate::env::stamp_node_table(&node, tr, body)?;
+        if let Some((_, stamp)) = slot.as_mut() {
+            *stamp = crate::env::node_stamp(&node, tr);
+        }
+
         let pre = node_pre(tr);
-        match pass {
-            Pass::Fixed => {
-                // The per-gameplay-tick hook (constant dt — gameplay/netcode cadence).
-                if let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? {
+        let ran = (|| -> mlua::Result<bool> {
+            match pass {
+                Pass::Fixed => {
+                    // The per-gameplay-tick hook (constant dt — gameplay/netcode cadence).
+                    let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? else {
+                        return Ok(false); // no hook: skip the body read-back (nothing ran)
+                    };
                     f.call::<()>((node.clone(), dt as f64))?;
-                } else {
-                    return Ok(()); // no hook: skip the body read-back (nothing ran)
                 }
-            }
-            Pass::Late => {
-                // The post-physics camera pass — followers sample FINAL poses.
-                if let Some(f) = lifecycle_fn(env, &["lateUpdate", "onLateUpdate"])? {
+                Pass::Late => {
+                    // The post-physics camera pass — followers sample FINAL poses.
+                    let Some(f) = lifecycle_fn(env, &["lateUpdate", "onLateUpdate"])? else {
+                        return Ok(false);
+                    };
                     f.call::<()>((node.clone(), dt as f64))?;
-                } else {
-                    return Ok(());
                 }
-            }
-            Pass::Frame => {
-                // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
-                // still work for older scripts.
-                if first
-                    && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
-                        f.call::<()>(node.clone())?;
+                Pass::Frame => {
+                    // Prefer the short hook names (`start`/`update`); `on_start`/`on_update`
+                    // still work for older scripts.
+                    if first
+                        && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
+                            f.call::<()>(node.clone())?;
+                        }
+                    if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
+                        f.call::<()>((node.clone(), dt as f64))?;
                     }
-                if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
-                    f.call::<()>((node.clone(), dt as f64))?;
                 }
             }
+            Ok(true)
+        })();
+        // Record what the table holds now, whatever happened — an errored hook's partial
+        // writes are discarded (the read-back below is skipped), so they must not read as
+        // pending writes on the next hook either.
+        let finish = |slot: &mut Option<(Table, crate::env::NodeStamp)>, tr: &Transform| {
+            if let Some((t, stamp)) = slot.as_mut() {
+                *stamp = crate::env::node_stamp(t, tr);
+            }
+        };
+        match ran {
+            Err(e) => {
+                finish(slot, tr);
+                return Err(e);
+            }
+            Ok(false) => {
+                finish(slot, tr);
+                return Ok(());
+            }
+            Ok(true) => {}
         }
         // Read back the velocity + height for a physics body — but only when
         // THIS script actually changed them from the seeded values. The node
@@ -2800,7 +2898,9 @@ impl ScriptHost {
                 self.body_pos_changes.borrow_mut().insert(eid, [x, y, z]);
             }
         }
-        apply_node(&node, tr, &pre)
+        let out = apply_node(&node, tr, &pre);
+        finish(slot, tr);
+        out
     }
 
     /// Stat the source; bump its generation (and clear the cached error) when the

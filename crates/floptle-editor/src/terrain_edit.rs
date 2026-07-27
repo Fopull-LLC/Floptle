@@ -825,13 +825,14 @@ fn terrain_voxel_size(baked: &floptle_field::BakedSdf) -> f32 {
 pub(crate) fn terrain_nearest_mask(
     textures: &[String],
     settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
+    project_root: &std::path::Path,
 ) -> u32 {
     let mut mask = 0u32;
     for (i, path) in textures.iter().enumerate().take(32) {
         if path.is_empty() {
             continue;
         }
-        let s = settings.get(path).copied().unwrap_or_default();
+        let s = crate::assets::tex_setting(settings, project_root, path);
         if s.filter == crate::assets::FilterMode::Pixelated {
             mask |= 1 << i;
         }

@@ -341,6 +341,7 @@ mod tests {
                     down: Source::Key(Key::KeyS),
                     left: Source::Key(Key::KeyA),
                     right: Source::Key(Key::KeyD),
+                    player: None,
                 }],
             }],
             axes1: vec![],
@@ -402,6 +403,65 @@ mod tests {
         sys.resolve_tick(&keys(&[Key::KeyD, Key::KeyJ]), 0.016);
         assert!(sys.buffered(0, "Punch", 4));
         assert!(sys.motion(0, "qcf", None), "still inside the window when the button lands");
+    }
+
+    /// Two local players on ONE keyboard, each with their own quarter-circle. This is
+    /// the end of floptle/0028: the motion recogniser reads the map-level `Move` axis,
+    /// and before per-player bindings that axis was player 1's for everyone — so P2's
+    /// `dir()` and every motion answered with P1's stick, silently.
+    #[test]
+    fn both_local_players_get_their_own_motions_on_one_keyboard() {
+        let mut map = fighter_map(2);
+        // One "Punch", two keyboards' worth of bindings.
+        map.actions[0].bindings = vec![
+            Binding::new(Source::Key(Key::KeyJ)).for_player(0),
+            Binding::new(Source::Key(Key::Numpad1)).for_player(1),
+        ];
+        // One "Move" axis: WASD for P1, arrows for P2.
+        map.axes2[0].bindings = vec![
+            Axis2Binding::Keys {
+                up: Source::Key(Key::KeyW),
+                down: Source::Key(Key::KeyS),
+                left: Source::Key(Key::KeyA),
+                right: Source::Key(Key::KeyD),
+                player: Some(0),
+            },
+            Axis2Binding::Keys {
+                up: Source::Key(Key::ArrowUp),
+                down: Source::Key(Key::ArrowDown),
+                left: Source::Key(Key::ArrowLeft),
+                right: Source::Key(Key::ArrowRight),
+                player: Some(1),
+            },
+        ];
+        let mut sys = InputSystem::new(map);
+        // P1 does a qcf on WASD while P2 stands still, then the reverse — interleaved on
+        // the same ticks, because that is how a couch match actually plays.
+        for k in [
+            vec![Key::KeyS],
+            vec![Key::KeyS, Key::KeyD],
+            vec![Key::KeyD],
+        ] {
+            sys.resolve_tick(&keys(&k), 0.016);
+        }
+        assert!(sys.motion(0, "qcf", None), "P1's quarter circle");
+        assert!(!sys.motion(1, "qcf", None), "P2 did nothing and must read as nothing");
+
+        let mut sys = InputSystem::new(sys.map().clone());
+        for k in [
+            vec![Key::ArrowDown],
+            vec![Key::ArrowDown, Key::ArrowRight],
+            vec![Key::ArrowRight],
+        ] {
+            sys.resolve_tick(&keys(&k), 0.016);
+        }
+        assert!(sys.motion(1, "qcf", None), "P2's quarter circle, on their own keys");
+        assert!(!sys.motion(0, "qcf", None), "and it must not read as P1's");
+
+        // The shared action name resolves to each player's own key.
+        sys.resolve_tick(&keys(&[Key::ArrowRight, Key::Numpad1]), 0.016);
+        assert!(sys.buffered(1, "Punch", 4), "P2's punch key");
+        assert!(!sys.buffered(0, "Punch", 4), "which is not P1's");
     }
 
     #[test]

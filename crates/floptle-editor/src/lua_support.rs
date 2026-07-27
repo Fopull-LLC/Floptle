@@ -68,7 +68,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
----@field setMaterial fun(self: Node, t: table) Construction API: set (and create if absent) the node's Material. Fields: color/emissive/specular/rim {r,g,b}, emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\").
+---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\").
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive (\"Cube\"/\"Sphere\"/\"Capsule\"/\"Plane\") with an optional {r,g,b} color.
@@ -1043,6 +1043,12 @@ function physics.pause(on) end
 ---Whether the physics step is currently paused.
 ---@return boolean
 function physics.isPaused() end
+---Frame-step: freeze the whole gameplay tick and release exactly `n` ticks (default 1),
+---each advancing scripts, physics and animation one frame. The scriptable half of the
+---editor's ⏭ Step button, for a training mode's own frame stepper. Call it from
+---`update` — the frame pass still runs while the tick is frozen, `fixedUpdate` does not.
+---@param n integer|nil
+function physics.step(n) end
 
 ---ride exact Kepler rails; one dominant body pulls µ/r² (patched conics).
 ---@class Space

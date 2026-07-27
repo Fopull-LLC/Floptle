@@ -396,50 +396,37 @@ impl Editor {
         self.terrain_wire_gizmo.clear();
         self.mesh_wire_gizmo.clear();
         self.particle_gizmo.clear();
-        // Script debug gizmos (`gizmo.*` from Lua). Unlike the editor overlays these
-        // draw in the GAME view too — they're the developer's own telegraphs — but
-        // the viewport gizmos toggle still hides them. (Projected for the SURFACE
-        // camera; in split view the tab viewer paints them on the Scene side only.)
+        // Script debug gizmos (`gizmo.*` from Lua), projected for the SURFACE camera and
+        // painted in the Scene view. The GAME view gets its own set (`game_gizmo_lines`)
+        // off its own camera, behind the "Also in Game view" toggle — it's off by
+        // default so the game view still shows what the player sees.
         self.script_gizmo_lines.clear();
         if self.show_gizmos && self.gizmo_filter.script && !self.script_gizmos.is_empty() {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
-            let cmds = &self.script_gizmos;
-            let out = &mut self.script_gizmo_lines;
-            let cam_pos = cam.world_position;
-            let mut seg = |a: DVec3, b: DVec3, color: [f32; 3]| {
-                if let (Some(pa), Some(pb)) =
-                    (project(a, cam_pos, view_proj, gw, gh), project(b, cam_pos, view_proj, gw, gh))
-                {
-                    out.push((pa, pb, color));
-                }
-            };
-            let v3 = |p: [f32; 3]| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
-            for cmd in cmds {
-                match *cmd {
-                    floptle_script::GizmoCmd::Line { a, b, color } => seg(v3(a), v3(b), color),
-                    floptle_script::GizmoCmd::Sphere { center, radius, color } => {
-                        // Three axis-aligned rings read as a sphere from any angle.
-                        let c = v3(center);
-                        let r = radius as f64;
-                        const N: usize = 20;
-                        for (u, v) in [(DVec3::X, DVec3::Y), (DVec3::Y, DVec3::Z), (DVec3::X, DVec3::Z)] {
-                            let mut prev = c + u * r;
-                            for k in 1..=N {
-                                let t = k as f64 / N as f64 * std::f64::consts::TAU;
-                                let p = c + u * (r * t.cos()) + v * (r * t.sin());
-                                seg(prev, p, color);
-                                prev = p;
-                            }
-                        }
-                    }
-                    floptle_script::GizmoCmd::Point { pos, size, color } => {
-                        let p = v3(pos);
-                        let h = size as f64 * 0.5;
-                        for off in [DVec3::X, DVec3::Y, DVec3::Z] {
-                            seg(p - off * h, p + off * h, color);
-                        }
-                    }
-                }
+            crate::viz::project_script_gizmos(
+                &self.script_gizmos,
+                cam.world_position,
+                view_proj,
+                floptle_core::math::Vec2::ZERO,
+                floptle_core::math::Vec2::new(gw, gh),
+                &mut self.script_gizmo_lines,
+            );
+        }
+        // Fullscreen Game tab: `cam` above already IS the active gameplay camera and the
+        // viewport is the whole surface, so the same projection serves. The DOCKED game
+        // tab fills this from `update_game_viewport`, which has its own camera + rect.
+        if game_view {
+            self.game_gizmo_lines.clear();
+            if self.game_gizmos && self.gizmo_filter.script && !self.script_gizmos.is_empty() {
+                let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+                crate::viz::project_script_gizmos(
+                    &self.script_gizmos,
+                    cam.world_position,
+                    view_proj,
+                    floptle_core::math::Vec2::ZERO,
+                    floptle_core::math::Vec2::new(gw, gh),
+                    &mut self.game_gizmo_lines,
+                );
             }
         }
         if !game_view && self.show_gizmos {
@@ -854,7 +841,7 @@ impl Editor {
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
                 self.terrain_glow_mask,
                 0,
                 0,
@@ -891,7 +878,7 @@ impl Editor {
         // Resolved up front for the same reason as paint_bases: the draw loop holds a
         // mutable borrow and can't call &self helpers.
         let terrain_nearest_mask =
-            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings);
+            crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
         // Per-node vertex-paint bases, resolved BEFORE the draw loop (which borrows
         // `raster` mutably, so it can't call &self helpers). Empty for unpainted scenes.
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
@@ -1441,6 +1428,7 @@ impl Editor {
         let project_root = self.project_root.as_path();
         let playing = self.playing;
         let paused = self.paused;
+        let game_tick_no = self.game_tick_no;
         let has_active_camera =
             world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Camera { active: true, .. }));
         // The selected camera's POV preview texture (only when a camera is selected).
@@ -1480,6 +1468,11 @@ impl Editor {
         let body_gizmos = self.body_gizmos.as_slice();
         let contact_gizmos = self.contact_gizmos.as_slice();
         let script_gizmo_lines = self.script_gizmo_lines.as_slice();
+        let game_gizmo_lines = self.game_gizmo_lines.as_slice();
+        // The gizmo menu's checkbox writes this directly; remember it so the change can
+        // be persisted after the dock UI runs.
+        let game_gizmos_before = self.game_gizmos;
+        let game_gizmos = &mut self.game_gizmos;
         let terrain_wire = self.terrain_wire_gizmo.as_slice();
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let particle_gizmo = self.particle_gizmo.as_slice();
@@ -1741,6 +1734,28 @@ impl Editor {
                         if ui.button(pause_label).clicked() {
                             cmd.toggle_pause = true;
                         }
+                        // Frame-step: only meaningful while frozen. One click = exactly
+                        // one fixedUpdate tick (scripts, physics, animation), then stop
+                        // again — how you find out whether a jab is 4 frames of startup
+                        // or 5.
+                        ui.add_enabled_ui(paused, |ui| {
+                            if ui
+                                .button("⏭ Step  (F3)")
+                                .on_hover_text(
+                                    "advance exactly one gameplay tick — scripts, \
+                                     physics and animation each move one frame",
+                                )
+                                .clicked()
+                            {
+                                cmd.step_tick = true;
+                            }
+                        });
+                        // The tick counter, so an observed event has a frame NUMBER you
+                        // can put in a frame-data table.
+                        ui.label(
+                            egui::RichText::new(format!("tick {game_tick_no}")).monospace().weak(),
+                        )
+                        .on_hover_text("gameplay ticks since Play started (60 Hz)");
                     }
                     if ui
                         .button(if net_hosting { "🌐 hosting" } else { "🌐" })
@@ -2087,6 +2102,8 @@ impl Editor {
                 body_gizmos,
                 contact_gizmos,
                 script_gizmo_lines,
+                game_gizmo_lines,
+                game_gizmos,
                 terrain_wire,
                 mesh_wire,
                 particle_gizmo,
@@ -2170,6 +2187,10 @@ impl Editor {
                 egui_dock::DockArea::new(dock_state)
                     .style(egui_dock::Style::from_egui(ui.style()))
                     .show_inside(ui, &mut viewer);
+            }
+
+            if *viewer.game_gizmos != game_gizmos_before {
+                crate::prefs::save_game_gizmos(*viewer.game_gizmos);
             }
 
             // Viewport drop: spawn a model when an asset is released over the Scene
@@ -3373,11 +3394,7 @@ impl Editor {
                 .terrain_textures
                 .iter()
                 .map(|p| {
-                    let nearest = settings
-                        .get(p)
-                        .copied()
-                        .unwrap_or_default()
-                        .filter
+                    let nearest = crate::assets::tex_setting(settings, root, p).filter
                         == crate::assets::FilterMode::Pixelated;
                     let file = crate::project::resolve_asset_path(root, p);
                     if !p.is_empty()
@@ -3390,7 +3407,7 @@ impl Editor {
                 })
                 .collect();
             let mask =
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings);
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
             if let Some(gpu) = self.gpu.as_ref() {
                 if let Some(raymarch) = self.raymarch.as_mut() {
                     raymarch.set_terrain_textures(gpu, &layers);
@@ -3764,15 +3781,33 @@ impl Editor {
             // already updated by run; re-importing here means the new mesh renders
             // THIS frame).
             self.load_script_swapped_models();
+            // `physics.step([n])` from a script — the same frame-stepper as ⏭. Drained
+            // in the FRAME pass, not inside the tick loop: once the tick is frozen that
+            // loop doesn't run, so a request drained there could never be the thing that
+            // unfreezes it. And before animation, so the step it releases advances the
+            // pose on the same frame as the gameplay tick rather than one behind.
+            let steps = self.script_host.take_frame_steps();
+            if steps > 0 {
+                self.step_tick(steps);
+            }
             // Animation: bind + apply queued Lua animator commands + advance every
             // controller (ordering: scripts → animation → physics), then dispatch
             // fired clip events back into the node's scripts.
             let anim_cmds = self.script_host.take_anim_commands();
+            // A frame-step advances animation by exactly the ticks it is about to
+            // release (the tick loop consumes `tick_steps` further down), so the pose
+            // you are looking at belongs to the gameplay frame you stopped on. Paused
+            // with no step pending, `sdt` is already 0.
+            let anim_dt = if self.paused {
+                self.tick_steps as f32 * self.game_tick.step
+            } else {
+                sdt
+            };
             let fired = anim::advance_animators(
                 &mut self.anim,
                 &mut self.world,
                 &self.mesh_registry,
-                sdt,
+                anim_dt,
                 anim_cmds,
             );
             for (eid, func) in fired {
@@ -3829,7 +3864,28 @@ impl Editor {
             self.drain_script_terrain_ops();
             if self.sim.is_some() {
                 self.game_tick.accumulate(sdt);
-                while self.game_tick.tick() {
+                // Frame-step. While frozen the clock banks nothing (so unpausing can
+                // never release a burst of caught-up ticks) and `tick_steps` is the only
+                // thing that lets a tick through. Draining the accumulator also drops
+                // `alpha` to 0, so what you look at between steps is the tick pose
+                // itself, not an interpolated one — which is the whole point of
+                // stopping on a frame.
+                let stepping = self.paused;
+                if stepping {
+                    self.game_tick.reset();
+                } else {
+                    // Steps queued while running are meaningless — never let them bank.
+                    self.tick_steps = 0;
+                }
+                loop {
+                    if stepping {
+                        if self.tick_steps == 0 {
+                            break;
+                        }
+                        self.tick_steps -= 1;
+                    } else if !self.game_tick.tick() {
+                        break;
+                    }
                     self.game_tick_no += 1;
                     // Celestial rails FIRST (solar demo S2): body nodes + their
                     // terrain collider anchors + gravity centers + the space.*
@@ -4586,6 +4642,9 @@ impl Editor {
         if let Some((dir, target)) = cmd.export_game {
             self.begin_export(dir, target);
         }
+        if cmd.step_tick {
+            self.step_tick(1);
+        }
         if cmd.toggle_pause {
             self.toggle_pause();
         }
@@ -5116,11 +5175,17 @@ impl Editor {
             self.add_camera_node(parent);
         }
         if let Some((path, setting)) = cmd.set_texture_setting.take() {
+            // Store under the PROJECT-RELATIVE key, which is how scenes and materials
+            // reference a texture; the Assets browser hands us an absolute path.
+            let path = crate::assets::asset_rel_path(&path, &self.project_root);
             self.texture_settings.insert(path.clone(), setting);
             // Drop the cached registration so the texture re-uploads with the new
-            // sampler (and mips) on next use, and persist the change.
-            self.texture_registry.remove(&path);
-            self.texture_registry_setting.remove(&path);
+            // sampler (and mips) on next use, and persist the change. The registry is
+            // keyed by the ref AS WRITTEN, so drop every spelling of this texture.
+            let root = self.project_root.clone();
+            let same = |k: &String| crate::assets::asset_rel_path(k, &root) == path;
+            self.texture_registry.retain(|k, _| !same(k));
+            self.texture_registry_setting.retain(|k, _| !same(k));
             // The terrain palette bakes its own 256² copy at load, so a filter change
             // has to re-RESAMPLE it — a sampler swap alone can't un-blur a bilinear
             // resize. Only re-upload if this texture is actually in the palette.
@@ -5467,7 +5532,7 @@ impl Editor {
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [
-                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings),
+                crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root),
                 self.terrain_glow_mask,
                 0,
                 0,
@@ -5654,7 +5719,7 @@ impl Editor {
                     tm.color[2],
                     // Legacy raymarch path packs the mask in an f32 lane — exact for
                     // slots 0..23 only; the meshed raster path uses u32 terrain_bits.
-                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings)
+                    crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root)
                         as f32,
                 ],
                 terrain_emissive: [tm.emissive[0], tm.emissive[1], tm.emissive[2], tm.emissive_strength],

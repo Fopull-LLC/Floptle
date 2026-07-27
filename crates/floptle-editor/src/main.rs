@@ -137,6 +137,8 @@ struct EditorCmd {
     toggle_play: bool,
     /// Toggle pause (freeze the script clock while playing).
     toggle_pause: bool,
+    /// Advance exactly one gameplay tick while paused (the ⏭ Step button / F3).
+    step_tick: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
     /// Open a folder in the OS file manager (empty path = the project root).
@@ -608,8 +610,11 @@ struct EditorTabViewer<'a> {
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
     contact_gizmos: &'a [(Vec2, Vec2)],
-    /// Script `gizmo.*` debug lines (projected px + 0-1 color) — Scene view only.
+    /// Script `gizmo.*` debug lines (projected px + 0-1 color) — Scene view.
     script_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
+    /// The same, projected for the Game view's camera (drawn only when `game_gizmos`).
+    game_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
+    game_gizmos: &'a mut bool,
     terrain_wire: &'a [(Vec2, Vec2)],
     mesh_wire: &'a [(Vec2, Vec2)],
     /// Selected particle track's emitter/force gizmo (colored screen segments).
@@ -1781,6 +1786,13 @@ struct Editor {
     script_gizmos: Vec<floptle_script::GizmoCmd>,
     /// Their projected viewport segments (physical px) + color, rebuilt per frame.
     script_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
+    /// The same commands projected through the GAMEPLAY camera into the Game tab's rect
+    /// — a second set, because the Scene view's projection is a different camera.
+    game_gizmo_lines: Vec<(Vec2, Vec2, [f32; 3])>,
+    /// Draw script `gizmo.*` shapes in the GAME view as well. Off by default: the game
+    /// view is meant to show what a player sees. On, because checking whether a hitbox
+    /// reaches is something you do WHILE playing, not instead of it. Persisted.
+    game_gizmos: bool,
     /// Master toggle for ALL viewport gizmos/overlays (a button at the viewport's top
     /// right, or the H key). Off = a clean view; the selected node's collider still
     /// hides too.
@@ -1904,6 +1916,11 @@ struct Editor {
     /// tick counter (the netcode timebase). Reset on Play.
     game_tick: floptle_core::FixedTimestep,
     game_tick_no: u64,
+    /// Frame-step: while `paused` freezes the gameplay tick, this releases exactly this
+    /// many ticks — scripts, physics and animation each advancing one step. A fighter is
+    /// authored in single frames, and "is this jab 4 frames of startup or 5" cannot be
+    /// answered by watching it at full speed.
+    tick_steps: u32,
     /// The in-editor multiplayer session (docs/netcode-design.md §12 2b): the play
     /// world hosts, an optional ghost-client world joins over the in-process hub
     /// with simulated latency/loss, and cyan gizmos show its view. Torn down on Stop.
@@ -2416,6 +2433,7 @@ impl ApplicationHandler for Editor {
         self.play_tint_enabled = tint_on;
         self.play_tint = tint_rgb;
         self.grid = load_grid();
+        self.game_gizmos = prefs::load_game_gizmos();
         self.map_keys = map_keys::load_map_keys();
         self.engine_theme = load_theme_index(engine_theme_path(), ENGINE_THEMES.len());
         self.code_theme = load_theme_index(code_theme_path(), CODE_THEMES.len());
@@ -2749,6 +2767,7 @@ impl ApplicationHandler for Editor {
                             KeyCode::F1 => self.toggle_play(),
                             KeyCode::F2 if self.player_mode => {}
                             KeyCode::F2 => self.toggle_pause(),
+                            KeyCode::F3 => self.step_tick(1),
                             // Everything else is an EDITOR shortcut — suppressed in the
                             // Game view so it behaves like a real build.
                             _ if !game_view => {

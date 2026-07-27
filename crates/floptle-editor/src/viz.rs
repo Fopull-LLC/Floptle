@@ -18,6 +18,60 @@ pub(crate) fn project(world: DVec3, cam_world: DVec3, vp: Mat4, w: f32, h: f32) 
     Some(Vec2::new((ndc.x * 0.5 + 0.5) * w, (1.0 - (ndc.y * 0.5 + 0.5)) * h))
 }
 
+/// Project a script's `gizmo.*` commands into screen-space segments for ONE camera and
+/// viewport. `origin` + `size` are physical pixels, so a docked Game tab passes its own
+/// sub-rect while a full-window view passes `(0,0)` and the surface size.
+///
+/// Split out because the Game view can now draw these too: a hitbox you can only see
+/// while NOT playing is the wrong way round for tuning one (floptle/0024).
+pub(crate) fn project_script_gizmos(
+    cmds: &[floptle_script::GizmoCmd],
+    cam_world: DVec3,
+    vp: Mat4,
+    origin: Vec2,
+    size: Vec2,
+    out: &mut Vec<(Vec2, Vec2, [f32; 3])>,
+) {
+    let mut seg = |a: DVec3, b: DVec3, color: [f32; 3]| {
+        if let (Some(pa), Some(pb)) = (
+            project(a, cam_world, vp, size.x, size.y),
+            project(b, cam_world, vp, size.x, size.y),
+        ) {
+            out.push((origin + pa, origin + pb, color));
+        }
+    };
+    let v3 = |p: [f32; 3]| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+    for cmd in cmds {
+        match *cmd {
+            floptle_script::GizmoCmd::Line { a, b, color } => seg(v3(a), v3(b), color),
+            floptle_script::GizmoCmd::Sphere { center, radius, color } => {
+                // Three axis-aligned rings read as a sphere from any angle.
+                let c = v3(center);
+                let r = radius as f64;
+                const N: usize = 20;
+                for (u, v) in
+                    [(DVec3::X, DVec3::Y), (DVec3::Y, DVec3::Z), (DVec3::X, DVec3::Z)]
+                {
+                    let mut prev = c + u * r;
+                    for k in 1..=N {
+                        let t = k as f64 / N as f64 * std::f64::consts::TAU;
+                        let p = c + u * (r * t.cos()) + v * (r * t.sin());
+                        seg(prev, p, color);
+                        prev = p;
+                    }
+                }
+            }
+            floptle_script::GizmoCmd::Point { pos, size, color } => {
+                let p = v3(pos);
+                let h = size as f64 * 0.5;
+                for off in [DVec3::X, DVec3::Y, DVec3::Z] {
+                    seg(p - off * h, p + off * h, color);
+                }
+            }
+        }
+    }
+}
+
 /// The world point under `cursor` (physical px) — its ray's hit on the ground
 /// plane y=0, or ~6 units ahead of the camera if the ray misses. `inv_vp` is the
 /// inverse of the camera's view-projection at this `w`/`h` aspect.

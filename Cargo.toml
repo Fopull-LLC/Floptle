@@ -35,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]
@@ -86,5 +86,11 @@ opt-level = 3          # always optimize dependencies (renderer/math heavy)
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
 strip = true
+# NO `panic = "abort"`. LuaJIT on x64 POSIX raises errors by real (DWARF) unwinding, and
+# that is how mlua turns a Rust callback's `Err` into a Lua error. Under `abort` every
+# Rust frame is compiled nounwind, so the unwind hits `panic_cannot_unwind` and kills the
+# process — meaning ANY script mistake that reaches a Rust callback (a wrong table shape,
+# a bad argument) took the whole editor down with SIGABRT, losing unsaved work, and not
+# even `pcall` could catch it. `cargo test` silently ignores this setting, so no unit
+# test can guard it; `examples/error_path.rs` in floptle-script is the check. floptle/0025.

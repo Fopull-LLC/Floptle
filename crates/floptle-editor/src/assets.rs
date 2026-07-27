@@ -187,6 +187,29 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
+/// A texture's sampling settings, looked up by a path in EITHER form.
+///
+/// `texture_settings` is keyed the way scenes and materials reference a texture:
+/// **project-relative**. The Assets browser works in absolute paths, though, so the
+/// Inspector's filter/wrap combo used to store an absolute key that nothing ever read
+/// back — the setting persisted, the Inspector showed it, and every renderer looking the
+/// texture up by its `textures/ui/hud/Fill.png` ref missed and got the default. Pixel art
+/// came out bilinear-blurred with `Pixelated` plainly selected (floptle/0026).
+///
+/// Keys are normalised on load and on write, so the fallback below is only for a stray
+/// absolute path arriving from the Assets side.
+pub(crate) fn tex_setting(
+    settings: &std::collections::HashMap<String, TexSetting>,
+    project_root: &Path,
+    path: &str,
+) -> TexSetting {
+    settings
+        .get(path)
+        .or_else(|| settings.get(asset_rel_path(path, project_root).as_str()))
+        .copied()
+        .unwrap_or_default()
+}
+
 /// Collect the path of every importable model (.glb/.gltf) in the asset tree — for the
 /// Inspector's mesh model picker and the Add Component menu.
 pub(crate) fn collect_model_paths(entries: &[AssetEntry], out: &mut Vec<String>) {
@@ -230,6 +253,41 @@ mod tests {
             script_kind_of("/tmp/project/scripts/rotate.lua", scripts_dir),
             "rotate"
         );
+    }
+
+    /// The Inspector selects a texture by its ABSOLUTE path; a scene references it by a
+    /// PROJECT-RELATIVE one. Both must reach the same settings entry, or a `Pixelated`
+    /// pick shows in the Inspector and never reaches the sampler (floptle/0026).
+    #[test]
+    fn texture_settings_resolve_from_either_path_form() {
+        let root = Path::new("/home/dev/Fofighter");
+        let pixel = TexSetting { filter: FilterMode::Pixelated, ..Default::default() };
+        let mut settings = std::collections::HashMap::new();
+        settings.insert("textures/ui/hud/Fill.png".to_string(), pixel);
+
+        // The form a UiElement / Material stores.
+        assert_eq!(
+            tex_setting(&settings, root, "textures/ui/hud/Fill.png").filter,
+            FilterMode::Pixelated
+        );
+        // The form the Assets browser hands the Inspector.
+        assert_eq!(
+            tex_setting(&settings, root, "/home/dev/Fofighter/textures/ui/hud/Fill.png").filter,
+            FilterMode::Pixelated
+        );
+        // An unknown texture still falls back to the default.
+        assert_eq!(tex_setting(&settings, root, "textures/other.png").filter, TexSetting::default().filter);
+
+        // A legacy file keyed by absolute path migrates to the relative form on load.
+        let legacy: std::collections::HashMap<String, TexSetting> = [(
+            "/home/dev/Fofighter/textures/ui/hud/Fill.png".to_string(),
+            pixel,
+        )]
+        .into_iter()
+        .collect();
+        let migrated: std::collections::HashMap<String, TexSetting> =
+            legacy.into_iter().map(|(k, v)| (asset_rel_path(&k, root), v)).collect();
+        assert!(migrated.contains_key("textures/ui/hud/Fill.png"), "{migrated:?}");
     }
 }
 

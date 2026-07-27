@@ -1169,7 +1169,8 @@ impl Editor {
                     let new = pick.unwrap_or_default();
                     // Inherit the texture's spritesheet grid (set in its asset
                     // settings) so a picked sheet slices without extra steps.
-                    let (sc, sr) = texture_settings.get(&new).map(|t| t.sheet()).unwrap_or((1, 1));
+                    let (sc, sr) =
+                        crate::assets::tex_setting(texture_settings, project_root, &new).sheet();
                     img.cols = sc;
                     img.rows = sr;
                     img.cell = 0;
@@ -1179,7 +1180,7 @@ impl Editor {
             });
             // --- spritesheet cell picker (when the texture is a sheet) ---
             let (sc, sr) =
-                texture_settings.get(&img.texture).map(|t| t.sheet()).unwrap_or((1, 1));
+                crate::assets::tex_setting(texture_settings, project_root, &img.texture).sheet();
             // Keep the image's grid in sync if the asset's split changed.
             if (img.cols, img.rows) != (sc, sr) {
                 img.cols = sc;

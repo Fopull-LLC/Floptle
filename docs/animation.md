@@ -140,6 +140,10 @@ end
   `anim:setLayerWeight(layer, w)`, `anim:seek(t [, layer])`.
 - Reads: `anim:state([layer])`, `anim:time([layer])`, `anim:finished([layer])`,
   `anim:isPlaying([state])`, `anim:clips()`, `anim:layers()`.
+- Authored data, from the asset rather than playback (so it works in `start()`):
+  `anim:duration(clip)` and `anim:events(clip)` → `{ {t, func}, ... }` ascending
+  by `t`. A game with integer frame data bakes these once at load instead of
+  letting events drive gameplay — see the scripting reference.
 
 Ordering each frame is **scripts → animation → physics**: what you set this
 frame shows this frame.

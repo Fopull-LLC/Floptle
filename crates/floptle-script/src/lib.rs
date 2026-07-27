@@ -168,6 +168,11 @@ struct Instance {
     generation: u64,
     started: bool,
     seen: bool,
+    /// The `node` table this instance's hooks are handed, kept alive between hooks and
+    /// re-stamped rather than rebuilt, so a handle a script stashed in `start()` keeps
+    /// reading the live transform. `stamp` is what the engine last wrote into it, so a
+    /// write made from outside a hook can be told apart from an untouched field.
+    node: Option<(mlua::Table, crate::env::NodeStamp)>,
 }
 
 /// Embeds Lua and runs the scripts attached to a world's nodes.
@@ -290,6 +295,8 @@ pub struct ScriptHost {
     warp_request: Rc<RefCell<Option<f64>>>,
     /// A pending `physics.pause(on)` request the editor drains + applies.
     physics_pause_request: Rc<RefCell<Option<bool>>>,
+    /// Gameplay ticks requested by `physics.step([n])` — the scriptable frame-stepper.
+    frame_step_request: Rc<std::cell::Cell<u32>>,
     /// Mirror of the editor's physics-paused state (`physics.isPaused()`).
     physics_paused: Rc<std::cell::Cell<bool>>,
     /// A pending mouse-lock request from `input.lockMouse()` / `input.unlockMouse()`:
@@ -399,8 +406,23 @@ fn gizmo_color(r: Option<f64>, g: Option<f64>, b: Option<f64>) -> [f32; 3] {
 pub struct AnimInfo {
     /// Per layer, base first: (layer name, current state, time seconds, finished).
     pub layers: Vec<(String, Option<String>, f32, bool)>,
-    /// Every playable state name across all layers.
-    pub states: Vec<String>,
+    /// Every playable state across all layers, with its clip's authored duration and
+    /// events. Behind an `Rc` because the mirror is rebuilt every frame while this half
+    /// changes only when a controller rebinds — the driver caches it and clones the
+    /// pointer.
+    pub clips: Rc<Vec<ClipInfo>>,
+}
+
+/// One playable state's clip, as authored. Read-only — the game bakes integer frame data
+/// out of this at load (`anim:events` / `anim:duration`), rather than letting float
+/// playback events drive gameplay, which no rollback replay could reproduce.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipInfo {
+    pub name: String,
+    /// Authored clip length in seconds.
+    pub duration: f32,
+    /// `(t seconds, function name)`, ascending by `t`.
+    pub events: Vec<(f32, String)>,
 }
 
 /// One queued `node:animator()` command.
@@ -1517,7 +1539,16 @@ end
                 e.index(),
                 AnimInfo {
                     layers: vec![("Base".into(), Some(state.into()), t, fin)],
-                    states: vec!["Idle".into(), "Walking".into(), "Running".into()],
+                    clips: Rc::new(
+                        ["Idle", "Walking", "Running"]
+                            .iter()
+                            .map(|n| ClipInfo {
+                                name: (*n).into(),
+                                duration: 1.0,
+                                events: Vec::new(),
+                            })
+                            .collect(),
+                    ),
                 },
             )])
         };
@@ -2971,5 +3002,300 @@ end
         // The numeric applier still drives opacity on the same element.
         crate::apply_component_field(&mut world, e, "UiElement", "opacity", 0.5);
         assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.5);
+    }
+
+    /// `anim:events` / `anim:duration` expose the AUTHORED clip data so a game can bake
+    /// integer frame data at load, instead of letting float playback events drive
+    /// gameplay (which stepped playback quantises and a prediction replay never re-fires).
+    /// They read the asset mirror, so they answer in `start()` — before anything has
+    /// played a frame (floptle/0023).
+    #[test]
+    fn animator_exposes_authored_clip_events_and_duration() {
+        let dir = std::env::temp_dir().join("floptle_script_test_anim_events");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "bake",
+            "function start(node)\n\
+               local a = node:animator()\n\
+               local dur = a:duration('Punch')\n\
+               local evs = a:events('Punch')\n\
+               -- 12 gameplay frames over the clip: which frame is the hitbox on?\n\
+               for _, e in ipairs(evs) do\n\
+                 if e.func == 'onHitboxStart' then\n\
+                   node.x = math.floor(e.t / dur * 12 + 0.5)\n\
+                 end\n\
+               end\n\
+               node.y = #evs\n\
+               node.z = (a:events('NoSuchClip') == nil) and 1 or 0\n\
+             end\n\
+             function update(node, dt) end\n",
+        );
+        let (mut world, e) = world_with_script("bake");
+        let mut host = ScriptHost::new();
+        host.set_anim_info(HashMap::from([(
+            e.index(),
+            AnimInfo {
+                layers: vec![("Base".into(), None, 0.0, false)],
+                clips: Rc::new(vec![ClipInfo {
+                    name: "Punch".into(),
+                    duration: 0.5,
+                    events: vec![(0.125, "onHitboxStart".into()), (0.25, "onHitboxEnd".into())],
+                }]),
+            },
+        )]));
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let tr = world.get::<Transform>(e).unwrap().translation;
+        assert_eq!(tr.x, 3.0, "0.125s of a 0.5s clip over 12 frames is frame 3");
+        assert_eq!(tr.y, 2.0, "both authored events came through");
+        assert_eq!(tr.z, 1.0, "an unknown clip reads nil rather than erroring");
+    }
+
+    /// A bad table shape passed to a construction API is a script error in the Console,
+    /// never a process abort. It used to take the whole editor down with SIGABRT
+    /// ("panic in a function that cannot unwind"), losing unsaved work and telling the
+    /// author nothing about what they got wrong (floptle/0025).
+    #[test]
+    fn a_bad_field_shape_is_a_script_error_not_an_abort() {
+        let dir = std::env::temp_dir().join("floptle_script_test_bad_field_shape");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "flash",
+            "function update(node, dt)\n\
+               node:setMaterial{ emissive = { nope = 1 } }\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Empty);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "flash".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        let errs = host.errors();
+        assert!(!errs.is_empty(), "the bad shape must surface as a script error");
+        assert!(
+            errs[0].contains("flash") && errs[0].contains("emissive"),
+            "the error must name the script and the offending field: {errs:?}"
+        );
+    }
+
+    /// The colour spellings the docs promise all reach the component. `{r,g,b}` was
+    /// documented in `floptle.lua` and named in the converter's own error message, and
+    /// was the one shape it refused.
+    #[test]
+    fn set_material_accepts_every_documented_colour_shape() {
+        let dir = std::env::temp_dir().join("floptle_script_test_colour_shapes");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "paint",
+            "function update(node, dt)\n\
+               node:setMaterial{ color = { r = 1, g = 0.5, b = 0.25 } }\n\
+               find(\"B\"):setMaterial{ color = { x = 1, y = 0.5, z = 0.25 } }\n\
+               find(\"C\"):setMaterial{ color = { 1, 0.5, 0.25 } }\n\
+               find(\"D\"):setMaterial{ color = vec3(1, 0.5, 0.25) }\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let mut nodes = Vec::new();
+        for name in ["A", "B", "C", "D"] {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(name.into()));
+            world.insert(e, Matter::Empty);
+            nodes.push(e);
+        }
+        world.insert(
+            nodes[0],
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "paint".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        for (e, name) in nodes.iter().zip(["{r,g,b}", "{x,y,z}", "array", "vec3"]) {
+            let m = world.get::<floptle_core::Material>(*e).expect(name);
+            assert!(
+                (m.color[0] - 1.0).abs() < 1e-5
+                    && (m.color[1] - 0.5).abs() < 1e-5
+                    && (m.color[2] - 0.25).abs() < 1e-5,
+                "{name} did not reach the material: {:?}",
+                m.color
+            );
+        }
+    }
+
+    /// `me = node` kept from `start()` must read the CURRENT pose on later hooks.
+    ///
+    /// It used to freeze at the spawn position: `node_table` built a fresh table per
+    /// hook with x/y/z as raw fields, so the stashed reference was a snapshot. It failed
+    /// silently and only partially — everything using the PASSED `node` stayed correct,
+    /// so a character moved and animated fine while anything derived from the stashed
+    /// handle (hitboxes, hand-anchored effects) stayed nailed to the spawn point.
+    #[test]
+    fn a_handle_kept_from_start_tracks_the_node() {
+        let dir = std::env::temp_dir().join("floptle_script_test_stashed_handle");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "walker",
+            "function start(node) me = node end\n\
+             function update(node, dt)\n\
+               seen = me.x          -- read the STASHED handle, before this frame's move\n\
+               node.x = node.x + 1\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "walker".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        for i in 0..3 {
+            host.run(&mut world, &dir, 0.016, i as f32 * 0.016);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0, "the body walked");
+        let seen = host
+            .instance_env(e.index(), "walker")
+            .and_then(|env| env.get::<f64>("seen").ok())
+            .unwrap_or(f64::NAN);
+        assert_eq!(seen, 2.0, "the stashed handle must track the body, not freeze at spawn");
+    }
+
+    /// Physics moving a body between hooks must NOT read as a pending write through the
+    /// stashed handle — otherwise every tick would teleport the body back to where the
+    /// table happened to be left. The drain compares the table against what the engine
+    /// last stamped INTO it, not against the transform.
+    #[test]
+    fn physics_moving_a_body_is_not_mistaken_for_a_stashed_write() {
+        let dir = std::env::temp_dir().join("floptle_script_test_no_phantom_teleport");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "rider",
+            "function start(node) me = node end\n\
+             function update(node, dt) seen = me.x end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "rider".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        // The driver (physics) moves the body between hooks; the script wrote nothing.
+        for i in 1..=3 {
+            world.get_mut::<Transform>(e).unwrap().translation.x = i as f64;
+            host.run(&mut world, &dir, 0.016, i as f32 * 0.016);
+            assert_eq!(
+                world.get::<Transform>(e).unwrap().translation.x,
+                i as f64,
+                "the engine must not drag the body back to the table's last value"
+            );
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let seen = host
+            .instance_env(e.index(), "rider")
+            .and_then(|env| env.get::<f64>("seen").ok())
+            .unwrap_or(f64::NAN);
+        assert_eq!(seen, 3.0, "and the stashed handle still reads the live pose");
+    }
+
+    /// A write through a stashed handle from OUTSIDE that script's hooks — the shape a
+    /// cross-script `other:knockBack()` takes — lands. It used to be dropped: the write
+    /// arrived after the target's read-back had drained, and the next hook's re-stamp
+    /// overwrote it.
+    #[test]
+    fn a_cross_script_write_through_a_stashed_handle_lands() {
+        let dir = std::env::temp_dir().join("floptle_script_test_cross_script_write");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "target",
+            "function start(node) me = node end\n\
+             function teleport(x) me.x = x end\n\
+             function update(node, dt) end\n",
+        );
+        write_script(
+            &dir,
+            "caller",
+            "function update(node, dt)\n\
+               if not done then\n\
+                 find(\"Target\"):getscript(\"target\").teleport(-5)\n\
+                 done = true\n\
+               end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let target = world.spawn();
+        world.insert(target, Transform::IDENTITY);
+        world.insert(target, floptle_core::Name("Target".into()));
+        world.insert(
+            target,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "target".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let caller = world.spawn();
+        world.insert(caller, Transform::IDENTITY);
+        world.insert(caller, floptle_core::Name("Caller".into()));
+        world.insert(
+            caller,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "caller".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        for i in 0..4 {
+            host.run(&mut world, &dir, 0.016, i as f32 * 0.016);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(
+            world.get::<Transform>(target).unwrap().translation.x,
+            -5.0,
+            "the teleport written through the stashed handle must reach the transform"
+        );
     }
 }

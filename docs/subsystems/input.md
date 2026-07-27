@@ -480,6 +480,41 @@ Pad slots are claimed by device **UUID**, so a player whose battery dies
 mid-match returns to their own character on replug instead of everyone being
 renumbered. Set the player count in Project Settings → Input.
 
+### Two players, one keyboard
+
+Pads sort themselves out — `PadId::Any` resolves to each slot's own device. A
+keyboard cannot, because there is only one of it: an unscoped `Key(KeyJ)` on
+`Punch` punches for *both* fighters. So a binding can name a player:
+
+```ron
+Action(name: "Light", bindings: [
+    Binding(source: Key(KeyJ),   player: Some(0)),   // P1
+    Binding(source: Key(Digit1), player: Some(1)),   // P2
+    Binding(source: Pad(id: Any, ctrl: Button(West))),  // either player's pad
+]),
+Axis2(name: "Move", socd: Neutral, bindings: [
+    Keys(up: KeyW,   down: KeyS,     left: KeyA,     right: KeyD,     player: Some(0)),
+    Keys(up: ArrowUp, down: ArrowDown, left: ArrowLeft, right: ArrowRight, player: Some(1)),
+    Stick(id: Any, x: LeftStickX, y: LeftStickY, deadzone: 0.15),
+]),
+```
+
+Omitted (the overwhelming default) means every player, so nothing changes for a
+single-player project. In the editor, right-click a binding chip to scope it;
+scoped chips read `⌨ J  P1`. An action with an unscoped **keyboard** binding in a
+`players > 1` project is flagged ▲, because "both characters jump off one press"
+is otherwise found by watching it happen.
+
+The scope lives on the **binding**, never the action. The action list is what the
+netcode indexes positionally and what `InputMap::hash()` covers, so scoping a
+binding cannot invalidate a session.
+
+It also fixes motions for player 2. `dir()`, `dirHeldTicks` and every motion read
+one map-level axis (`motion_axis`, default `"Move"`), resolved per player — so
+one `Move` axis carrying WASD for P1 and the arrows for P2 gives each of them
+their own quarter-circle. Two separate axes (`Move` / `Move2`) would not: the
+recogniser would read P1's for everyone.
+
 ## Multiplayer: actions ride the wire
 
 `NetInput` carries an action bitmask plus axis values — no keys. A pad player

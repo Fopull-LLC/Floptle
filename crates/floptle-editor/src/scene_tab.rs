@@ -355,6 +355,17 @@ impl EditorTabViewer<'_> {
                                     ui.checkbox(&mut f.colliders, "Collider wireframes");
                                     ui.checkbox(&mut f.particles, "Particle emitters");
                                     ui.checkbox(&mut f.script, "Script gizmos (Lua)");
+                                    ui.indent("script_gizmo_game", |ui| {
+                                        ui.add_enabled_ui(f.script, |ui| {
+                                            ui.checkbox(self.game_gizmos, "…also in Game view")
+                                                .on_hover_text(
+                                                    "draw Lua gizmo.* shapes over the Game \
+                                                     view too — hit/hurtboxes while you \
+                                                     actually play. Off keeps the Game view \
+                                                     showing exactly what a player sees.",
+                                                );
+                                        });
+                                    });
                                     ui.separator();
                                     if ui.button("All on").clicked() {
                                         *f = crate::GizmoFilter::default();
@@ -598,16 +609,19 @@ impl EditorTabViewer<'_> {
             }
         }
 
-        // Script debug gizmos (`gizmo.*`): Scene view only — like every other
-        // gizmo, the Game view stays clean (what the player would actually see).
-        if !game && !self.script_gizmo_lines.is_empty() {
+        // Script debug gizmos (`gizmo.*`). The Game view stays clean by default — it's
+        // what the player would see — but "Also in Game view" opts in, because checking
+        // whether a hitbox reaches is something you do with the controller in your hands.
+        let script_lines: &[(Vec2, Vec2, [f32; 3])] =
+            if game { self.game_gizmo_lines } else { self.script_gizmo_lines };
+        if !script_lines.is_empty() {
             let painter = ui
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("script_gizmos")))
                 .with_clip_rect(rect);
             let ppp = self.ppp;
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
-            for (a, b, c) in self.script_gizmo_lines {
+            for (a, b, c) in script_lines {
                 let col = egui::Color32::from_rgb(
                     (c[0].clamp(0.0, 1.0) * 255.0) as u8,
                     (c[1].clamp(0.0, 1.0) * 255.0) as u8,

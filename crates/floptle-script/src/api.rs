@@ -1195,11 +1195,24 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     {
         let q = shared.rich_sets.clone();
         // A 3-vector in ANY of the Lua spellings: vec3(..), {x=,y=,z=}, {r,g,b}.
+        /// Every spelling of a three-component value the docs promise: a `vec3`, an
+        /// `{x=,y=,z=}` table, an array `{1,2,3}`, and — for colours, which is what most
+        /// of these fields are — `{r=,g=,b=}`. `{r,g,b}` was documented in `floptle.lua`
+        /// and named in this function's own error message while being the one shape it
+        /// refused (floptle/0025).
         fn triple_of(v: &Value) -> Option<[f64; 3]> {
             if let Some(p) = crate::math_api::vec3_of(v) {
                 return Some([p.x, p.y, p.z]);
             }
             if let Value::Table(t) = v {
+                if let (Ok(Some(r)), Ok(Some(g)), Ok(Some(b))) = (
+                    t.get::<Option<f64>>("r"),
+                    t.get::<Option<f64>>("g"),
+                    t.get::<Option<f64>>("b"),
+                ) {
+                    // Alpha is accepted and dropped: these fields are all three-component.
+                    return Some([r, g, b]);
+                }
                 let a = t.raw_get::<Option<f64>>(1).ok().flatten()?;
                 let b = t.raw_get::<Option<f64>>(2).ok().flatten()?;
                 let c = t.raw_get::<Option<f64>>(3).ok().flatten()?;
@@ -1566,11 +1579,60 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     let e: u32 = this.raw_get("__id")?;
                     let arr = lua.create_table()?;
                     if let Some(i) = inf.borrow().get(&e) {
-                        for (n, s) in i.states.iter().enumerate() {
-                            arr.set(n + 1, lua.create_string(s)?)?;
+                        for (n, c) in i.clips.iter().enumerate() {
+                            arr.set(n + 1, lua.create_string(&c.name)?)?;
                         }
                     }
                     Ok(arr)
+                })?,
+            )?;
+        }
+        // A clip's AUTHORED duration + events, read from the asset rather than from
+        // playback — so a game can bake integer frame data once at load. Runtime event
+        // dispatch is unchanged; these are read-only.
+        //
+        // A fighter cannot let clip events drive gameplay: they fire off float playback
+        // time, stepped playback (`sample_fps`) quantises them to the step grid, clip
+        // time and state frame disagree mid-crossfade, and a prediction replay
+        // deliberately does not re-fire them. Baking at load sidesteps all four — every
+        // machine loads the same `.anim.ron`, so the numbers are identical and constant.
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "duration",
+                lua.create_function(move |_, (this, clip): (Table, String)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let info = inf.borrow();
+                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                    Ok(i.clips
+                        .iter()
+                        .find(|c| c.name == clip)
+                        .map(|c| Value::Number(c.duration as f64))
+                        .unwrap_or(Value::Nil))
+                })?,
+            )?;
+        }
+        {
+            let inf = shared.anim_info.clone();
+            anim_methods.set(
+                "events",
+                lua.create_function(move |lua, (this, clip): (Table, String)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let info = inf.borrow();
+                    let Some(i) = info.get(&e) else { return Ok(Value::Nil) };
+                    // Unknown clip → nil, so `if anim:events(c) then` guards work; a
+                    // clip with no events → an empty array, which is a different answer.
+                    let Some(c) = i.clips.iter().find(|c| c.name == clip) else {
+                        return Ok(Value::Nil);
+                    };
+                    let arr = lua.create_table()?;
+                    for (n, (t, func)) in c.events.iter().enumerate() {
+                        let ev = lua.create_table()?;
+                        ev.set("t", *t as f64)?;
+                        ev.set("func", lua.create_string(func)?)?;
+                        arr.set(n + 1, ev)?;
+                    }
+                    Ok(Value::Table(arr))
                 })?,
             )?;
         }

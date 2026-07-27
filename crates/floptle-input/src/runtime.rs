@@ -103,7 +103,10 @@ impl ActionRuntime {
                 continue;
             }
             for b in &action.bindings {
-                if !modifiers_held(b, raw, slot) {
+                // A binding scoped to another local player contributes nothing here —
+                // this is what lets ONE `Light` action be `J` for P1 and `1` for P2 on
+                // the same keyboard instead of needing a duplicate `Light2`.
+                if !b.serves(slot) || !modifiers_held(b, raw, slot) {
                     continue;
                 }
                 if raw.held(b.source, slot, b.threshold) {
@@ -269,7 +272,10 @@ fn resolve_axis1(
     memory: &mut i8,
 ) -> f32 {
     match b {
-        Axis1Binding::Keys { minus, plus } => {
+        Axis1Binding::Keys { minus, plus, player } => {
+            if player.is_some_and(|p| p != slot) {
+                return 0.0;
+            }
             let n = raw.held(*minus, slot, crate::map::DEFAULT_THRESHOLD);
             let p = raw.held(*plus, slot, crate::map::DEFAULT_THRESHOLD);
             socd_axis(n, p, socd, memory)
@@ -293,7 +299,10 @@ fn resolve_axis2(
     memory: &mut (i8, i8),
 ) -> (f32, f32) {
     match b {
-        Axis2Binding::Keys { up, down, left, right } => {
+        Axis2Binding::Keys { up, down, left, right, player } => {
+            if player.is_some_and(|p| p != slot) {
+                return (0.0, 0.0);
+            }
             let t = crate::map::DEFAULT_THRESHOLD;
             let x = socd_axis(
                 raw.held(*left, slot, t),
@@ -373,6 +382,7 @@ mod tests {
                         down: Source::Key(Key::KeyS),
                         left: Source::Key(Key::KeyA),
                         right: Source::Key(Key::KeyD),
+                        player: None,
                     },
                     Axis2Binding::Stick {
                         id: PadId::Any,
@@ -494,6 +504,91 @@ mod tests {
         rt.reset();
         let pad = rt.resolve(&map, &stick(0.0, 1.0), 0, 0.016, AllowMask::ALL).axis2(0);
         assert!((pad.1 - 1.0).abs() < 1e-5 && pad.0.abs() < 1e-5, "{pad:?}");
+    }
+
+    /// Two players on ONE keyboard. A binding scoped to a slot fires only for that
+    /// slot, so a single action name serves both fighters instead of the map having to
+    /// carry a duplicate `Light2` (floptle/0028).
+    #[test]
+    fn a_player_scoped_binding_serves_only_its_slot() {
+        let map = InputMap {
+            actions: vec![Action {
+                name: "Light".into(),
+                bindings: vec![
+                    Binding::new(Source::Key(Key::KeyJ)).for_player(0),
+                    Binding::new(Source::Key(Key::Digit1)).for_player(1),
+                    // Unscoped, and `Any` already resolves per slot: each player's own
+                    // pad still fires it.
+                    Binding::new(Source::Pad {
+                        id: PadId::Any,
+                        ctrl: PadControl::Button(PadButton::West),
+                    }),
+                ],
+            }],
+            players: 2,
+            ..Default::default()
+        };
+        let (mut p1, mut p2) = (ActionRuntime::new(), ActionRuntime::new());
+        let raw = with_keys(&[Key::KeyJ]);
+        assert!(p1.resolve(&map, &raw, 0, 0.016, AllowMask::ALL).is_held(0), "J is P1's");
+        assert!(
+            !p2.resolve(&map, &raw, 1, 0.016, AllowMask::ALL).is_held(0),
+            "J must NOT also punch for P2 — that was the whole bug"
+        );
+
+        let (mut p1, mut p2) = (ActionRuntime::new(), ActionRuntime::new());
+        let raw = with_keys(&[Key::Digit1]);
+        assert!(!p1.resolve(&map, &raw, 0, 0.016, AllowMask::ALL).is_held(0));
+        assert!(p2.resolve(&map, &raw, 1, 0.016, AllowMask::ALL).is_held(0), "1 is P2's");
+
+        // The unscoped pad binding is untouched: each slot's own pad fires it.
+        for slot in [0u8, 1] {
+            let mut rt = ActionRuntime::new();
+            let mut raw = RawInput::default();
+            raw.pad_mut(slot).connected = true;
+            raw.pad_mut(slot).buttons.insert(PadButton::West);
+            assert!(
+                rt.resolve(&map, &raw, slot, 0.016, AllowMask::ALL).is_held(0),
+                "PadId::Any must keep working per slot (slot {slot})"
+            );
+        }
+    }
+
+    /// One `Move` axis, WASD for P1 and the arrows for P2 — which is what makes the
+    /// map-level motion axis (`dir()`, `qcf`, …) correct for BOTH local players instead
+    /// of feeding player 1's stick into everyone's history.
+    #[test]
+    fn one_axis_can_carry_a_different_key_set_per_player() {
+        let map = InputMap {
+            axes2: vec![Axis2 {
+                name: "Move".into(),
+                socd: Socd::Neutral,
+                bindings: vec![
+                    Axis2Binding::Keys {
+                        up: Source::Key(Key::KeyW),
+                        down: Source::Key(Key::KeyS),
+                        left: Source::Key(Key::KeyA),
+                        right: Source::Key(Key::KeyD),
+                        player: Some(0),
+                    },
+                    Axis2Binding::Keys {
+                        up: Source::Key(Key::ArrowUp),
+                        down: Source::Key(Key::ArrowDown),
+                        left: Source::Key(Key::ArrowLeft),
+                        right: Source::Key(Key::ArrowRight),
+                        player: Some(1),
+                    },
+                ],
+            }],
+            players: 2,
+            ..Default::default()
+        };
+        // P1 walks right, P2 walks left, at the same instant on the same keyboard.
+        let raw = with_keys(&[Key::KeyD, Key::ArrowLeft]);
+        let v1 = ActionRuntime::new().resolve(&map, &raw, 0, 0.016, AllowMask::ALL).axis2(0);
+        let v2 = ActionRuntime::new().resolve(&map, &raw, 1, 0.016, AllowMask::ALL).axis2(0);
+        assert!(v1.0 > 0.9, "P1 reads only WASD, got {v1:?}");
+        assert!(v2.0 < -0.9, "P2 reads only the arrows, got {v2:?}");
     }
 
     #[test]

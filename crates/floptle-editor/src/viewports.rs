@@ -424,6 +424,24 @@ impl Editor {
                 valid: true,
             });
         }
+        // Script `gizmo.*` shapes for the DOCKED game tab, projected through the
+        // gameplay camera into that tab's own rect (the Scene view's set is projected
+        // for a different camera entirely and would land nowhere near).
+        self.game_gizmo_lines.clear();
+        if self.game_gizmos
+            && self.gizmo_filter.script
+            && !self.script_gizmos.is_empty()
+            && let Some(r) = self.game_rect
+        {
+            crate::viz::project_script_gizmos(
+                &self.script_gizmos,
+                cam.world_position,
+                cam.view_proj(aspect),
+                floptle_core::math::Vec2::new(r.min.x * ppp, r.min.y * ppp),
+                floptle_core::math::Vec2::new(r.width() * ppp, r.height() * ppp),
+                &mut self.game_gizmo_lines,
+            );
+        }
         let Some((cv, dv)) =
             self.game_vp.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
         else {

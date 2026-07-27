@@ -93,7 +93,8 @@ impl Editor {
         if path.starts_with("rt:") {
             return self.texture_registry.get(path).copied();
         }
-        let want = self.texture_settings.get(path).copied().unwrap_or_default();
+        let want =
+            crate::assets::tex_setting(&self.texture_settings, &self.project_root, path);
         if let (Some(id), Some(prev)) =
             (self.texture_registry.get(path), self.texture_registry_setting.get(path))
             && *prev == want {
@@ -133,12 +134,22 @@ impl Editor {
     }
 
     /// Load the per-texture sampling settings from `.floptle/textures.ron` (if present).
+    ///
+    /// Keys are normalised to the project-relative form scenes and materials reference
+    /// textures by. Older files stored the Assets browser's ABSOLUTE paths, which no
+    /// renderer ever looked up — those migrate here, and are written back relative by
+    /// the next save (floptle/0026).
     pub(crate) fn load_texture_settings(&mut self) {
         let path = self.project_root.join(".floptle").join("textures.ron");
-        self.texture_settings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| ron::from_str(&s).ok())
-            .unwrap_or_default();
+        let raw: std::collections::HashMap<String, crate::assets::TexSetting> =
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| ron::from_str(&s).ok())
+                .unwrap_or_default();
+        self.texture_settings = raw
+            .into_iter()
+            .map(|(k, v)| (crate::assets::asset_rel_path(&k, &self.project_root), v))
+            .collect();
     }
 
     /// One-time migration: a scene from before the PostProcess node inherits the

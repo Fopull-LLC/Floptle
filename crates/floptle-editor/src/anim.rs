@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::rc::Rc;
 
 use floptle_anim::{
     Clip, Controller, Interp, Layer, NodeChannels, PropValue, PropertyTrack, SkelNode, Skeleton,
@@ -191,6 +192,9 @@ pub enum AnimBinding {
     Nodes { entities: Vec<Option<Entity>>, covered: Vec<usize> },
 }
 
+/// Cached `anim:events` / `anim:duration` data, keyed by `(entity index, revision)`.
+type ClipInfoCache = HashMap<(u32, u64), Rc<Vec<floptle_script::ClipInfo>>>;
+
 /// One live animated entity: its bound controller runtime + how to apply it.
 pub struct AnimInstance {
     /// Controller asset key (`None` = embedded-clips fallback for a rigged
@@ -231,9 +235,39 @@ pub struct AnimSystem {
     pub warnings: Vec<String>,
     /// Warning keys already emitted this play session (one warning, not 60/s).
     warned: HashSet<String>,
+    /// `anim:events` / `anim:duration` data per entity, keyed by the bound revision.
+    /// The script mirror is rebuilt every frame; this half only changes when an
+    /// instance rebinds, so cloning event strings 60×/s would be pure waste.
+    clip_info: std::cell::RefCell<ClipInfoCache>,
 }
 
 impl AnimSystem {
+    /// The authored duration + events of every state this instance can play, for
+    /// `anim:duration` / `anim:events`. Built once per (entity, revision) and handed to
+    /// the per-frame mirror as a shared pointer.
+    fn clip_info(&self, eid: u32, inst: &AnimInstance) -> Rc<Vec<floptle_script::ClipInfo>> {
+        let key = (eid, inst.revision);
+        if let Some(hit) = self.clip_info.borrow().get(&key) {
+            return hit.clone();
+        }
+        let built: Rc<Vec<_>> = Rc::new(
+            inst.ctl
+                .layers
+                .iter()
+                .flat_map(|l| l.states.iter())
+                .map(|s| floptle_script::ClipInfo {
+                    name: s.name.clone(),
+                    duration: s.clip.duration,
+                    // `Clip::events` is kept sorted by `t`, which is the order the
+                    // scripting contract promises.
+                    events: s.clip.events.iter().map(|e| (e.t, e.func.clone())).collect(),
+                })
+                .collect(),
+        );
+        self.clip_info.borrow_mut().insert(key, built.clone());
+        built
+    }
+
     /// Re-scan `assets/` for animation clips + controllers.
     pub fn rescan(&mut self, project_root: &Path) {
         self.clips.clear();
@@ -1317,14 +1351,15 @@ pub fn build_info(system: &AnimSystem) -> HashMap<u32, floptle_script::AnimInfo>
                 (l.name.clone(), state, t, fin)
             })
             .collect();
-        let states = inst
-            .ctl
-            .layers
-            .iter()
-            .flat_map(|l| l.states.iter().map(|s| s.name.clone()))
-            .collect();
-        out.insert(e.index(), floptle_script::AnimInfo { layers, states });
+        out.insert(
+            e.index(),
+            floptle_script::AnimInfo { layers, clips: system.clip_info(e.index(), inst) },
+        );
     }
+    // Instances that went away don't need their cached clip data any more.
+    system.clip_info.borrow_mut().retain(|(eid, rev), _| {
+        *rev == system.revision && system.instances.keys().any(|e| e.index() == *eid)
+    });
     out
 }
 

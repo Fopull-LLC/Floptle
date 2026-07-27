@@ -634,7 +634,7 @@ impl<'a> EditorTabViewer<'a> {
     pub(crate) fn texture_settings_ui(&mut self, ui: &mut egui::Ui, path: &str) {
         ui.separator();
         ui.strong("Sampling");
-        let mut s = self.texture_settings.get(path).copied().unwrap_or_default();
+        let mut s = crate::assets::tex_setting(self.texture_settings, self.project_root, path);
         let before = s;
         egui::Grid::new("tex-sampling").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
             ui.label("filter");

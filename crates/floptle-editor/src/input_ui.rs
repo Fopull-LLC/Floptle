@@ -54,6 +54,12 @@ pub(crate) enum InputCmd {
         action: String,
         index: usize,
     },
+    /// Scope a binding to one local player (`None` = every player).
+    SetBindingPlayer {
+        action: String,
+        index: usize,
+        player: Option<u8>,
+    },
     StartRebind {
         action: String,
         filter: BindFilter,
@@ -84,7 +90,6 @@ pub(crate) fn input_section(
     query: &str,
 ) -> InputEdits {
     let mut edits = InputEdits::default();
-    let multiplayer = map.players > 1;
 
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -113,7 +118,7 @@ pub(crate) fn input_section(
         );
         for action in actions {
             let idx = map.action_index(&action.name).unwrap_or(0);
-            action_row(ui, action, idx, scan, test, multiplayer, &mut edits);
+            action_row(ui, action, idx, scan, test, map.players, &mut edits);
         }
         ui.add_space(4.0);
         add_action_row(ui, map, new_action, &mut edits);
@@ -329,9 +334,10 @@ fn action_row(
     idx: usize,
     scan: &InputScan,
     test: &ActionState,
-    multiplayer: bool,
+    players: u8,
     edits: &mut InputEdits,
 ) {
+    let multiplayer = players > 1;
     // Every widget in this row is namespaced by the action name. Without it,
     // two rows' menus share an egui id and fight — which is exactly why the
     // pickers refused to stay open.
@@ -368,8 +374,25 @@ fn action_row(
                 ui.label(egui::RichText::new(icons::UNUSED).weak())
                     .on_hover_text("no script reads this action");
             }
+            // There is only ever ONE keyboard. In a local-multiplayer project an
+            // unscoped key binding therefore fires this action for EVERY player at
+            // once — both characters jump off one press. A pad binding has no such
+            // problem (`Any` resolves per slot), so only flag the keyboard half.
+            if multiplayer
+                && action.bindings.iter().any(|b| {
+                    b.player.is_none()
+                        && matches!(b.source, Source::Key(_) | Source::Mouse(_))
+                })
+            {
+                ui.colored_label(egui::Color32::from_rgb(224, 168, 64), icons::WARN)
+                    .on_hover_text(
+                        "a keyboard binding here is not scoped to a player, so it fires \
+                         this action for BOTH local players at once. Right-click the chip \
+                         to give it a player.",
+                    );
+            }
 
-            binding_chips(ui, &action.bindings, &action.name, edits);
+            binding_chips(ui, &action.bindings, &action.name, players, edits);
             bind_buttons(ui, &action.name, multiplayer, edits);
             if ui
                 .small_button(icons::REMOVE)
@@ -503,6 +526,7 @@ fn binding_chips(
     ui: &mut egui::Ui,
     bindings: &[floptle_input::Binding],
     action: &str,
+    players: u8,
     edits: &mut InputEdits,
 ) {
     if bindings.is_empty() {
@@ -516,8 +540,36 @@ fn binding_chips(
         // Namespaced per index: two identical chips on one row would otherwise
         // share an id and the wrong one would answer the click.
         let resp = ui.push_id(i, |ui| {
-            ui.button(chip_frame(ui, &b.chip()))
-                .on_hover_text("click to remove this binding")
+            let label = match b.player {
+                Some(p) => format!("{}  P{}", b.chip(), p + 1),
+                None => b.chip(),
+            };
+            let resp = ui.button(chip_frame(ui, &label)).on_hover_text(
+                "click to remove this binding · right-click to scope it to one player",
+            );
+            // Which player a binding belongs to only exists as a question with more
+            // than one of them — and it's the answer to "why does P2's key punch for
+            // both fighters", since there is only ever one keyboard.
+            if players > 1 {
+                resp.context_menu(|ui| {
+                    let mut set = |ui: &mut egui::Ui, label: &str, player: Option<u8>| {
+                        if ui.radio(b.player == player, label).clicked() {
+                            edits.commands.push(InputCmd::SetBindingPlayer {
+                                action: action.into(),
+                                index: i,
+                                player,
+                            });
+                            edits.save = true;
+                            ui.close();
+                        }
+                    };
+                    set(ui, "every player", None);
+                    for p in 0..players {
+                        set(ui, &format!("player {}", p + 1), Some(p));
+                    }
+                });
+            }
+            resp
         });
         if resp.inner.clicked() {
             edits.commands.push(InputCmd::RemoveBinding { action: action.into(), index: i });
@@ -804,12 +856,25 @@ fn socd_label(s: Socd) -> &'static str {
     }
 }
 
+/// `"  P2"` for a binding scoped to one local player, empty for the usual case.
+fn player_suffix(player: Option<u8>) -> String {
+    player.map(|p| format!("  P{}", p + 1)).unwrap_or_default()
+}
+
 /// A compact one-chip summary of a 2D axis binding.
 fn axis2_chip(b: &Axis2Binding) -> String {
     match b {
-        Axis2Binding::Keys { up, down, left, right } => {
+        Axis2Binding::Keys { up, down, left, right, player } => {
             let l = |s: &Source| s.label();
-            format!("{} {}{}{}{}", icons::KEYBOARD, l(up), l(left), l(down), l(right))
+            format!(
+                "{} {}{}{}{}{}",
+                icons::KEYBOARD,
+                l(up),
+                l(left),
+                l(down),
+                l(right),
+                player_suffix(*player)
+            )
         }
         Axis2Binding::Stick { x, deadzone, .. } => {
             let stick = if matches!(x, floptle_input::PadAxis::LeftStickX) { "L" } else { "R" };
@@ -829,8 +894,14 @@ fn axis2_chip(b: &Axis2Binding) -> String {
 
 fn axis1_chip(b: &Axis1Binding) -> String {
     match b {
-        Axis1Binding::Keys { minus, plus } => {
-            format!("{} {} / {}", icons::KEYBOARD, minus.label(), plus.label())
+        Axis1Binding::Keys { minus, plus, player } => {
+            format!(
+                "{} {} / {}{}",
+                icons::KEYBOARD,
+                minus.label(),
+                plus.label(),
+                player_suffix(*player)
+            )
         }
         Axis1Binding::Analog { source, invert, .. } => {
             let sign = if *invert { "-" } else { "+" };
@@ -851,6 +922,7 @@ mod tests {
             down: Source::Key(Key::KeyS),
             left: Source::Key(Key::KeyA),
             right: Source::Key(Key::KeyD),
+            player: None,
         };
         assert_eq!(axis2_chip(&keys), format!("{} WASD", icons::KEYBOARD));
 

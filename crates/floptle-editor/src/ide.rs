@@ -2628,7 +2628,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.heldSecs", insert: "input.heldSecs(", doc: "input.heldSecs(\"Charge\") — seconds the action has been continuously held (0 when up). Hold-to-charge without your own timer." },
     ApiEntry { label: "input.axis1", insert: "input.axis1(", doc: "input.axis1(\"Zoom\") — a named 1D axis in -1..1 (triggers, wheel, or a key pair)." },
     ApiEntry { label: "input.axis2", insert: "input.axis2(", doc: "local x, y = input.axis2(\"Move\") — a named 2D axis clamped to the unit disk. Reads identically on WASD and on a stick; deadzone and SOCD are handled for you." },
-    ApiEntry { label: "input.player", insert: "input.player(", doc: "input.player(2) — the same input API bound to another LOCAL player (1-based). Two characters can run the same script: pass the slot as a param and use `local me = input.player(params.player)`. Set the count in Project Settings → Input." },
+    ApiEntry { label: "input.player", insert: "input.player(", doc: "input.player(2) — the same input API bound to another LOCAL player (1-based). Two characters can run the same script: pass the slot as a param and use `local me = input.player(params.player)`. Set the count in Project Settings → Input. Sharing ONE keyboard: scope a binding to a player (right-click its chip) so a single action name can be J for P1 and 1 for P2 — pads sort themselves out already." },
     ApiEntry { label: "input.buffered", insert: "input.buffered(", doc: "input.buffered(\"Punch\", 4) — was it pressed within the last 4 TICKS and not yet consumed? The input buffer: a player who hits Punch a couple of frames before recovery ends still gets the punch. Pair with input.consume so it fires once. fixedUpdate only." },
     ApiEntry { label: "input.consume", insert: "input.consume(", doc: "input.consume(\"Punch\", 4) — spend a buffered press. Without it a 4-tick buffer fires your attack on all four ticks." },
     ApiEntry { label: "input.motion", insert: "input.motion(", doc: "input.motion(\"qcf\") — has a fighting-game motion just been completed? Seeded set: qcf, qcb, dp, rdp, hcf, hcb, dd, ff, bb, chargeF, chargeU (edit them in input.ron). Combine with input.buffered for a special: `if input.motion(\"qcf\") and input.buffered(\"Punch\", 4) then`. fixedUpdate only." },
@@ -2734,6 +2734,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:isPlaying", insert: ":isPlaying(", doc: "anim:isPlaying([state]) — is that state playing on any layer (or anything at all, with no argument)?" },
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
     ApiEntry { label: "anim:layers", insert: ":layers()", doc: "anim:layers() — every layer name, base first, as a list." },
+    ApiEntry { label: "anim:duration", insert: ":duration(", doc: "anim:duration(\"Punch\") — the clip's AUTHORED length in seconds (nil if there's no such state). Reads the asset, not playback, so it works in start()." },
+    ApiEntry { label: "anim:events", insert: ":events(", doc: "anim:events(\"Punch\") — the clip's authored events as { {t = seconds, func = \"onHitboxStart\"}, … }, ascending by t; nil if there's no such state, an empty list if it has none. Reads the asset, so you can bake integer frame data at load: frame = math.floor(e.t / anim:duration(c) * totalFrames + 0.5). Prefer this to letting events DRIVE gameplay — they fire off float playback time, quantise to sample_fps, and are deliberately not re-fired on a prediction replay." },
     ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end." },
     ApiEntry { label: "spawn", insert: "spawn(", doc: "spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). \"bullet\" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame — spawn(\"bullet\", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects." },
     ApiEntry { label: "createNode", insert: "createNode(", doc: "createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine." },
@@ -3154,7 +3156,7 @@ a rigged model's embedded clips). Drive states from gameplay:
   • anim:setLayerWeight(\"Attack\", 0.5)   blend a layer over the ones below
   • anim:seek(t [, layer])                jump the current state's playhead
   Getters: anim:state()/anim:current()  anim:time()  anim:finished()  anim:isPlaying([state])  anim:clips()  anim:layers()
-           anim:clips()  anim:layers()
+  Authored (asset, not playback — callable in start()): anim:duration(\"Punch\")  anim:events(\"Punch\")
 
     -- walk/run from speed, one-shot attack on click
     local speed = math.sqrt(node.vx ^ 2 + node.vz ^ 2)

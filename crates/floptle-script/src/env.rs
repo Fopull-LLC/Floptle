@@ -13,6 +13,7 @@ use crate::BodyState;
 
 /// The pre-call `node` values, so we only write back fields the script changed
 /// (avoids quat↔euler drift on untouched rotations, etc.).
+#[derive(Clone, Copy)]
 pub(crate) struct NodePre {
     pub(crate) x: f64,
     pub(crate) y: f64,
@@ -129,8 +130,22 @@ pub(crate) fn params_table(
     Ok(t)
 }
 
+/// Create the script's own-node table: `{__id}` under the node metatable, with the
+/// transform stamped into it as direct fields.
+///
+/// The returned table is **kept for the life of the instance** and re-stamped before
+/// every hook (see [`stamp_node_table`]) rather than rebuilt. That is what makes the
+/// most natural thing a script author writes —
+///
+/// ```lua
+/// function start(node) me = node end
+/// ```
+///
+/// — keep working: `me` is the same table the engine goes on updating, so `me.x` on a
+/// later hook is the CURRENT position. Building a fresh table per hook froze such a
+/// handle at the spawn pose, silently, while everything using the passed `node` stayed
+/// correct (floptle/0027).
 pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyState>) -> mlua::Result<Table> {
-    let (yaw, pitch, roll) = tr.rotation.to_euler(EulerRot::YXZ);
     let t = lua.create_table()?;
     // Tag with the entity + the node metatable so `node.parent`, `node:getscript(...)`,
     // `node:children()` etc. work. The transform fields below are direct table values, so
@@ -139,9 +154,22 @@ pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyS
     if let Ok(mt) = lua.named_registry_value::<Table>("floptle_node_mt") {
         t.set_metatable(Some(mt));
     }
-    // raw_set so these stay DIRECT table fields (not routed through the node metatable's
-    // __newindex, which is for handles to other nodes) — the existing read-back path reads
-    // them directly after `update`.
+    stamp_node_table(&t, tr, body)?;
+    Ok(t)
+}
+
+/// Write the node's current transform + body state into its own-node table, called
+/// before every hook.
+///
+/// raw_set so these stay DIRECT table fields (not routed through the node metatable's
+/// `__newindex`, which is for handles to other nodes) — the read-back path reads them
+/// directly after the hook.
+pub(crate) fn stamp_node_table(
+    t: &Table,
+    tr: &Transform,
+    body: Option<BodyState>,
+) -> mlua::Result<()> {
+    let (yaw, pitch, roll) = tr.rotation.to_euler(EulerRot::YXZ);
     t.raw_set("x", tr.translation.x)?;
     t.raw_set("y", tr.translation.y)?;
     t.raw_set("z", tr.translation.z)?;
@@ -154,17 +182,111 @@ pub(crate) fn node_table(lua: &Lua, eid: u32, tr: &Transform, body: Option<BodyS
     t.raw_set("roll", roll as f64)?;
     // Physics body fields (present only on rigidbody nodes): read grounded, read/write
     // the velocity. The engine reads vx/vy/vz back after `update` and applies them.
-    if let Some(b) = body {
-        t.raw_set("vx", b.vel[0] as f64)?;
-        t.raw_set("vy", b.vel[1] as f64)?;
-        t.raw_set("vz", b.vel[2] as f64)?;
-        t.raw_set("up_x", b.up[0] as f64)?;
-        t.raw_set("up_y", b.up[1] as f64)?;
-        t.raw_set("up_z", b.up[2] as f64)?;
-        t.raw_set("grounded", b.grounded)?;
-        t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
+    match body {
+        Some(b) => {
+            t.raw_set("vx", b.vel[0] as f64)?;
+            t.raw_set("vy", b.vel[1] as f64)?;
+            t.raw_set("vz", b.vel[2] as f64)?;
+            t.raw_set("up_x", b.up[0] as f64)?;
+            t.raw_set("up_y", b.up[1] as f64)?;
+            t.raw_set("up_z", b.up[2] as f64)?;
+            t.raw_set("grounded", b.grounded)?;
+            t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
+        }
+        // The node lost its RigidBody since the last hook — clear the stale body fields
+        // rather than leaving the last tick's velocity readable on a table we now reuse.
+        None => {
+            for k in ["vx", "vy", "vz", "up_x", "up_y", "up_z", "grounded", "height"] {
+                if t.raw_get::<Value>(k)? != Value::Nil {
+                    t.raw_set(k, Value::Nil)?;
+                }
+            }
+        }
     }
-    Ok(t)
+    Ok(())
+}
+
+/// The own-node table's values as the engine last left them. A difference against this
+/// at the start of the next hook means something wrote to the table from OUTSIDE that
+/// script's hook — a cross-script method call, a timer or an `on…` callback — which the
+/// post-hook read-back never saw. [`drain_node_writes`] applies those before re-stamping.
+#[derive(Clone, Copy)]
+pub(crate) struct NodeStamp {
+    pre: NodePre,
+    vel: Option<[f32; 3]>,
+    height: Option<f32>,
+}
+
+/// Snapshot the table's current values, to compare the next hook against.
+pub(crate) fn node_stamp(t: &Table, tr: &Transform) -> NodeStamp {
+    let mut pre = node_pre(tr);
+    // Read from the TABLE, not the transform: after a hook these differ whenever the
+    // script's write was queued rather than applied in place (a body teleport).
+    if let Ok(v) = t.raw_get::<f64>("x") {
+        pre.x = v;
+    }
+    if let Ok(v) = t.raw_get::<f64>("y") {
+        pre.y = v;
+    }
+    if let Ok(v) = t.raw_get::<f64>("z") {
+        pre.z = v;
+    }
+    for (slot, key) in [
+        (&mut pre.sx, "scale_x"),
+        (&mut pre.sy, "scale_y"),
+        (&mut pre.sz, "scale_z"),
+        (&mut pre.scale, "scale"),
+        (&mut pre.yaw, "yaw"),
+        (&mut pre.pitch, "pitch"),
+        (&mut pre.roll, "roll"),
+    ] {
+        if let Ok(v) = t.raw_get::<f64>(key) {
+            *slot = v;
+        }
+    }
+    let vel = match (t.raw_get::<f64>("vx"), t.raw_get::<f64>("vy"), t.raw_get::<f64>("vz")) {
+        (Ok(x), Ok(y), Ok(z)) => Some([x as f32, y as f32, z as f32]),
+        _ => None,
+    };
+    NodeStamp { pre, vel, height: t.raw_get::<f64>("height").ok().map(|h| h as f32) }
+}
+
+/// What a script wrote to its own-node table between hooks.
+#[derive(Default)]
+pub(crate) struct DrainedWrites {
+    pub(crate) moved: bool,
+    pub(crate) vel: Option<[f32; 3]>,
+    pub(crate) height: Option<f32>,
+}
+
+/// Apply writes made to the own-node table since [`node_stamp`] was taken, so a
+/// cross-script `other:knockBack()` that sets `me.x` is not silently thrown away by the
+/// next re-stamp. The transform half reuses the same only-what-changed comparison the
+/// post-hook read-back uses; the caller queues the body half.
+pub(crate) fn drain_node_writes(
+    t: &Table,
+    prev: &NodeStamp,
+    tr: &mut Transform,
+) -> mlua::Result<DrainedWrites> {
+    let before = tr.translation;
+    apply_node(t, tr, &prev.pre)?;
+    let mut out = DrainedWrites { moved: tr.translation != before, ..Default::default() };
+    if let Some(pv) = prev.vel
+        && let (Ok(x), Ok(y), Ok(z)) =
+            (t.raw_get::<f64>("vx"), t.raw_get::<f64>("vy"), t.raw_get::<f64>("vz"))
+    {
+        let now = [x as f32, y as f32, z as f32];
+        if now != pv {
+            out.vel = Some(now);
+        }
+    }
+    if let Some(ph) = prev.height
+        && let Ok(h) = t.raw_get::<f64>("height")
+        && h as f32 != ph
+    {
+        out.height = Some(h as f32);
+    }
+    Ok(out)
 }
 
 pub(crate) fn node_pre(tr: &Transform) -> NodePre {

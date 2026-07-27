@@ -310,6 +310,13 @@ impl Editor {
                         a.bindings.remove(index);
                     }
                 }
+                InputCmd::SetBindingPlayer { action, index, player } => {
+                    if let Some(a) = sys.map_mut().actions.iter_mut().find(|a| a.name == action)
+                        && let Some(b) = a.bindings.get_mut(index)
+                    {
+                        b.player = player;
+                    }
+                }
                 InputCmd::StartRebind { action, filter } => sys.start_rebind(action, 0, filter),
                 InputCmd::CancelRebind => sys.cancel_rebind(),
                 InputCmd::SetSocd { axis, socd } => {

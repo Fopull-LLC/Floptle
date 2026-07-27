@@ -300,6 +300,14 @@ running — the tool for loading screens, cutscenes and pause menus
 (`physics.pause(false)` resumes; `physics.isPaused()` reads it; queued
 thrust is dropped, never banked, while paused).
 
+**Frame-stepping:** `physics.step([n])` freezes the whole gameplay tick and
+releases exactly `n` (default 1), each advancing scripts, physics *and*
+animation by one frame — enough to build a training mode's own frame stepper.
+The editor does the same thing from its ⏭ Step button (F3, while paused), with
+the tick counter beside it naming the frame you stopped on. Call `physics.step`
+from `update`: the frame pass still runs while the tick is frozen, `fixedUpdate`
+by definition does not.
+
 **Per-part impact attribution — `assembly.impacts(node)`:** the engine
 attributes every contact a compound resolves to the PART that took it. Each
 tick the call returns an array of `{ part, impulse, speed, x, y, z }` —
@@ -740,7 +748,16 @@ it skip their draw calls, so the far side of a planet costs nothing. Keep it
 conservative — below anything diggable — and `0` (the default) turns it off.
 
 `setCelestial` / `setMaterial` create the component when absent and take
-camelCase fields (colors as `{r,g,b}`). `terrain.generatePlanet` is the heavy
+camelCase fields. A colour takes any of `{r,g,b}`, `{x,y,z}`, `{1,0.5,0.2}` or
+`vec3(...)`, whichever reads best where you are.
+
+**`setMaterial` is a setup-time call, not a per-frame one.** It inserts the
+component and queues a deferred write, so driving a hit flash or a fade with it
+every tick does far more work than you want. Write it on transitions (when the
+flash starts and when it ends) and use `setShaderParam` — which writes a live
+uniform — for anything that changes every frame.
+
+`terrain.generatePlanet` is the heavy
 generic primitive — a layered, cavernous, cratered sphere written into the
 terrain field on a background thread (every knob optional; see the IDE hover
 for the full list). `rng()` with no seed rolls a fresh stream from the clock
@@ -1059,6 +1076,32 @@ function onSlashHit(node) log("hit frame!") end
 | `anim:finished([layer])` | a one-shot reached its end |
 | `anim:isPlaying([state])` | is a state (or anything) playing |
 | `anim:clips()` / `anim:layers()` | available state / layer names |
+| `anim:duration(clip)` / `anim:events(clip)` | the clip **as authored** — length in seconds, and its event list |
+
+**`anim:duration` / `anim:events` read the asset, not playback**, so they answer
+in `start()`, before anything has played a frame. `events` returns
+`{ {t = seconds, func = "onHitboxStart"}, ... }` ascending by `t` — an unknown
+clip is `nil`, a clip with no events is an empty list.
+
+They exist so an animator can author timing **by eye** while the game still runs
+on integer frames. Drop an event on the frame where the strike connects, then
+bake it once at load:
+
+```lua
+local dur = anim:duration(clipName)
+for _, e in ipairs(anim:events(clipName) or {}) do
+  if e.func == "onHitboxStart" then
+    move.startup = math.floor(e.t / dur * move.frames + 0.5)
+  end
+end
+```
+
+Don't let events *drive* frame-exact gameplay directly: they fire off float
+playback time, stepped playback (`sample_fps`) quantises them to its grid, clip
+time and gameplay frame disagree mid-crossfade, and a prediction replay
+deliberately doesn't re-fire them. Every machine loads the same `.anim.ron`, so
+a baked number is identical everywhere and constant thereafter.
+
 
 **Conditional expressions.** Lua's `and`/`or` chain is an inline if/else —
 handy for mapping states to values without an if-ladder:

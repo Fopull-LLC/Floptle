@@ -60,15 +60,38 @@ pub struct Binding {
     /// Where an analog source starts counting as pressed.
     #[serde(default = "default_threshold", skip_serializing_if = "is_default_threshold")]
     pub threshold: f32,
+    /// Restrict this binding to ONE local player slot (0-based). `None` — the
+    /// overwhelming default — means every slot, which is right for a pad binding
+    /// (`PadId::Any` already resolves per slot) and for single-player.
+    ///
+    /// It exists for the case a pad can't cover: **two players sharing one keyboard**.
+    /// There is only one keyboard, so `Key(KeyJ)` otherwise fires `Light` for both
+    /// fighters at once, and the only way out was to duplicate the whole action set
+    /// under `Light2` names. Scoping the BINDING rather than the action keeps the action
+    /// list — and therefore the netcode's positional indexing and [`InputMap::hash`] —
+    /// untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player: Option<u8>,
 }
 
 impl Binding {
     pub fn new(source: Source) -> Self {
-        Self { source, modifiers: Vec::new(), threshold: DEFAULT_THRESHOLD }
+        Self { source, modifiers: Vec::new(), threshold: DEFAULT_THRESHOLD, player: None }
     }
 
     pub fn with_modifiers(source: Source, modifiers: Vec<Source>) -> Self {
-        Self { source, modifiers, threshold: DEFAULT_THRESHOLD }
+        Self { source, modifiers, threshold: DEFAULT_THRESHOLD, player: None }
+    }
+
+    /// This binding, restricted to one local player slot. See [`Binding::player`].
+    pub fn for_player(mut self, slot: u8) -> Self {
+        self.player = Some(slot);
+        self
+    }
+
+    /// Whether this binding contributes for `slot`.
+    pub fn serves(&self, slot: u8) -> bool {
+        self.player.is_none_or(|p| p == slot)
     }
 
     /// Chip text including the chord (`"⌨ Ctrl+S"`).
@@ -134,7 +157,13 @@ impl Curve {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Axis1Binding {
     /// Two digital sources forming −1 / +1.
-    Keys { minus: Source, plus: Source },
+    Keys {
+        minus: Source,
+        plus: Source,
+        /// Restrict to one local player slot — see [`Binding::player`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<u8>,
+    },
     /// A single analog source passed through deadzone → curve → sensitivity.
     Analog {
         source: Source,
@@ -155,8 +184,18 @@ pub enum Axis1Binding {
 /// One contributor to a 2D axis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Axis2Binding {
-    /// WASD-style: four digital sources.
-    Keys { up: Source, down: Source, left: Source, right: Source },
+    /// WASD-style: four digital sources. Scoping these to a slot is what lets ONE
+    /// `Move` axis carry WASD for player 1 and the arrow keys for player 2 — which in
+    /// turn makes the map-level motion axis (`dir()`, `qcf`, …) correct for both.
+    Keys {
+        up: Source,
+        down: Source,
+        left: Source,
+        right: Source,
+        /// Restrict to one local player slot — see [`Binding::player`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<u8>,
+    },
     /// A gamepad stick, deadzoned radially.
     Stick {
         id: PadId,
@@ -487,6 +526,7 @@ impl InputMap {
                         Axis1Binding::Keys {
                             minus: pad(PadButton::DPadDown),
                             plus: pad(PadButton::DPadUp),
+                            player: None,
                         },
                     ],
                 },
@@ -498,6 +538,7 @@ impl InputMap {
                         Axis1Binding::Keys {
                             minus: key(Key::ControlLeft),
                             plus: key(Key::Space),
+                            player: None,
                         },
                         Axis1Binding::Analog {
                             source: pad_axis(PadAxis::RightZ),
@@ -528,6 +569,7 @@ impl InputMap {
                             down: key(Key::KeyS),
                             left: key(Key::KeyA),
                             right: key(Key::KeyD),
+                            player: None,
                         },
                         Axis2Binding::Stick {
                             id: PadId::Any,
@@ -639,6 +681,34 @@ mod tests {
         let text = map.to_ron();
         let back = InputMap::parse(&text).expect("starter map re-parses");
         assert_eq!(map, back);
+    }
+
+    /// Scoping a binding to a local player must NOT move the handshake hash — the wire
+    /// indexes actions by position, and a per-player BINDING doesn't change the action
+    /// list. Round-tripping it through RON matters for the same reason: a hand-edit that
+    /// silently dropped `player` would put both fighters back on one set of keys.
+    #[test]
+    fn a_per_player_binding_round_trips_and_leaves_the_hash_alone() {
+        let mut map = InputMap::starter();
+        let before = map.hash();
+        map.actions[0].bindings[0].player = Some(1);
+        map.axes2[0].bindings[0] = match map.axes2[0].bindings[0].clone() {
+            Axis2Binding::Keys { up, down, left, right, .. } => {
+                Axis2Binding::Keys { up, down, left, right, player: Some(1) }
+            }
+            other => other,
+        };
+        assert_eq!(map.hash(), before, "a binding's player must not invalidate a session");
+
+        let text = map.to_ron();
+        assert!(text.contains("player: Some(1)"), "the scope must be written out:\n{text}");
+        assert_eq!(InputMap::parse(&text).expect("re-parses"), map);
+
+        // Absent in the file = every slot, so every existing input.ron is unchanged.
+        let plain = InputMap::starter();
+        assert!(!plain.to_ron().contains("player:"), "unscoped bindings stay clean");
+        assert!(plain.actions[0].bindings[0].serves(0));
+        assert!(plain.actions[0].bindings[0].serves(3));
     }
 
     #[test]

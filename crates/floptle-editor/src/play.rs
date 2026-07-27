@@ -679,6 +679,17 @@ impl Editor {
         }
     }
 
+    /// Frame-step: release exactly `n` gameplay ticks. Pauses first if the game is
+    /// running, because "advance one frame" only means something from a standstill —
+    /// so ⏭ / F3 / `physics.step()` all do the obvious thing from either state.
+    pub(crate) fn step_tick(&mut self, n: u32) {
+        if !self.playing {
+            return;
+        }
+        self.paused = true;
+        self.tick_steps = self.tick_steps.saturating_add(n);
+    }
+
     /// Resolve a `scene.load(...)` argument to a scene file: a name ("arena"),
     /// a scenes-relative name ("arenas/desert"), or a project-relative path
     /// ("scenes/arena.ron"). Escapes are REJECTED — in multiplayer the string

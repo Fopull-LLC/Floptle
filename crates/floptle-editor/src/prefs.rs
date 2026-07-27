@@ -159,6 +159,29 @@ pub(crate) fn save_play_tint(enabled: bool, tint: [u8; 3]) {
     }
 }
 
+/// Whether Lua `gizmo.*` shapes also draw over the GAME view. Off by default, and
+/// persisted, because a project that wants hit/hurtboxes while playing wants them every
+/// session, not once.
+pub(crate) fn game_gizmos_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("game_gizmos"))
+}
+
+pub(crate) fn load_game_gizmos() -> bool {
+    game_gizmos_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+pub(crate) fn save_game_gizmos(on: bool) {
+    if let Some(p) = game_gizmos_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, if on { "1" } else { "0" });
+    }
+}
+
 /// The default grid `y_offset` — the grid sits this far below the camera by default (a
 /// little lower than eye level, nearer the floor). Persisted, so a user's value sticks.
 pub(crate) const DEFAULT_GRID_Y_OFFSET: f32 = 2.0;
