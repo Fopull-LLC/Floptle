@@ -51,6 +51,10 @@ impl Editor {
 
     pub(crate) fn restore(&mut self, doc: SceneDoc) {
         // Entities are respawned below — drop animator runtimes keyed by the old ones.
+        // The map sub-object selection is keyed by Entity but ADDRESSES a stable
+        // geometry id, so it can be carried across the respawn (undo mid-edit
+        // used to dump you out of the shape you were working on).
+        let keep_map = self.map_sel.take();
         self.anim.clear_instances();
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
@@ -62,6 +66,24 @@ impl Editor {
         self.pivot_edit = false;
         self.grabbed = None;
         self.drag = None;
+        self.map_drag = None;
+        self.map_stroke = None;
+        self.map_box = None;
+        self.map_draw = None;
+        // Re-bind the sub-object selection to the respawned node carrying the
+        // same map id, and re-select that node so the tool stays where it was.
+        if let Some(mut sel) = keep_map
+            && let Some(e) = self.world.query::<Matter>().find_map(|(e, m)| {
+                matches!(m, Matter::MapMesh { id } if *id == sel.id).then_some(e)
+            })
+        {
+            sel.entity = e;
+            if let Some(mesh) = self.maps.meshes.get(&sel.id) {
+                sel.prune(mesh);
+            }
+            self.selection.push(e);
+            self.map_sel = Some(sel);
+        }
     }
 
     /// Swap the live terrain field for serialized `bytes`, queuing a GPU re-upload.
@@ -146,6 +168,10 @@ impl Editor {
                     self.history.redo.push(redo);
                 }
             }
+            Some(Snapshot::MapMesh(id, prev)) => {
+                let cur = self.swap_map_mesh(id, &prev);
+                self.history.redo.push(Snapshot::MapMesh(id, cur));
+            }
             None => {}
         }
     }
@@ -175,6 +201,10 @@ impl Editor {
                 if let Some(undo) = self.swap_tex_paint(entries) {
                     self.history.undo.push(undo);
                 }
+            }
+            Some(Snapshot::MapMesh(id, next)) => {
+                let cur = self.swap_map_mesh(id, &next);
+                self.history.undo.push(Snapshot::MapMesh(id, cur));
             }
             None => {}
         }

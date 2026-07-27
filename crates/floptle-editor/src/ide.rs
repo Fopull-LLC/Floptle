@@ -1961,32 +1961,39 @@ impl EditorTabViewer<'_> {
         let Some((sel_a, sel_b, caret)) = ide_selection(ui.ctx(), editor_id) else { return };
         let empty_sel = sel_a == sel_b;
 
+        // Copy/Cut with NO selection act on the whole line (VSCode-style); with a
+        // selection they pass through untouched — the TextEdit's own handlers put
+        // the selected text on the OS clipboard (and delete it for Cut). Only
+        // intent is recorded inside `input_mut`: `copy_text` and the caret store
+        // re-lock the egui Context, which deadlocks while the input lock is held.
         let mut pasted = None;
+        let mut line_copy = false;
+        let mut line_cut = false;
         ui.input_mut(|inp| {
             inp.events.retain(|e| match e {
                 egui::Event::Paste(text) => {
                     pasted = Some(text.clone());
                     false
                 }
-                egui::Event::Copy => {
-                    if empty_sel {
-                        ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
-                    }
+                egui::Event::Copy if empty_sel => {
+                    line_copy = true;
                     false
                 }
-                egui::Event::Cut => {
-                    if empty_sel {
-                        let clip = line_edit::line_with_newline(&self.ide.open[i].text, caret);
-                        ui.ctx().copy_text(clip);
-                        let new_caret = delete_lines(&mut self.ide.open[i].text, caret, caret);
-                        self.ide.open[i].dirty = true;
-                        set_ide_caret(ui.ctx(), editor_id, new_caret);
-                    }
+                egui::Event::Cut if empty_sel => {
+                    line_cut = true;
                     false
                 }
                 _ => true,
             });
         });
+        if line_copy || line_cut {
+            ui.ctx().copy_text(line_edit::line_with_newline(&self.ide.open[i].text, caret));
+            if line_cut {
+                let new_caret = delete_lines(&mut self.ide.open[i].text, caret, caret);
+                self.ide.open[i].dirty = true;
+                set_ide_caret(ui.ctx(), editor_id, new_caret);
+            }
+        }
         if let Some(pasted) = pasted {
             let new_caret = paste_text(&mut self.ide.open[i].text, sel_a, sel_b, &pasted);
             self.ide.open[i].dirty = true;
@@ -2702,10 +2709,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "anim:setLayerWeight", insert: ":setLayerWeight(", doc: "anim:setLayerWeight(\"Attack\", 0.5) — blend a layer over the ones below (0 = off, 1 = full override)." },
     ApiEntry { label: "anim:seek", insert: ":seek(", doc: "anim:seek(t [, layer]) — jump the current state's playhead to t seconds." },
     ApiEntry { label: "anim:state", insert: ":state(", doc: "anim:state([layer]) — the state currently showing (topmost active layer), or that layer's state. Nil when idle." },
+    ApiEntry { label: "anim:current", insert: ":current(", doc: "anim:current([layer]) — alias of anim:state: the state currently showing (topmost active layer). Nil when idle." },
     ApiEntry { label: "anim:time", insert: ":time(", doc: "anim:time([layer]) — seconds into the current state." },
     ApiEntry { label: "anim:finished", insert: ":finished(", doc: "anim:finished([layer]) — true when a non-looped state reached its end this frame (or stays true while holding the last frame)." },
     ApiEntry { label: "anim:isPlaying", insert: ":isPlaying(", doc: "anim:isPlaying([state]) — is that state playing on any layer (or anything at all, with no argument)?" },
     ApiEntry { label: "anim:clips", insert: ":clips()", doc: "anim:clips() — every playable state name, as a list." },
+    ApiEntry { label: "anim:layers", insert: ":layers()", doc: "anim:layers() — every layer name, base first, as a list." },
     ApiEntry { label: "spawnEffect", insert: "spawnEffect(", doc: "spawnEffect(key, x, y, z) — fire a one-shot particle effect at a world point, no node needed. It plays once and despawns itself. e.g. local h = raycast(...); if h then spawnEffect(\"vfx/Impact\", h.x, h.y, h.z) end." },
     ApiEntry { label: "spawn", insert: "spawn(", doc: "spawn(prefab [, pos [, fn]]) — spawn a PREFAB instance (make one by dragging a node into the Assets panel). \"bullet\" finds prefabs/bullet.prefab.ron. pos = a vec3/node for the root; fn(root) runs with the new node's handle the same frame — spawn(\"bullet\", node.pos + dir, function(b) b.vx = dir.x * 40 end). Local-only in multiplayer: the server uses net.spawn for replicated objects." },
     ApiEntry { label: "createNode", insert: "createNode(", doc: "createNode(name [, parent] [, fn]) — create a PLAIN node (Empty matter). fn(n) gets its handle: combine with n:setTerrain(id) / n:setCelestial{...} / n:setPrimitive(shape, color) / n:setMaterial{...} + transform writes to build content from script (procgen, editor actions). Nested creates inside callbacks are fine." },
@@ -3125,7 +3134,7 @@ a rigged model's embedded clips). Drive states from gameplay:
   • anim:setSpeed(2)                      playback speed multiplier
   • anim:setLayerWeight(\"Attack\", 0.5)   blend a layer over the ones below
   • anim:seek(t [, layer])                jump the current state's playhead
-  Getters: anim:state()  anim:time()  anim:finished()  anim:isPlaying([state])
+  Getters: anim:state()/anim:current()  anim:time()  anim:finished()  anim:isPlaying([state])  anim:clips()  anim:layers()
            anim:clips()  anim:layers()
 
     -- walk/run from speed, one-shot attack on click
@@ -3304,6 +3313,24 @@ mod tests {
     fn delete_lines_spans_selection() {
         let mut t = "one\ntwo\nthree".to_string();
         let caret = delete_lines(&mut t, 4, 9); // selection touching "two" + "three"
+        assert_eq!(t, "one\n");
+        assert_eq!(caret, 4);
+    }
+
+    #[test]
+    fn cut_line_clipboard_content_and_delete() {
+        // Empty-selection Ctrl+X: the caret's line (with a trailing \n, so a
+        // paste re-inserts a whole line) goes to the clipboard, then leaves the
+        // buffer — including the last line, which has no trailing \n to span.
+        let mut t = "one\ntwo\nthree".to_string();
+        let caret = "one\ntw".chars().count();
+        assert_eq!(line_edit::line_with_newline(&t, caret), "two\n");
+        let caret = delete_lines(&mut t, caret, caret);
+        assert_eq!(t, "one\nthree");
+        assert_eq!(caret, 4);
+        let last = t.chars().count();
+        assert_eq!(line_edit::line_with_newline(&t, last), "three\n");
+        let caret = delete_lines(&mut t, last, last);
         assert_eq!(t, "one\n");
         assert_eq!(caret, 4);
     }

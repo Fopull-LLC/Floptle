@@ -17,6 +17,7 @@ floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
 floptle-scene = { path = "../floptle-scene" }
 floptle-field = { path = "../floptle-field" }
+floptle-map = { path = "../floptle-map" }
 floptle-shader = { path = "../floptle-shader" }
 floptle-vfx = { path = "../floptle-vfx" }
 floptle-audio = { path = "../floptle-audio" }   # full backend: device output + decode

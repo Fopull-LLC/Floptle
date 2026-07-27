@@ -1,0 +1,935 @@
+//! The ⬢ Map tab: draw/spawn blockout shapes, the vertex/edge/face sub-mode,
+//! modeling ops on the current sub-object selection, and the material-slot
+//! list (assign faces to slots; override each slot's material per node).
+//!
+//! Laid out as titled sections in the order you work in — DRAW, SELECT,
+//! TRANSFORM, MODIFY, SHAPE, SIZE, FACE MATERIALS — with one visual language
+//! throughout: a rule under each section title, equal-width chips for anything
+//! that picks a mode, equal-width buttons for anything that acts, and a left
+//! label column so controls line up down the panel. Rarely-touched knobs live
+//! in collapsed disclosures so the common path stays short.
+//!
+//! Like every tab, this runs on `EditorTabViewer`'s disjoint borrows and
+//! records intents on `EditorCmd` — geometry ops need `&mut Editor` (undo
+//! snapshots + the store), so they apply after the frame.
+
+use crate::gizmo::Tool;
+use crate::map_edit::{MapOp, MapOrient, MapShape, MapSubMode, MapXform};
+use crate::map_keys::{MapCmd, reserved, save_map_keys};
+use crate::{EditorTabViewer, inspector};
+use egui::{Color32, RichText, Vec2};
+use floptle_core::Matter;
+
+/// The measurements the panel is built on, so everything lines up without
+/// magic numbers scattered through the code.
+const LABEL_W: f32 = 58.0;
+const CHIP_W: f32 = 74.0;
+const BTN_H: f32 = 22.0;
+const ACCENT: Color32 = Color32::from_rgb(255, 200, 80);
+const DRAW_ACCENT: Color32 = Color32::from_rgb(120, 220, 255);
+
+/// A titled section rule: `TITLE ─────────────`.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(12.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).small().strong().color(ui.visuals().strong_text_color()));
+        let rect = ui.available_rect_before_wrap();
+        if rect.width() > 8.0 {
+            let y = rect.center().y;
+            ui.painter().line_segment(
+                [egui::pos2(rect.left() + 4.0, y), egui::pos2(rect.right(), y)],
+                ui.visuals().widgets.noninteractive.bg_stroke,
+            );
+        }
+    });
+    ui.add_space(4.0);
+}
+
+/// A labelled row: a fixed-width caption on the left, controls on the right.
+fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            [LABEL_W, BTN_H],
+            egui::Label::new(RichText::new(label).weak()).selectable(false),
+        );
+        add(ui)
+    })
+    .inner
+}
+
+/// One chip of a segmented control.
+fn chip(ui: &mut egui::Ui, on: bool, text: &str, hover: &str) -> bool {
+    ui.add_sized([CHIP_W, BTN_H], egui::Button::selectable(on, text))
+        .on_hover_text(hover)
+        .clicked()
+}
+
+/// An action button, sized like every other action button.
+fn action(ui: &mut egui::Ui, enabled: bool, text: &str, hover: &str) -> bool {
+    ui.add_enabled(enabled, egui::Button::new(text).min_size(Vec2::new(0.0, BTN_H)))
+        .on_hover_text(hover)
+        .on_disabled_hover_text(hover)
+        .clicked()
+}
+
+impl EditorTabViewer<'_> {
+    pub(crate) fn map_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        if self.map_playing {
+            ui.colored_label(ACCENT, "⏹  Stop the scene to edit map geometry");
+            ui.small(
+                "edits during Play would not be undoable and the physics collider \
+                 would not rebuild, so the tool stays out of the way until you stop.",
+            );
+            return;
+        }
+        // The whole tab runs on the ⬢ Map TOOL's sub-object selection. Say so
+        // once, at the top, with the button that fixes it — greying everything
+        // out with no explanation is what made this feel broken.
+        if !self.map_tool_on {
+            egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("⬢  Turn on the Map tool")
+                        .on_hover_text(
+                            "key 8 — needed to draw shapes and select faces in the viewport",
+                        )
+                        .clicked()
+                    {
+                        self.cmd.set_tool = Some(Tool::MapEdit);
+                    }
+                    ui.small("(key 8)");
+                });
+            });
+        }
+
+        self.map_draw_section(ui);
+        self.map_select_section(ui);
+        self.map_transform_section(ui);
+        self.map_modify_section(ui);
+        let target = self.selection.last().and_then(|&e| match self.world.get::<Matter>(e) {
+            Some(Matter::MapMesh { id }) => Some((e, *id)),
+            _ => None,
+        });
+        if let Some((entity, id)) = target {
+            self.map_shape_section(ui, id);
+            self.map_size_section(ui, id);
+            self.map_materials_section(ui, entity, id);
+        }
+        self.map_keys_section(ui);
+        ui.add_space(12.0);
+    }
+
+    // ---- DRAW ---------------------------------------------------------------
+
+    fn map_draw_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "DRAW");
+        ui.horizontal_wrapped(|ui| {
+            for shape in MapShape::ALL {
+                let armed = self.map_arm == Some(shape);
+                let label = shape.label().trim_start_matches("Map ");
+                if ui
+                    .add_sized(
+                        [CHIP_W + 14.0, BTN_H + 2.0],
+                        egui::Button::selectable(
+                            armed,
+                            format!("{label}  {}", self.map_keys.label(shape.cmd())),
+                        ),
+                    )
+                    .on_hover_text(format!(
+                        "Drag out the footprint on the ground (or on any map surface you \
+                         aim at), release, then move to set the height and click.\n\
+                         {} / {} turn it 90°, {} turns it around, {} / {} change its \
+                         resolution, Esc cancels.\nShortcut: {}",
+                        self.map_keys.label(MapCmd::TurnLeft),
+                        self.map_keys.label(MapCmd::TurnRight),
+                        self.map_keys.label(MapCmd::TurnAround),
+                        self.map_keys.label(MapCmd::ResolutionDown),
+                        self.map_keys.label(MapCmd::ResolutionUp),
+                        self.map_keys.label(shape.cmd())
+                    ))
+                    .clicked()
+                {
+                    self.cmd.set_map_arm = Some(if armed { None } else { Some(shape) });
+                }
+            }
+        });
+        ui.add_space(2.0);
+        match self.map_arm {
+            Some(shape) => {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        DRAW_ACCENT,
+                        format!(
+                            "✏  drag out a {} — base first, then height",
+                            shape.label().trim_start_matches("Map ").to_lowercase()
+                        ),
+                    );
+                    if ui.small_button("stop (Esc)").clicked() {
+                        self.cmd.set_map_arm = Some(None);
+                    }
+                });
+            }
+            None => {
+                ui.small("pick a shape, then drag in the viewport: footprint first, then height");
+            }
+        }
+
+        egui::CollapsingHeader::new(RichText::new("Defaults for NEW shapes").small())
+            .id_salt("map_shape_opts")
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "what the next shape is built with — to change the shape you have \
+                         SELECTED, use the SHAPE section further down",
+                    )
+                    .weak()
+                    .small(),
+                );
+                row(ui, "round", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.sides)
+                            .range(3..=128)
+                            .prefix("sides "),
+                    )
+                    .on_hover_text("cylinder / sphere segments");
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.rings)
+                            .range(2..=64)
+                            .prefix("rings "),
+                    )
+                    .on_hover_text("sphere latitude bands");
+                });
+                row(ui, "stairs", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.steps)
+                            .range(1..=64)
+                            .prefix("steps "),
+                    );
+                    ui.small("[ and ] while drawing");
+                });
+                row(ui, "arch", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.arch_segments)
+                            .range(2..=32)
+                            .prefix("segments "),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.arch_width)
+                            .speed(0.01)
+                            .range(0.05..=0.98)
+                            .prefix("opening w "),
+                    )
+                    .on_hover_text("opening width as a fraction of the arch's width");
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.arch_height)
+                            .speed(0.01)
+                            .range(0.05..=0.98)
+                            .prefix("h "),
+                    )
+                    .on_hover_text(
+                        "opening height (jamb + arc) as a fraction of the arch's height",
+                    );
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("spawn at camera:").weak());
+                    for shape in MapShape::ALL {
+                        if ui
+                            .small_button(shape.label().trim_start_matches("Map "))
+                            .on_hover_text("drop one at a default size in front of the camera")
+                            .clicked()
+                        {
+                            self.cmd.add_map_shape = Some(shape);
+                        }
+                    }
+                });
+            });
+    }
+
+    // ---- SELECT -------------------------------------------------------------
+
+    fn map_select_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "SELECT");
+        row(ui, "mode", |ui| {
+            for mode in [MapSubMode::Vertex, MapSubMode::Edge, MapSubMode::Face] {
+                if chip(
+                    ui,
+                    self.map_mode == mode,
+                    mode.label(),
+                    "Tab cycles — your selection converts, it isn't dropped",
+                ) {
+                    self.cmd.set_map_mode = Some(mode);
+                }
+            }
+        });
+
+        let counts = self.map_selection_counts();
+        let (faces, edges, verts) = counts.unwrap_or((0, 0, 0));
+        let total = faces + edges + verts;
+        let mesh_size = self.map_target_mesh().map(|m| (m.faces.len(), m.verts.len()));
+        row(ui, "", |ui| {
+            match counts {
+                None => {
+                    ui.label(RichText::new("no map node selected").weak());
+                }
+                Some(_) if total == 0 => {
+                    ui.label(RichText::new("nothing selected").weak());
+                }
+                Some(_) => {
+                    let plural =
+                        |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+                    let mut parts = Vec::new();
+                    if faces > 0 {
+                        parts.push(plural(faces, "face"));
+                    }
+                    if edges > 0 {
+                        parts.push(plural(edges, "edge"));
+                    }
+                    if verts > 0 {
+                        parts.push(plural(verts, "vert"));
+                    }
+                    ui.colored_label(ACCENT, format!("{} selected", parts.join(" · ")));
+                }
+            }
+            if let Some((f, v)) = mesh_size {
+                ui.label(RichText::new(format!("  (mesh: {f} faces, {v} verts)")).weak().small());
+            }
+        });
+        row(ui, "", |ui| {
+            if action(ui, true, "All", "select everything in the current mode") {
+                self.cmd.map_op = Some(MapOp::SelectAll);
+            }
+            if action(ui, total > 0, "None", "clear the sub-object selection") {
+                self.cmd.map_op = Some(MapOp::SelectNone);
+            }
+            if action(ui, total > 0, "Grow", "add the neighbouring ring") {
+                self.cmd.map_op = Some(MapOp::Grow);
+            }
+            if action(ui, total > 0, "Connected", "everything joined to the selection") {
+                self.cmd.map_op = Some(MapOp::SelectConnected);
+            }
+            if action(
+                ui,
+                faces > 0,
+                "Coplanar",
+                "spread across the flat region this face sits in",
+            ) {
+                self.cmd.map_op = Some(MapOp::SelectCoplanar);
+            }
+            if action(ui, edges > 0, "Edge loop", "run the selection along its quad loops") {
+                self.cmd.map_op = Some(MapOp::SelectLoop);
+            }
+        });
+        row(ui, "", |ui| {
+            ui.checkbox(&mut *self.map_select_hidden, "select through the surface").on_hover_text(
+                "off (default): only sub-objects you can actually see are clickable or \
+                 box-selectable — no more grabbing the vertex on the far side of a wall",
+            );
+        });
+    }
+
+    // ---- TRANSFORM ----------------------------------------------------------
+
+    fn map_transform_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "TRANSFORM");
+        row(ui, "gizmo", |ui| {
+            for x in [MapXform::Move, MapXform::Rotate, MapXform::Scale] {
+                if chip(ui, *self.map_xform == x, x.label(), "what the gizmo does — X cycles") {
+                    *self.map_xform = x;
+                }
+            }
+        });
+        row(ui, "handles", |ui| {
+            for o in [MapOrient::Normal, MapOrient::Local, MapOrient::Global] {
+                let hover = match o {
+                    MapOrient::Normal => {
+                        "along the selection itself — a diagonal face pushes straight out of \
+                         its own surface in one drag (V cycles)"
+                    }
+                    MapOrient::Local => "the node's own axes (V cycles)",
+                    MapOrient::Global => "world axes (V cycles)",
+                };
+                if chip(ui, *self.map_orient == o, o.label(), hover) {
+                    *self.map_orient = o;
+                }
+            }
+        });
+    }
+
+    // ---- MODIFY -------------------------------------------------------------
+
+    fn map_modify_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "MODIFY");
+        let (faces, edges, verts) = self.map_selection_counts().unwrap_or((0, 0, 0));
+        row(ui, "faces", |ui| {
+            if action(
+                ui,
+                faces > 0,
+                "⬆ Extrude",
+                "push the selected faces out along their own normal  (E)",
+            ) {
+                self.cmd.map_op = Some(MapOp::Extrude);
+            }
+            if action(
+                ui,
+                faces > 0,
+                "⊡ Inset",
+                "shrink a copy of each face inside its own border — inset then extrude \
+                 carves a recess  (I)",
+            ) {
+                self.cmd.map_op = Some(MapOp::Inset);
+            }
+            if action(ui, faces > 0, "⊞ Subdivide", "split each selected face into quads") {
+                self.cmd.map_op = Some(MapOp::Subdivide);
+            }
+            if action(
+                ui,
+                faces == 2,
+                "⇌ Bridge",
+                "join two selected faces with a tube of walls (they need the same corner count)",
+            ) {
+                self.cmd.map_op = Some(MapOp::Bridge);
+            }
+        });
+        row(ui, "", |ui| {
+            if action(ui, faces > 0, "🗑 Delete", "remove the selected faces  (Del)") {
+                self.cmd.map_op = Some(MapOp::DeleteFaces);
+            }
+            if action(
+                ui,
+                faces > 0,
+                "✂ Split off",
+                "move the selected faces into their own map node",
+            ) {
+                self.cmd.map_detach = true;
+            }
+            if action(ui, faces > 0, "⇄ Flip", "reverse the selected faces' winding") {
+                self.cmd.map_op = Some(MapOp::FlipFaces);
+            }
+            if action(
+                ui,
+                true,
+                "⇄ Flip all",
+                "turn the whole mesh inside out (fixes a shape rendering inside-out)",
+            ) {
+                self.cmd.map_op = Some(MapOp::FlipAll);
+            }
+        });
+        row(ui, "points", |ui| {
+            if action(
+                ui,
+                faces + edges + verts > 0,
+                "⊙ Weld",
+                "merge selected verts that are within the weld radius of each other",
+            ) {
+                self.cmd.map_op = Some(MapOp::WeldSelected);
+            }
+            if action(
+                ui,
+                true,
+                "⌗ Snap to grid",
+                "round the selection (or the whole mesh) onto the grid",
+            ) {
+                self.cmd.map_op = Some(MapOp::SnapToGrid);
+            }
+        });
+        egui::CollapsingHeader::new(RichText::new("Amounts").small()).id_salt("map_amounts").show(
+            ui,
+            |ui| {
+                row(ui, "extrude", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.extrude)
+                            .speed(0.05)
+                            .range(0.01..=500.0),
+                    )
+                    .on_hover_text("how far E pushes — grid snap overrides this while it is on");
+                });
+                row(ui, "inset", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.inset)
+                            .speed(0.01)
+                            .range(0.001..=100.0),
+                    );
+                });
+                row(ui, "weld", |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.map_opts.weld)
+                            .speed(0.005)
+                            .range(0.0001..=10.0),
+                    )
+                    .on_hover_text("verts closer than this to each other merge");
+                });
+            },
+        );
+    }
+
+    // ---- SHAPE --------------------------------------------------------------
+
+    /// Shape parameters for a node that is still the primitive it was drawn as
+    /// — step count, sides, arch opening — plus the facing controls. Editing
+    /// the geometry retires the parameters (the mesh is no longer that shape,
+    /// and silently re-generating would throw the edit away), but turning the
+    /// node is just a rotation, so that always works.
+    fn map_shape_section(&mut self, ui: &mut egui::Ui, id: u32) {
+        use floptle_map::ShapeKind;
+        let Some(mesh) = self.maps.meshes.get(&id) else { return };
+        if mesh.bounds().is_none() {
+            return;
+        }
+        let spec = mesh.spec;
+        let title = match spec {
+            Some(s) => format!(
+                "SHAPE — {}",
+                MapShape::of_kind(s.kind).label().trim_start_matches("Map ").to_uppercase()
+            ),
+            None => "SHAPE".to_string(),
+        };
+        section(ui, &title);
+        row(ui, "", |ui| {
+            ui.label(RichText::new("the SELECTED node's own settings").weak().small());
+        });
+        row(ui, "facing", |ui| {
+            if action(ui, true, "⟲ 90°", "turn left a quarter turn about the node's up axis  (,)")
+            {
+                self.cmd.map_turn = Some(-1);
+            }
+            if action(ui, true, "⟳ 90°", "turn right a quarter turn  (.)") {
+                self.cmd.map_turn = Some(1);
+            }
+            if action(
+                ui,
+                true,
+                "⇄ 180°",
+                "turn it right around  (Z) — for a stair or ramp this is \"climb the other \
+                 way\"; the green arrow in the viewport shows which way it goes",
+            ) {
+                self.cmd.map_turn = Some(2);
+            }
+        });
+        let Some(spec) = spec else {
+            row(ui, "", |ui| {
+                ui.label(
+                    RichText::new(
+                        "edited geometry — no shape parameters to adjust (undo past the edit, \
+                         or draw a fresh one)",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+            return;
+        };
+        // Buffered like the size fields: apply on release, so a drag is one
+        // undo step rather than one per frame.
+        let mut next = self.map_spec_buf.unwrap_or(spec);
+        if next.kind != spec.kind {
+            next = spec;
+        }
+        let mut editing = false;
+        let mut done = false;
+        {
+            let (e, d) = (&mut editing, &mut done);
+            let mut knob = |ui: &mut egui::Ui,
+                            v: &mut u32,
+                            range: std::ops::RangeInclusive<u32>,
+                            prefix: &str| {
+                let r = ui.add(egui::DragValue::new(v).range(range).prefix(prefix));
+                *e |= r.changed() || r.dragged();
+                *d |= r.drag_stopped() || r.lost_focus();
+            };
+            match spec.kind {
+                ShapeKind::Stairs => {
+                    row(ui, "steps", |ui| {
+                        knob(ui, &mut next.steps, 1..=64, "");
+                        ui.small("[ and ] step it from the viewport");
+                    });
+                }
+                ShapeKind::Cylinder => {
+                    row(ui, "sides", |ui| knob(ui, &mut next.sides, 3..=128, ""));
+                }
+                ShapeKind::Sphere => row(ui, "detail", |ui| {
+                    knob(ui, &mut next.sides, 3..=128, "segments ");
+                    knob(ui, &mut next.rings, 2..=64, "rings ");
+                }),
+                ShapeKind::Arch => {
+                    row(ui, "arc", |ui| knob(ui, &mut next.arch_segments, 2..=32, "segments "));
+                }
+                ShapeKind::Box | ShapeKind::Plane | ShapeKind::Wedge => row(ui, "", |ui| {
+                    ui.label(
+                        RichText::new("no resolution to adjust — see SIZE below").weak().small(),
+                    );
+                }),
+            }
+        }
+        if spec.kind == ShapeKind::Arch {
+            row(ui, "opening", |ui| {
+                let w = ui.add(
+                    egui::DragValue::new(&mut next.arch_width)
+                        .speed(0.01)
+                        .range(0.05..=0.98)
+                        .prefix("width "),
+                );
+                let h = ui.add(
+                    egui::DragValue::new(&mut next.arch_height)
+                        .speed(0.01)
+                        .range(0.05..=0.98)
+                        .prefix("height "),
+                );
+                editing |= w.changed() || w.dragged() || h.changed() || h.dragged();
+                done |= w.drag_stopped() || w.lost_focus() || h.drag_stopped() || h.lost_focus();
+                ui.small("of the shape");
+            });
+        }
+        if editing || self.map_spec_buf.is_some() {
+            *self.map_spec_buf = Some(next);
+        }
+        if done {
+            self.cmd.map_op = Some(MapOp::Reshape(next));
+            *self.map_spec_buf = None;
+        }
+    }
+
+    // ---- SIZE ---------------------------------------------------------------
+
+    /// The numeric half of a modeling tool. Editing geometry is how a map mesh
+    /// gets sized — scaling the NODE would stretch the box-projected UVs and
+    /// detune every texture on it.
+    fn map_size_section(&mut self, ui: &mut egui::Ui, id: u32) {
+        let Some(mesh) = self.maps.meshes.get(&id) else { return };
+        let Some((lo, hi)) = mesh.bounds() else { return };
+        section(ui, "SIZE");
+        let live = self.map_size_buf.is_some();
+        let mut size = self.map_size_buf.unwrap_or(hi - lo);
+        row(ui, "extents", |ui| {
+            let mut editing = false;
+            let mut done = false;
+            for (i, axis) in ["x ", "y ", "z "].iter().enumerate() {
+                let r = ui.add(
+                    egui::DragValue::new(&mut size[i])
+                        .speed(0.05)
+                        .range(0.01..=100000.0)
+                        .prefix(*axis),
+                );
+                editing |= r.changed() || r.dragged();
+                done |= r.drag_stopped() || r.lost_focus();
+            }
+            if editing || live {
+                *self.map_size_buf = Some(size);
+            }
+            if done {
+                self.cmd.map_op = Some(MapOp::Resize(size));
+                *self.map_size_buf = None;
+            }
+            ui.label(
+                RichText::new("geometry, not node scale — textures keep their real size")
+                    .weak()
+                    .small(),
+            );
+        });
+        row(ui, "pivot", |ui| {
+            if action(
+                ui,
+                true,
+                "⌖ Center",
+                "move the node's origin to the middle of the mesh (nothing moves on screen)",
+            ) {
+                self.cmd.map_op = Some(MapOp::CenterPivot);
+            }
+            if action(
+                ui,
+                true,
+                "⌖ To selection",
+                "put the origin on the selected sub-objects — the point rotation and scale \
+                 work around",
+            ) {
+                self.cmd.map_op = Some(MapOp::PivotToSelection);
+            }
+        });
+    }
+
+    // ---- FACE MATERIALS -----------------------------------------------------
+
+    fn map_materials_section(&mut self, ui: &mut egui::Ui, entity: floptle_core::Entity, id: u32) {
+        section(ui, "FACE MATERIALS");
+        let faces = self.map_selection_counts().map_or(0, |(f, _, _)| f);
+        // The headline action. Previously this took "add slot" + "assign" +
+        // "override" and read like it did nothing.
+        ui.horizontal(|ui| {
+            let r = ui.add_enabled(
+                faces > 0,
+                egui::Button::new("◑  New material for selected faces")
+                    .min_size(Vec2::new(0.0, BTN_H + 2.0)),
+            );
+            let hover = if faces > 0 {
+                "makes a slot from the selection and gives it its own material — this is how \
+                 one face gets a different look from the rest"
+            } else {
+                "select some faces first (⬢ Map tool, face mode)"
+            };
+            if r.on_hover_text(hover).on_disabled_hover_text(hover).clicked() {
+                let name = {
+                    let n = self.map_slot_name.trim();
+                    if n.is_empty() {
+                        format!("Material {}", self.slot_count(id) + 1)
+                    } else {
+                        n.to_string()
+                    }
+                };
+                self.map_slot_name.clear();
+                self.cmd.map_op = Some(MapOp::MaterialFromSelection(name));
+            }
+            ui.add(
+                egui::TextEdit::singleline(self.map_slot_name)
+                    .hint_text("name (optional)")
+                    .desired_width(110.0),
+            );
+        });
+        ui.add_space(4.0);
+
+        let Some(mesh) = self.maps.meshes.get(&id) else { return };
+        let slot_names: Vec<String> = mesh.slots.clone();
+        let counts: Vec<usize> = (0..slot_names.len())
+            .map(|i| mesh.faces.iter().filter(|f| f.slot as usize == i).count())
+            .collect();
+        for (i, name) in slot_names.iter().enumerate() {
+            let has = self
+                .world
+                .get::<floptle_core::ObjectMaterials>(entity)
+                .is_some_and(|om| om.0.contains_key(name));
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).strong());
+                        ui.label(
+                            RichText::new(format!("{} of this mesh's faces", counts[i]))
+                                .weak()
+                                .small(),
+                        )
+                        .on_hover_text("how many faces draw with this slot — not your selection");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("Select")
+                                .on_hover_text("select every face drawing with this slot")
+                                .clicked()
+                            {
+                                self.cmd.map_op = Some(MapOp::SelectSlot(i as u16));
+                            }
+                            if ui
+                                .add_enabled(
+                                    faces > 0,
+                                    egui::Button::new("Assign selection").small(),
+                                )
+                                .on_hover_text("move the selected faces onto this slot")
+                                .clicked()
+                            {
+                                self.cmd.map_op = Some(MapOp::AssignSlot(i as u16));
+                            }
+                        });
+                    });
+                    // Per-node material override for this slot (the same
+                    // ObjectMaterials machinery imported models use).
+                    if has {
+                        egui::CollapsingHeader::new(RichText::new("material").small())
+                            .id_salt(("map_slot_mat", id, i))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                let (materials, asset_tree, project_root, flsl, sdf) = (
+                                    &*self.materials,
+                                    &*self.asset_tree,
+                                    &*self.project_root,
+                                    &*self.flsl_cache,
+                                    &*self.sdf_cache,
+                                );
+                                if let Some(om) =
+                                    self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
+                                    && let Some(mat) = om.0.get_mut(name)
+                                {
+                                    let res = inspector::material_props_ui(
+                                        ui,
+                                        mat,
+                                        materials,
+                                        asset_tree,
+                                        project_root,
+                                        self.mat_name_buf,
+                                        flsl,
+                                        sdf,
+                                    );
+                                    self.cmd.inspector_changed |= res.changed;
+                                }
+                                if ui.small_button("✕ clear override").clicked()
+                                    && let Some(om) =
+                                        self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
+                                {
+                                    om.0.remove(name);
+                                    self.cmd.inspector_changed = true;
+                                }
+                            });
+                    } else if ui
+                        .small_button("＋ give this slot its own material")
+                        .on_hover_text("colour / texture / shader for every face on this slot")
+                        .clicked()
+                    {
+                        if self.world.get::<floptle_core::ObjectMaterials>(entity).is_none() {
+                            self.world.insert(entity, floptle_core::ObjectMaterials::default());
+                        }
+                        if let Some(om) =
+                            self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
+                        {
+                            om.0.insert(name.clone(), floptle_core::Material::default());
+                            self.cmd.inspector_changed = true;
+                        }
+                    }
+                });
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("＋ empty slot")
+                .on_hover_text("add a slot without assigning anything to it")
+                .clicked()
+            {
+                let name = {
+                    let n = self.map_slot_name.trim();
+                    if n.is_empty() {
+                        format!("Slot {}", slot_names.len() + 1)
+                    } else {
+                        n.to_string()
+                    }
+                };
+                self.map_slot_name.clear();
+                self.cmd.map_op = Some(MapOp::AddSlot(name));
+            }
+            if ui
+                .small_button("🧹 Clean unused geometry")
+                .on_hover_text(
+                    "drop stored geometry no node uses any more (duplicates and deleted nodes \
+                     leave copies behind so undo can bring them back — anything undo could \
+                     still restore is kept)",
+                )
+                .clicked()
+            {
+                self.cmd.map_prune = true;
+            }
+        });
+    }
+
+    // ---- KEYS ---------------------------------------------------------------
+
+    /// Every control's hotkey, listed and rebindable. Click a chord, press the
+    /// new one; anything the editor already answers in this context — or that
+    /// another map command holds — is refused with the reason, so a broken
+    /// binding can't come into being.
+    fn map_keys_section(&mut self, ui: &mut egui::Ui) {
+        section(ui, "KEYS");
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(
+                    "map keys only fire while the ⬢ Map tool is active and you're not typing",
+                )
+                .weak()
+                .small(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Reset all")
+                    .on_hover_text("back to the shipped bindings")
+                    .clicked()
+                {
+                    *self.map_keys = crate::map_keys::MapKeys::default();
+                    *self.map_rebind = None;
+                    *self.map_rebind_err = None;
+                    save_map_keys(self.map_keys);
+                }
+            });
+        });
+        if let Some(err) = self.map_rebind_err.clone() {
+            ui.colored_label(Color32::from_rgb(235, 120, 120), RichText::new(err).small());
+        }
+        let listening = *self.map_rebind;
+        for group in ["Draw", "Select", "Transform", "Modify"] {
+            egui::CollapsingHeader::new(RichText::new(group).small())
+                .id_salt(("map_keys", group))
+                .show(ui, |ui| {
+                    egui::Grid::new(("map_keys_grid", group))
+                        .num_columns(2)
+                        .spacing([8.0, 2.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for cmd in MapCmd::ALL.into_iter().filter(|c| c.group() == group) {
+                                ui.label(RichText::new(cmd.label()).small());
+                                let waiting = listening == Some(cmd);
+                                let text = if waiting {
+                                    "press a key…".to_string()
+                                } else {
+                                    self.map_keys.label(cmd)
+                                };
+                                if ui
+                                    .add_sized(
+                                        [110.0, BTN_H],
+                                        egui::Button::selectable(waiting, text),
+                                    )
+                                    .on_hover_text(
+                                        "click, then press the key (Shift is part of the                                          chord; Ctrl belongs to the application). Esc cancels.",
+                                    )
+                                    .clicked()
+                                {
+                                    *self.map_rebind = if waiting { None } else { Some(cmd) };
+                                    *self.map_rebind_err = None;
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        }
+        egui::CollapsingHeader::new(RichText::new("Keys the editor keeps").small())
+            .id_salt("map_keys_reserved")
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "these answer whatever modifiers are held, so the Map tool won't take                          them:",
+                    )
+                    .weak()
+                    .small(),
+                );
+                let mut listed: Vec<(&str, Vec<String>)> = Vec::new();
+                for key in crate::map_keys::known_keys() {
+                    if let Some(what) = reserved(key) {
+                        let label = crate::map_keys::key_label(key);
+                        match listed.iter_mut().find(|(w, _)| *w == what) {
+                            Some((_, keys)) => keys.push(label),
+                            None => listed.push((what, vec![label])),
+                        }
+                    }
+                }
+                for (what, keys) in listed {
+                    ui.label(RichText::new(format!("{}  —  {what}", keys.join(" "))).small().weak());
+                }
+            });
+    }
+
+    // ---- shared lookups -----------------------------------------------------
+
+    /// `(faces, edges, verts)` selected on the targeted map node, or `None`
+    /// when no map node is selected at all — the two states read differently
+    /// in the UI and must not be conflated.
+    fn map_selection_counts(&self) -> Option<(usize, usize, usize)> {
+        let e = *self.selection.last()?;
+        matches!(self.world.get::<Matter>(e), Some(Matter::MapMesh { .. })).then_some(())?;
+        let sel = self.map_sel.as_ref().filter(|s| s.entity == e);
+        Some(sel.map_or((0, 0, 0), |s| (s.faces.len(), s.edges.len(), s.verts.len())))
+    }
+
+    fn map_target_mesh(&self) -> Option<&floptle_map::MapMesh> {
+        let e = *self.selection.last()?;
+        match self.world.get::<Matter>(e) {
+            Some(Matter::MapMesh { id }) => self.maps.meshes.get(id),
+            _ => None,
+        }
+    }
+
+    fn slot_count(&self, id: u32) -> usize {
+        self.maps.meshes.get(&id).map_or(0, |m| m.slots.len())
+    }
+}

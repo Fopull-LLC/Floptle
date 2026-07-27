@@ -25,6 +25,9 @@ pub(crate) enum EditorTab {
     ShaderGraph,
     /// The vertex-paint brush settings (color, radius, strength, falloff, channels).
     Paint,
+    /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
+    /// per-face material slots (docs/map-tools-proposal.md).
+    Map,
 }
 
 impl EditorTab {
@@ -33,6 +36,7 @@ impl EditorTab {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
             EditorTab::Terrain => "Δ Terrain",
+            EditorTab::Map => "⬢ Map",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
             EditorTab::Scene => "⌖ Scene",
@@ -69,24 +73,39 @@ pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bo
     tab_is_front(dock, EditorTab::Scene) && tab_is_front(dock, EditorTab::Game)
 }
 
-/// The default layout: Hierarchy left, Inspector right, Assets bottom, with the
-/// Scene + Scripting tabs filling the center. Users can drag/re-dock freely.
+/// The default layout, grouped by what each dock is FOR:
+///
+/// - **left** — what the scene contains and what you build it out of:
+///   Hierarchy, ⬢ Map.
+/// - **centre** — the viewports and the full-canvas editors that replace them:
+///   Scene / Game, Scripting, ◈ Shaders, ◎ Controller.
+/// - **right** — properties of whatever is selected: Inspector, Δ Terrain,
+///   🖌 Paint.
+/// - **bottom** — the project and the timelines that scrub it: Assets,
+///   Console, ✏ Animating, ✨ Particles, 🎧 Mixer.
+///
+/// Users can drag/re-dock freely; **Window ▸ Reset layout** comes back here.
 pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
     use egui_dock::{DockState, NodeIndex};
-    // Scene (editor view), Game (active-camera view), and Scripting share the central
-    // leaf — only the front tab renders, and which of Scene/Game is front picks the
-    // camera. Scene first so the editor view is the default on launch.
-    let mut dock =
-        DockState::new(vec![EditorTab::Scene, EditorTab::Game, EditorTab::Scripting, EditorTab::ShaderGraph]);
+    // Scene (editor view) and Game (active-camera view) share the central leaf
+    // with the graph/text editors — only the front tab renders, and which of
+    // Scene/Game is front picks the camera. Scene first so the editor view is
+    // the default on launch.
+    let mut dock = DockState::new(vec![
+        EditorTab::Scene,
+        EditorTab::Game,
+        EditorTab::Scripting,
+        EditorTab::ShaderGraph,
+        EditorTab::AnimGraph,
+    ]);
     let surface = dock.main_surface_mut();
-    let [central, _] = surface.split_left(NodeIndex::root(), 0.18, vec![EditorTab::Hierarchy]);
-    // Inspector + Terrain + Paint tabs share the right dock (Inspector shown first).
+    let [central, _] =
+        surface.split_left(NodeIndex::root(), 0.19, vec![EditorTab::Hierarchy, EditorTab::Map]);
     let [central, _] = surface.split_right(
         central,
         0.78,
         vec![EditorTab::Inspector, EditorTab::Terrain, EditorTab::Paint],
     );
-    // Console + the animation tabs sit beside Assets in the bottom dock.
     let [_, _] = surface.split_below(
         central,
         0.72,
@@ -94,7 +113,6 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
             EditorTab::Assets,
             EditorTab::Console,
             EditorTab::Animation,
-            EditorTab::AnimGraph,
             EditorTab::Particles,
             EditorTab::Mixer,
         ],
@@ -137,6 +155,16 @@ pub(crate) fn focus_paint_tab(dock: &mut egui_dock::DockState<EditorTab>) {
         let _ = dock.set_active_tab(path);
     } else {
         dock.push_to_focused_leaf(EditorTab::Paint);
+    }
+}
+
+/// Focus the ⬢ Map dock tab — re-adding it if the user closed it. Used when the
+/// Map tool is selected, so the shape/op controls are never a tab-hunt away.
+pub(crate) fn focus_map_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Map) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Map);
     }
 }
 

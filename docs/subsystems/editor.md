@@ -206,16 +206,19 @@ enum PlayState { Editing, Playing, Paused }
 
 ## 7. Out of scope
 
-We do **parametric primitives, not a full DCC modeling toolset.**
+This section has narrowed over time (texture painting and the embedded IDE both
+landed after it was written, and the **map-building suite** —
+[`../map-tools-proposal.md`](../map-tools-proposal.md) — added real in-editor
+blockout modeling via the ⬢ Map tool: draw a shape by dragging out its base
+then its height, vertex/edge/face editing with normal-aligned move/rotate/scale
+gizmos, extrude/inset/bridge/subdivide, and per-face materials). What still
+holds:
 
-- **Arbitrary mesh modeling** — no edge-loop/extrude/sculpt/retopo tooling. Build
-  blockouts from parametric shapes here; do real modeling in **Blender** and
-  import via glTF ([`./asset-pipeline.md`](./asset-pipeline.md)).
-- **UV unwrapping / texture painting** — Blender's job; we lean on triplanar so
-  procedural shapes tile without UVs anyway.
-- **A built-in code editor** — VSCode via ADR-0011.
-- **Animation rigging / weight painting** — authored in Blender; we import skins
-  and play clips ([`./animation.md`](./animation.md)).
+- **Character/prop modeling** — sculpt, retopo, precise UV unwrapping, subdiv
+  surface work stay in **Blender**, imported via glTF
+  ([`./asset-pipeline.md`](./asset-pipeline.md)). Map meshes are for LEVELS.
+- **Animation rigging / weight painting** — authored in Blender; we import
+  skins and play clips ([`./animation.md`](./animation.md)).
 
-If a tool duplicates what Blender or VSCode already do well, it doesn't belong in
-the editor.
+If Blender does it better AND it isn't core to building a level in-engine, it
+doesn't belong in the editor.

@@ -28,6 +28,17 @@ impl Editor {
         if tool == Tool::Paint {
             self.focus_paint();
         }
+        if tool == Tool::MapEdit {
+            self.focus_map();
+        }
+        if tool != Tool::MapEdit {
+            // Leaving map mode drops the sub-object selection + any box drag,
+            // and abandons a half-drawn shape.
+            self.map_sel = None;
+            self.map_box = None;
+            self.map_draw = None;
+            self.map_arm = None;
+        }
     }
 
     // ---- selection ----------------------------------------------------------
@@ -217,6 +228,21 @@ impl Editor {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (r * t.scale.max_element()).max(0.1))
                 }
+                Matter::MapMesh { id } => {
+                    // Exact face raycast (the kernel keeps CPU geometry) — a
+                    // blockout wall should pick where you click, not by a
+                    // bounding sphere. Unnormalized local ray keeps `t` in
+                    // world units, comparable across candidates.
+                    self.maps.meshes.get(id).and_then(|mesh| {
+                        let m_inv = t.render_matrix(cam.world_position).inverse();
+                        if !m_inv.is_finite() {
+                            return None;
+                        }
+                        let ro_l = (m_inv * ro.extend(1.0)).truncate();
+                        let rd_l = (m_inv * rd.extend(0.0)).truncate();
+                        floptle_map::raycast(mesh, ro_l, rd_l, f32::MAX).map(|h| h.t)
+                    })
+                }
                 // no mesh — select via the hierarchy.
                 Matter::Empty
                 | Matter::Terrain { .. }
@@ -262,9 +288,15 @@ impl Editor {
         let start = drag.start_xf;
         let cursor_delta = cursor - drag.cursor_start;
         let (snap, step) = (self.grid.snap, self.grid.size as f64);
+        // A sub-object drag snaps the DISTANCE TRAVELLED, not the resulting
+        // world point: the gizmo sits on a selection centroid that is rarely on
+        // a grid line, and on a normal-aligned (diagonal) axis, snapping the
+        // point would quantize the move off its own axis and slide the face
+        // sideways.
+        let sub_object = self.map_drag.is_some();
 
-        match self.tool {
-            Tool::Move => {
+        match self.gizmo_tool() {
+            Tool::Move | Tool::MapEdit => {
                 if let Some(i) = handle.axis_index() {
                     let dir = local_axis(start.rotation, i);
                     // Project the axis (a 1-unit step) to screen; the move distance is
@@ -280,9 +312,13 @@ impl Editor {
                     if len2 < 1e-6 {
                         return; // axis points (almost) straight at the camera
                     }
-                    let units = cursor_delta.dot(sdir) / len2;
+                    let mut units = cursor_delta.dot(sdir) / len2;
+                    if snap && sub_object {
+                        let s = step as f32;
+                        units = (units / s).round() * s;
+                    }
                     let mut p = start.translation + (dir * units).as_dvec3();
-                    if snap {
+                    if snap && !sub_object {
                         p = snap_dvec3(p, step);
                     }
                     let xf = Transform { translation: p, ..start };
@@ -295,9 +331,13 @@ impl Editor {
                     let up = rot * Vec3::Y;
                     let dist = (start.translation - cam_world).length().max(0.1) as f32;
                     let wpp = 2.0 * dist * (30f32.to_radians()).tan() / h;
-                    let mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
+                    let mut mv = right * (cursor_delta.x * wpp) - up * (cursor_delta.y * wpp);
+                    if snap && sub_object {
+                        let s = step as f32;
+                        mv = (mv / s).round() * s;
+                    }
                     let mut p = start.translation + mv.as_dvec3();
-                    if snap {
+                    if snap && !sub_object {
                         p = snap_dvec3(p, step);
                     }
                     let xf = Transform { translation: p, ..start };
@@ -456,6 +496,15 @@ impl Editor {
     /// node's *local* transform when it has a parent (so dragging a child's gizmo
     /// edits its local placement, and parents still carry it).
     pub(crate) fn set_world_transform(&mut self, e: Entity, world_xf: Transform) {
+        // A Map-tool drag targets SUB-OBJECTS (verts/edges/faces), not the
+        // node: translate the snapshot verts by the gizmo's world delta and
+        // never touch the Transform. Route before everything else.
+        if self.map_drag.is_some() {
+            if let Some(d) = self.drag {
+                self.map_apply_drag(d.start_xf, world_xf);
+            }
+            return;
+        }
         // A gizmo drag on an armature BONE / model object (not an ECS entity):
         // in pivot-edit mode it moves the object's rotation pivot; otherwise it poses
         // the bone into the open clip. Route it before any Transform write.

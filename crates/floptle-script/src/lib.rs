@@ -1436,6 +1436,96 @@ end
         assert!(host.take_vfx_commands().is_empty(), "no play() when already playing");
     }
 
+    /// Ground truth for the `cond and X or Y` conditional idiom through the real
+    /// host — with animator METHOD CALLS in the chain — plus the animator getters
+    /// reading the fed mirror. Lua's ternary spelling is core syntax; the reported
+    /// "errors writing statements like that" came from method casing (see
+    /// `animator_method_typo_names_the_camel_case_fix`), not from the idiom.
+    #[test]
+    fn animator_getters_and_conditional_idiom() {
+        let dir = std::env::temp_dir().join("floptle_script_test_anim");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "locomotion",
+            "function update(node, dt)\n  local anim = node:animator()\n  node.x = anim:isPlaying('Running') and 2 or anim:isPlaying('Walking') and 1 or 0\n  node.y = anim:time() or -1\n  node.z = ((anim:current() == 'Running') and 10 or 0) + #anim:clips()\nend\n",
+        );
+        let (mut world, e) = world_with_script("locomotion");
+        let mut host = ScriptHost::new();
+
+        // The IDE's red-squiggle path must accept the idiom too.
+        assert!(
+            host.check_syntax(
+                "function f(a) return a:isPlaying('R') and 2 or a:isPlaying('W') and 1 or 0 end"
+            )
+            .is_none(),
+            "and/or chain must parse cleanly"
+        );
+
+        let info = |state: &str, t: f32, fin: bool| {
+            HashMap::from([(
+                e.index(),
+                AnimInfo {
+                    layers: vec![("Base".into(), Some(state.into()), t, fin)],
+                    states: vec!["Idle".into(), "Walking".into(), "Running".into()],
+                },
+            )])
+        };
+        let pos = |world: &World| world.get::<Transform>(e).unwrap().translation;
+
+        // Running → the chain picks 2; current()/time()/clips() read the mirror.
+        host.set_anim_info(info("Running", 0.25, false));
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let p = pos(&world);
+        assert_eq!(p.x, 2.0, "isPlaying('Running') and 2 must win");
+        assert!((p.y - 0.25).abs() < 1e-5, "time() reads the fed playhead");
+        assert_eq!(p.z, 13.0, "current()=='Running' (10) + 3 clips");
+
+        // Walking → the middle arm.
+        host.set_anim_info(info("Walking", 1.5, false));
+        host.run(&mut world, &dir, 0.1, 0.2);
+        assert_eq!(pos(&world).x, 1.0, "isPlaying('Walking') and 1 must win");
+
+        // Running but FINISHED → isPlaying is false → the chain falls to 0.
+        host.set_anim_info(info("Running", 2.0, true));
+        host.run(&mut world, &dir, 0.1, 0.3);
+        assert_eq!(pos(&world).x, 0.0, "a finished one-shot is not 'playing'");
+
+        // No animator mirror at all → every arm false → 0 (and no errors).
+        host.set_anim_info(HashMap::new());
+        host.run(&mut world, &dir, 0.1, 0.4);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(pos(&world).x, 0.0);
+    }
+
+    /// A CASING typo on an animator method (`anim:IsPlaying`) must fail with a
+    /// did-you-mean naming the camelCase method — not a bare "attempt to call a
+    /// nil value". Genuinely unknown keys still index to nil (feature probes).
+    #[test]
+    fn animator_method_typo_names_the_camel_case_fix() {
+        let dir = std::env::temp_dir().join("floptle_script_test_anim_typo");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "typo",
+            "function update(node, dt)\n  if dt < 0.15 then\n    if node:animator().notAThing == nil then node.y = 7 end\n  else\n    node.x = node:animator():IsPlaying('Run') and 2 or 0\n  end\nend\n",
+        );
+        let (mut world, e) = world_with_script("typo");
+        let mut host = ScriptHost::new();
+        // Frame 1: the unknown-key probe indexes to nil — no error, the write lands.
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "nil probe must not error: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 7.0);
+        // Frame 2: the casing typo errors WITH the camelCase suggestion.
+        host.run(&mut world, &dir, 0.2, 0.3);
+        let errs = host.errors().join("\n");
+        assert!(
+            errs.contains("did you mean 'isPlaying'"),
+            "typo must suggest the camelCase method: {errs}"
+        );
+    }
+
     #[test]
     fn audio_play_queues_and_handle_controls() {
         let dir = std::env::temp_dir().join("floptle_script_test_audio");

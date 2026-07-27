@@ -1590,8 +1590,35 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 })?,
             )?;
         }
+        // Method lookup goes through a function so a CASING typo fails with a
+        // fix instead of a bare nil-call: the animator API is camelCase
+        // (`anim:isPlaying`), and `anim:IsPlaying(...)` used to die with
+        // "attempt to call a nil value (method 'IsPlaying')" — no hint at all.
+        // A case-insensitive near-miss now errors with "did you mean
+        // 'isPlaying'?". Genuinely unknown keys still index to nil, so
+        // feature probes (`if anim.someday then`) keep working.
         let anim_mt = lua.create_table()?;
-        anim_mt.set("__index", anim_methods)?;
+        anim_mt.set(
+            "__index",
+            lua.create_function(move |_, (_this, key): (Table, Value)| {
+                let Value::String(k) = &key else { return Ok(Value::Nil) };
+                let name = k.to_string_lossy().to_string();
+                let hit: Value = anim_methods.raw_get(name.as_str())?;
+                if hit != Value::Nil {
+                    return Ok(hit);
+                }
+                for pair in anim_methods.pairs::<String, Value>() {
+                    let (known, _) = pair?;
+                    if known.eq_ignore_ascii_case(&name) {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "animator has no method '{name}' — did you mean '{known}'? \
+                             (animator methods are camelCase)"
+                        )));
+                    }
+                }
+                Ok(Value::Nil)
+            })?,
+        )?;
         lua.set_named_registry_value("floptle_anim_mt", anim_mt)?;
 
         methods.set(

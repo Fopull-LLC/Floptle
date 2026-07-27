@@ -472,6 +472,13 @@ pub enum Matter {
     /// A group / "empty" — renders nothing, but has a transform and can parent other
     /// nodes (a folder for organizing the scene, or a rig root like a player).
     Empty,
+    /// An editable map-building polygon mesh (blockout shapes, per-face
+    /// materials, vertex/edge/face modeling — docs/map-tools-proposal.md).
+    /// Like `Terrain`, the geometry does NOT live on the component: `id` is a
+    /// stable per-mesh key into the editor's map store, persisted to a
+    /// per-scene sidecar (`maps/<scene>.map.ron`), because Entity indices die
+    /// on undo/reload and big data can't ride the per-frame scene snapshot.
+    MapMesh { id: u32 },
     /// Editable SDF terrain — like a blob, but a sculptable/paintable voxel field.
     /// The transform places its volume; the field data lives alongside the scene.
     /// `id` is a stable per-terrain key (Entity indices aren't stable across load),

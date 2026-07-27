@@ -47,6 +47,14 @@ impl Editor {
         }
     }
 
+    /// Bring the ⬢ Map tab to the front (re-adding it if closed) — the Map
+    /// tool's shape/op controls live there.
+    pub(crate) fn focus_map(&mut self) {
+        if let Some(dock) = self.dock_state.as_mut() {
+            crate::dock::focus_map_tab(dock);
+        }
+    }
+
     /// The mesh-asset key a node paints against, and its part count. Primitives share
     /// ONE `MeshId` per shape, so they key by shape name — the paint still lands
     /// per-node because the block is per-node, not per-mesh.

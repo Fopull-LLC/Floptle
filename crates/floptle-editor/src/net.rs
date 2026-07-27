@@ -1543,6 +1543,22 @@ impl Editor {
                     }
                     sim.add_static_mesh(anchor, &verts, &indices, layer);
                 }
+                // Map meshes collide as their exact kernel triangulation, same
+                // as the local play sim (play.rs) — server truth matches visuals.
+                Some(Matter::MapMesh { id }) => {
+                    let Some(mesh) = self.maps.meshes.get(id) else { continue };
+                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
+                    let mut verts: Vec<Vec3> = Vec::new();
+                    let mut indices: Vec<u32> = Vec::new();
+                    for sm in floptle_map::triangulate(mesh) {
+                        let base = verts.len() as u32;
+                        verts.extend(sm.positions.iter().map(|p| m.transform_point3(Vec3::from(*p))));
+                        indices.extend(sm.indices.iter().map(|i| i + base));
+                    }
+                    if indices.len() >= 3 {
+                        sim.add_static_mesh(anchor, &verts, &indices, layer);
+                    }
+                }
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
                         sim.add_static_box(

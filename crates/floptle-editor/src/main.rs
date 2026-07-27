@@ -48,6 +48,8 @@ mod history;
 mod ide;
 mod inspector;
 mod lua_support;
+mod map_edit;
+mod map_ui;
 mod matter_catalog;
 mod net;
 mod paint_io;
@@ -60,6 +62,7 @@ mod prefab;
 mod shader_graph;
 mod shader_preview;
 mod shaders;
+mod map_keys;
 mod prefs;
 mod project;
 mod render_frame;
@@ -267,6 +270,24 @@ struct EditorCmd {
     new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
+    /// Spawn a new map-mesh blockout shape (⬢ Map tab / Add menu).
+    add_map_shape: Option<map_edit::MapShape>,
+    /// A Map-tab modeling op on the current sub-object selection.
+    map_op: Option<map_edit::MapOp>,
+    /// Switch the Map tool's vertex/edge/face sub-mode.
+    set_map_mode: Option<map_edit::MapSubMode>,
+    /// Arm (or disarm, with `None`) a shape for interactive drawing.
+    set_map_arm: Option<Option<map_edit::MapShape>>,
+    /// Detach the selected faces into their own map node.
+    map_detach: bool,
+    /// Turn the selected map node by N * 90 degrees about its up axis.
+    map_turn: Option<i32>,
+    /// Drop stored map geometry no node references any more.
+    map_prune: bool,
+    /// Focus the ⬢ Map dock tab (Window menu).
+    focus_map: bool,
+    /// Put every dock panel back to the shipped layout (Window menu).
+    reset_layout: bool,
     /// Save the current scene.
     save_scene: bool,
     /// Rescan the project asset tree.
@@ -453,6 +474,32 @@ enum ProjectAction {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
+    /// Map-building suite state for the ⬢ Map tab (read-only; ops go via cmd).
+    maps: &'a map_edit::MapStore,
+    map_sel: &'a Option<map_edit::MapSel>,
+    map_mode: map_edit::MapSubMode,
+    map_slot_name: &'a mut String,
+    map_opts: &'a mut map_edit::MapOpts,
+    map_size_buf: &'a mut Option<Vec3>,
+    map_spec_buf: &'a mut Option<floptle_map::ShapeSpec>,
+    map_arm: Option<map_edit::MapShape>,
+    map_orient: &'a mut map_edit::MapOrient,
+    map_xform: &'a mut map_edit::MapXform,
+    map_select_hidden: &'a mut bool,
+    /// True while the ⬢ Map TOOL is active — every sub-object op needs it, so
+    /// the tab offers to turn it on rather than silently greying out.
+    map_tool_on: bool,
+    map_playing: bool,
+    /// The Map tool's keybinds — every hint in the UI reads its chord from
+    /// here, so a rebind can never leave the labels lying.
+    map_hud_open: &'a mut bool,
+    map_keys: &'a mut map_keys::MapKeys,
+    map_rebind: &'a mut Option<map_keys::MapCmd>,
+    map_rebind_err: &'a mut Option<String>,
+    /// The gizmo the Scene tab should PAINT (the map tool substitutes its own
+    /// move/rotate/scale mode — see `Editor::gizmo_tool`).
+    gizmo_tool: Tool,
+    map_viz: &'a Option<map_edit::MapViz>,
     /// Game-UI element outlines for the Scene view (index, rect pts, scale).
     ui_overlay: &'a [(u32, [f32; 4], f32)],
     /// The selected node's reference-param kinds ((script kind, param) → kind),
@@ -675,6 +722,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Particles => self.particles_ui(ui),
             EditorTab::Mixer => self.mixer_ui(ui),
             EditorTab::ShaderGraph => self.shader_graph_ui(ui),
+            EditorTab::Map => self.map_ui(ui),
         }
     }
 }
@@ -1435,6 +1483,62 @@ struct Editor {
     /// Per-entity vertex buffers for CPU-skinned parts (two characters sharing
     /// a model must not bake their poses into one buffer).
     skin_variants: anim::SkinVariants,
+    /// Editable map-mesh geometry (the map-building suite) — the authority
+    /// behind every `Matter::MapMesh { id }` node and its `@map/<id>` parts.
+    maps: map_edit::MapStore,
+    /// Active sub-object selection of the ⬢ Map tool (verts/edges/faces on
+    /// the primary map-mesh node). Cleared on undo restore — see history.rs.
+    map_sel: Option<map_edit::MapSel>,
+    /// The Map tool's vertex/edge/face sub-mode (Tab cycles it).
+    map_mode: map_edit::MapSubMode,
+    /// This frame's Map-tool overlay (projected wireframe + selection).
+    map_viz: Option<map_edit::MapViz>,
+    /// Live sub-object gizmo drag (pre-drag vert positions).
+    map_drag: Option<map_edit::MapDrag>,
+    /// Pre-gesture mesh snapshot, banked as one undo step on release.
+    map_stroke: Option<(u32, floptle_map::MapMesh)>,
+    /// Box-select anchor (physical px) while LMB is held on bare space.
+    map_box: Option<Vec2>,
+    /// This frame's sub-object gizmo transform (selection centroid), cached by
+    /// the map driver — the render scope's borrows forbid computing it there.
+    map_gizmo: Option<floptle_core::Transform>,
+    /// The Map tab's new-slot name field.
+    map_slot_name: String,
+    /// Shape resolution + op distances for the Map tool.
+    map_opts: map_edit::MapOpts,
+    /// Live value of the Map tab's size fields while they are being dragged.
+    /// The resize only APPLIES on release — a per-frame resize would push one
+    /// undo step per mouse move.
+    map_size_buf: Option<Vec3>,
+    /// Same, for the Shape panel's step/side counts.
+    map_spec_buf: Option<floptle_map::ShapeSpec>,
+    /// The shape ARMED for drawing: while set, a viewport drag lays out a new
+    /// blockout shape (base rectangle, then height) instead of selecting.
+    map_arm: Option<map_edit::MapShape>,
+    /// The in-progress draw gesture.
+    map_draw: Option<map_edit::MapDraw>,
+    /// Whether the viewport's Map strip shows its shape picker (the Map PANEL
+    /// is the full control surface; the strip states the mode).
+    map_hud_open: bool,
+    /// Sticky quarter-turn for drawn shapes (`,` / `.` / Z) — seeds each new
+    /// draw gesture, so a run of staircases keeps the facing you chose.
+    map_turns: i32,
+    /// The Map tool's keybinds (loaded from prefs at startup, rebindable in
+    /// the Map tab). See map_keys.rs for why they cannot collide.
+    map_keys: map_keys::MapKeys,
+    /// The command currently listening for its new chord, if the user is
+    /// mid-rebind, plus the last refusal to show them.
+    map_rebind: Option<map_keys::MapCmd>,
+    map_rebind_err: Option<String>,
+    /// Which frame the sub-object gizmo's handles use.
+    map_orient: map_edit::MapOrient,
+    /// Move / rotate / scale for the sub-object gizmo (the global tool stays
+    /// on ⬢ Map — switching tools would drop the sub-object selection).
+    map_xform: map_edit::MapXform,
+    /// Let clicks and box-select reach sub-objects hidden behind the surface.
+    map_select_hidden: bool,
+    /// Pre-Play map geometry, restored on Stop (the terrain-snapshot pattern).
+    play_maps: Option<HashMap<u32, floptle_map::MapMesh>>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
     texture_registry: HashMap<String, TexId>,
     /// The game-UI render pass (instanced quads + glyph atlas).
@@ -2112,6 +2216,10 @@ enum Snapshot {
     /// touches (that's how you shade a wall-floor corner in one stroke) — and one stroke
     /// must be one undo step, however many nodes it crossed. Keyed by the stable id.
     TexPaint(Vec<(u32, Option<Vec<Vec<u8>>>)>),
+    /// A map-mesh edit: `(map id, the whole pre-edit mesh)`. Map meshes are a
+    /// few hundred faces, so whole-mesh swaps are cheap and exact — keyed by
+    /// the stable map id like terrain/paint (the store, not the ECS).
+    MapMesh(u32, floptle_map::MapMesh),
 }
 
 /// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
@@ -2246,6 +2354,7 @@ impl ApplicationHandler for Editor {
         self.play_tint_enabled = tint_on;
         self.play_tint = tint_rgb;
         self.grid = load_grid();
+        self.map_keys = map_keys::load_map_keys();
         self.engine_theme = load_theme_index(engine_theme_path(), ENGINE_THEMES.len());
         self.code_theme = load_theme_index(code_theme_path(), CODE_THEMES.len());
         self.preview_spinning = true;
@@ -2381,6 +2490,7 @@ impl ApplicationHandler for Editor {
         // texture-paint atlases are GPU allocations — see the NOTE at the scene load above).
         self.adopt_paint();
         self.adopt_tex_paint();
+        self.adopt_maps();
         let now = Instant::now();
         self.last = Some(now);
         self.started = Some(now);
@@ -2494,6 +2604,40 @@ impl ApplicationHandler for Editor {
                             self.tick_keys_released.insert(name.to_string());
                         }
                     }
+                    // A Map keybind being re-recorded swallows the next key.
+                    if pressed && !typing && self.map_rebind.is_some() {
+                        self.capture_map_rebind(code);
+                        return;
+                    }
+                    // ⬢ Map tool keybinds. They run BEFORE the editor's own
+                    // shortcuts but only inside the map context (tool active,
+                    // not typing, no Ctrl), and map_keys.rs refuses to bind
+                    // anything the editor answers in that same context — so
+                    // this can shadow nothing. A command that declines (delete
+                    // with no faces selected) falls through untouched.
+                    if pressed
+                        && !typing
+                        && !game_view
+                        && !self.ctrl
+                        && self.tool == Tool::MapEdit
+                        && !self.playing
+                        // A focused timeline (Animating / Graph / Particles /
+                        // Shaders) owns its own keys — the map stays out of it,
+                        // exactly as the editor's other shortcuts do.
+                        && !matches!(
+                            self.focused_tab,
+                            Some(
+                                EditorTab::Animation
+                                    | EditorTab::AnimGraph
+                                    | EditorTab::Particles
+                                    | EditorTab::ShaderGraph
+                            )
+                        )
+                        && let Some(cmd) = self.map_keys.command(code, self.shift)
+                        && self.run_map_command(cmd)
+                    {
+                        return;
+                    }
                     // Discrete commands fire on press only.
                     if pressed && !typing {
                         // Engine controls work in any view (Play/Pause/Quit).
@@ -2504,7 +2648,10 @@ impl ApplicationHandler for Editor {
                                 // graph window, and never silently discard unsaved work.
                                 // A BUILD (player mode) only ever frees the cursor — games
                                 // don't quit on Escape.
-                                if self.game_trap || self.script_mouse_lock {
+                                if self.map_draw_cancel() || self.map_arm.take().is_some() {
+                                    // Back out of a draw gesture / disarm the
+                                    // shape before anything else claims Escape.
+                                } else if self.game_trap || self.script_mouse_lock {
                                     // Free BOTH lock owners — a script that holds the
                                     // mouse (setMouseLocked) must not survive Escape,
                                     // or the cursor stays gone with no way back.
@@ -2597,6 +2744,9 @@ impl ApplicationHandler for Editor {
                                         // selected for animation (there's no scene selection
                                         // to delete anyway — this just prevents accidents).
                                         KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
+                                        // (the ⬢ Map tool's delete-faces bind runs
+                                        // before this and only claims the key while
+                                        // faces are selected — see the dispatch above)
                                         KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
                                         KeyCode::KeyF => self.focus_selected(),
                                         KeyCode::KeyQ => self.selection.clear(), // unselect
@@ -2695,6 +2845,53 @@ impl ApplicationHandler for Editor {
                             // egui owns this press — selecting or dragging happens
                             // there. Picking here would miss (elements are 2D) and
                             // clear the selection, killing the handle mid-grab.
+                        } else if self.tool == Tool::MapEdit && self.playing {
+                            // Play owns the viewport; map editing resumes on Stop.
+                        } else if self.tool == Tool::MapEdit && self.map_draw.is_some() {
+                            // Second click of a draw gesture: commit the height.
+                            self.map_draw_commit();
+                        } else if self.tool == Tool::MapEdit && self.map_arm.is_some() {
+                            // A shape is armed: this press starts laying out its base.
+                            self.context_menu = None;
+                            if let Some(cursor) = self.cursor {
+                                self.map_draw_begin(cursor);
+                            }
+                        } else if self.tool == Tool::MapEdit {
+                            // Map tool: a gizmo grab drags the SUB-OBJECT selection;
+                            // otherwise clicks pick verts/edges/faces, and a press on
+                            // bare space starts a box-select which falls back to a
+                            // node pick if it turns out to be a click (that fallback
+                            // is the only way to switch between map nodes by eye).
+                            if let (Some(h), Some(e), Some(start_xf)) =
+                                (hovered, self.primary(), self.map_gizmo_xf())
+                            {
+                                if self.map_begin_drag() {
+                                    self.drag_group.clear();
+                                    self.grabbed = Some(h);
+                                    self.drag = Some(DragState {
+                                        handle: h,
+                                        entity: e,
+                                        bone: None,
+                                        start_xf,
+                                        cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
+                                    });
+                                }
+                            } else if let Some(cursor) = self.cursor {
+                                let extend = self.shift || self.ctrl;
+                                if !self.map_click(cursor, extend) {
+                                    if self.map_target().is_some() {
+                                        self.map_box = Some(cursor);
+                                    } else {
+                                        // No map node targeted yet: normal node pick so
+                                        // clicking a map mesh starts editing it.
+                                        match self.pick(cursor) {
+                                            Some(e) if extend => self.select_toggle(e),
+                                            Some(e) => self.select_single(e),
+                                            None => {}
+                                        }
+                                    }
+                                }
+                            }
                         } else if let (Some(h), Some(e)) = (hovered, self.primary()) {
                             // On a gizmo handle ⏵ start an undoable edit and grab it.
                             // start_xf is the WORLD transform; gizmo math runs in world
@@ -2771,6 +2968,41 @@ impl ApplicationHandler for Editor {
                             self.push_history(Snapshot::Terrain(id, snap));
                             self.end_sculpt_stroke();
                         }
+                    // End of a Map-tool gesture: a sub-object drag banks its
+                    // pre-drag mesh as ONE step (only if it actually moved);
+                    // a box-select applies its rect to the selection.
+                    if self.map_drag.take().is_some()
+                        && let Some((id, pre)) = self.map_stroke.take()
+                        && self.maps.meshes.get(&id) != Some(&pre)
+                    {
+                        self.push_history(Snapshot::MapMesh(id, pre));
+                    }
+                    self.map_stroke = None;
+                    if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)
+                        && self.tool == Tool::MapEdit
+                    {
+                        if (cursor - anchor).length() > 4.0 {
+                            self.map_box_apply(anchor, cursor, self.shift || self.ctrl);
+                        } else {
+                            // A CLICK on bare space (not a box drag): re-pick the
+                            // node, so clicking another map mesh starts editing it
+                            // and clicking empty space steps out. Without this the
+                            // map tool was a one-way street into the first node
+                            // you selected.
+                            let extend = self.shift || self.ctrl;
+                            match self.pick(cursor) {
+                                Some(e) if extend => self.select_toggle(e),
+                                Some(e) => self.select_single(e),
+                                None if !extend => self.selection.clear(),
+                                None => {}
+                            }
+                        }
+                    }
+                    // A drawn footprint finishes on release (flat shapes commit,
+                    // solids move on to their height).
+                    if self.tool == Tool::MapEdit && self.map_draw.is_some() {
+                        self.map_draw_release();
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {

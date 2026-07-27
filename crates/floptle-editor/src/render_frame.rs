@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use crate::assets::{AssetPayload, build_assets, collect_texture_paths, is_model};
 use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active};
-use crate::gizmo::build_gizmo;
+use crate::gizmo::{build_gizmo, Tool};
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
 use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
@@ -44,6 +44,11 @@ impl Editor {
         // can freely borrow `self`).
         self.terrain_frame_update();
         self.vertex_paint_frame_update();
+        // Map meshes: heal duplicated ids and re-upload edited geometry so the
+        // gather below always finds a current `@map/<id>` registry entry; then
+        // the Map tool's hover/selection overlay.
+        self.sync_map_meshes();
+        self.map_edit_frame_update();
 
         // Inspector asset preview: render the spinning model/material (or load the
         // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
@@ -785,8 +790,24 @@ impl Editor {
                 * (bone_local * Mat4::from_translation(pivot)).as_dmat4();
             Some(floptle_core::transform::Transform::from_matrix(world_m))
         });
-        self.gizmo = build_gizmo(
-            self.tool,
+        // Map tool: the gizmo sits on the sub-object selection's centroid (a
+        // Move-style gizmo; no selection = no gizmo). Reuses the bone-override
+        // slot — both are "gizmo on a non-entity target". Cached by the frame
+        // driver (this scope holds a mutable gpu borrow, so no &self calls).
+        let map_xf = self.map_gizmo;
+        // The map tool's gizmo is whatever its OWN transform mode says (move /
+        // rotate / scale) — see `Editor::gizmo_tool`.
+        // (inlined `gizmo_tool()`: this scope holds a mutable `gpu` borrow, so
+        // whole-`self` method calls are out — disjoint field reads are fine)
+        let gizmo_tool =
+            if self.tool == Tool::MapEdit { self.map_xform.tool() } else { self.tool };
+        // No sub-object selection = no map gizmo, whatever the transform mode
+        // (the node's own gizmo would be a lie in map mode).
+        self.gizmo = if self.tool == Tool::MapEdit && map_xf.is_none() {
+            None
+        } else {
+            build_gizmo(
+            gizmo_tool,
             self.selection.last().copied(),
             &self.world,
             self.cursor,
@@ -795,8 +816,9 @@ impl Editor {
             gpu.config.width as f32,
             gpu.config.height.max(1) as f32,
             rect_half,
-            bone_xf,
-        );
+            map_xf.or(bone_xf),
+            )
+        };
 
         // Lighting comes from the scene's mandatory Lighting node (a Light component).
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
@@ -970,6 +992,17 @@ impl Editor {
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
                         push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                    }
+                }
+                Matter::MapMesh { id } => {
+                    // Renders through the same per-part path as imported models
+                    // (parts = material slots), so ObjectMaterials overrides
+                    // keyed by slot name work unchanged. No rig, no paint.
+                    if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
+                        let model = t.render_matrix(cam.world_position);
+                        let mp = mat.as_ref().map(material_params);
+                        let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
+                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, None, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -1200,6 +1233,14 @@ impl Editor {
                             }
                         }
                     }
+                    Matter::MapMesh { id } => {
+                        if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
+                            let model = t.render_matrix(cam.world_position);
+                            for &mid in &asset.parts {
+                                mask_mesh.push((mid, instance_of(model, [1.0, 1.0, 1.0])));
+                            }
+                        }
+                    }
                     Matter::Blob { scale } => {
                         let mp = self
                             .world
@@ -1327,6 +1368,24 @@ impl Editor {
         };
         let fullscreen_tab = &mut self.fullscreen_tab;
         let world = &mut self.world;
+        let maps = &self.maps;
+        let map_sel = &self.map_sel;
+        let map_mode = self.map_mode;
+        let map_slot_name = &mut self.map_slot_name;
+        let map_viz = &self.map_viz;
+        let map_opts = &mut self.map_opts;
+        let map_size_buf = &mut self.map_size_buf;
+        let map_spec_buf = &mut self.map_spec_buf;
+        let map_arm = self.map_arm;
+        let map_orient = &mut self.map_orient;
+        let map_xform = &mut self.map_xform;
+        let map_select_hidden = &mut self.map_select_hidden;
+        let map_hud_open = &mut self.map_hud_open;
+        let map_keys = &mut self.map_keys;
+        let map_rebind = &mut self.map_rebind;
+        let map_rebind_err = &mut self.map_rebind_err;
+        let map_tool_on = self.tool == Tool::MapEdit;
+        let map_playing = self.playing;
         let has_selection = !self.selection.is_empty();
         let selection = &mut self.selection;
         let bone_selection = &mut self.bone_selection;
@@ -1629,6 +1688,23 @@ impl Editor {
                             cmd.focus_terrain = true;
                             ui.close();
                         }
+                        if ui.button("⬢ Map tools").clicked() {
+                            cmd.focus_map = true;
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .button("⟲ Reset layout")
+                            .on_hover_text(
+                                "put every panel back where it starts: Hierarchy + Map left, \
+                                 viewports and graph editors centre, Inspector right, \
+                                 project and timelines below",
+                            )
+                            .clicked()
+                        {
+                            cmd.reset_layout = true;
+                            ui.close();
+                        }
                     });
                     ui.separator();
                     let play_label = if playing { "⏹ Stop  (F1)" } else { "⏵ Play  (F1)" };
@@ -1913,6 +1989,25 @@ impl Editor {
             let mut viewer = EditorTabViewer {
                 world,
                 selection,
+                maps,
+                map_sel,
+                map_mode,
+                map_slot_name,
+                map_viz,
+                map_opts,
+                map_size_buf,
+                map_spec_buf,
+                map_arm,
+                map_orient,
+                map_xform,
+                map_select_hidden,
+                map_tool_on,
+                map_playing,
+                map_hud_open,
+                map_keys,
+                map_rebind,
+                map_rebind_err,
+                gizmo_tool,
                 ui_overlay: &ui_overlay_snapshot,
                 ui_canvas: &ui_canvas_snapshot,
                 ref_kinds,
@@ -2885,8 +2980,17 @@ impl Editor {
         // egui-winit's cursor-icon handling calls set_cursor_visible(true) whenever
         // the hover icon changes — un-hiding a cursor the game grabbed. Re-assert
         // the hide while any lock is held so the pointer can't flicker back.
-        if self.game_trap || self.script_mouse_lock {
+        // A script lock only hides the cursor while it's actually OVER the game
+        // view: the grab is Confined (one OS window), so the pointer can reach
+        // the Inspector mid-play — it must be visible there to tweak values.
+        // (inlined cursor_over_game — this scope holds a mutable gpu borrow)
+        let over_game = scene_hit(&egui.ctx, self.cursor, self.game_rect);
+        if self.game_trap || (self.script_mouse_lock && over_game) {
             window.set_cursor_visible(false);
+        } else if self.script_mouse_lock {
+            // Off the game view with the lock still held: force the show —
+            // egui only un-hides on an icon CHANGE, which may never fire.
+            window.set_cursor_visible(true);
         }
         if self.project.retro_height != old_retro_h {
             retro.resize(gpu, self.project.retro_height.max(80));
@@ -4406,6 +4510,7 @@ impl Editor {
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
+                MatterDoc::MapMesh { .. } => "Map Mesh",
                 MatterDoc::Terrain { .. } => "Terrain",
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
@@ -4418,6 +4523,43 @@ impl Editor {
         }
         if let Some(what) = cmd.add_ui {
             self.add_ui_node(what);
+        }
+        if let Some(shape) = cmd.add_map_shape {
+            self.add_map_shape(shape);
+        }
+        if let Some(op) = cmd.map_op.take() {
+            self.apply_map_op(op);
+        }
+        if let Some(mode) = cmd.set_map_mode {
+            // Converts rather than clears — see `set_map_mode`.
+            self.set_map_mode(mode);
+        }
+        if let Some(arm) = cmd.set_map_arm {
+            self.map_draw = None;
+            self.map_arm = arm;
+            // Drawing needs the tool: arming from the tab turns it on rather
+            // than leaving a button that visibly does nothing.
+            if arm.is_some() && self.tool != Tool::MapEdit {
+                self.set_tool(Tool::MapEdit);
+                self.map_arm = arm; // set_tool clears the arm on the way in
+            }
+        }
+        if cmd.map_detach {
+            self.map_detach_selection();
+        }
+        if let Some(q) = cmd.map_turn {
+            self.map_turn(q);
+        }
+        if cmd.map_prune {
+            let n = self.prune_map_orphans();
+            self.map_note(
+                floptle_script::LogLevel::Debug,
+                if n == 0 {
+                    "no unused map geometry to clean".to_string()
+                } else {
+                    format!("cleaned {n} unused map mesh(es) from this scene's sidecar")
+                },
+            );
         }
         // Latch "pointer on a UI overlay interact" for the raw LMB handler (which
         // runs between frames): while set, presses belong to egui, not pick/gizmo.
@@ -5195,6 +5337,12 @@ impl Editor {
         if cmd.focus_terrain {
             self.focus_terrain();
         }
+        if cmd.focus_map {
+            self.focus_map();
+        }
+        if cmd.reset_layout {
+            self.dock_state = Some(crate::dock::default_dock());
+        }
         if let Some(path) = cmd.open_scene {
             // Opening a scene ends any play session FIRST — Stop restores the
             // pre-Play scene (name, world, terrain), so the unsaved-changes
@@ -5531,6 +5679,28 @@ impl Editor {
                         push_mesh_instances(
                             gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats,
                             &self.texture_registry, node_paint,
+                            *ent, &mut self.skin_variants,
+                            &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
+                        );
+                    }
+                }
+                // Blockout geometry, through the same per-part path as imported
+                // models (parts = material slots). Without this arm the Game
+                // view — and every camera preview / render target, which all
+                // come through here — drew the level as empty air while the
+                // Scene view showed it fine.
+                Matter::MapMesh { id } => {
+                    if let (Some(gpu), Some(raster), Some(asset)) = (
+                        self.gpu.as_ref(),
+                        self.raster.as_mut(),
+                        self.mesh_registry.get(&crate::map_edit::map_key(*id)),
+                    ) {
+                        let model = t.render_matrix(cam.world_position);
+                        let mp = mat.as_ref().map(material_params);
+                        let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*ent);
+                        push_mesh_instances(
+                            gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats,
+                            &self.texture_registry, None,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
                         );

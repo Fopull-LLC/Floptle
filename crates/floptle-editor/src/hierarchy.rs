@@ -139,6 +139,20 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::Empty);
             ui.close();
         }
+        ui.menu_button("⬢ Map shape", |ui| {
+            for shape in crate::map_edit::MapShape::ALL {
+                let label = shape.label().trim_start_matches("Map ");
+                if ui.button(format!("⬢ {label}")).clicked() {
+                    cmd.add_map_shape = Some(shape);
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(
+            "editable blockout geometry — the ⬢ Map tool (key 8) edits its \
+             faces/edges/verts, extrudes, and assigns per-face materials",
+        );
         ui.separator();
         if ui.button("Δ Terrain").on_hover_text("a sculptable SDF terrain node").clicked() {
             cmd.open_new_terrain = true;

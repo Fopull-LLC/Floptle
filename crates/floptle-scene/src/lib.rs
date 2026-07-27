@@ -570,6 +570,20 @@ pub enum MatterDoc {
         #[serde(default)]
         id: u32,
     },
+    /// An editable map-building polygon mesh. Geometry lives in the per-scene
+    /// `maps/<scene>.map.ron` sidecar keyed by this stable id (the terrain
+    /// pattern — big data never rides the scene doc).
+    ///
+    /// `geo` is the ESCAPE HATCH for documents that leave the scene: a prefab or
+    /// a clipboard payload has no sidecar to key into, so those writers stamp the
+    /// geometry in and the spawner mints a fresh id from it. Scene saves and the
+    /// per-frame undo baseline leave it `None` (`to_doc` never fills it), so the
+    /// hot path stays exactly as small as it was.
+    MapMesh {
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        geo: Option<floptle_map::MapMesh>,
+    },
     /// A camera viewpoint. `fov_y` is the vertical field of view (radians); `active`
     /// marks the camera that holds play-mode authority on load. A non-empty
     /// `target` renders the camera into the live `rt:<target>` texture; the
@@ -733,6 +747,7 @@ impl From<&Matter> for MatterDoc {
             Matter::Mesh { asset_path } => MatterDoc::Mesh { asset_path: asset_path.clone() },
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
+            Matter::MapMesh { id } => MatterDoc::MapMesh { id: *id, geo: None },
             Matter::Camera { fov_y, active, target, cull_mask } => MatterDoc::Camera {
                 fov_y: *fov_y,
                 active: *active,
@@ -799,6 +814,7 @@ impl MatterDoc {
             MatterDoc::Mesh { asset_path } => Matter::Mesh { asset_path: asset_path.clone() },
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
+            MatterDoc::MapMesh { id, .. } => Matter::MapMesh { id: *id },
             MatterDoc::Camera { fov_y, active, target, cull_mask } => Matter::Camera {
                 fov_y: *fov_y,
                 active: *active,

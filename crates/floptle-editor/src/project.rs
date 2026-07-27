@@ -335,6 +335,7 @@ impl Editor {
         self.adopt_terrain();
         self.adopt_paint();
         self.adopt_tex_paint();
+        self.adopt_maps();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -367,6 +368,7 @@ impl Editor {
         self.adopt_terrain();
         self.adopt_paint();
         self.adopt_tex_paint();
+        self.adopt_maps();
         self.register_scene_meshes();
         self.selection.clear();
         self.selected_asset = None;
@@ -861,6 +863,7 @@ impl Editor {
         self.adopt_terrain();
         self.adopt_paint();
         self.adopt_tex_paint();
+        self.adopt_maps();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
@@ -1076,6 +1079,7 @@ impl Editor {
         // terrain fields do — they have no business in a .ron.
         self.save_paint();
         self.save_tex_paint();
+        self.save_maps();
         // The texture PALETTE (which image fills each painted slot) is editor state,
         // not in the field — persist it so painted textures survive a reload. Glowing
         // slots keep their `|glow` marker (see adopt_terrain's load). Cold terrains
@@ -1169,6 +1173,7 @@ impl Editor {
         self.adopt_terrain();
         self.adopt_paint();
         self.adopt_tex_paint();
+        self.adopt_maps();
         self.register_scene_meshes();
         self.selection.clear();
         self.history = History::default();

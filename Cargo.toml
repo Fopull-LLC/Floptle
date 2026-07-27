@@ -12,6 +12,7 @@ resolver = "3"
 members = [
     "crates/floptle-core",     # math, ECS, scene-graph facade, events, time, allocator/pools
     "crates/floptle-field",    # implicit geometry: SDFs + CSG/blend ops (shared substrate)
+    "crates/floptle-map",      # editable polygon-mesh kernel (map-building suite)
     "crates/floptle-rules",    # Lawset/Realm meta-spine + field-interaction graph
     "crates/floptle-render",   # wgpu render graph, materials, the signature SDF/raymarch look
     "crates/floptle-shader",   # shader IR: graph <-> text, transpile to WGSL via naga
@@ -34,7 +35,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]

@@ -183,6 +183,16 @@ impl Editor {
         self.world.insert(e, node.transform.to_transform());
         self.world.insert(e, Name(node.name.clone()));
         self.world.insert(e, node.matter.to_matter());
+        // Inline map geometry (prefab instance / paste / duplicate): give this
+        // node its OWN id in this scene's store. Without it the doc's id would
+        // key into whatever that id happens to mean here — an empty node in a
+        // fresh scene, or somebody else's wall in a busy one.
+        if let MatterDoc::MapMesh { geo: Some(geo), .. } = &node.matter {
+            let id = self.next_map_id();
+            self.maps.meshes.insert(id, geo.clone());
+            self.maps.dirty.insert(id);
+            self.world.insert(e, floptle_core::Matter::MapMesh { id });
+        }
         if !node.scripts.is_empty() {
             let insts = node
                 .scripts
@@ -258,16 +268,36 @@ impl Editor {
 
     /// Spawn a new node ~5 units in front of the camera, and select it.
     pub(crate) fn add_node(&mut self, name: &str, matter: MatterDoc) {
+        self.add_node_at(name, matter, None);
+    }
+
+    /// `add_node`, but at an explicit world transform when the caller has one
+    /// (the Map tool draws a shape where the cursor put it, not 5 units in
+    /// front of the camera).
+    pub(crate) fn add_node_at(
+        &mut self,
+        name: &str,
+        matter: MatterDoc,
+        at: Option<floptle_core::Transform>,
+    ) {
         self.record();
         let cam = self.camera.render_camera();
         let mut pos = cam.world_position + (cam.rotation * Vec3::NEG_Z * 5.0).as_dvec3();
         if self.grid.snap {
             pos = snap_dvec3(pos, self.grid.size as f64);
         }
+        let transform = match at {
+            Some(t) => TransformDoc {
+                translation: [t.translation.x, t.translation.y, t.translation.z],
+                rotation: t.rotation.to_array(),
+                scale: t.scale.to_array(),
+            },
+            None => TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
+        };
         let node = NodeDoc {
             terrain_gen: None,
             name: name.into(),
-            transform: TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
+            transform,
             matter,
             scripts: Vec::new(),
             material: None,
@@ -427,6 +457,13 @@ impl Editor {
             roots.iter().map(|&r| (r, None)).collect();
         while let Some((e, pidx)) = queue.pop_front() {
             let Some(mut doc) = self.node_of(e) else { continue };
+            // A map mesh's geometry lives in the per-scene sidecar, which a
+            // prefab or a clipboard payload can't reach — carry it inline so
+            // pasting into another scene/project rebuilds the real shape
+            // instead of the placeholder box.
+            if let MatterDoc::MapMesh { id, geo } = &mut doc.matter {
+                *geo = self.maps.meshes.get(id).cloned();
+            }
             doc.parent = pidx;
             if pidx.is_none() {
                 doc.transform =

@@ -143,6 +143,22 @@ impl Editor {
                     }
                     sim.add_static_mesh(anchor, &verts, &indices, layer);
                 }
+                // Map meshes: the kernel geometry IS the collider (all slots
+                // concatenated) — a blockout wall collides exactly where it draws.
+                Some(Matter::MapMesh { id }) => {
+                    let Some(mesh) = self.maps.meshes.get(id) else { continue };
+                    let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
+                    let mut verts: Vec<Vec3> = Vec::new();
+                    let mut indices: Vec<u32> = Vec::new();
+                    for sm in floptle_map::triangulate(mesh) {
+                        let base = verts.len() as u32;
+                        verts.extend(sm.positions.iter().map(|p| m.transform_point3(Vec3::from(*p))));
+                        indices.extend(sm.indices.iter().map(|i| i + base));
+                    }
+                    if indices.len() >= 3 {
+                        sim.add_static_mesh(anchor, &verts, &indices, layer);
+                    }
+                }
                 // Primitive geometry → matching analytic collider, sized to match the
                 // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
                 Some(Matter::Primitive { shape, .. }) => match shape {
@@ -524,6 +540,18 @@ impl Editor {
             // Persistent `save.*` data flushes on Stop — the one guarantee scripts
             // rely on (periodic flushes during Play only bound crash loss).
             self.script_host.flush_save();
+            // Map geometry lives outside the scene doc too — and unlike terrain
+            // it has no in-Play authoring path, so a restore here is purely a
+            // guard against a script (or a stray Map-tab click) mutating the
+            // level during a run.
+            if let Some(meshes) = self.play_maps.take()
+                && self.maps.meshes != meshes
+            {
+                for id in meshes.keys().chain(self.maps.meshes.keys()) {
+                    self.maps.dirty.insert(*id);
+                }
+                self.maps.meshes = meshes;
+            }
             if let Some((fields, palette)) = self.play_terrains.take() {
                 for (id, t) in fields {
                     if let Some(e) = self.terrain_entity_of_id(id) {
@@ -560,6 +588,7 @@ impl Editor {
             // Stop restores them exactly — unsaved sculpts survive Play, and a
             // mid-play scene switch can never leak another scene's terrain
             // into this one (see Stop above).
+            self.play_maps = Some(self.maps.meshes.clone());
             self.play_terrains = Some((
                 self.terrains
                     .iter()

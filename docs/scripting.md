@@ -1026,10 +1026,25 @@ function onSlashHit(node) log("hit frame!") end
 | `anim:setSpeed(x)` | global speed multiplier |
 | `anim:setLayerWeight(layer, w)` | blend a layer over the ones below (0..1) |
 | `anim:seek(t [, layer])` | jump the playhead |
-| `anim:state([layer])` / `anim:time([layer])` | what's showing / seconds in |
+| `anim:state([layer])` / `anim:time([layer])` | what's showing / seconds in (`anim:current` is an alias of `anim:state`) |
 | `anim:finished([layer])` | a one-shot reached its end |
 | `anim:isPlaying([state])` | is a state (or anything) playing |
 | `anim:clips()` / `anim:layers()` | available state / layer names |
+
+**Conditional expressions.** Lua's `and`/`or` chain is an inline if/else —
+handy for mapping states to values without an if-ladder:
+
+```lua
+local speed = anim:isPlaying("Running") and 2
+           or anim:isPlaying("Walking") and 1
+           or 0
+```
+
+The one gotcha: put the **condition first**. `a and b` yields `b` only when
+`a` is truthy, so `2 and anim:isPlaying("Running")` gives you the *boolean*,
+not the 2. (And this only picks non-false values — `cond and false or x`
+always lands on `x`.) Method names are camelCase: `anim:IsPlaying` is an
+error, and the animator will suggest the spelling it thinks you meant.
 
 **Events → functions.** Put a ⚑ event on a clip in the **✎ Animating** tab and
 name a function; when the playhead crosses it during Play, that function is

@@ -1,0 +1,13 @@
+[package]
+name = "floptle-map"
+description = "Editable polygon-mesh kernel for the in-editor map-building suite: blockout primitives, vertex/edge/face ops, extrude, per-face material slots."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+glam = { workspace = true, features = ["serde"] } # Vec3 in the .map.ron sidecar
+serde = { workspace = true } # MapMesh persists to a per-scene sidecar (maps/<scene>.map.ron)

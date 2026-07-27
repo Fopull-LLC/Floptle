@@ -25,7 +25,7 @@ pub(crate) const CENTER_RING_PX: f32 = 52.0;
 /// Trackball free-rotate sensitivity (radians per pixel).
 pub(crate) const TRACKBALL_SENS: f32 = 0.01;
 
-/// The active editing tool. Bound to number keys 1-7 (8-9 reserved).
+/// The active editing tool. Bound to number keys 1-8 (9 reserved).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Tool {
     #[default]
@@ -42,6 +42,9 @@ pub(crate) enum Tool {
     Rect,
     /// Vertex paint brush (LMB-drag paints per-vertex color onto a mesh).
     Paint,
+    /// Map-building sub-object editor: select/drag vertices, edges, faces of a
+    /// `Matter::MapMesh` node, extrude, assign per-face materials (⬢ Map tab).
+    MapEdit,
 }
 
 impl Tool {
@@ -49,7 +52,7 @@ impl Tool {
     /// `digit`, and the viewport toolbar all read it, so the toolbar can never again
     /// disagree with the number keys (it used to list Rect before Sculpt while the keys
     /// said otherwise). Add a tool here and it appears, in order, everywhere.
-    pub(crate) const ALL: [Tool; 7] = [
+    pub(crate) const ALL: [Tool; 8] = [
         Tool::Select,
         Tool::Move,
         Tool::Rotate,
@@ -57,10 +60,11 @@ impl Tool {
         Tool::Sculpt,
         Tool::Rect,
         Tool::Paint,
+        Tool::MapEdit,
     ];
 
     pub(crate) fn from_digit(n: u32) -> Option<Tool> {
-        // 8-9 reserved for future tools.
+        // 9 reserved for future tools.
         Self::ALL.get((n as usize).checked_sub(1)?).copied()
     }
 
@@ -78,6 +82,7 @@ impl Tool {
             Tool::Sculpt => "sculpt",
             Tool::Rect => "rect",
             Tool::Paint => "paint",
+            Tool::MapEdit => "map",
         }
     }
 }
@@ -222,6 +227,11 @@ pub(crate) fn build_gizmo(
     xf_override: Option<Transform>,
 ) -> Option<GizmoFrame> {
     if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint {
+        return None;
+    }
+    // The Map tool only shows a (Move-style) gizmo when a sub-object selection
+    // provides its centroid transform; bare map mode has nothing to drag.
+    if tool == Tool::MapEdit && xf_override.is_none() {
         return None;
     }
     // Either an explicit world transform — a selected armature BONE, which is not
@@ -374,7 +384,7 @@ pub(crate) fn hit_test(
         dmin
     };
     match tool {
-        Tool::Move | Tool::Scale => {
+        Tool::Move | Tool::Scale | Tool::MapEdit => {
             for (i, tip) in tips.iter().enumerate() {
                 if let Some(tip) = *tip {
                     cands.push((handle_for_axis(i), seg_dist(cursor, center, tip)));
@@ -435,7 +445,7 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
     let active = |h: Handle| grabbed == Some(h) || g.hovered == Some(h);
     let center = pt(g.center);
     match tool {
-        Tool::Move => {
+        Tool::Move | Tool::MapEdit => {
             for (i, (tip, col)) in g.tips.iter().zip(axis_col).enumerate() {
                 if let Some(tip) = *tip {
                     let on = active(handle_for_axis(i));

@@ -1148,6 +1148,14 @@ impl EditorTabViewer<'_> {
                                      raymarched into the scene field. Visual only (no collision yet).",
                                 );
                             }
+                            Matter::MapMesh { id } => {
+                                ui.label(format!("map mesh #{id}"));
+                                ui.small(
+                                    "editable blockout geometry — use the ⬢ Map tool (key 8) \
+                                     to edit faces/edges/verts, extrude, and assign per-face \
+                                     materials; the Map tab has the shape ops",
+                                );
+                            }
                             Matter::Mesh { asset_path } => {
                                 ui.label("imported mesh");
                                 // Swap the model freely — pick any model in the project.

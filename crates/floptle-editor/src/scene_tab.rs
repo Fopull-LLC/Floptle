@@ -199,6 +199,141 @@ impl EditorTabViewer<'_> {
                 });
         }
 
+        // ⬢ Map tool HUD. The Map PANEL is the control surface; this is a
+        // status strip — what the next click and the next drag will do, on one
+        // line, so it states the tool's mode without duplicating the panel or
+        // covering the scene. `⌄` opens the same chips for anyone who would
+        // rather switch from here.
+        if !game && self.tool == Tool::MapEdit && !self.map_playing {
+            let accent = egui::Color32::from_rgb(120, 220, 255);
+            egui::Area::new(egui::Id::new("map_hud"))
+                .fixed_pos(rect.left_top() + egui::vec2(8.0, 46.0))
+                .order(egui::Order::Middle)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                        let k = |c: crate::map_keys::MapCmd| self.map_keys.label(c);
+                        // One line: mode · gizmo · handles · what's armed.
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("⬢").small().weak());
+                            let cycle = |ui: &mut egui::Ui, text: &str, hover: String| {
+                                ui.add(egui::Button::new(egui::RichText::new(text).small()).frame(false))
+                                    .on_hover_text(hover)
+                                    .clicked()
+                            };
+                            if cycle(
+                                ui,
+                                self.map_mode.label(),
+                                format!("sub-object mode — click or {} to cycle", k(crate::map_keys::MapCmd::ModeCycle)),
+                            ) {
+                                self.cmd.set_map_mode = Some(self.map_mode.next());
+                            }
+                            ui.label(egui::RichText::new("·").weak().small());
+                            if cycle(
+                                ui,
+                                self.map_xform.label(),
+                                format!("what the gizmo does — click or {} to cycle", k(crate::map_keys::MapCmd::GizmoCycle)),
+                            ) {
+                                *self.map_xform = match *self.map_xform {
+                                    crate::map_edit::MapXform::Move => crate::map_edit::MapXform::Rotate,
+                                    crate::map_edit::MapXform::Rotate => crate::map_edit::MapXform::Scale,
+                                    crate::map_edit::MapXform::Scale => crate::map_edit::MapXform::Move,
+                                };
+                            }
+                            ui.label(egui::RichText::new("·").weak().small());
+                            if cycle(
+                                ui,
+                                self.map_orient.label(),
+                                format!("handle orientation — click or {} to cycle", k(crate::map_keys::MapCmd::OrientCycle)),
+                            ) {
+                                *self.map_orient = match *self.map_orient {
+                                    crate::map_edit::MapOrient::Normal => crate::map_edit::MapOrient::Local,
+                                    crate::map_edit::MapOrient::Local => crate::map_edit::MapOrient::Global,
+                                    crate::map_edit::MapOrient::Global => crate::map_edit::MapOrient::Normal,
+                                };
+                            }
+                            if let Some(shape) = self.map_arm {
+                                ui.label(egui::RichText::new("·").weak().small());
+                                ui.colored_label(
+                                    accent,
+                                    egui::RichText::new(format!(
+                                        "drawing {}",
+                                        shape.label().trim_start_matches("Map ").to_lowercase()
+                                    ))
+                                    .small(),
+                                );
+                            }
+                            ui.label(egui::RichText::new("·").weak().small());
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(if *self.map_hud_open { "⌃" } else { "⌄" })
+                                            .small(),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text(if *self.map_hud_open {
+                                    "hide the shape picker"
+                                } else {
+                                    "show the shape picker"
+                                })
+                                .clicked()
+                            {
+                                *self.map_hud_open = !*self.map_hud_open;
+                            }
+                        });
+                        if *self.map_hud_open {
+                            ui.horizontal(|ui| {
+                                for shape in crate::map_edit::MapShape::ALL {
+                                    let armed = self.map_arm == Some(shape);
+                                    let label = shape.label().trim_start_matches("Map ");
+                                    if ui
+                                        .add_sized(
+                                            [62.0, 20.0],
+                                            egui::Button::selectable(
+                                                armed,
+                                                format!("{label} {}", self.map_keys.label(shape.cmd())),
+                                            ),
+                                        )
+                                        .on_hover_text("drag out the base, then the height (Esc cancels)")
+                                        .clicked()
+                                    {
+                                        self.cmd.set_map_arm =
+                                            Some(if armed { None } else { Some(shape) });
+                                    }
+                                }
+                            });
+                        }
+                        // The context line: only what applies right now.
+                        let hint = match self.map_arm {
+                            Some(shape) => {
+                                let mut h = format!(
+                                    "drag the base, then the height  ·  {} {} turn  ·  {} flip",
+                                    k(crate::map_keys::MapCmd::TurnLeft),
+                                    k(crate::map_keys::MapCmd::TurnRight),
+                                    k(crate::map_keys::MapCmd::TurnAround),
+                                );
+                                if shape.detail(*self.map_opts).is_some() {
+                                    h.push_str(&format!(
+                                        "  ·  {} {} resolution",
+                                        k(crate::map_keys::MapCmd::ResolutionDown),
+                                        k(crate::map_keys::MapCmd::ResolutionUp)
+                                    ));
+                                }
+                                h.push_str("  ·  Esc cancel");
+                                h
+                            }
+                            None => format!(
+                                "click to select  ·  drag empty space to box-select  ·  {} extrude  ·  {} inset",
+                                k(crate::map_keys::MapCmd::Extrude),
+                                k(crate::map_keys::MapCmd::Inset),
+                            ),
+                        };
+                        ui.label(egui::RichText::new(hint).weak().small());
+                    });
+                });
+        }
+
         // Gizmos master toggle — top-right of the viewport (editor view only). Off hides
         // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
         // selected node's.
@@ -262,7 +397,7 @@ impl EditorTabViewer<'_> {
                 .ctx()
                 .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("gizmo")))
                 .with_clip_rect(rect);
-            paint_gizmo(&painter, g, self.tool, self.grabbed, self.ppp);
+            paint_gizmo(&painter, g, self.gizmo_tool, self.grabbed, self.ppp);
         }
 
         // Terrain brush telegraph: a ring at the surface + a normal line, so you can
@@ -300,6 +435,95 @@ impl EditorTabViewer<'_> {
                 let mut pts: Vec<egui::Pos2> = viz.ring.iter().map(|v| pt(*v)).collect();
                 pts.push(pts[0]); // close the loop
                 painter.line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 120, 220)));
+            }
+        }
+
+        // Map tool overlay: the target mesh's wireframe with selection/hover
+        // highlights, plus the box-select rectangle.
+        if let Some(viz) = self.map_viz.as_ref().filter(|_| !game) {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("map_edit")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let wire = egui::Color32::from_rgba_unmultiplied(160, 170, 185, 140);
+            let sel_col = egui::Color32::from_rgb(255, 200, 80);
+            for &(a, b, on) in &viz.edges {
+                let stroke = if on {
+                    egui::Stroke::new(2.5, sel_col)
+                } else {
+                    egui::Stroke::new(1.0, wire)
+                };
+                painter.line_segment([pt(a), pt(b)], stroke);
+            }
+            for ring in &viz.sel_faces {
+                let mut pts: Vec<egui::Pos2> = ring.iter().map(|v| pt(*v)).collect();
+                if let Some(&first) = pts.first() {
+                    pts.push(first);
+                }
+                painter.line(pts, egui::Stroke::new(2.5, sel_col));
+            }
+            for &(a, b) in &viz.hover {
+                painter.line_segment([pt(a), pt(b)], egui::Stroke::new(2.0, egui::Color32::WHITE));
+            }
+            if viz.show_verts {
+                for &(p, on) in &viz.verts {
+                    let (r, c) = if on { (4.0, sel_col) } else { (2.5, wire) };
+                    painter.circle_filled(pt(p), r, c);
+                }
+            }
+            // Draw-tool preview: the candidate shape's wireframe, its footprint
+            // on the build plane, the height axis, and the live size readout.
+            let ghost = egui::Color32::from_rgb(120, 220, 255);
+            for &(a, b) in &viz.preview {
+                painter.line_segment([pt(a), pt(b)], egui::Stroke::new(1.5, ghost));
+            }
+            if viz.base_ring.len() >= 3 {
+                let mut pts: Vec<egui::Pos2> = viz.base_ring.iter().map(|v| pt(*v)).collect();
+                pts.push(pts[0]);
+                painter.add(egui::Shape::convex_polygon(
+                    pts.clone(),
+                    egui::Color32::from_rgba_unmultiplied(120, 220, 255, 22),
+                    egui::Stroke::NONE,
+                ));
+                painter.line(pts, egui::Stroke::new(2.5, ghost));
+            }
+            if let Some((a, b)) = viz.height_axis {
+                painter.line_segment([pt(a), pt(b)], egui::Stroke::new(2.0, sel_col));
+            }
+            // Climb direction: an arrow from the low end to the high end.
+            if let Some((lo, hi)) = viz.arrow {
+                let (a, b) = (pt(lo), pt(hi));
+                let col = egui::Color32::from_rgb(120, 255, 170);
+                painter.line_segment([a, b], egui::Stroke::new(2.5, col));
+                crate::gizmo::arrow_head(&painter, a, b, col);
+                // Label the high end so the arrow can't be read backwards.
+                let font = egui::FontId::proportional(11.0);
+                let galley = painter.layout_no_wrap("up".into(), font, col);
+                let at = b + (b - a).normalized() * 10.0 - galley.size() * 0.5;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(at, galley.size()).expand(2.0),
+                    2.0,
+                    egui::Color32::from_black_alpha(170),
+                );
+                painter.galley(at, galley, col);
+            }
+            if let Some((at, text)) = viz.label.as_ref() {
+                let p = pt(*at) + egui::vec2(14.0, 14.0);
+                let font = egui::FontId::monospace(12.0);
+                let galley = painter.layout_no_wrap(text.clone(), font, egui::Color32::WHITE);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(p, galley.size()).expand(3.0),
+                    3.0,
+                    egui::Color32::from_black_alpha(190),
+                );
+                painter.galley(p, galley, egui::Color32::WHITE);
+            }
+            if let Some((a, b)) = viz.rect {
+                let r = egui::Rect::from_two_pos(pt(a), pt(b));
+                painter.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 200, 80, 18));
+                painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, sel_col), egui::StrokeKind::Inside);
             }
         }
 
