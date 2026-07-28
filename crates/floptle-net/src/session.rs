@@ -324,6 +324,21 @@ pub struct NetSession {
     /// Client: a `RollbackStart` received since the last drain — the cue to
     /// (re)start the local driver at tick 0.
     rollback_start_in: Option<(Vec<PeerId>, u8, u64)>,
+    /// Host: the match input log, when recording. Inputs plus the seed ARE the
+    /// replay (`crate::replay`) — and the same log is what the referee
+    /// re-simulates from.
+    record: Option<crate::replay::InputLog>,
+    /// Host: newly recorded log entries, drained by whoever is shadowing the
+    /// match (the referee). Handed out as they arrive rather than by cloning
+    /// the log, which would cost the whole match every tick.
+    record_out: Vec<crate::replay::LogEntry>,
+    /// Host: the REFEREE's checksum per confirmed tick — from a simulation that
+    /// never guessed. When one exists, peers are judged against it rather than
+    /// against each other, which is the difference between "someone is wrong"
+    /// and "peer 3 is wrong".
+    referee_hashes: HashMap<u64, u64>,
+    /// Host: `(tick, peer)` where a peer's state disagreed with the referee.
+    referee_faults: Vec<(u64, PeerId)>,
     /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
     state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
     /// Ticks a desync was detected or announced for, for the driver to surface.
@@ -411,6 +426,10 @@ impl NetSession {
             rollback_window: VecDeque::new(),
             rollback_in: Vec::new(),
             rollback_start_in: None,
+            record: None,
+            record_out: Vec::new(),
+            referee_hashes: HashMap::new(),
+            referee_faults: Vec::new(),
             state_hashes: HashMap::new(),
             desyncs_in: Vec::new(),
             events: Vec::new(),
@@ -855,6 +874,70 @@ impl NetSession {
         self.note_rollback_input(SERVER, InputCmd { tick: applied, input });
     }
 
+    /// Start recording this match (host only). Inputs are the replay file;
+    /// nothing else needs capturing, because a rollback match is a pure
+    /// function of them plus the seed.
+    pub fn start_recording(&mut self, scene: &str) {
+        if self.role != NetRole::Server {
+            return;
+        }
+        let mut log = crate::replay::InputLog::new(
+            scene,
+            self.rollback_seed,
+            self.input_delay,
+            self.rollback_slots.clone(),
+            self.input_map_hash,
+        );
+        // Everything already banked this match — the warm-up ticks land before
+        // anyone thinks to press record.
+        for (p, cmd) in &self.rollback_window {
+            log.record(*p, cmd.tick, &cmd.input);
+        }
+        self.record = Some(log);
+    }
+
+    /// Log entries recorded since the last drain — what a shadow simulation
+    /// feeds on.
+    pub fn take_log_entries(&mut self) -> Vec<crate::replay::LogEntry> {
+        std::mem::take(&mut self.record_out)
+    }
+
+    /// The referee's verdict for a confirmed tick: the state a simulation that
+    /// never guessed arrived at. Peers are judged against this once it exists.
+    pub fn set_referee_hash(&mut self, tick: u64, hash: u64) {
+        if self.role != NetRole::Server {
+            return;
+        }
+        self.referee_hashes.insert(tick, hash);
+        // Judge anything that already reported for this tick and was waiting.
+        let reported: Vec<(PeerId, u64)> =
+            self.state_hashes.get(&tick).cloned().unwrap_or_default();
+        for (p, h) in reported {
+            if h != hash {
+                self.referee_faults.push((tick, p));
+            }
+        }
+        // A long match must not accumulate one entry per checksum forever.
+        let floor = tick.saturating_sub(600);
+        self.referee_hashes.retain(|t, _| *t >= floor);
+    }
+
+    /// `(tick, peer)` pairs where a peer's reported state disagreed with the
+    /// referee's. Empty unless a referee is running.
+    pub fn take_referee_faults(&mut self) -> Vec<(u64, PeerId)> {
+        std::mem::take(&mut self.referee_faults)
+    }
+
+    /// The match log so far, if recording.
+    pub fn recording(&self) -> Option<&crate::replay::InputLog> {
+        self.record.as_ref()
+    }
+
+    /// Stop recording and take the log.
+    pub fn take_recording(&mut self) -> Option<crate::replay::InputLog> {
+        self.record.take()
+    }
+
     fn note_rollback_input(&mut self, peer: PeerId, cmd: InputCmd) {
         // The redundant window re-carries recent ticks in every packet; the
         // duplicate is free (the driver's `add_remote` ignores it) but the log
@@ -863,6 +946,18 @@ impl NetSession {
             return;
         }
         self.rollback_in.push((peer, cmd.tick, cmd.input.clone()));
+        // Recorded HERE because this is the one funnel every peer's input
+        // passes through exactly once, the host's own included — recording at
+        // the send sites instead would miss whatever path was added last.
+        if let Some(log) = self.record.as_mut()
+            && log.record(peer, cmd.tick, &cmd.input)
+        {
+            self.record_out.push(crate::replay::LogEntry {
+                tick: cmd.tick,
+                peer,
+                input: cmd.input.clone(),
+            });
+        }
         self.rollback_window.push_back((peer, cmd));
         let cap = INPUT_WINDOW * self.rollback_slots.len().max(2);
         while self.rollback_window.len() > cap {
@@ -909,6 +1004,20 @@ impl NetSession {
             return;
         }
         entry.push((peer, hash));
+        // With a referee running, a peer is judged the moment it reports —
+        // against a simulation that never guessed, not against a quorum of
+        // other players who might all be running the same modified build.
+        if let Some(&truth) = self.referee_hashes.get(&tick) {
+            if hash != truth {
+                self.referee_faults.push((tick, peer));
+                self.desyncs_in.push(tick);
+                let msg = Msg::Desync { tick }.encode();
+                for &p in &self.peers {
+                    self.transport.send(p, Channel::Reliable, &msg);
+                }
+            }
+            return;
+        }
         if entry.len() < expected {
             return;
         }

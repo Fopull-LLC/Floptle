@@ -16,6 +16,10 @@
 
 use floptle_net::{NetInput, PeerId, SERVER};
 
+/// How many ticks the referee may catch up in one frame. It is allowed to be
+/// late; it is not allowed to be why the game stutters.
+const REFEREE_CATCHUP_TICKS: u64 = 8;
+
 use crate::rollback::{Ctx, RollbackDriver};
 use crate::Editor;
 
@@ -123,6 +127,7 @@ impl Editor {
         s.set_rollback(true, delay, seed);
         let peers = s.rollback_slots().to_vec();
         self.net_rollback_start(SERVER, peers, delay, seed);
+        self.net_referee_start();
     }
 
     /// Host: the roster changed (someone joined or left). The session has
@@ -138,9 +143,195 @@ impl Editor {
         self.net_rollback_start(SERVER, peers, delay, seed);
     }
 
+    /// Host: start the referee and the match recording, if the project wants
+    /// them (`docs/rollback-netcode-design.md` §5).
+    ///
+    /// Both ride the same input log, and both are the host's job: it is the one
+    /// peer that sees every input, because it is the one fanning them out.
+    fn net_referee_start(&mut self) {
+        let Some(doc) = self.net_scene_doc.clone() else { return };
+        if !crate::shadow::scene_has_rollback(&doc) {
+            return;
+        }
+        let scene = self.scene_name.clone();
+        let Some(s) = self.net_server.as_mut() else { return };
+        s.start_recording(&scene);
+        let Some(log) = s.recording().cloned() else { return };
+        let (dir, map, step) = (
+            self.scripts_dir(),
+            self.script_host.input_system().borrow().map().clone(),
+            self.game_tick.step,
+        );
+        self.net_referee = Some(crate::shadow::ShadowSim::build(
+            &doc,
+            &dir,
+            map,
+            log,
+            floptle_net::SERVER,
+            step,
+        ));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            "⚖ referee running — a second simulation of this match at the confirmed frontier              only. It never guesses, so its result is the authoritative one, and every peer's              checksum is judged against it rather than against a quorum."
+                .into(),
+            None,
+        );
+    }
+
+    /// Host, once per tick: feed the referee whatever inputs arrived, let it
+    /// catch up, and publish its verdict for any confirmed tick it reaches.
+    fn net_referee_tick(&mut self) {
+        let Some(mut r) = self.net_referee.take() else { return };
+        if let Some(s) = self.net_server.as_mut() {
+            for e in s.take_log_entries() {
+                r.log.record(e.peer, e.tick, &e.input);
+            }
+        }
+        // Capped: a referee catching up after a hitch must not stall the frame
+        // it is catching up in. It is allowed to be late; it is not allowed to
+        // be the reason the game stutters.
+        r.advance(crate::shadow::Horizon::Confirmed, REFEREE_CATCHUP_TICKS);
+        let due = r.tick() - r.tick() % floptle_net::CHECKSUM_EVERY;
+        if due > self.net_referee_reported
+            && due > 0
+            && let Some(hash) = r.state_hash(due)
+        {
+            self.net_referee_reported = due;
+            if let Some(s) = self.net_server.as_mut() {
+                s.set_referee_hash(due, hash);
+            }
+        }
+        self.net_referee = Some(r);
+        let faults = self
+            .net_server
+            .as_mut()
+            .map(|s| s.take_referee_faults())
+            .unwrap_or_default();
+        for (tick, peer) in faults {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!(
+                    "⚖ REFEREE: peer {peer}'s state at tick {tick} disagrees with the                      authoritative simulation. Either that machine desynced, or it is not                      running the game everyone else is. The referee's result is the real one."
+                ),
+                None,
+            );
+        }
+    }
+
+    /// Write the match's input log out as a replay. Inputs and the seed ARE the
+    /// match, so this is kilobytes for a full set and playback is not playback —
+    /// it is running the match again.
+    fn net_save_replay(&mut self) {
+        let Some(log) = self.net_server.as_mut().and_then(|s| s.take_recording()) else {
+            return;
+        };
+        if log.entries.is_empty() {
+            return;
+        }
+        let dir = crate::shadow::replay_dir(&self.project_root);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("replay not saved: {e}"),
+                None,
+            );
+            return;
+        }
+        // Named by seed: it is already unique per match, it is in the file, and
+        // it does not need a clock — which is the one thing this feature is not
+        // allowed to depend on.
+        let path = dir.join(format!("match-{:016x}.floptlereplay", log.seed));
+        match std::fs::write(&path, log.to_ron()) {
+            Ok(()) => self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!(
+                    "🎞 replay saved — {} ({} inputs over {} ticks). Inputs and the seed are                      the match, so playing it back re-simulates rather than re-enacts.",
+                    path.display(),
+                    log.entries.len(),
+                    log.last_tick(),
+                ),
+                None,
+            ),
+            Err(e) => self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("replay not saved to {}: {e}", path.display()),
+                None,
+            ),
+        }
+    }
+
+    /// Play a recorded match back in a headless second world, and report
+    /// whether it reproduced. Used by the ⚖ panel button and by tests.
+    pub(crate) fn net_play_replay(&mut self, path: &std::path::Path) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("replay {}: {e}", path.display()),
+                    None,
+                );
+                return;
+            }
+        };
+        let log = match floptle_net::InputLog::from_ron(&text, self.input_map_hash()) {
+            Ok(l) => l,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("replay {}: {e}", path.display()),
+                    None,
+                );
+                return;
+            }
+        };
+        let Some(doc) = self.net_scene_doc.clone().or_else(|| {
+            self.playing.then(|| floptle_scene::to_doc("replay", &self.world))
+        }) else {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "replay: enter Play on the match's scene first — a replay is re-simulated, so                  it needs the world it was played in"
+                    .into(),
+                None,
+            );
+            return;
+        };
+        let (dir, map, step) = (
+            self.scripts_dir(),
+            self.script_host.input_system().borrow().map().clone(),
+            self.game_tick.step,
+        );
+        let ticks = log.last_tick();
+        let mut sh = crate::shadow::ShadowSim::build(
+            &doc,
+            &dir,
+            map,
+            log,
+            floptle_net::SERVER,
+            step,
+        );
+        sh.advance(crate::shadow::Horizon::WholeLog, u64::MAX);
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "🎞 replay complete — {} of {ticks} tick(s) re-simulated{}",
+                sh.tick(),
+                match sh.state_hash(sh.tick().saturating_sub(1)) {
+                    Some(h) => format!(", final checksum {h:016x}"),
+                    None => String::new(),
+                }
+            ),
+            None,
+        );
+        self.net_replay = Some(sh);
+    }
+
     /// Hand the bodies back and forget the session (Stop, `net.leave()`, the
     /// host going away).
     pub(crate) fn net_rollback_stop(&mut self) {
+        self.net_save_replay();
+        self.net_referee = None;
+        self.net_referee_reported = 0;
         let Some(mut d) = self.net_rollback.take() else { return };
         // Take back exactly the half of the filters the driver added. `net_stop`
         // clears both wholesale afterwards and would not have needed this, but a
@@ -247,6 +438,7 @@ impl Editor {
             self.console.push(floptle_script::LogLevel::Error, f, None);
         }
         self.net_rollback = Some(d);
+        self.net_referee_tick();
         self.net_rollback_report_desyncs();
     }
 

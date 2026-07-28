@@ -21,6 +21,7 @@ pub mod lagcomp;
 pub mod predict;
 pub mod quic;
 pub mod relay;
+pub mod replay;
 pub mod rollback;
 pub mod session;
 pub mod transport;
@@ -33,6 +34,7 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
+pub use replay::{InputLog, LogEntry, LogError};
 pub use rollback::{
     Correction, ResolvedInput, Rollback, DEFAULT_INPUT_DELAY, DEFAULT_MAX_DEPTH, MAX_DELAY,
 };

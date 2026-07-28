@@ -204,6 +204,23 @@ impl Rollback {
         if peer == self.local {
             return None; // our own input echoed back; we are the authority on it
         }
+        self.insert_logged(peer, applied, input)
+    }
+
+    /// Record a real input for ANY peer — the local one included — at an
+    /// already-shifted applied tick.
+    ///
+    /// What a replay and the referee do: every peer's input is already in the
+    /// log, including whoever this instance stands in for, so nothing is ever
+    /// sampled and nothing needs the delay applied to it a second time.
+    /// [`Self::add_local`] would shift it again and play the match a couple of
+    /// ticks skewed; [`Self::add_remote`] would silently ignore it.
+    pub fn insert_logged(
+        &mut self,
+        peer: PeerId,
+        applied: u64,
+        input: NetInput,
+    ) -> Option<Correction> {
         // A duplicate (the redundant window resends the last few ticks every
         // packet) must not re-trigger anything.
         if self.real.get(&(peer, applied)).is_some_and(|prev| *prev == input) {

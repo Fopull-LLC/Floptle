@@ -426,6 +426,14 @@ impl RollbackDriver {
         c
     }
 
+    /// Record a logged input for any peer, the local one included — what a
+    /// shadow simulation ([`crate::shadow`]) feeds instead of sampling.
+    pub fn feed_logged(&mut self, peer: PeerId, applied: u64, input: NetInput) {
+        if let Some(c) = self.net.insert_logged(peer, applied, input) {
+            self.pending = Some(self.pending.map_or(c.tick, |p| p.min(c.tick)));
+        }
+    }
+
     /// Advance the local simulation by one tick, resolving any banked
     /// correction first. Returns the tick simulated, or `None` when the session
     /// stalled waiting for input (§2.3).

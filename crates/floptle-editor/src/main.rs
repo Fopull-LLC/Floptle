@@ -52,6 +52,7 @@ mod input_scan;
 mod input_ui;
 mod inspector;
 mod settings_ui;
+mod shadow;
 mod lua_support;
 mod map_edit;
 mod map_ui;
@@ -174,6 +175,8 @@ struct EditorCmd {
     net_join_quic: Option<String>,
     /// Host through a rendezvous relay at this address.
     net_host_relay: Option<String>,
+    /// Re-simulate a recorded match (`docs/rollback-netcode-design.md` §5).
+    net_play_replay: Option<std::path::PathBuf>,
     /// Export the project as a runnable game build: (folder, target index —
     /// see `EXPORT_TARGETS`).
     export_game: Option<(String, usize)>,
@@ -2003,6 +2006,16 @@ struct Editor {
     /// driver behind it is just a local node, which is exactly what local versus
     /// wants.
     net_rollback: Option<rollback::RollbackDriver>,
+    /// Host: the REFEREE (`docs/rollback-netcode-design.md` §5) — a second,
+    /// headless simulation of the same match advanced only to the confirmed
+    /// frontier. It never guesses and never rolls back, so its state is the
+    /// authoritative one and every peer's checksum is judged against it.
+    net_referee: Option<shadow::ShadowSim>,
+    /// The newest tick the referee has published a verdict for.
+    net_referee_reported: u64,
+    /// The most recently played-back replay, kept so its world can be inspected
+    /// after the run (and so it isn't dropped mid-frame).
+    net_replay: Option<shadow::ShadowSim>,
     /// 🌐 panel text buffers: the LAN host port, the join address, the relay.
     net_host_port: String,
     net_join_addr: String,

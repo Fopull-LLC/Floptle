@@ -1524,6 +1524,12 @@ impl Editor {
         // is otherwise indistinguishable from a bad frame rate.
         let net_rollback =
             self.net_rollback.as_ref().map(crate::rollback_session::RollbackStats::of);
+        // (referee tick, live tick) — how far behind the authoritative sim is.
+        let referee = self
+            .net_referee
+            .as_ref()
+            .map(|r| (r.tick(), self.net_rollback.as_ref().map(|d| d.net.current()).unwrap_or(0)));
+        let replays = crate::shadow::list_replays(&self.project_root);
         // A REAL session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -1863,6 +1869,41 @@ impl Editor {
                                 ));
                             } else {
                                 ui.small("checksums: none due yet (every 30 confirmed ticks)");
+                            }
+                            if let Some(rf) = referee {
+                                ui.small(format!(
+                                    "⚖ referee at tick {} ({} behind)",
+                                    rf.0,
+                                    rf.1.saturating_sub(rf.0)
+                                ))
+                                .on_hover_text(
+                                    "a second simulation of this match on the host, advanced \
+                                     only to ticks every peer's input has actually arrived \
+                                     for. It never guesses and never rolls back, so it is \
+                                     never wrong — only behind. Every peer's checksum is \
+                                     judged against it, which is the difference between \
+                                     \"someone is out of sync\" and \"THAT machine is\".",
+                                );
+                            }
+                            ui.separator();
+                        }
+                        // Replays. A match's inputs and its seed ARE the match,
+                        // so a replay is kilobytes and playing it back is
+                        // re-simulation rather than re-enactment.
+                        if !replays.is_empty() {
+                            ui.small("🎞 replays");
+                            for (name, path) in &replays {
+                                if ui
+                                    .button(name.as_str())
+                                    .on_hover_text(
+                                        "re-simulate this match in a headless second world. \
+                                         Enter Play on its scene first — a replay is the match \
+                                         run again, so it needs the world it was played in.",
+                                    )
+                                    .clicked()
+                                {
+                                    cmd.net_play_replay = Some(path.clone());
+                                }
                             }
                             ui.separator();
                         }
@@ -4768,6 +4809,9 @@ impl Editor {
         }
         if let Some(port) = cmd.net_host_quic {
             self.net_host_quic(port);
+        }
+        if let Some(p) = cmd.net_play_replay {
+            self.net_play_replay(&p);
         }
         if let Some(addr) = cmd.net_join_quic {
             let a = addr.trim().to_string();
