@@ -1173,7 +1173,7 @@ end
             peers: vec![1],
             rtt_ms: 20.0,
             my_peer: None,
-            lobby_code: None,
+            ..Default::default()
         });
         host.run(&mut world, &dir, 0.01, 0.01);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -1232,7 +1232,7 @@ end
         // the contract here; value-level checks ride the rpc/synced paths above.)
 
         // Client-side writes to synced warn.
-        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0, my_peer: Some(7), lobby_code: None });
+        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0, my_peer: Some(7), ..Default::default() });
         host.dispatch_rpc(
             &mut world,
             "hurt",
@@ -1280,7 +1280,7 @@ end
             peers: vec![],
             rtt_ms: 0.0,
             my_peer: None,
-            lobby_code: None,
+            ..Default::default()
         });
         host.run(&mut world, &dir, 0.016, 0.016);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -1297,12 +1297,76 @@ end
             rtt_ms: 0.0,
             my_peer: None,
             lobby_code: Some("QK7RM".into()),
+            ..Default::default()
         });
         host.run(&mut world, &dir, 0.016, 0.032);
         assert_eq!(
             code(&mut host),
             "QK7RM",
             "the code must reach Lua, or a game cannot show it to the players who need it"
+        );
+    }
+
+    /// A mistyped lobby code has to reach the player as words.
+    ///
+    /// It is the most common thing that will ever go wrong in an online
+    /// session, and it used to arrive as an event indistinguishable from the
+    /// opponent closing their laptop — the relay's own explanation was
+    /// discarded one line below the pipe built to carry it.
+    #[test]
+    fn a_refused_join_reaches_the_game_with_the_relays_own_words() {
+        let dir = std::env::temp_dir().join("floptle_script_test_join_state");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "lobby",
+            "replicated = { shown = \"\" }\n\
+             function update(node, dt)\n\
+             \x20 local st, why = net.joinState()\n\
+             \x20 synced.shown = why or st\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        );
+        let mut host = ScriptHost::new();
+        let shown = |h: &mut ScriptHost| match &h.collect_synced()[0].2[0].1 {
+            floptle_net::NetValue::Str(s) => s.clone(),
+            other => panic!("expected a string, got {other:?}"),
+        };
+
+        // Offline: no join in progress, and it says so rather than "".
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(shown(&mut host), "offline");
+
+        // The join is in flight. This is the state a game used to be unable to
+        // tell apart from success, because role already reads "client" here.
+        host.set_net_state(NetState {
+            role: NetRoleState::Client,
+            join_state: "connecting",
+            ..Default::default()
+        });
+        host.run(&mut world, &dir, 0.016, 0.032);
+        assert_eq!(shown(&mut host), "connecting");
+
+        // The relay answers. The game can print this.
+        host.set_net_state(NetState {
+            role: NetRoleState::Client,
+            join_state: "refused",
+            join_error: Some("no lobby QK7RM".into()),
+            ..Default::default()
+        });
+        host.run(&mut world, &dir, 0.016, 0.048);
+        assert_eq!(
+            shown(&mut host),
+            "no lobby QK7RM",
+            "the relay's reason must reach Lua — without it a wrong code and a \
+             dropped connection are the same event"
         );
     }
 
@@ -2973,7 +3037,7 @@ end
             peers: vec![2],
             rtt_ms: 0.0,
             my_peer: None,
-            lobby_code: None,
+            ..Default::default()
         });
         host.run(&mut world, &dir, 0.016, 0.016);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -2988,7 +3052,7 @@ end
             peers: vec![],
             rtt_ms: 0.0,
             my_peer: Some(2),
-            lobby_code: None,
+            ..Default::default()
         });
         host.run(&mut world, &dir, 0.016, 0.032);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -3032,7 +3096,7 @@ end
             }]),
         );
         let mut host = ScriptHost::new();
-        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0, my_peer: None, lobby_code: None });
+        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0, my_peer: None, ..Default::default() });
         host.run(&mut world, &dir, 0.01, 0.01); // instantiate
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 

@@ -382,6 +382,16 @@ function net.peers() end
 ---@param peer integer|nil
 ---@return number
 function net.ping(peer) end
+---How a join attempt is going: \"offline\", \"connecting\", \"joined\" or
+---\"refused\". Second return is WHY, on \"refused\" — the relay's own words,
+---e.g. \"no lobby QK7RM\".
+---
+---Wait on this, not on net.role(): joining does not block, so role reads
+---\"client\" from the frame you called net.join, whether or not that code
+---matched any lobby.
+---@return string state
+---@return string|nil reason
+function net.joinState() end
 ---The lobby code friends type in to join, on a host that used
 ---`net.host{ relay = ... }`. Put it on your own lobby screen.
 ---

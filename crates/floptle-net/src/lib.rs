@@ -39,7 +39,7 @@ pub use rollback::{
     Correction, ResolvedInput, Rollback, DEFAULT_INPUT_DELAY, DEFAULT_MAX_DEPTH, MAX_DELAY,
 };
 pub use session::{
-    AnimSrcLayer, AnimStates, BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
+    AnimSrcLayer, AnimStates, BodyStates, JoinState, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
     SyncedVars,
 };
 pub use wire::{AnimEntry, AnimLayerWire, InputCmd, NetInput, CHECKSUM_EVERY, PROTO_VERSION};

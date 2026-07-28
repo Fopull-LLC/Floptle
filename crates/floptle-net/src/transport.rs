@@ -33,8 +33,32 @@ pub enum Channel {
 #[derive(Clone, Debug)]
 pub enum Incoming {
     Connected(PeerId),
-    Disconnected(PeerId),
+    /// The link to this peer ended, and why — when anyone knows why.
+    ///
+    /// The reason is what tells a mistyped lobby code apart from an opponent
+    /// closing their laptop. Every layer above this already carries one
+    /// ([`crate::NetEvent::Disconnected`] → `net.on("disconnected", fn)` →
+    /// the game's own text), so the string a relay actually sends —
+    /// "no such lobby" — used to be thrown away one line below the pipe built
+    /// to deliver it.
+    ///
+    /// `None` means the link simply ended: a timeout, a closed process, a
+    /// pulled cable. Nobody is in a position to say more, and inventing a
+    /// reason there would be worse than admitting it.
+    Disconnected(PeerId, Option<String>),
     Message(PeerId, Channel, Vec<u8>),
+}
+
+impl Incoming {
+    /// A disconnect nobody has an explanation for — the common case.
+    pub fn dropped(peer: PeerId) -> Self {
+        Self::Disconnected(peer, None)
+    }
+
+    /// A disconnect with something the player can be told.
+    pub fn refused(peer: PeerId, why: impl Into<String>) -> Self {
+        Self::Disconnected(peer, Some(why.into()))
+    }
 }
 
 /// Link quality, for lag compensation + the net-stats overlay.
@@ -140,7 +164,7 @@ impl HubState {
                 out.push(Incoming::Connected(p));
             }
             while let Some(p) = self.pending_leaves.pop_front() {
-                out.push(Incoming::Disconnected(p));
+                out.push(Incoming::dropped(p));
             }
         }
         let now = self.now;

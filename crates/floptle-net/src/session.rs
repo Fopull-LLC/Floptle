@@ -34,6 +34,23 @@ pub enum NetRole {
 
 /// Session happenings for the game layer (`net.on(...)` in Lua).
 #[derive(Clone, Debug, PartialEq)]
+pub enum JoinState {
+    /// Sent, nothing back yet. A relay round trip lives here.
+    Connecting,
+    /// In. The session is real.
+    Joined,
+    /// It will never succeed, and this is why — usually a code that matches
+    /// no lobby.
+    ///
+    /// The distinction this exists to draw: `net.join` does not block and
+    /// `net.role()` reads "client" from the frame it is called, so a game
+    /// that trusts role congratulates a player on joining a lobby that was
+    /// never there. Waiting on this separates "not yet" from "never",
+    /// which elapsed time cannot.
+    Refused(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum NetEvent {
     /// Client: the server accepted us.
     Connected,
@@ -184,6 +201,9 @@ pub struct NetSession {
     /// because no two clients are told the same thing any more.
     last_sent: HashMap<(Option<PeerId>, u64), Pose>,
     last_synced: HashMap<(Option<PeerId>, u64, String, String), NetValue>,
+    /// Client: how the join attempt is going. `net.joinState()` reads it, so a
+    /// lobby screen can say "no such lobby" instead of counting to ten.
+    join_state: JoinState,
     /// Interest management (`docs/netcode-design.md` §5.2). Off by default.
     interest: crate::interest::InterestConfig,
     /// Per-client relevant sets and priority accumulators. Empty and unused
@@ -397,6 +417,7 @@ impl NetSession {
             peers: Vec::new(),
             last_sent: HashMap::new(),
             last_synced: HashMap::new(),
+            join_state: JoinState::Connecting,
             interest: crate::interest::InterestConfig::default(),
             interest_sets: crate::interest::InterestSets::default(),
             interest_stats: HashMap::new(),
@@ -828,6 +849,15 @@ impl NetSession {
     /// Empty while interest management is off, which is the honest answer:
     /// with it off every client is told about everything, so there is no set
     /// to report and nothing being held back.
+    /// Client: how the join attempt is going.
+    ///
+    /// Worth preferring over [`Self::role`] on a lobby screen: joining does not
+    /// block, so role reads `Client` from the frame `net.join` was called,
+    /// whether or not that lobby exists.
+    pub fn join_state(&self) -> &JoinState {
+        &self.join_state
+    }
+
     pub fn interest_stats(&self) -> Vec<(PeerId, crate::interest::InterestStat)> {
         self.peers
             .iter()
@@ -1196,7 +1226,7 @@ impl NetSession {
         for inc in self.transport.poll() {
             match inc {
                 Incoming::Connected(_) => { /* wait for Hello to admit */ }
-                Incoming::Disconnected(p) => self.drop_peer(p),
+                Incoming::Disconnected(p, _) => self.drop_peer(p),
                 Incoming::Message(p, _, bytes) => {
                     let Some(msg) = Msg::decode(&bytes) else { continue };
                     self.server_message(world, p, msg, tick);
@@ -1783,9 +1813,19 @@ impl NetSession {
                     let Some(msg) = Msg::decode(&bytes) else { continue };
                     self.client_message(world, msg);
                 }
-                Incoming::Disconnected(_) => {
+                Incoming::Disconnected(_, why) => {
                     self.connected = false;
-                    self.events.push(NetEvent::Disconnected("server closed".into()));
+                    // Whatever the transport knew. "server closed" is the
+                    // honest fallback for a link that simply ended, and a poor
+                    // description of a lobby code that was never valid — which
+                    // is what every refused join used to report.
+                    self.join_state = match &why {
+                        Some(r) => JoinState::Refused(r.clone()),
+                        None => JoinState::Refused("the connection ended".into()),
+                    };
+                    self.events.push(NetEvent::Disconnected(
+                        why.unwrap_or_else(|| "server closed".into()),
+                    ));
                 }
                 Incoming::Connected(_) => {}
             }
@@ -1912,6 +1952,7 @@ impl NetSession {
         match msg {
             Msg::Welcome { peer, tick, scene, epoch, input_delay, .. } => {
                 self.connected = true;
+                self.join_state = JoinState::Joined;
                 self.my_peer = Some(peer);
                 self.welcome_tick = Some(tick);
                 self.scene_epoch = epoch;

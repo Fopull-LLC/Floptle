@@ -163,7 +163,7 @@ impl RelayServer {
                 Incoming::Connected(c) => {
                     self.conns.insert(c, Role::Fresh);
                 }
-                Incoming::Disconnected(c) => self.drop_conn(c),
+                Incoming::Disconnected(c, _) => self.drop_conn(c),
                 Incoming::Message(c, ch, bytes) => {
                     let Some(msg) = RelayMsg::decode(&bytes) else { continue };
                     self.dispatch(c, ch, msg);
@@ -338,7 +338,7 @@ impl Transport for RelayHost {
                 Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
                     Some(RelayMsg::Hosted { code }) => self.code = Some(code),
                     Some(RelayMsg::PeerJoined { peer }) => out.push(Incoming::Connected(peer)),
-                    Some(RelayMsg::PeerLeft { peer }) => out.push(Incoming::Disconnected(peer)),
+                    Some(RelayMsg::PeerLeft { peer }) => out.push(Incoming::dropped(peer)),
                     Some(RelayMsg::FromPeer { peer, channel, seq, bytes })
                         if !self.dedup.stale(peer, channel, seq) =>
                     {
@@ -346,12 +346,15 @@ impl Transport for RelayHost {
                     }
                     _ => {}
                 },
-                Incoming::Disconnected(_) => {
-                    // The relay leg died: every player is unreachable now.
+                Incoming::Disconnected(_, _) => {
+                    // The relay leg died: every player is unreachable now, and
+                    // the cause is the relay rather than any one of them —
+                    // worth saying, because "everyone left at once" is not a
+                    // conclusion a game should be left to draw on its own.
                     let peers: Vec<u64> =
                         self.dedup.last.keys().map(|(p, _)| *p).collect();
                     for p in peers {
-                        out.push(Incoming::Disconnected(p));
+                        out.push(Incoming::refused(p, "lost the connection to the relay"));
                     }
                 }
                 Incoming::Connected(_) => {}
@@ -410,9 +413,13 @@ impl Transport for RelayClient {
             match inc {
                 Incoming::Message(_, _, bytes) => match RelayMsg::decode(&bytes) {
                     Some(RelayMsg::JoinOk) => out.push(Incoming::Connected(SERVER)),
+                    // The relay told us exactly what was wrong — usually that
+                    // the code doesn't match a lobby. Carry it: mistyping the
+                    // code is the most common thing that will ever go wrong in
+                    // an online session, and it used to arrive at the game
+                    // indistinguishable from the host closing their laptop.
                     Some(RelayMsg::Refused { reason }) => {
-                        let _ = reason;
-                        out.push(Incoming::Disconnected(SERVER));
+                        out.push(Incoming::refused(SERVER, reason));
                     }
                     Some(RelayMsg::FromHost { channel, seq, bytes })
                         if !self.dedup.stale(SERVER, channel, seq) =>
@@ -421,7 +428,8 @@ impl Transport for RelayClient {
                     }
                     _ => {}
                 },
-                Incoming::Disconnected(_) => out.push(Incoming::Disconnected(SERVER)),
+                // Whatever the leg below knew, if anything.
+                Incoming::Disconnected(_, why) => out.push(Incoming::Disconnected(SERVER, why)),
                 Incoming::Connected(_) => {}
             }
         }
@@ -540,15 +548,28 @@ mod tests {
 
         // Join with a garbage code → refused (a Disconnected on the client).
         let mut nope = RelayClient::join(&addr, "XXXXX").expect("connects to the relay fine");
-        let mut refused = false;
+        // The refusal must arrive WITH the relay's reason. A disconnect that
+        // carries nothing is indistinguishable from the host closing their
+        // laptop — and mistyping the code is the most common thing that will
+        // ever go wrong in an online session, so it is the one failure a game
+        // most needs to be able to describe.
+        let mut why: Option<Option<String>> = None;
         for _ in 0..400 {
-            if nope.poll().iter().any(|i| matches!(i, Incoming::Disconnected(SERVER))) {
-                refused = true;
+            if let Some(r) = nope.poll().iter().find_map(|i| match i {
+                Incoming::Disconnected(SERVER, r) => Some(r.clone()),
+                _ => None,
+            }) {
+                why = Some(r);
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(refused, "a bad code must refuse");
+        let why = why.expect("a bad code must refuse");
+        let why = why.expect("the refusal must carry the relay's reason, not just end the link");
+        assert!(
+            why.contains("XXXXX"),
+            "the reason should name the code that failed so a game can print it — got {why:?}"
+        );
 
         // A real lobby: the host vanishing kills it for the client.
         let (host_t, code) = RelayHost::host(&addr).expect("host");
@@ -565,7 +586,7 @@ mod tests {
         drop(host_t);
         let mut dead = false;
         for _ in 0..400 {
-            if client.poll().iter().any(|i| matches!(i, Incoming::Disconnected(SERVER))) {
+            if client.poll().iter().any(|i| matches!(i, Incoming::Disconnected(SERVER, _))) {
                 dead = true;
                 break;
             }

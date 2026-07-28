@@ -1405,7 +1405,8 @@ end
 | `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards); `port` = direct UDP (QUIC); neither = the in-editor harness |
 | `net.host{ interest = 150, interestBudget = 16384 }` | **interest management** — each client is told about its own neighbourhood (metres) within a per-client byte budget, instead of everything. Absent = broadcast to everyone, which is cheaper below a few dozen players. Tick ⬦ *always relevant* on a node's Networked component to exempt it (the match clock, the objective, the boss) |
 | `net.lobbyCode()` | the five letters friends type in, on a relay host — so your own lobby screen can show them. **Poll it**: `nil` until the relay answers (a round trip after `net.host`), and `nil` for good on a client or a direct/LAN host, where there is no code and joiners use the address |
-| `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness) |
+| `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness). **Does not block** — see `net.joinState()` |
+| `net.joinState()` | `"offline"` / `"connecting"` / `"joined"` / `"refused"`, plus the reason as a second return when refused. **Wait on this, not on `net.role()`** — joining doesn't block, so role reads `"client"` from the frame you called `net.join`, whether or not that code matched any lobby |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
 | `net.peers()` / `net.ping(peer)` | connected peer ids · round-trip ms |
@@ -1494,6 +1495,27 @@ Poll it rather than reading it once: the relay has to answer first, so it is
 direct/LAN host — there is no code in either case — and it clears the moment a
 session ends or a host attempt fails, so five stale letters can never sit on
 screen looking live.
+
+**Joining does not block, and the code is usually wrong.** `net.join` returns
+immediately and `net.role()` reads `"client"` from that frame — before the relay
+has said anything. A game that trusts role congratulates a player on joining a
+lobby that was never there. Wait on `net.joinState()` instead:
+
+```lua
+function update(node, dt)
+  local state, why = net.joinState()
+  if state == "joined" then
+    scene.load("arena")
+  elseif state == "refused" then
+    find("Error").text = why          -- "no lobby QK7RM", in the relay's words
+  end
+end
+```
+
+Mistyping the code is the most common thing that will ever go wrong in an online
+session. `"refused"` is the relay actively saying no; a relay that is switched
+off entirely never answers at all, and stays `"connecting"` — so give that case a
+timeout of your own.
 
 The relay is dumb on purpose: lobbies, peer ids, forwarding — it never reads
 game state, and a session through it is byte-identical to a direct one. The

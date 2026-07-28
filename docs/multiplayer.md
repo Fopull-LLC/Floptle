@@ -275,6 +275,25 @@ end
 trip after `net.host{relay=…}` — and `nil` for good on a client or a direct/LAN
 host, where there's no code and joiners use the address.
 
+### Handling a wrong code
+
+`net.join` does not block. `net.role()` reads `"client"` from the frame you call
+it, whether or not that lobby exists — so a lobby screen that trusts role
+congratulates a player on joining nothing. Wait on `net.joinState()`:
+
+```lua
+local state, why = net.joinState()
+-- "offline" | "connecting" | "joined" | "refused"
+if state == "refused" then
+  find("Error").text = why      -- "no lobby QK7RM", in the relay's own words
+end
+```
+
+Mistyping the code is the most common failure in an online session, and it's the
+one your players will hit. Note the difference between a relay that says **no**
+(`"refused"`, with a reason) and one that is switched **off** (never answers,
+stays `"connecting"`) — the second needs a timeout of your own.
+
 ### A joiner plays with their own controls
 
 Two different things are called a "slot", and only one of them is about

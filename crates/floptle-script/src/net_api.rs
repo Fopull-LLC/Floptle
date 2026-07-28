@@ -86,13 +86,21 @@ pub struct RollbackInfo {
 
 /// Live session state fed by the editor each tick, read by `net.role()` /
 /// `net.peers()` / `net.ping()` / `net.isMine()`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct NetState {
     pub role: NetRoleState,
     pub peers: Vec<u64>,
     pub rtt_ms: f32,
     /// Client: our peer id once welcomed (`net.isMine` needs it).
     pub my_peer: Option<u64>,
+    /// Client: how the join attempt is going — `"connecting"`, `"joined"`, or
+    /// `"refused"`, with `join_error` carrying the relay's own words.
+    ///
+    /// Needed because joining does not block: `role` reads `Client` from the
+    /// frame `net.join` was called, whether or not that lobby exists.
+    pub join_state: &'static str,
+    /// Why a join was refused, when it was.
+    pub join_error: Option<String>,
     /// Host, relay sessions only: the lobby code friends type in to join.
     ///
     /// The relay hands this back when the lobby registers, which is a moment
@@ -103,6 +111,24 @@ pub struct NetState {
     /// `None` offline, on a client, and on a direct/LAN host (there is no code
     /// to show — joiners use the address).
     pub lobby_code: Option<String>,
+}
+
+impl Default for NetState {
+    fn default() -> Self {
+        Self {
+            role: NetRoleState::Offline,
+            peers: Vec::new(),
+            rtt_ms: 0.0,
+            my_peer: None,
+            // Hand-written rather than derived: `&'static str` defaults to the
+            // empty string, and a join state of "" is a third thing a game
+            // would have to know about. With no session there is no join in
+            // progress, and "offline" says exactly that.
+            join_state: "offline",
+            join_error: None,
+            lobby_code: None,
+        }
+    }
 }
 
 /// One `net.on(event, fn)` registration; owned by an `(entity, script)`
@@ -500,6 +526,21 @@ pub(crate) fn install_net_api(
         t.set(
             "isClient",
             lua.create_function(move |_, ()| Ok(n.state.borrow().role == NetRoleState::Client))?,
+        )?;
+    }
+    // net.joinState() — "offline" | "connecting" | "joined" | "refused".
+    // A lobby screen should wait on THIS rather than on net.role(): joining
+    // does not block, so role says "client" from the frame you called join,
+    // whether or not the code was real. Second return is the reason on
+    // "refused" — the relay's own words, e.g. "no lobby QK7RM".
+    {
+        let n = net.clone();
+        t.set(
+            "joinState",
+            lua.create_function(move |_, ()| {
+                let st = n.state.borrow();
+                Ok((st.join_state.to_string(), st.join_error.clone()))
+            })?,
         )?;
     }
     // net.lobbyCode() — the code friends type in, on a relay host. nil until

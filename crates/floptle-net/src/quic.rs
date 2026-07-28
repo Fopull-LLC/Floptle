@@ -235,7 +235,7 @@ impl QuicServer {
                     tokio::spawn(async move {
                         conn.closed().await;
                         peers.lock().unwrap().remove(&peer);
-                        let _ = ev.send(Incoming::Disconnected(peer));
+                        let _ = ev.send(Incoming::dropped(peer));
                     });
                 }
             });
@@ -400,12 +400,12 @@ impl QuicClient {
                 let connecting = match endpoint.connect(remote, "floptle-dev") {
                     Ok(c) => c,
                     Err(_) => {
-                        let _ = events_tx.send(Incoming::Disconnected(SERVER));
+                        let _ = events_tx.send(Incoming::dropped(SERVER));
                         return;
                     }
                 };
                 let Ok(conn) = connecting.await else {
-                    let _ = events_tx.send(Incoming::Disconnected(SERVER));
+                    let _ = events_tx.send(Incoming::dropped(SERVER));
                     return;
                 };
                 *conn_slot.lock().unwrap() = Some(conn.clone());
@@ -424,7 +424,7 @@ impl QuicClient {
                 tokio::spawn(read_datagrams(conn.clone(), SERVER, events_tx.clone()));
                 conn.closed().await;
                 *conn_slot.lock().unwrap() = None;
-                let _ = events_tx.send(Incoming::Disconnected(SERVER));
+                let _ = events_tx.send(Incoming::dropped(SERVER));
             });
         }
         Ok(Self {
@@ -612,7 +612,7 @@ mod tests {
         drop(client);
         let mut on_server = Polled::new(&mut server);
         assert_eq!(
-            on_server.wait_for(|i| matches!(i, Incoming::Disconnected(1)), 1).len(),
+            on_server.wait_for(|i| matches!(i, Incoming::Disconnected(1, _)), 1).len(),
             1,
             "server must notice the client vanish"
         );

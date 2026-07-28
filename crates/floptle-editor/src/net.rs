@@ -367,6 +367,9 @@ impl Editor {
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
+                // A host is not joining anything.
+                join_state: "joined",
+                join_error: None,
                 // The relay's answer, so a game can put the code on its own
                 // lobby screen instead of sending players to the 🌐 panel.
                 lobby_code: self.net_lobby_code.clone(),
@@ -1150,6 +1153,8 @@ impl Editor {
             peers: hs.session.peers().to_vec(),
             rtt_ms: hs.session.stats(hs.peer).rtt_ms,
             my_peer: None,
+            join_state: "joined",
+            join_error: None,
             // The hidden harness server is loopback: no relay, no code.
             lobby_code: None,
         });
@@ -1732,11 +1737,23 @@ impl Editor {
             .as_ref()
             .map(|c| (c.stats(floptle_net::SERVER).rtt_ms, c.my_peer()))
             .unwrap_or((0.0, None));
+        // The half a lobby screen actually needs: joining does not block, so
+        // role says Client from the frame net.join was called — whether or not
+        // that code matched any lobby. This is what separates "not yet" from
+        // "never", which elapsed time cannot.
+        let (join_state, join_error) = match self.net_play_client.as_ref().map(|c| c.join_state()) {
+            Some(floptle_net::JoinState::Joined) => ("joined", None),
+            Some(floptle_net::JoinState::Refused(why)) => ("refused", Some(why.clone())),
+            Some(floptle_net::JoinState::Connecting) => ("connecting", None),
+            None => ("offline", None),
+        };
         self.script_host.set_net_state(NetState {
             role: NetRoleState::Client,
             peers: Vec::new(),
             rtt_ms: rtt,
             my_peer,
+            join_state,
+            join_error,
             // A joiner already knows the code — they typed it. It is the host's
             // to publish, so this stays None rather than echoing it back.
             lobby_code: None,
