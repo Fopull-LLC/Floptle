@@ -785,7 +785,54 @@ impl Editor {
 
     /// The transport-agnostic tail of hosting a real session: the ownership
     /// convention, per-owner routing filters, the session itself.
+    /// The dev-only link-impairment knob, or `None` when `FLOPTLE_NET_IMPAIR`
+    /// is unset — which is every build nobody deliberately asked to degrade.
+    ///
+    /// Process-global because the environment is: read once, at first use. The
+    /// handle is shared with every transport opened afterwards, which is what
+    /// lets the panel retune a live session instead of restarting it.
+    pub(crate) fn net_impair() -> Option<&'static floptle_net::ImpairHandle> {
+        static KNOB: std::sync::OnceLock<Option<floptle_net::ImpairHandle>> =
+            std::sync::OnceLock::new();
+        KNOB.get_or_init(|| floptle_net::Impairment::from_env().map(floptle_net::ImpairHandle::new))
+            .as_ref()
+    }
+
+    /// Put the bad link in front of a real transport, if this build has one.
+    /// Applied at the two tails every real session funnels through, so QUIC and
+    /// the relay are covered by construction rather than by remembering.
+    fn net_impair_wrap(
+        t: Box<dyn floptle_net::Transport>,
+    ) -> Box<dyn floptle_net::Transport> {
+        match Self::net_impair() {
+            Some(k) => Box::new(floptle_net::Impaired::new(t, k.clone())),
+            None => t,
+        }
+    }
+
+    /// What the 🌐 panel says while a link is being degraded on purpose.
+    fn net_impair_note(&mut self) {
+        let Some(imp) = Self::net_impair().map(|k| k.get()) else { return };
+        if !imp.is_active() {
+            return;
+        }
+        self.console.push(
+            floptle_script::LogLevel::Warn,
+            format!(
+                "⚠ LINK IMPAIRMENT ACTIVE — {} ms one way ({} ms RTT), {:.1}% loss. This is a \
+                 dev-build rehearsal knob ({}); unset it for a real session.",
+                imp.latency_ms,
+                imp.rtt_ms(),
+                imp.loss * 100.0,
+                floptle_net::IMPAIR_ENV,
+            ),
+            None,
+        );
+    }
+
     fn net_host_with(&mut self, transport: Box<dyn floptle_net::Transport>, how: &str) {
+        let transport = Self::net_impair_wrap(transport);
+        self.net_impair_note();
         Self::net_assign_scene_owners(&mut self.world);
         // Remote-owned Predicted nodes (slots #2, #3, …): skipped in the
         // global script passes, run per-tick with their owner's replayed
@@ -875,6 +922,8 @@ impl Editor {
 
     /// The transport-agnostic tail of joining a real session.
     fn net_join_with(&mut self, transport: Box<dyn floptle_net::Transport>, what: &str) {
+        let transport = Self::net_impair_wrap(transport);
+        self.net_impair_note();
         Self::net_assign_scene_owners(&mut self.world);
         let mut client = NetSession::client(transport, self.input_map_hash());
         client.register_scene(&self.world);

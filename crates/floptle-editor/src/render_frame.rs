@@ -1866,6 +1866,55 @@ impl Editor {
                             }
                             ui.separator();
                         }
+                        // Dev-only rehearsal knob. The section only exists at
+                        // all when FLOPTLE_NET_IMPAIR was set on the command
+                        // line, so it cannot appear in front of someone who did
+                        // not ask for it — the whole point is that a real
+                        // session can never be silently degraded from the UI.
+                        if let Some(knob) = Editor::net_impair() {
+                            let mut imp = knob.get();
+                            let before = imp;
+                            let hot = imp.is_active();
+                            ui.colored_label(
+                                if hot {
+                                    egui::Color32::from_rgb(255, 170, 60)
+                                } else {
+                                    egui::Color32::GRAY
+                                },
+                                "⚠ LINK IMPAIRMENT (dev build)",
+                            )
+                            .on_hover_text(
+                                "adds latency and loss to THIS build's real transports (QUIC \
+                                 and the relay) so a rollback match can be rehearsed at match \
+                                 conditions between two instances on one desk. It is not a \
+                                 network emulator — no jitter, no reordering — and it is not \
+                                 a substitute for the two-machine acceptance run.",
+                            );
+                            let rtt = imp.rtt_ms();
+                            ui.add(
+                                egui::Slider::new(&mut imp.latency_ms, 0..=250)
+                                    .text(format!("one-way ms  (≈{rtt} ms RTT)")),
+                            );
+                            let mut loss_pct = imp.loss * 100.0;
+                            if ui
+                                .add(egui::Slider::new(&mut loss_pct, 0.0..=25.0).text("% loss"))
+                                .changed()
+                            {
+                                imp.loss = loss_pct / 100.0;
+                            }
+                            if hot && ui.button("off").clicked() {
+                                imp = floptle_net::Impairment::default();
+                            }
+                            if imp != before {
+                                knob.set(imp);
+                            }
+                            ui.small(
+                                "reliable traffic is never dropped — a real reliable channel \
+                                 retransmits, so dropping handshakes would only invent \
+                                 failures the field can't produce.",
+                            );
+                            ui.separator();
+                        }
                         if net_as_player {
                             ui.label(format!(
                                 "🎮 you are a REMOTE PLAYER · rtt {net_rtt:.0} ms"

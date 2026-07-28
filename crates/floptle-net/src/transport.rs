@@ -53,6 +53,20 @@ pub trait Transport: Send {
     fn stats(&self, peer: PeerId) -> LinkStats;
 }
 
+/// A boxed transport is a transport — what lets a wrapper such as
+/// [`Impaired`](crate::Impaired) go around an already-erased one.
+impl Transport for Box<dyn Transport> {
+    fn send(&mut self, peer: PeerId, channel: Channel, bytes: &[u8]) {
+        (**self).send(peer, channel, bytes);
+    }
+    fn poll(&mut self) -> Vec<Incoming> {
+        (**self).poll()
+    }
+    fn stats(&self, peer: PeerId) -> LinkStats {
+        (**self).stats(peer)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // MemoryHub — in-process loopback with tick-based latency/loss simulation
 // ---------------------------------------------------------------------------

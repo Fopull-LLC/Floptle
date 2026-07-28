@@ -15,6 +15,7 @@
 //! Prediction (2c), lag compensation (2d), and the QUIC transport + relay (2e)
 //! build on these seams without changing the game-facing API.
 
+pub mod impair;
 pub mod lagcomp;
 pub mod predict;
 pub mod quic;
@@ -25,6 +26,7 @@ pub mod transport;
 pub mod value;
 pub mod wire;
 
+pub use impair::{ImpairHandle, Impaired, Impairment, IMPAIR_ENV};
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
