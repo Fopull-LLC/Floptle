@@ -14,7 +14,12 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 9;
+pub const PROTO_VERSION: u16 = 10;
+
+/// Confirmed ticks between rollback state checksums (§6) — twice a second at
+/// 60 Hz. Often enough that a desync is caught within a exchange or two, rare
+/// enough that hashing the state ring is free.
+pub const CHECKSUM_EVERY: u64 = 30;
 
 /// One controller layer's playback in a snapshot, quantized for the wire:
 /// state index (`u16::MAX` = the layer is stopped/released), clip time in
@@ -153,10 +158,23 @@ pub enum Msg {
     /// personal rebinds deliberately don't affect the hash.
     Hello { proto: u16, input_map: u64 },
     /// Server → client: accepted; your peer id, the current tick, the snapshot
-    /// cadence (ticks between snapshots), and the CURRENT scene (project-root-
+    /// cadence (ticks between snapshots), the CURRENT scene (project-root-
     /// relative path + its epoch) — a late joiner lands in the scene the
-    /// session is actually in, not whatever it had open.
-    Welcome { peer: PeerId, tick: u64, snapshot_every: u8, scene: String, epoch: u8 },
+    /// session is actually in, not whatever it had open — and the session's
+    /// fixed rollback input delay.
+    ///
+    /// `input_delay` is host-set and identical on every peer, because mismatched
+    /// delay is mismatched simulation (`docs/rollback-netcode-design.md` §2.2).
+    /// It is carried even for a non-rollback session so a client never has to
+    /// ask; a session with no `Rollback` nodes simply never applies it.
+    Welcome {
+        peer: PeerId,
+        tick: u64,
+        snapshot_every: u8,
+        scene: String,
+        epoch: u8,
+        input_delay: u8,
+    },
     /// Server → client: refused (wrong proto / full).
     Refused { reason: String },
     /// Server → clients (reliable): the session switched scenes. Clients load
@@ -194,6 +212,39 @@ pub enum Msg {
     PeerLeft { peer: PeerId },
     /// Either direction: clean goodbye.
     Bye,
+    /// Server → clients: this session simulates by ROLLBACK from now, with this
+    /// peer→slot assignment (`peers[n]` plays slot `n`; the host is always slot
+    /// 0) and this fixed input delay.
+    ///
+    /// It is also the **tick origin**: receiving it starts every peer's rollback
+    /// clock at 0, so tick N means the same instant on every machine. That is
+    /// what lets the wire carry bare applied-tick numbers with no stamp
+    /// translation — and it is why v1 does not support joining a rollback match
+    /// already in progress. Spectators and late joiners need the input log plus
+    /// a keyframe, which §5 files as future work.
+    ///
+    /// Re-sent whenever the roster changes, which restarts the match clock.
+    RollbackStart { peers: Vec<PeerId>, input_delay: u8 },
+    /// Host → clients, every tick: a redundant window of EVERY peer's recent
+    /// APPLIED-tick inputs, so one lost packet costs nothing.
+    ///
+    /// The host is the arbiter and the fan-out point: peers send it their own
+    /// inputs and it echoes everyone's to everyone. That also means the host
+    /// holds the session's input log, which is what makes match replays, the
+    /// referee and (later) spectators nearly free (§5).
+    Inputs { entries: Vec<(PeerId, InputCmd)> },
+    /// Any peer → host → all: the state checksum for a confirmed tick (§6).
+    ///
+    /// Mandatory, not optional. Determinism across builds and platforms is
+    /// *expected*, not proven, and a rollback session without checksums doesn't
+    /// fail loudly — it plays a subtly different match on each screen until
+    /// someone notices the health bars disagree.
+    StateHash { tick: u64, hash: u64 },
+    /// Host → clients: the checksums for `tick` did not agree. Every peer
+    /// surfaces this loudly — Console error, red in the Hub panel, and
+    /// `net.on("desync")` so the game can end the match honestly rather than
+    /// play out two different fights.
+    Desync { tick: u64 },
     /// Server → one client, periodically: input-timing feedback. `margin` is
     /// the smoothed number of ticks of that client's input still buffered
     /// ahead when the server consumes one (negative = arriving LATE,
@@ -248,6 +299,46 @@ mod tests {
         };
         assert_eq!(Msg::decode(&m.encode()), Some(m));
         assert_eq!(Msg::decode(b"garbage\xff\xff"), None);
+    }
+
+    /// The rollback additions have to survive the wire too — and `Inputs` is the
+    /// one message a fighter sends sixty times a second, so a decode failure
+    /// there is the whole match.
+    #[test]
+    fn rollback_messages_round_trip() {
+        for m in [
+            Msg::Welcome {
+                peer: 3,
+                tick: 900,
+                snapshot_every: 2,
+                scene: "scenes/ring.ron".into(),
+                epoch: 1,
+                input_delay: 2,
+            },
+            Msg::RollbackStart { peers: vec![0, 3], input_delay: 2 },
+            Msg::Inputs {
+                entries: vec![
+                    (0, InputCmd { tick: 120, input: NetInput { actions: 0b101, ..Default::default() } }),
+                    (
+                        3,
+                        InputCmd {
+                            tick: 120,
+                            input: NetInput {
+                                actions: 0b10,
+                                just_pressed: 0b10,
+                                axes2: vec![(-1.0, 0.0)],
+                                aim: Some([0.5, -0.25]),
+                                ..Default::default()
+                            },
+                        },
+                    ),
+                ],
+            },
+            Msg::StateHash { tick: 90, hash: 0xdead_beef_cafe_f00d },
+            Msg::Desync { tick: 90 },
+        ] {
+            assert_eq!(Msg::decode(&m.encode()), Some(m.clone()), "{m:?}");
+        }
     }
 
     #[test]

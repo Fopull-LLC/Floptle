@@ -72,6 +72,7 @@ mod prefs;
 mod project;
 mod render_frame;
 mod rollback;
+mod rollback_session;
 mod rig_overrides;
 mod scene_ops;
 mod space;
@@ -1993,6 +1994,12 @@ struct Editor {
     /// Real hosting: the lag-comp history ring (the hidden harness server
     /// keeps its own inside `HiddenServer`).
     net_history: floptle_net::LagHistory,
+    /// The rollback session's driver, when the scene has `Rollback` nodes and a
+    /// session is running (`docs/rollback-netcode-design.md`). `None` offline
+    /// and in an `Authority`/`Predicted`-only session — a Rollback node with no
+    /// driver behind it is just a local node, which is exactly what local versus
+    /// wants.
+    net_rollback: Option<rollback::RollbackDriver>,
     /// 🌐 panel text buffers: the LAN host port, the join address, the relay.
     net_host_port: String,
     net_join_addr: String,

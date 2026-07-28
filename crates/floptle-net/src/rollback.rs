@@ -44,6 +44,14 @@ pub const INPUT_RING: usize = 256;
 /// the added latency costs more than the mispredicts it avoids.
 pub const MAX_DELAY: u8 = 6;
 
+/// The default input delay, ticks (~33 ms at 60 Hz).
+///
+/// Fixed per session, never auto-adjusted mid-match: adaptive delay hides bad
+/// connections but changes how the game *feels* while you are playing it, which
+/// a fighting game cannot tolerate. The measurement is exposed instead, so
+/// players choose their delay informed (§2.2).
+pub const DEFAULT_INPUT_DELAY: u8 = 2;
+
 /// The default rollback depth cap. Past roughly this many ticks the correction
 /// hitch is more visible than the latency of simply waiting, so the driver
 /// stalls instead of re-simulating (see [`Rollback::should_stall`]).
@@ -166,6 +174,24 @@ impl Rollback {
         let applied = self.applied_tick(sampled);
         self.insert_real(self.local, applied, input);
         applied
+    }
+
+    /// Seed the local peer's real inputs for the session's warm-up ticks, and
+    /// return them so the driver can ship them like any other input.
+    ///
+    /// Input sampled on tick `T` applies on `T + delay`, so ticks `1..=delay`
+    /// have no local sample behind them — nothing was pressed before the match
+    /// began. Neutral is not a guess there, it is the truth. Leaving them empty
+    /// would be: the confirmed frontier could never pass 0, and the session
+    /// would stall against the depth cap a few ticks in and never recover.
+    pub fn prime_warmup(&mut self) -> Vec<(u64, NetInput)> {
+        let mut out = Vec::new();
+        for applied in 1..=self.delay as u64 {
+            let input = NetInput::default();
+            self.insert_real(self.local, applied, input.clone());
+            out.push((applied, input));
+        }
+        out
     }
 
     /// A remote peer's input for an already-shifted APPLIED tick.
@@ -483,6 +509,28 @@ mod tests {
         assert_eq!(r.confirmed(), 0);
         r.set_peers(vec![P1]); // P2 disconnected
         assert_eq!(r.confirmed(), 1, "nobody is left to wait for");
+    }
+
+    /// Without the warm-up seed the confirmed frontier can never leave 0 —
+    /// ticks 1..=delay hold it back forever — and the session stalls against
+    /// the depth cap a few ticks into the match with nothing to wait for.
+    #[test]
+    fn the_delay_warmup_is_seeded_so_the_frontier_can_advance() {
+        let mut r = rb(2);
+        let seeded = r.prime_warmup();
+        assert_eq!(seeded.len(), 2, "delay 2 leaves ticks 1 and 2 unsampled");
+        assert_eq!(seeded[0], (1, NetInput::default()));
+        // The peer seeds and ships its own; ours arrive over the wire.
+        for (applied, input) in [(1, NetInput::default()), (2, NetInput::default())] {
+            r.add_remote(P2, applied, input);
+        }
+        assert_eq!(r.confirmed(), 2, "the frontier clears the warm-up");
+        // …and a real sample still lands where the delay puts it.
+        assert_eq!(r.add_local(1, held(9)), 3);
+        r.add_remote(P2, 3, held(9));
+        assert_eq!(r.confirmed(), 3);
+        // Delay 0 has no warm-up to seed.
+        assert!(rb(0).prime_warmup().is_empty());
     }
 
     #[test]

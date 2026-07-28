@@ -29,16 +29,18 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
-pub use rollback::{Correction, ResolvedInput, Rollback, DEFAULT_MAX_DEPTH, MAX_DELAY};
+pub use rollback::{
+    Correction, ResolvedInput, Rollback, DEFAULT_INPUT_DELAY, DEFAULT_MAX_DEPTH, MAX_DELAY,
+};
 pub use session::{
     AnimSrcLayer, AnimStates, BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
     SyncedVars,
 };
-pub use wire::{AnimEntry, AnimLayerWire, InputCmd, NetInput};
+pub use wire::{AnimEntry, AnimLayerWire, InputCmd, NetInput, CHECKSUM_EVERY, PROTO_VERSION};
 pub use transport::{
     Channel, Incoming, LinkStats, MemoryHub, MemoryTransport, PeerId, Transport, SERVER,
 };
-pub use value::{NetValue, ValueError, MAX_VALUE_BYTES, MAX_VALUE_DEPTH};
+pub use value::{Fnv, NetValue, ValueError, MAX_VALUE_BYTES, MAX_VALUE_DEPTH};
 
 #[cfg(test)]
 mod tests {
@@ -626,5 +628,126 @@ mod tests {
         });
         let nx = cw2.get::<Transform>(ce2[0]).unwrap().translation.x;
         assert!(nx > 400.0, "post-switch replication resumes in the new scene, got {nx}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rollback wire (docs/rollback-netcode-design.md §5, §6)
+    // -----------------------------------------------------------------------
+
+    fn held(actions: u64) -> NetInput {
+        NetInput { actions, ..Default::default() }
+    }
+
+    /// The fan-out: peers send the host their own applied-tick inputs and the
+    /// host echoes everyone's to everyone, so every peer can simulate every
+    /// fighter. Nothing about a hit ever crosses the wire — only inputs do.
+    #[test]
+    fn rollback_inputs_fan_out_from_the_host_to_every_peer() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+        server.set_rollback(true, 2);
+        // `RollbackStart` is the match clock's origin, so a client queues
+        // nothing until it lands — anything sampled before it belongs to a tick
+        // numbering that no longer exists.
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 2, |_, _| {});
+        let start = client.take_rollback_start();
+
+        // The host's own input goes through exactly the same path as a peer's.
+        for tick in 1..=6u64 {
+            server.push_rollback_input(tick, held(tick));
+            client.send_rollback_input(tick, held(100 + tick));
+        }
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 6, |_, _| {});
+
+        // The client learned the roster + the delay from RollbackStart…
+        let (peers, delay) = start.expect("the host must announce the match");
+        assert_eq!(peers, vec![SERVER, 1], "host is slot 0, the joiner slot 1");
+        assert_eq!(delay, 2);
+        assert_eq!(client.input_delay(), 2);
+
+        // …the host received the client's inputs…
+        let at_host = server.take_rollback_inputs();
+        for tick in 1..=6u64 {
+            assert!(
+                at_host.iter().any(|(p, t, i)| *p == 1 && *t == tick && i.actions == 100 + tick),
+                "host missing the client's tick {tick}: {at_host:?}"
+            );
+        }
+        // …and the client received the HOST's, without its own echoed back.
+        let at_client = client.take_rollback_inputs();
+        for tick in 1..=6u64 {
+            assert!(
+                at_client.iter().any(|(p, t, i)| *p == SERVER && *t == tick && i.actions == tick),
+                "client missing the host's tick {tick}: {at_client:?}"
+            );
+        }
+        assert!(
+            !at_client.iter().any(|(p, ..)| *p == 1),
+            "a peer is the authority on its own input; the echo must be dropped"
+        );
+    }
+
+    /// The redundant window is the loss strategy: an input only goes missing if
+    /// every packet carrying it drops. This is where replay-input stability
+    /// earns its keep, so it is tested at 50% loss rather than on a clean link.
+    #[test]
+    fn rollback_inputs_survive_heavy_loss_through_the_redundant_window() {
+        let hub = MemoryHub::new();
+        hub.set_conditions(2, 0.5);
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 8, |_, _| {});
+        server.set_rollback(true, 2);
+        let _ = client.take_rollback_start();
+
+        let mut seen_at_client = std::collections::HashSet::new();
+        let mut seen_at_host = std::collections::HashSet::new();
+        for tick in 1..=40u64 {
+            server.push_rollback_input(tick, held(tick));
+            client.send_rollback_input(tick, held(1000 + tick));
+            t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 1, |_, _| {});
+            seen_at_client.extend(client.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+            seen_at_host.extend(server.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+        }
+        // Let the tail drain: the last few ticks are still riding the window.
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 20, |_, _| {});
+        seen_at_client.extend(client.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+        seen_at_host.extend(server.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+        for tick in 1..=40u64 {
+            assert!(seen_at_client.contains(&tick), "client lost tick {tick} at 50% loss");
+            assert!(seen_at_host.contains(&tick), "host lost tick {tick} at 50% loss");
+        }
+    }
+
+    /// Desync detection is mandatory (§6). Agreement is silent; disagreement is
+    /// loud on every peer — the alternative is two machines playing a subtly
+    /// different match, each convinced it is right.
+    #[test]
+    fn disagreeing_state_hashes_are_reported_to_every_peer() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+        server.set_rollback(true, 2);
+        let _ = client.take_rollback_start();
+
+        // Agreement: nobody hears anything.
+        server.send_state_hash(30, 0xAAAA);
+        client.send_state_hash(30, 0xAAAA);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 4, |_, _| {});
+        assert!(server.take_desyncs().is_empty(), "matching checksums must stay quiet");
+        assert!(client.take_desyncs().is_empty());
+
+        // Disagreement: both sides are told, and told WHICH tick.
+        server.send_state_hash(60, 0xAAAA);
+        client.send_state_hash(60, 0xBBBB);
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 4, |_, _| {});
+        assert_eq!(server.take_desyncs(), vec![60], "the host detects it");
+        assert_eq!(client.take_desyncs(), vec![60], "and says so out loud");
     }
 }

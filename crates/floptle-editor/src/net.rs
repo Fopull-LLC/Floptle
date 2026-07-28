@@ -263,6 +263,10 @@ impl Editor {
             for ev in events {
                 match ev {
                     NetEvent::PeerJoined(p) => {
+                        // A new roster means a new match clock: the session has
+                        // already re-announced `RollbackStart`, so the host
+                        // restarts its own driver on the same roster.
+                        self.net_rollback_resync();
                         self.script_host.fire_net_event(&mut self.world, "playerJoined", Some(p), None)
                     }
                     NetEvent::PeerLeft(p) => {
@@ -286,6 +290,7 @@ impl Editor {
                         if cleaned {
                             self.net_apply_host_filters();
                         }
+                        self.net_rollback_resync();
                         self.script_host.fire_net_event(&mut self.world, "playerLeft", Some(p), None)
                     }
                     _ => {}
@@ -372,6 +377,7 @@ impl Editor {
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
         self.net_hub = Some(hub);
         self.net_server = Some(s);
+        self.net_rollback_host_setup();
         self.console.push(
             floptle_script::LogLevel::Debug,
             "🌐 hosting an in-editor session (join a local ghost client from the 🌐 panel)".into(),
@@ -610,6 +616,10 @@ impl Editor {
                 s.rebind_scene(&self.world);
             }
             self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
+            // The ring is indexed by node position and the new scene's fighters
+            // are different nodes — the driver rebinds and the match clock
+            // restarts, on every peer.
+            self.net_rollback_resync();
         } else {
             self.net_apply_offline_slots();
         }
@@ -713,6 +723,7 @@ impl Editor {
         s.register_scene(&self.world);
         self.net_server = Some(s);
         self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
+        self.net_rollback_host_setup();
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!(
@@ -1172,7 +1183,12 @@ impl Editor {
         // Read the tick's actions BEFORE borrowing the session mutably.
         let ni = self.current_net_input();
         let Some(cs) = self.net_play_client.as_mut() else { return };
-        cs.send_input(tick, ni.clone());
+        // A rollback session ships its own inputs, at their APPLIED tick and
+        // with no stamp offset (`net_rollback_tick`). Sending here too would put
+        // the same tick on the wire twice under two different numbering schemes.
+        if !cs.is_rollback() {
+            cs.send_input(tick, ni.clone());
+        }
         // Record this tick's prediction (post-physics state of our node).
         if let (Some((pe, pred)), Some(sim)) = (self.net_predictor.as_mut(), self.sim.as_ref())
             && let Some(bs) = sim.body_snapshot(pe.index()) {
@@ -1194,6 +1210,12 @@ impl Editor {
             }
         // Poll: snapshots interpolate others + ship the input window.
         cs.tick_client(&mut self.world);
+        // The host announced a rollback match (or re-announced it on a roster
+        // change): start our driver on the same roster, at the same tick 0.
+        // Deferred past this borrow — the restart rebinds the world.
+        let rollback_start = cs.take_rollback_start().map(|(peers, delay)| {
+            (cs.my_peer().unwrap_or(floptle_net::SERVER), peers, delay)
+        });
         // Synced vars from the server land in our scripts.
         for (e, kind, vars) in cs.take_synced() {
             self.script_host.apply_synced(e.index(), &kind, &vars);
@@ -1420,7 +1442,13 @@ impl Editor {
                                 // no ping has completed yet): let the session
                                 // keep the lead tuned from server margin
                                 // feedback instead of trusting it forever.
-                                cs.set_auto_input_lead(true);
+                                //
+                                // NOT in a rollback session: there the fixed
+                                // input delay IS the lead, and an adaptive
+                                // mechanism shifting stamps underneath it
+                                // fights the thing it is meant to help. The
+                                // margin stays as a measurement only (§0.5.1).
+                                cs.set_auto_input_lead(!cs.is_rollback());
                                 self.console.push(
                                     floptle_script::LogLevel::Debug,
                                     format!(
@@ -1493,6 +1521,9 @@ impl Editor {
                 // only honest option (staying = a frozen desynced world).
                 self.net_stop("the server switched to a scene this project doesn't have");
             }
+        }
+        if let Some((me, peers, delay)) = rollback_start {
+            self.net_rollback_start(me, peers, delay);
         }
         // Smooth the visual correction.
         if let Some((_, pred)) = self.net_predictor.as_mut() {
@@ -1606,6 +1637,7 @@ impl Editor {
         {
             return;
         }
+        self.net_rollback_stop();
         self.net_server = None;
         self.net_client = None;
         self.net_play_client = None;

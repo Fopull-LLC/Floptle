@@ -265,6 +265,34 @@ pub struct NetSession {
     anim_started: HashSet<(u64, u8)>,
     /// Animator updates due this tick, for the driver's apply step.
     anims_due: Vec<(Entity, AnimEntry)>,
+    // --- rollback (docs/rollback-netcode-design.md §5) ---
+    /// Is this session simulating by rollback? Set by the driver from the
+    /// scene's `Rollback` nodes. It changes what the host does with inputs
+    /// (fan them out to everyone, rather than consume them itself) and turns
+    /// auto input lead off, because the fixed delay replaces it.
+    rollback: bool,
+    /// The session's fixed input delay in ticks (§2.2). Host-set, carried in
+    /// `Welcome` + `RollbackStart`, identical on every peer — mismatched delay
+    /// is mismatched simulation.
+    input_delay: u8,
+    /// Peer→slot assignment, index = slot. `slots[0]` is always the host.
+    rollback_slots: Vec<PeerId>,
+    /// Every peer's recent applied-tick inputs — the redundant window the host
+    /// echoes to everyone each tick. On the host this IS the session input log,
+    /// which is what makes replays, the referee and (later) spectators nearly
+    /// free (§5).
+    rollback_window: VecDeque<(PeerId, InputCmd)>,
+    /// Applied-tick inputs received for OTHER peers — from a client on the
+    /// host, from the host's fan-out on a client. The driver drains these into
+    /// `Rollback::add_remote`.
+    rollback_in: Vec<(PeerId, u64, NetInput)>,
+    /// Client: a `RollbackStart` received since the last drain — the cue to
+    /// (re)start the local driver at tick 0.
+    rollback_start_in: Option<(Vec<PeerId>, u8)>,
+    /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
+    state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
+    /// Ticks a desync was detected or announced for, for the driver to surface.
+    desyncs_in: Vec<u64>,
     // --- both ---
     events: Vec<NetEvent>,
     rpcs_in: Vec<ReceivedRpc>,
@@ -339,6 +367,14 @@ impl NetSession {
             anim_started: HashSet::new(),
             anims_due: Vec::new(),
             client_ticks: 0,
+            rollback: false,
+            input_delay: crate::rollback::DEFAULT_INPUT_DELAY,
+            rollback_slots: Vec::new(),
+            rollback_window: VecDeque::new(),
+            rollback_in: Vec::new(),
+            rollback_start_in: None,
+            state_hashes: HashMap::new(),
+            desyncs_in: Vec::new(),
             events: Vec::new(),
             rpcs_in: Vec::new(),
             rpcs_out: Vec::new(),
@@ -673,6 +709,157 @@ impl NetSession {
         self.late_inputs
     }
 
+    // -----------------------------------------------------------------------
+    // Rollback (docs/rollback-netcode-design.md §5)
+    // -----------------------------------------------------------------------
+
+    /// Host: put this session into (or out of) rollback mode with a fixed input
+    /// delay, and announce the peer→slot roster to every client.
+    ///
+    /// Announcing is also the **tick origin**: every peer starts its rollback
+    /// clock at 0 on receiving it, so a bare applied-tick number means the same
+    /// instant everywhere and no stamp translation is needed. Calling it again
+    /// (a peer joined or left) restarts the match clock, which is why v1 does
+    /// not support joining a rollback match in progress.
+    pub fn set_rollback(&mut self, on: bool, input_delay: u8) {
+        self.rollback = on;
+        self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
+        self.rollback_window.clear();
+        self.rollback_in.clear();
+        self.state_hashes.clear();
+        if self.role != NetRole::Server {
+            return;
+        }
+        self.rollback_slots = if on {
+            std::iter::once(SERVER).chain(self.peers.iter().copied()).collect()
+        } else {
+            Vec::new()
+        };
+        if on {
+            let msg = Msg::RollbackStart {
+                peers: self.rollback_slots.clone(),
+                input_delay: self.input_delay,
+            }
+            .encode();
+            for &p in &self.peers {
+                self.transport.send(p, Channel::Reliable, &msg);
+            }
+        }
+    }
+
+    pub fn is_rollback(&self) -> bool {
+        self.rollback
+    }
+
+    /// The session's fixed input delay in ticks.
+    pub fn input_delay(&self) -> u8 {
+        self.input_delay
+    }
+
+    /// The peer→slot roster (index = slot; the host is slot 0).
+    pub fn rollback_slots(&self) -> &[PeerId] {
+        &self.rollback_slots
+    }
+
+    /// Client: this tick's local input for its APPLIED tick.
+    ///
+    /// Deliberately not [`Self::send_input`]: that stamps through
+    /// `stamp_offset`, the adaptive lead the `Predicted` path uses to keep
+    /// inputs arriving just ahead of the server. In a rollback session the
+    /// fixed delay IS the lead and the tick origin is shared, so applying an
+    /// offset on top would shift one peer's inputs relative to everyone else's
+    /// — the two mechanisms fight, and the delay loses.
+    pub fn send_rollback_input(&mut self, applied: u64, input: NetInput) {
+        self.input_window.push_back(InputCmd { tick: applied, input });
+        while self.input_window.len() > INPUT_WINDOW {
+            self.input_window.pop_front();
+        }
+    }
+
+    /// Host: record its OWN local input into the log it fans out. The host is a
+    /// player too, and its inputs reach the clients by exactly the same path as
+    /// everyone else's.
+    pub fn push_rollback_input(&mut self, applied: u64, input: NetInput) {
+        self.note_rollback_input(SERVER, InputCmd { tick: applied, input });
+    }
+
+    fn note_rollback_input(&mut self, peer: PeerId, cmd: InputCmd) {
+        // The redundant window re-carries recent ticks in every packet; the
+        // duplicate is free (the driver's `add_remote` ignores it) but the log
+        // must not grow one entry per resend.
+        if self.rollback_window.iter().any(|(p, c)| *p == peer && c.tick == cmd.tick) {
+            return;
+        }
+        self.rollback_in.push((peer, cmd.tick, cmd.input.clone()));
+        self.rollback_window.push_back((peer, cmd));
+        let cap = INPUT_WINDOW * self.rollback_slots.len().max(2);
+        while self.rollback_window.len() > cap {
+            self.rollback_window.pop_front();
+        }
+    }
+
+    /// Every peer's applied-tick inputs received since the last drain, for the
+    /// driver to feed [`crate::Rollback::add_remote`].
+    pub fn take_rollback_inputs(&mut self) -> Vec<(PeerId, u64, NetInput)> {
+        std::mem::take(&mut self.rollback_in)
+    }
+
+    /// Client: a `RollbackStart` received since the last drain — `(roster,
+    /// input delay)`. The driver (re)starts its rollback clock at 0 on it.
+    pub fn take_rollback_start(&mut self) -> Option<(Vec<PeerId>, u8)> {
+        self.rollback_start_in.take()
+    }
+
+    /// Publish this peer's state checksum for a confirmed tick (§6). On a
+    /// client it goes to the host; on the host it enters the comparison
+    /// directly.
+    pub fn send_state_hash(&mut self, tick: u64, hash: u64) {
+        match self.role {
+            NetRole::Server => self.compare_state_hash(SERVER, tick, hash),
+            NetRole::Client => {
+                let msg = Msg::StateHash { tick, hash }.encode();
+                self.transport.send(SERVER, Channel::Reliable, &msg);
+            }
+        }
+    }
+
+    /// Host: fold one peer's checksum in and, once everyone has reported for
+    /// that tick, decide.
+    ///
+    /// Loud on mismatch, by design. The alternative — carrying on — is the one
+    /// outcome the design refuses to allow: two machines playing a subtly
+    /// different match, each convinced it is right.
+    fn compare_state_hash(&mut self, peer: PeerId, tick: u64, hash: u64) {
+        let expected = self.rollback_slots.len().max(1);
+        let entry = self.state_hashes.entry(tick).or_default();
+        if entry.iter().any(|(p, _)| *p == peer) {
+            return;
+        }
+        entry.push((peer, hash));
+        if entry.len() < expected {
+            return;
+        }
+        let agreed = entry.iter().all(|(_, h)| *h == hash);
+        self.state_hashes.remove(&tick);
+        // Anything older is moot now — a peer that never reported for it never
+        // will, and holding the entries forever is a slow leak over a long set.
+        self.state_hashes.retain(|t, _| *t > tick);
+        if agreed {
+            return;
+        }
+        self.desyncs_in.push(tick);
+        let msg = Msg::Desync { tick }.encode();
+        for &p in &self.peers {
+            self.transport.send(p, Channel::Reliable, &msg);
+        }
+    }
+
+    /// Ticks a desync was detected (host) or announced (client) for, since the
+    /// last drain.
+    pub fn take_desyncs(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.desyncs_in)
+    }
+
     /// Client: authoritative states received for OUR OWN predicted node —
     /// (entity, server tick, state) — the driver's reconcile input.
     pub fn take_predicted_updates(&mut self) -> Vec<(Entity, u64, PredictedState)> {
@@ -789,6 +976,17 @@ impl NetSession {
                 }
             }
         }
+        // Rollback fan-out: every peer's recent applied-tick inputs, to every
+        // peer, every tick. Sequenced-unreliable because the window is already
+        // the redundancy — a lost packet costs nothing, and a retransmit would
+        // arrive after the tick it was needed for.
+        if self.rollback && !self.peers.is_empty() && !self.rollback_window.is_empty() {
+            let msg = Msg::Inputs { entries: self.rollback_window.iter().cloned().collect() }
+                .encode();
+            for &p in &self.peers {
+                self.transport.send(p, Channel::UnreliableSequenced, &msg);
+            }
+        }
         // Input-timing feedback, a few times a second: each peer learns how
         // much runway its inputs have (auto-lead reads this client-side).
         if !self.peers.is_empty() && tick.is_multiple_of(INPUT_ACK_EVERY) {
@@ -845,6 +1043,7 @@ impl NetSession {
                     snapshot_every: SNAPSHOT_EVERY,
                     scene: self.scene.clone(),
                     epoch: self.scene_epoch,
+                    input_delay: self.input_delay,
                 };
                 self.transport.send(from, Channel::Reliable, &welcome.encode());
                 // Tell everyone else, and tell the joiner about existing peers.
@@ -874,6 +1073,12 @@ impl NetSession {
                     // Reliable: the joiner MUST get its baseline.
                     self.transport.send(from, Channel::Reliable, &kf.encode());
                 }
+                if self.rollback {
+                    // A new player means a new roster and a new match clock —
+                    // every peer restarts at tick 0 together.
+                    let delay = self.input_delay;
+                    self.set_rollback(true, delay);
+                }
             }
             Msg::Rpc { name, args, tick: perceived, .. } => {
                 // Stamp the true sender — never trust the payload's claim. The
@@ -881,6 +1086,15 @@ impl NetSession {
                 self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived });
             }
             Msg::Input { entries } => {
+                if self.rollback {
+                    // Rollback: the host doesn't CONSUME a peer's input, it
+                    // relays it. Everyone simulates everyone, so an input is
+                    // only useful once every peer has it.
+                    for cmd in entries {
+                        self.note_rollback_input(from, cmd);
+                    }
+                    return;
+                }
                 let buf = self.peer_inputs.entry(from).or_default();
                 for cmd in entries {
                     // The window re-carries recent ticks; keep each tick once,
@@ -893,6 +1107,7 @@ impl NetSession {
                     buf.pop_front();
                 }
             }
+            Msg::StateHash { tick, hash } => self.compare_state_hash(from, tick, hash),
             Msg::Bye => self.drop_peer(from),
             _ => { /* clients don't send anything else */ }
         }
@@ -909,6 +1124,10 @@ impl NetSession {
             let left = Msg::PeerLeft { peer: p }.encode();
             for &q in &self.peers {
                 self.transport.send(q, Channel::Reliable, &left);
+            }
+            if self.rollback {
+                let delay = self.input_delay;
+                self.set_rollback(true, delay);
             }
         }
     }
@@ -1162,11 +1381,12 @@ impl NetSession {
 
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
-            Msg::Welcome { peer, tick, scene, epoch, .. } => {
+            Msg::Welcome { peer, tick, scene, epoch, input_delay, .. } => {
                 self.connected = true;
                 self.my_peer = Some(peer);
                 self.welcome_tick = Some(tick);
                 self.scene_epoch = epoch;
+                self.input_delay = input_delay;
                 if !scene.is_empty() {
                     // The session's scene: the driver compares against what it
                     // has loaded, switches if needed, and rebinds either way.
@@ -1296,6 +1516,34 @@ impl NetSession {
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
             Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer)),
+            Msg::RollbackStart { peers, input_delay } => {
+                // The host set the roster and the parameters; this is also the
+                // shared tick origin, so the driver restarts at 0 on it.
+                self.rollback = true;
+                self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
+                self.rollback_slots = peers.clone();
+                self.rollback_window.clear();
+                self.rollback_in.clear();
+                // The fixed delay replaces the adaptive lead — leaving both on
+                // has one mechanism shifting the stamps the other assumes are
+                // stable (§0.5.1).
+                self.auto_lead = false;
+                self.stamp_offset = 0;
+                self.input_window.clear();
+                self.rollback_start_in = Some((peers, self.input_delay));
+            }
+            Msg::Inputs { entries } => {
+                let me = self.my_peer;
+                for (peer, cmd) in entries {
+                    // Our own input echoed back: we are the authority on it and
+                    // already simulated with it.
+                    if Some(peer) == me {
+                        continue;
+                    }
+                    self.note_rollback_input(peer, cmd);
+                }
+            }
+            Msg::Desync { tick } => self.desyncs_in.push(tick),
             Msg::InputAck { margin, late } => self.ack = Some((margin, late)),
             Msg::Bye => {
                 self.connected = false;

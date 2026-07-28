@@ -1517,6 +1517,13 @@ impl Editor {
         // Client-side input timing, from the server's InputAck feedback —
         // the only place a JOINER can see whether its inputs run late.
         let net_input_ack = self.net_play_client.as_ref().and_then(|c| c.input_ack());
+        // Rollback health (docs/rollback-netcode-design.md §7 P6): a fighting
+        // game's connection quality is rollback depth and mispredict rate, not
+        // ping — and the stall indicator is the one readout a player NEEDS,
+        // because a stalled sim looks like the game running slightly slow and
+        // is otherwise indistinguishable from a bad frame rate.
+        let net_rollback =
+            self.net_rollback.as_ref().map(crate::rollback_session::RollbackStats::of);
         // A REAL session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -1785,6 +1792,44 @@ impl Editor {
                                  project joins over the network.",
                             );
                             return;
+                        }
+                        if let Some(rb) = net_rollback {
+                            ui.separator();
+                            if rb.stalled {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 170, 60),
+                                    "🥊 ROLLBACK · waiting for input",
+                                )
+                                .on_hover_text(
+                                    "past the depth cap the sim waits instead of guessing \
+                                     further: the game runs slightly slow rather than \
+                                     teleporting the opponent. It catches up on its own.",
+                                );
+                            } else {
+                                ui.label(format!(
+                                    "🥊 ROLLBACK · {} fighter(s) · {}-tick delay",
+                                    rb.fighters, rb.input_delay
+                                ));
+                            }
+                            ui.small(format!(
+                                "corrections {} · depth last {} / max {} / avg {:.1} · \
+                                 guessed {:.0}% of ticks · ring {} ticks / {} KB",
+                                rb.corrections,
+                                rb.last_depth,
+                                rb.max_depth_seen,
+                                rb.average_depth,
+                                rb.mispredict_rate * 100.0,
+                                rb.ring_ticks,
+                                rb.ring_bytes / 1024,
+                            ))
+                            .on_hover_text(
+                                "the delay is FIXED for the session — it never changes \
+                                 mid-match, because how the game feels must not. These \
+                                 numbers are the measurement you choose it from: a healthy \
+                                 match sits at low average depth. Checksums run every 30 \
+                                 confirmed ticks; a mismatch is reported in the Console.",
+                            );
+                            ui.separator();
                         }
                         if net_as_player {
                             ui.label(format!(
@@ -3921,7 +3966,20 @@ impl Editor {
                     // The action layer's tick domain — the one with input
                     // history, so motions and buffers advance exactly once per
                     // tick regardless of framerate. Drains the banked edges.
-                    self.resolve_tick_actions(self.game_tick.step, game_focused);
+                    //
+                    // A ROLLBACK session owns that domain instead: every peer's
+                    // input, including ours, is written into its slot at its
+                    // APPLIED tick and history advances exactly once from
+                    // there. Resolving devices here as well would advance it a
+                    // second time and halve every motion window on the local
+                    // player only (see `InputSystem::sample_tick`). The driver
+                    // also runs its fighters' hooks and steps their bodies —
+                    // the rest of this tick then runs for everything else.
+                    if self.net_rollback.is_some() {
+                        self.net_rollback_tick(game_focused);
+                    } else {
+                        self.resolve_tick_actions(self.game_tick.step, game_focused);
+                    }
                     if let Some(sim) = self.sim.as_mut() {
                         // Fresh body state for THIS tick (post previous tick's physics).
                         let mut states = HashMap::new();

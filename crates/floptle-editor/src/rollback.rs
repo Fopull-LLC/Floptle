@@ -39,12 +39,6 @@
 //! physics step ([`floptle_physics::Sim::set_driven_bodies`]) rather than
 //! stepping them one way live and another way in a replay.
 
-// Phase 3 lands the driver and its acceptance test; phase 4 is what puts a
-// session behind it and calls into here from the play loop. Until then nothing
-// in the editor constructs one, and the compiler is right to say so — remove
-// this the moment `net.rs` engages the driver.
-#![allow(dead_code)]
-
 use std::collections::{HashSet, VecDeque};
 
 use floptle_core::math::Vec3;
@@ -123,6 +117,8 @@ pub struct RollbackDriver {
     /// True while the local sim is waiting for input rather than guessing past
     /// the depth cap (§2.3). The editor shows a connection indicator on it.
     pub stalled: bool,
+    /// The newest tick a checksum has been published for (§6).
+    last_checksum: u64,
     /// Diagnostics: ticks re-simulated since the session started. Divided by
     /// `net.corrections` it is the average rollback depth a player actually
     /// felt.
@@ -145,6 +141,7 @@ impl RollbackDriver {
             ring: VecDeque::new(),
             pending: None,
             stalled: false,
+            last_checksum: 0,
             resimulated_ticks: 0,
             faults: Vec::new(),
         }
@@ -230,6 +227,91 @@ impl RollbackDriver {
     /// Which slot a peer plays in, if they are in this session.
     pub fn slot_of(&self, peer: PeerId) -> Option<u8> {
         self.slots.iter().position(|p| *p == peer).map(|i| i as u8)
+    }
+
+    /// The state checksum for a saved tick (§6): the body snapshots and script
+    /// state the driver holds for it, folded into one FNV-1a digest.
+    ///
+    /// Script state is hashed through [`floptle_net::NetValue::canonical_hash`],
+    /// which sorts table pairs first. Without that, two peers in perfect
+    /// agreement would report a desync roughly every time Lua handed them one
+    /// table's keys in a different order — an alarm that cries wolf is worse
+    /// than no alarm, because everyone learns to ignore it.
+    ///
+    /// Transforms are deliberately NOT hashed. Rotation on a fighter is derived
+    /// presentation (which way the model faces), and a checksum that fires on
+    /// divergence the simulation cannot feel is the same cried wolf.
+    pub fn state_hash(&self, tick: u64) -> Option<u64> {
+        let s = self.ring.iter().find(|s| s.tick == tick)?;
+        let mut h = floptle_net::Fnv::new();
+        h.eat(&tick.to_le_bytes());
+        for (i, node) in self.nodes.iter().enumerate() {
+            h.eat(&node.eid.to_le_bytes());
+            match s.bodies.get(i).and_then(|b| b.as_ref()) {
+                Some(b) => {
+                    h.eat(b"B");
+                    for v in [b.pos.x, b.pos.y, b.pos.z] {
+                        h.eat(&v.to_bits().to_le_bytes());
+                    }
+                    for v in [b.vel.x, b.vel.y, b.vel.z] {
+                        h.eat(&v.to_bits().to_le_bytes());
+                    }
+                    h.eat(&[b.grounded as u8]);
+                }
+                None => h.eat(b"-"),
+            }
+            if let Some(state) = s.scripts.get(i) {
+                // Sorted by kind so two peers fold the same node's scripts in
+                // the same order regardless of how the host's map iterated.
+                let mut kinds: Vec<&(String, floptle_net::NetValue)> = state.entries.iter().collect();
+                kinds.sort_by(|a, b| a.0.cmp(&b.0));
+                for (kind, v) in kinds {
+                    h.eat(kind.as_bytes());
+                    h.eat(&v.canonical_hash().to_le_bytes());
+                }
+            }
+        }
+        Some(h.0)
+    }
+
+    /// The next checksum owed, if one is (§6: every `CHECKSUM_EVERY` confirmed
+    /// ticks). Returns `(tick, hash)` once per tick and never repeats one.
+    ///
+    /// The tick is picked deterministically from the confirmed frontier — the
+    /// largest multiple of `CHECKSUM_EVERY` at or below it — so two peers
+    /// choose the same one without negotiating. If the frontier jumped past a
+    /// multiple whose state has already fallen off the ring, that round is
+    /// simply skipped: a missed checksum is a smaller problem than stalling a
+    /// match to take one.
+    pub fn due_checksum(&mut self) -> Option<(u64, u64)> {
+        let confirmed = self.net.confirmed();
+        if confirmed < floptle_net::CHECKSUM_EVERY {
+            return None;
+        }
+        let tick = confirmed - confirmed % floptle_net::CHECKSUM_EVERY;
+        if tick <= self.last_checksum {
+            return None;
+        }
+        let hash = self.state_hash(tick)?;
+        self.last_checksum = tick;
+        Some((tick, hash))
+    }
+
+    /// Restart the match: a new roster, a new delay, and tick 0 again.
+    ///
+    /// Called on `Msg::RollbackStart`, which every peer receives — that shared
+    /// moment is what gives the session a shared tick origin, and it is why v1
+    /// does not support joining a rollback match in progress.
+    pub fn restart(&mut self, local: PeerId, peers: Vec<PeerId>, delay: u8) {
+        let max_depth = self.net.max_depth;
+        self.slots = peers.clone();
+        self.net = Rollback::new(local, peers, delay);
+        self.net.max_depth = max_depth;
+        self.ring.clear();
+        self.pending = None;
+        self.stalled = false;
+        self.last_checksum = 0;
+        self.resimulated_ticks = 0;
     }
 
     /// Record the local player's sampled input. Returns the tick it will
@@ -888,6 +970,169 @@ end\n";
         d.release(&mut f.sim);
         assert_eq!(d.ring_depth(), 0);
         assert!(d.nodes().is_empty());
+    }
+
+    /// Two real peers, two real simulations, one lossy simulated link — and one
+    /// match (§7 P4).
+    ///
+    /// This is the driver and the wire together: each peer samples only its own
+    /// pad, ships it to the other through `NetSession` over a `MemoryHub` with
+    /// four ticks of one-way latency and 30% packet loss, predicts what it
+    /// hasn't heard, and rolls back when it turns out wrong. Nothing about a hit
+    /// crosses the wire — only inputs do — so if the two simulations agree at
+    /// the end, they agreed about every hit along the way.
+    ///
+    /// Packet loss is the point of running it here rather than on a clean link:
+    /// it is what makes the driver re-simulate ticks it has already re-simulated
+    /// once, which is where reusing the ORIGINAL guess for still-missing inputs
+    /// stops being a nicety.
+    #[test]
+    fn two_peers_over_a_lossy_link_simulate_the_same_match() {
+        use floptle_net::{MemoryHub, NetSession, SERVER};
+
+        let hub = MemoryHub::new();
+        hub.set_conditions(4, 0.3);
+        let mut host_net = NetSession::server(Box::new(hub.server_endpoint()), 0);
+        let mut peer_net = NetSession::client(Box::new(hub.connect()), 0);
+        // The sessions carry nothing but inputs here, so their replication
+        // worlds stay empty — which is the design's claim made literal.
+        let (hw, mut pw) = (World::default(), World::default());
+        let mut wall = 0u64;
+        let mut pump = |n: u64,
+                        wall: &mut u64,
+                        host_net: &mut NetSession,
+                        peer_net: &mut NetSession| {
+            for _ in 0..n {
+                hub.set_now(*wall);
+                host_net.tick_server(&hw, *wall);
+                peer_net.tick_client(&mut pw);
+                *wall += 1;
+            }
+        };
+        pump(4, &mut wall, &mut host_net, &mut peer_net);
+        host_net.set_rollback(true, 2);
+        pump(8, &mut wall, &mut host_net, &mut peer_net);
+        let (roster, delay) = peer_net.take_rollback_start().expect("the host announces the match");
+        assert_eq!(roster, vec![SERVER, 1]);
+
+        let mut host = Fixture::new("link_host");
+        let mut peer = Fixture::new("link_peer");
+        let mut host_d = RollbackDriver::new(SERVER, roster.clone(), delay);
+        let mut peer_d = RollbackDriver::new(1, roster, delay);
+        host_d.rebind(&host.world, &mut host.sim, &host.host);
+        peer_d.rebind(&peer.world, &mut peer.sim, &peer.host);
+        for (applied, input) in host_d.net.prime_warmup() {
+            host_net.push_rollback_input(applied, input);
+        }
+        for (applied, input) in peer_d.net.prime_warmup() {
+            peer_net.send_rollback_input(applied, input);
+        }
+
+        let script = script_of_the_match();
+        let input_for = |driver_tick: u64, host_side: bool| {
+            script
+                .iter()
+                .find(|(t, ..)| *t == driver_tick)
+                .map(|(_, p1, p2)| if host_side { p1.clone() } else { p2.clone() })
+                .unwrap_or_else(|| held(0))
+        };
+        let target = script.len() as u64;
+        // Generous wall time: latency and loss both cost the peers ticks, and a
+        // stall is a legitimate outcome of either.
+        for _ in 0..(target * 4) {
+            for (peer_side, driver) in [(false, &mut host_d), (true, &mut peer_d)] {
+                let sampled = driver.net.current() + 1;
+                if sampled > target {
+                    continue;
+                }
+                let ni = input_for(sampled, !peer_side);
+                let applied = driver.add_local(sampled, ni.clone());
+                if peer_side {
+                    peer_net.send_rollback_input(applied, ni);
+                } else {
+                    host_net.push_rollback_input(applied, ni);
+                }
+            }
+            hub.set_now(wall);
+            host_net.tick_server(&hw, wall);
+            peer_net.tick_client(&mut pw);
+            wall += 1;
+            for (peer_side, driver) in [(false, &mut host_d), (true, &mut peer_d)] {
+                let incoming = if peer_side {
+                    peer_net.take_rollback_inputs()
+                } else {
+                    host_net.take_rollback_inputs()
+                };
+                let local = driver.net.local();
+                for (p, applied, input) in incoming {
+                    if p != local {
+                        driver.add_remote(p, applied, input);
+                    }
+                }
+            }
+            if host_d.net.current() < target {
+                host_d.advance(&mut host.ctx());
+            }
+            if peer_d.net.current() < target {
+                peer_d.advance(&mut peer.ctx());
+            }
+            if host_d.net.current() >= target && peer_d.net.current() >= target {
+                break;
+            }
+        }
+        assert_eq!(host_d.net.current(), target, "the host never finished the match");
+        assert_eq!(peer_d.net.current(), target, "the peer never finished the match");
+        assert!(
+            host_d.net.corrections > 0 || peer_d.net.corrections > 0,
+            "a lossy 4-tick link must have produced at least one mispredict"
+        );
+        assert_eq!(
+            host.fingerprint(&host_d),
+            peer.fingerprint(&peer_d),
+            "two peers fed the same inputs must have simulated the same match"
+        );
+        assert!(host_d.faults.is_empty(), "host faults: {:?}", host_d.faults);
+        assert!(peer_d.faults.is_empty(), "peer faults: {:?}", peer_d.faults);
+        assert!(host.host.errors().is_empty(), "host script errors: {:?}", host.host.errors());
+    }
+
+    /// The checksum both peers publish (§6) must agree when the simulations do,
+    /// and disagree the moment they don't. A checksum that can't tell the
+    /// difference is decoration on the one mechanism that has to be trustworthy.
+    #[test]
+    fn the_state_checksum_agrees_between_peers_and_catches_a_divergence() {
+        let script = script_of_the_match();
+        let run = |tag: &str, tamper: bool| -> (u64, u64) {
+            let mut f = Fixture::new(tag);
+            let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+            d.rebind(&f.world, &mut f.sim, &f.host);
+            let mut last = 0;
+            for tick in 1..=40u64 {
+                let (p1, p2) = script
+                    .iter()
+                    .find(|(t, ..)| *t == tick)
+                    .map(|(_, a, b)| (a.clone(), b.clone()))
+                    .unwrap_or((held(0), held(0)));
+                // One nudge, on one machine, on one tick — the shape a real
+                // desync takes.
+                let p2 = if tamper && tick == 12 { held(RIGHT) } else { p2 };
+                d.add_local(tick, p1);
+                d.add_remote(P2, tick, p2);
+                d.advance(&mut f.ctx());
+                if let Some((t, h)) = d.due_checksum() {
+                    last = h;
+                    assert_eq!(t, 30, "the checksum tick is derived, not negotiated");
+                }
+            }
+            (last, d.net.confirmed())
+        };
+        let (clean, confirmed) = run("hash_a", false);
+        let (same, _) = run("hash_b", false);
+        let (drifted, _) = run("hash_c", true);
+        assert!(confirmed >= floptle_net::CHECKSUM_EVERY, "a checksum must have come due");
+        assert_ne!(clean, 0);
+        assert_eq!(clean, same, "two agreeing runs must publish the same checksum");
+        assert_ne!(clean, drifted, "one tick of divergence must change it");
     }
 
     /// A `Rollback` node whose scripts define neither hook is almost always a
