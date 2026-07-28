@@ -1404,6 +1404,7 @@ end
 |---|---|
 | `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards); `port` = direct UDP (QUIC); neither = the in-editor harness |
 | `net.host{ interest = 150, interestBudget = 16384 }` | **interest management** — each client is told about its own neighbourhood (metres) within a per-client byte budget, instead of everything. Absent = broadcast to everyone, which is cheaper below a few dozen players. Tick ⬦ *always relevant* on a node's Networked component to exempt it (the match clock, the objective, the boss) |
+| `net.lobbyCode()` | the five letters friends type in, on a relay host — so your own lobby screen can show them. **Poll it**: `nil` until the relay answers (a round trip after `net.host`), and `nil` for good on a client or a direct/LAN host, where there is no code and joiners use the address |
 | `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness) |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
@@ -1478,6 +1479,21 @@ binary, default port 7788 — or use a managed one), then:
   → you get a five-letter **lobby code**.
 - **Friends:** 🌐 → Join with `relay://relay.host:7788/CODE`
   (or `net.join("relay://…/CODE")`).
+
+Show the code on your own lobby screen rather than sending players to the 🌐
+panel — `net.lobbyCode()` returns it:
+
+```lua
+function update(node, dt)
+  find("CodeLabel").text = net.lobbyCode() or "getting a code…"
+end
+```
+
+Poll it rather than reading it once: the relay has to answer first, so it is
+`nil` for a round trip after `net.host`. It stays `nil` on a client and on a
+direct/LAN host — there is no code in either case — and it clears the moment a
+session ends or a host attempt fails, so five stale letters can never sit on
+screen looking live.
 
 The relay is dumb on purpose: lobbies, peer ids, forwarding — it never reads
 game state, and a session through it is byte-identical to a direct one. The

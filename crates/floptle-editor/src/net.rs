@@ -792,6 +792,11 @@ impl Editor {
         if self.net_server.is_some() || self.net_play_client.is_some() {
             return;
         }
+        // Drop any previous code BEFORE trying, so a failed host can never
+        // leave the last session's code on screen looking live. A player would
+        // read those five letters out and their friend would get "no such
+        // lobby" — with the game insisting it is hosting.
+        self.net_lobby_code = None;
         let (transport, code) = match floptle_net::RelayHost::host(relay_addr) {
             Ok(t) => t,
             Err(e) => {
@@ -1832,6 +1837,10 @@ impl Editor {
         // whole-world step, and leaving one behind would freeze the fighters
         // with nothing left to advance them.
         self.net_rollback_stop();
+        // Ahead of the early-out: a code with no session behind it is the one
+        // state that must never survive a stop, and this path is reached with
+        // no session precisely when something went wrong on the way up.
+        self.net_lobby_code = None;
         if self.net_server.is_none() && self.net_client.is_none() && self.net_play_client.is_none()
         {
             return;
