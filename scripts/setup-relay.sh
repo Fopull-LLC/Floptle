@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Build and install floptle-relay as a service on a fresh Oracle Cloud
-# (Ubuntu 22.04/24.04, ARM or x86) instance. Run as a normal sudo user:
+# Build and install floptle-relay as a service on a fresh cloud instance.
+# Works on Ubuntu (apt) and Oracle Linux / RHEL / Fedora (dnf), ARM or x86 —
+# which matters because Oracle's image and shape pickers filter each other,
+# and the shape that actually has free capacity often dictates the distro you
+# end up on. Run as a normal sudo user:
 #
 #     bash setup-relay.sh https://github.com/Fopull-LLC/Floptle.git
 #
@@ -12,9 +15,41 @@ PORT="${PORT:-7788}"
 REPO="${1:-}"
 SRC="$HOME/floptle"
 
-echo "==> packages"
-sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential pkg-config git curl
+# Which package manager and firewall this box uses. Everything below branches
+# on this once, rather than assuming a distro that capacity limits may have
+# chosen for us.
+if command -v apt-get >/dev/null; then
+  PKG=apt
+elif command -v dnf >/dev/null; then
+  PKG=dnf
+else
+  echo "unsupported distro: need apt-get or dnf" >&2
+  exit 1
+fi
+echo "==> packages ($PKG)"
+case "$PKG" in
+  apt)
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq build-essential pkg-config git curl
+    ;;
+  dnf)
+    sudo dnf install -y -q gcc make pkgconf-pkg-config git curl
+    ;;
+esac
+
+# A relay needs ~1 GB to link. Oracle's always-free x86 shape has exactly 1 GB
+# and no swap, so cargo gets OOM-killed most of the way through the build —
+# which looks like a mysterious "signal: 9" rather than anything about memory.
+TOTAL_MB=$(free -m | awk '/^Mem:/{print $2}')
+SWAP_MB=$(free -m | awk '/^Swap:/{print $2}')
+if [ "$TOTAL_MB" -lt 2048 ] && [ "$SWAP_MB" -lt 1024 ] && [ ! -f /swapfile ]; then
+  echo "==> only ${TOTAL_MB}MB RAM and no swap — adding 2G so the build survives"
+  sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+  sudo chmod 600 /swapfile
+  sudo mkswap -q /swapfile
+  sudo swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
 
 echo "==> rust"
 if ! command -v cargo >/dev/null; then
@@ -38,13 +73,25 @@ cargo build --release -p floptle-relay --manifest-path "$SRC/Cargo.toml"
 sudo install -m755 "$SRC/target/release/floptle-relay" /usr/local/bin/floptle-relay
 
 echo "==> firewall"
-# Oracle's Ubuntu images ship a REJECT-everything iptables policy that survives
-# opening the port in the console. Both have to be done; this is the half that
-# gets forgotten, and the symptom is a lobby code that nobody can ever join.
-sudo iptables -I INPUT 1 -p udp --dport "$PORT" -j ACCEPT
-sudo netfilter-persistent save 2>/dev/null || {
-  sudo apt-get install -y -qq iptables-persistent && sudo netfilter-persistent save
-}
+# Oracle's images ship a REJECT-everything host firewall that survives opening
+# the port in the web console. BOTH have to be done; this is the half that gets
+# forgotten, and the symptom is a lobby code nobody can ever join.
+if command -v firewall-cmd >/dev/null && sudo firewall-cmd --state >/dev/null 2>&1; then
+  sudo firewall-cmd --permanent --add-port="${PORT}/udp"
+  sudo firewall-cmd --reload
+else
+  sudo iptables -I INPUT 1 -p udp --dport "$PORT" -j ACCEPT
+  # Persist across reboot, however this distro spells it.
+  if command -v netfilter-persistent >/dev/null; then
+    sudo netfilter-persistent save
+  elif [ "$PKG" = apt ]; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent \
+      && sudo netfilter-persistent save
+  else
+    sudo dnf install -y -q iptables-services 2>/dev/null \
+      && sudo service iptables save 2>/dev/null || true
+  fi
+fi
 
 echo "==> service"
 sudo tee /etc/systemd/system/floptle-relay.service >/dev/null <<UNIT
@@ -93,4 +140,5 @@ cat <<DONE
       Source 0.0.0.0/0 · IP Protocol UDP · Destination port ${PORT}
 
   Logs:   sudo journalctl -u floptle-relay -f
+  Check:  sudo ss -ulnp | grep ${PORT}
 DONE
