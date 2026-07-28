@@ -2417,6 +2417,10 @@ const LUA_SNIPPETS: &[(&str, &[(&str, &str)])] = &[
                 "\nreplicated = { open = false }\n\nonRpc = {}\nfunction onRpc.use(args, sender)\n  if net.isServer() then synced.open = not synced.open end\nend\n\nfunction update(node, dt)\n  local target = synced.open and 1.6 or 0.0\n  node.y = node.y + (target - node.y) * math.min(1, dt * 6)\nend\n",
             ),
             (
+                "rollback fighter (snapshot / restore)",
+                "\n-- For a node whose Networked component is in mode \"Rollback (all peers)\".\n-- Every peer runs this script every tick from the shared input set, and\n-- re-runs it when a guessed input turns out wrong. That only works if the\n-- engine can put your script back exactly as it was.\n\nlocal state, frame, health = \"idle\", 0, 100\n\n-- Return EVERYTHING this script owns. Anything you leave out survives a\n-- rewind unchanged, which is what a desync is made of. Transforms and\n-- physics bodies are saved for you — don't list them.\nfunction snapshot()\n  return { state = state, frame = frame, health = health }\nend\n\nfunction restore(s)\n  state, frame, health = s.state, s.frame, s.health\nend\n\nfunction fixedUpdate(node, dt)\n  frame = frame + 1\n  -- ACTIONS, not raw keys: the wire carries actions, so input.pressed(\"j\")\n  -- reads neutral on a rollback-driven node. Bind these in Settings ▸ Input.\n  if state == \"idle\" and input.justPressed(\"Attack\") then\n    state, frame = \"startup\", 0\n  elseif state == \"startup\" and frame >= 4 then\n    state, frame = \"active\", 0\n  elseif state == \"active\" and frame >= 3 then\n    state = \"idle\"\n  end\n\n  -- tickPos, never node.x: node.x is the interpolated RENDER pose, and a\n  -- hurtbox built from it lags the body it belongs to.\n  local move = input.axis1(\"MoveX\") * 6.0 * dt\n  node.tickPos = node.tickPos + vec3(move, 0, 0)\n\n  -- Deterministic randomness only — rng() reads the clock, and two peers\n  -- drawing different numbers is a match that quietly forks in two.\n  if state == \"active\" and net.random() < 0.1 then\n    health = health - 1\n  end\nend\n",
+            ),
+            (
                 "lag-compensated swing (net.rewind)",
                 "\n-- client: fire the intent stamped with the tick you were SEEING\nfunction update(node, dt)\n  if net.isClient() and input.clicked(0) then\n    local yaw = input.aimYaw() or node.yaw\n    net.rpc(\"swing\", { dx = math.sin(yaw), dz = math.cos(yaw) }, { withInput = true })\n  end\nend\n\n-- server: judge it against the world as that player perceived it\nonRpc = {}\nfunction onRpc.swing(args, peer)\n  if not net.isServer() then return end\n  net.rewind(peer, function()\n    local hit = raycast(node.x, node.y, node.z, args.dx, 0, args.dz, 3.0)\n    if hit and hit.node then\n      local combat = hit.node:getscript(\"combat\")\n      if combat and combat.synced.parrying then\n        net.rpc(\"parried\", {}, { to = peer })\n      else\n        log(\"hit \" .. hit.node.name)\n      end\n    end\n  end)\nend\n",
             ),
@@ -2483,6 +2487,8 @@ pub(crate) const LUA_API_WORDS: &[&str] = &[
     "onTriggerEnter", "onTriggerStay", "onTriggerExit",
     "assets", "gizmo",
     "net", "synced", "replicated", "onRpc", "audio", "terrain", "rng", "save",
+    // Rollback: the two hooks a Rollback node's scripts must implement.
+    "snapshot", "restore",
     "after", "every", "tween", "space", "camera",
 ];
 
@@ -2524,7 +2530,7 @@ fn api_category(label: &str) -> &'static str {
     } else if label.starts_with("input") {
         "input — keyboard & mouse"
     } else if label.starts_with("net")
-        || matches!(label, "synced" | "replicated" | "onRpc")
+        || matches!(label, "synced" | "replicated" | "onRpc" | "snapshot" | "restore")
     {
         "networking — net.*, synced"
     } else if label.starts_with("save.") {
@@ -2569,7 +2575,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "defaults", insert: "defaults", doc: "defaults = { name = value } — tunables shown in the Inspector." },
     ApiEntry { label: "input.aimYaw", insert: "input.aimYaw()", doc: "The ACTIVE camera's world yaw (radians), captured with the input snapshot — use it for camera-relative movement (in multiplayer it rides the input command, so server + prediction replay see exactly your view angle). nil without an active camera." },
     ApiEntry { label: "input.aimPitch", insert: "input.aimPitch()", doc: "The active camera's world pitch (radians), captured with the input snapshot." },
-    ApiEntry { label: "net.host", insert: "net.host{}", doc: "net.host{ maxPlayers = 16, port = 7777, relay = \"addr\" } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards); port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness." },
+    ApiEntry { label: "net.host", insert: "net.host{}", doc: "net.host{ maxPlayers = 16, port = 7777, relay = \"addr\", interest = 150, interestBudget = 16384 } — become the authoritative host. relay = a rendezvous relay address (you get a LOBBY CODE, nobody port-forwards); port = direct UDP (QUIC) for LAN; neither = the in-editor loopback harness. interest = metres: each client hears about its own neighbourhood instead of the whole world (leave it off below a few dozen players — broadcasting is cheaper); interestBudget = bytes/sec of entity updates per client." },
     ApiEntry { label: "net.join", insert: "net.join(\"local://\")", doc: "net.join(addr) — join a session: \"relay://relayaddr/CODE\" = a lobby code through a relay (no port-forwarding), \"quic://host:port\" = a server directly, \"local://\" = the in-editor test harness." },
     ApiEntry { label: "net.leave", insert: "net.leave()", doc: "net.leave() — end the session." },
     ApiEntry { label: "net.role", insert: "net.role()", doc: "net.role() — \"offline\" | \"server\" | \"client\"." },
@@ -2583,6 +2589,17 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "net.spawn", insert: "net.spawn(\"scenes/thing.ron\", { x = 0, y = 0, z = 0 })", doc: "SERVER ONLY: net.spawn(path, {x,y,z,owner}) — spawn a scene's first node as a replicated runtime object on every client (available next tick)." },
     ApiEntry { label: "net.despawn", insert: "net.despawn(node)", doc: "SERVER ONLY: net.despawn(node) — remove a replicated runtime object everywhere." },
     ApiEntry { label: "net.isMine", insert: "net.isMine(node)", doc: "net.isMine(node) — is this node under MY control on this machine? Offline/non-networked → true; server → true unless a remote peer owns it; client → only your own predicted node(s). Cameras/HUDs use it to pick the local player out of many avatars (pair with findScripts)." },
+    // ---- rollback netcode (a Networked node in mode "Rollback (all peers)") ----
+    ApiEntry { label: "snapshot", insert: "function snapshot()\n  return { }\nend", doc: "function snapshot() — REQUIRED on a rollback node's scripts. Return a flat table of every gameplay value this script owns (state, frame counters, health, stun). The engine calls it each tick and restores it when a correction arrives. ANYTHING you leave out is a value that survives a rewind unchanged — which is exactly what a desync is made of. Transforms and physics bodies are saved for you; do NOT put them in here." },
+    ApiEntry { label: "restore", insert: "function restore(s)\n  \nend", doc: "function restore(s) — the other half of snapshot(): put the table back. Called before the engine re-simulates a tick it already ran. Restore every key snapshot() returned, and nothing else." },
+    ApiEntry { label: "net.random", insert: "net.random()", doc: "net.random(a?, b?) — deterministic RNG for a rollback match, drawn from (match seed, tick, draw index): every peer rolls the same number AND a re-simulated tick rolls it again. Use this instead of rng() in anything a rollback node reads — an unseeded roll comes from the clock, and two peers drawing differently is a match that quietly forks in two. No args → [0,1); one → integer 1..a; two → a..b." },
+    ApiEntry { label: "net.replaying", insert: "net.replaying()", doc: "net.replaying() — true while the engine is RE-SIMULATING ticks it already ran after a correction. For cosmetics the engine can't gate for you (a screen shake, a UI poke). NEVER branch simulation on it: a replayed tick that computes something different from the live one is the definition of a desync." },
+    ApiEntry { label: "net.stalled", insert: "net.stalled()", doc: "net.stalled() — true while the sim is waiting for a peer's input rather than guessing past the depth cap. The game runs slightly slow instead of teleporting the opponent. Drive your own \"connection trouble\" banner off this — a stall is otherwise indistinguishable from a bad frame rate." },
+    ApiEntry { label: "net.inputDelay", insert: "net.inputDelay()", doc: "net.inputDelay() — the session's FIXED input delay in ticks. Never changes mid-match, because how the game feels must not." },
+    ApiEntry { label: "net.rollbackDepth", insert: "net.rollbackDepth()", doc: "net.rollbackDepth() — ticks re-simulated by the most recent correction." },
+    ApiEntry { label: "net.rollbackMax", insert: "net.rollbackMax()", doc: "net.rollbackMax() — the deepest rollback this session has had to perform: its worst moment." },
+    ApiEntry { label: "net.rollbackAverage", insert: "net.rollbackAverage()", doc: "net.rollbackAverage() — mean ticks re-simulated per correction. The texture of the connection, where rollbackMax is only its worst moment. A healthy match sits low." },
+    ApiEntry { label: "net.mispredictRate", insert: "net.mispredictRate()", doc: "net.mispredictRate() — 0..1, the fraction of simulated ticks that had to guess a peer's input. Rises with latency; what the input delay is chosen against." },
     ApiEntry { label: "replicated", insert: "replicated = {  }", doc: "replicated = { hp = 100 } — declare synced script vars (top level). Read/write them as synced.hp; the server's writes replicate to every client." },
     ApiEntry { label: "synced", insert: "synced", doc: "The synced-vars table (declared via replicated = {...}). Server writes replicate; client writes warn and get overwritten." },
     ApiEntry { label: "onRpc", insert: "onRpc = {}\nfunction onRpc.name(args, sender)\n  \nend", doc: "onRpc.<name>(args, sender) — handles net.rpc(\"name\", args). sender is the verified peer id (0 = server)." },
@@ -2701,6 +2718,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:addTag", insert: "node:addTag(", doc: "node:addTag(\"burning\") — add a tag at runtime (duplicates are ignored). findTagged sees it next frame." },
     ApiEntry { label: "node:removeTag", insert: "node:removeTag(", doc: "node:removeTag(\"burning\") — remove a tag (no-op when absent)." },
     ApiEntry { label: "node.pos", insert: "node.pos", doc: "The node's position as a vec3 (read/write): node.pos = node.pos + dir * dt. Accepts anything with x/y/z." },
+    ApiEntry { label: "node.tickPos", insert: "node.tickPos", doc: "The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not." },
+    ApiEntry { label: "node.tickYaw", insert: "node.tickYaw", doc: "The body's tick-domain yaw (read/write) — node.yaw's simulation-truth counterpart, for facing a fighter inside fixedUpdate." },
     ApiEntry { label: "vec3", insert: "vec3(", doc: "vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length(), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle." },
     ApiEntry { label: "vec2", insert: "vec2(", doc: "vec2(x, y) — a 2-vector value (UI/screen math), same operators and methods as vec3 (minus cross)." },
     ApiEntry { label: "distance", insert: "distance(", doc: "distance(a, b) — distance between two points: vec3/vec2 values, {x=,y=,z=} tables, or NODE handles (distance(node, target) just works). Also distance(x1,y1,z1, x2,y2,z2) for raw numbers." },
@@ -3281,6 +3300,34 @@ pulsate.lua, float.lua — open one for a working start.",
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The in-engine IDE and the VSCode stub library must describe the same
+    /// engine.
+    ///
+    /// They are written in two different places and nothing connected them, so
+    /// they drifted: the whole rollback surface — `net.random`, `net.stalled`,
+    /// the depth counters — shipped in the stub library and reached the
+    /// in-engine autocomplete not at all. A developer scripting inside Floptle
+    /// could not discover the feature they had just switched on in the
+    /// Inspector.
+    #[test]
+    fn every_net_function_in_the_stub_library_is_also_in_the_engines_own_autocomplete() {
+        // `function net.foo(` in the annotations → the name the IDE must know.
+        let stub: Vec<String> = crate::lua_support::LUA_ANNOTATIONS
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("function net."))
+            .filter_map(|rest| rest.split('(').next())
+            .map(|n| format!("net.{n}"))
+            .collect();
+        assert!(stub.len() > 10, "the stub library should define a lot of net.* — found {stub:?}");
+        let known: std::collections::HashSet<&str> = LUA_API.iter().map(|e| e.label).collect();
+        let missing: Vec<&String> = stub.iter().filter(|n| !known.contains(n.as_str())).collect();
+        assert!(
+            missing.is_empty(),
+            "these exist for VSCode but not for the editor's own script editor, so they are \
+             undiscoverable in the engine that ships them: {missing:?}"
+        );
+    }
 
     #[test]
     fn find_ranges_case_modes() {

@@ -182,18 +182,36 @@ pub(crate) fn input_section(
 
     // ---- players -------------------------------------------------------
     ui.add_space(12.0);
-    crate::settings_ui::row(ui, "Local players", Some("split-screen / same-couch versus"), |ui| {
-        let mut n = map.players.max(1);
-        if ui.add(egui::DragValue::new(&mut n).range(1..=4u8)).changed() {
-            edits.commands.push(InputCmd::SetPlayers(n));
-            edits.save = true;
-        }
-        if n > 1 {
-            ui.label(
-                egui::RichText::new("read with input.player(n) — 1-based").weak().small(),
-            );
-        }
-    });
+    crate::settings_ui::row(
+        ui,
+        "Local players",
+        // Rollback needs this raised too, which is not obvious: a rollback
+        // match gives every fighter its own input slot whether the players are
+        // on one couch or two continents apart. Left at 1, the second fighter
+        // has nowhere to read input from and stands still all match — so say so
+        // here rather than only in the fault it eventually raises.
+        Some("split-screen / same-couch versus — and one slot per fighter in a rollback match"),
+        |ui| {
+            let mut n = map.players.max(1);
+            if ui
+                .add(egui::DragValue::new(&mut n).range(1..=4u8))
+                .on_hover_text(
+                    "how many input slots exist. Raise it for split-screen, AND for a \
+                     rollback (fighting-game) scene: every Rollback node reads its own slot, \
+                     so two fighters need two slots even when the opponent is remote.",
+                )
+                .changed()
+            {
+                edits.commands.push(InputCmd::SetPlayers(n));
+                edits.save = true;
+            }
+            if n > 1 {
+                ui.label(
+                    egui::RichText::new("read with input.player(n) — 1-based").weak().small(),
+                );
+            }
+        },
+    );
 
     live_tester(ui, map, test, pad_names);
     edits

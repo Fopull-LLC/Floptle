@@ -1,8 +1,7 @@
 # Floptle documentation
 
 Start here. Floptle is a lightweight, hyperoptimized Rust game engine for surreal,
-otherworldly visuals (Fopull LLC). This repo is currently **planning + scaffold** —
-the design is written before the engine is built.
+otherworldly visuals (Fopull LLC).
 
 ## Using the engine (start here to build something)
 
@@ -13,6 +12,10 @@ the design is written before the engine is built.
   Scripting ▸ § Docs page.)
 - [physics.md](physics.md) — **rigidbodies, gravity, colliders, raycasting** and how the
   play loop runs.
+- [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
+  together**: which replication mode to pick, prediction, rollback for fighting games,
+  testing on one desk, and shipping (relay, dedicated server, interest management).
+- [export-builds.md](export-builds.md) — **shipping a build** players can run.
 
 ## Design docs (how it's built and why)
 

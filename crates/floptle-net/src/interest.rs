@@ -74,6 +74,29 @@ impl InterestConfig {
     }
 }
 
+/// What one client's last snapshot actually cost, for the 🌐 panel.
+///
+/// Interest management is the one netcode feature whose whole job is to *not*
+/// send things, which makes it invisible from the outside: a project that
+/// turns it on and sets the radius too tight gets a world where distant
+/// objects quietly stop moving, and nothing anywhere says why. These counters
+/// are what let a developer see the trade they are making — how much of the
+/// world each client is being told about, and whether the budget is the thing
+/// holding the rest back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InterestStat {
+    /// Entities this client is allowed to hear about at all.
+    pub relevant: usize,
+    /// Entities whose state actually went out in the last snapshot.
+    pub sent: usize,
+    /// Wanted a turn and didn't get one — the budget was spent. Non-zero is
+    /// not a fault (they accrue priority and go next), but a number that never
+    /// comes back down means the budget is too small for the scene.
+    pub deferred: usize,
+    /// Bytes of entity entries in the last snapshot.
+    pub bytes: usize,
+}
+
 /// One candidate entity, as the accumulator sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate {

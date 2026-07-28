@@ -74,6 +74,51 @@ The dialog's **Target** picker chooses the build's platform:
    port-forwarding anywhere).
 4. On the others: F1 → enter the code (or the address) → join.
 
+## Hosting on a server instead of a player's machine
+
+Peer-hosting is the default and needs nothing beyond the above. It has two
+limits that only matter for some games: the world ends when the host closes
+their laptop, and the host is also a player, with an unfair zero-latency view
+of the simulation everyone else sees over the wire.
+
+The **dedicated server** removes both. It is the same `World`, the same
+physics, the same scripts and the same session the editor hosts — minus the
+window, the GPU, the audio and the input, because nobody is sitting at it:
+
+```
+floptle-runtime --server <project-dir> [--scene scenes/arena.ron]
+                [--port 7777 | --relay host:port] [--tick 60]
+                [--interest 150] [--budget 16384]
+```
+
+| Flag | Meaning |
+|---|---|
+| `--scene` | the scene to host; defaults to the project's entry scene |
+| `--port` | listen for direct QUIC connections on this UDP port |
+| `--relay` | register a lobby on a relay instead, so nobody port-forwards |
+| `--tick` | simulation rate in Hz (default 60) |
+| `--interest` | turn on interest management with this radius in metres |
+| `--budget` | per-client snapshot budget in bytes/sec (with `--interest`) |
+
+It ships the project directory as-is — copy the same folder you'd export, and
+keep it on the same engine version as the clients (the wire protocol refuses
+mismatches at connect).
+
+Two things it deliberately will not do. It **refuses a `Rollback` scene**: a
+rollback match has every peer simulating every tick, so its "host" is a referee
+and a relay rather than a simulation, and for a fighting game that role is one
+of the players. And it does no interpolation, audio or VFX — a server that spent
+time on any of it would be spending it on nothing.
+
+Started from a terminal it prints a peer-count heartbeat every 30 seconds and
+stops on Enter. Started by a service manager or a container — anywhere stdin
+isn't a TTY — the Enter watcher isn't installed at all, so it runs until the
+process is signalled. Shutdown is not graceful: clients see the connection drop
+rather than a goodbye, which is the right trade for v1 but worth knowing before
+you restart a live world.
+
+See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
+
 ## v1 limits (deliberate)
 
 - The binary is the full editor in disguise (~the same size); the slim

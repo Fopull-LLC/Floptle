@@ -172,7 +172,9 @@ impl Editor {
         ));
         self.console.push(
             floptle_script::LogLevel::Debug,
-            "⚖ referee running — a second simulation of this match at the confirmed frontier              only. It never guesses, so its result is the authoritative one, and every peer's              checksum is judged against it rather than against a quorum."
+            "⚖ referee running — a second simulation of this match, at the confirmed \
+             frontier only. It never guesses, so its result is the authoritative one, and \
+             every peer's checksum is judged against it rather than against a quorum."
                 .into(),
             None,
         );
@@ -211,7 +213,9 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!(
-                    "⚖ REFEREE: peer {peer}'s state at tick {tick} disagrees with the                      authoritative simulation. Either that machine desynced, or it is not                      running the game everyone else is. The referee's result is the real one."
+                    "⚖ REFEREE: peer {peer}'s state at tick {tick} disagrees with the \
+                     authoritative simulation. Either that machine desynced, or it is not \
+                     running the game everyone else is. The referee's result is the real one."
                 ),
                 None,
             );
@@ -245,7 +249,8 @@ impl Editor {
             Ok(()) => self.console.push(
                 floptle_script::LogLevel::Debug,
                 format!(
-                    "🎞 replay saved — {} ({} inputs over {} ticks). Inputs and the seed are                      the match, so playing it back re-simulates rather than re-enacts.",
+                    "🎞 replay saved — {} ({} inputs over {} ticks). Inputs and the seed are \
+                     the match, so playing it back re-simulates rather than re-enacts.",
                     path.display(),
                     log.entries.len(),
                     log.last_tick(),
@@ -290,7 +295,8 @@ impl Editor {
         }) else {
             self.console.push(
                 floptle_script::LogLevel::Warn,
-                "replay: enter Play on the match's scene first — a replay is re-simulated, so                  it needs the world it was played in"
+                "replay: enter Play on the match's scene first — a replay is re-simulated, \
+                 so it needs the world it was played in"
                     .into(),
                 None,
             );
@@ -544,5 +550,61 @@ impl RollbackStats {
             checksum_tick: d.last_checksum(),
             desynced: d.desynced,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Player-facing sentences must not carry a flattened line continuation.
+    ///
+    /// A multi-line string in Rust keeps the newline AND the source indentation
+    /// unless the line ends in `\`. Drop the backslash — or re-wrap a string
+    /// that had one — and the message still compiles, still reads correctly in
+    /// the source, and reaches the Console with a twenty-space hole punched
+    /// through the middle of a sentence. Nothing in the toolchain says a word:
+    /// not the compiler, not clippy, not a test that only checks behaviour.
+    ///
+    /// Four of these shipped in the referee and replay messages, which are the
+    /// first thing a developer sees when they use either feature. This is the
+    /// check that would have caught them.
+    #[test]
+    fn console_messages_have_no_flattened_continuations() {
+        let files = [
+            ("rollback_session.rs", include_str!("rollback_session.rs")),
+            ("rollback.rs", include_str!("rollback.rs")),
+            ("shadow.rs", include_str!("shadow.rs")),
+            ("net.rs", include_str!("net.rs")),
+        ];
+        let mut bad = Vec::new();
+        for (name, src) in files {
+            for (n, line) in src.lines().enumerate() {
+                if !line.contains('"') {
+                    continue;
+                }
+                // A run of spaces sitting mid-sentence: text, a gap wider than
+                // any real one, then more text. Leading indentation is skipped
+                // (it starts the line), so only interior gaps can match.
+                let b = line.as_bytes();
+                for i in 0..b.len() {
+                    let run = b[i..].iter().take_while(|c| **c == b' ').count();
+                    if run < 4 || i == 0 {
+                        continue;
+                    }
+                    let before = b[i - 1];
+                    let after = b.get(i + run).copied().unwrap_or(b' ');
+                    if (before.is_ascii_alphanumeric() || b",.;".contains(&before))
+                        && after.is_ascii_alphabetic()
+                    {
+                        bad.push(format!("{name}:{}", n + 1));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these lines put a run of spaces inside a sentence — a string continuation lost \
+             its trailing `\\`, and the gap reaches the player's Console: {bad:?}"
+        );
     }
 }

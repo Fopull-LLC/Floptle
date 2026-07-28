@@ -1540,6 +1540,15 @@ impl Editor {
             .as_ref()
             .map(|r| (r.tick(), self.net_rollback.as_ref().map(|d| d.net.current()).unwrap_or(0)));
         let replays = crate::shadow::list_replays(&self.project_root);
+        // Interest management is the one feature whose job is to NOT send
+        // things, so with no readout it is indistinguishable from a bug: set
+        // the radius too tight and distant objects quietly stop moving, with
+        // nothing anywhere saying why. `None` when it's off, which is a
+        // different statement from "on, and culling nothing".
+        let net_interest = self.net_server.as_ref().and_then(|s| {
+            let cfg = s.interest();
+            cfg.enabled.then(|| (cfg, s.interest_stats()))
+        });
         // A REAL session (QUIC) has no hub: the link is the actual network, so
         // the simulated latency/loss sliders and ghost worlds don't apply.
         let net_is_real = (self.net_server.is_some() || self.net_play_client.is_some())
@@ -1837,6 +1846,55 @@ impl Editor {
                                  transport only sees its own leg — it would report host↔relay \
                                  and call it the player's ping.",
                             );
+                        }
+                        // ---- interest management, when the host turned it on ----
+                        if let Some((cfg, stats)) = &net_interest {
+                            ui.separator();
+                            ui.label(format!(
+                                "👁 interest · {:.0} m radius · {} KB/s per client",
+                                cfg.radius,
+                                cfg.budget_bytes_per_sec / 1024
+                            ))
+                            .on_hover_text(
+                                "each client is told about its own neighbourhood instead of the \
+                                 whole world. Nothing is dropped for good — what doesn't fit \
+                                 the budget accrues priority and goes in a later snapshot.",
+                            );
+                            if stats.is_empty() {
+                                ui.small("no clients yet — nothing to build a relevant set from");
+                            }
+                            for (peer, st) in stats {
+                                let line = format!(
+                                    "peer {peer}: {} of {} sent · {} B{}",
+                                    st.sent,
+                                    st.relevant,
+                                    st.bytes,
+                                    if st.deferred > 0 {
+                                        format!(" · {} waiting", st.deferred)
+                                    } else {
+                                        String::new()
+                                    }
+                                );
+                                // A backlog that never clears is the one shape
+                                // worth colouring: it means the budget cannot
+                                // keep up with the scene, and distant things
+                                // will visibly lag rather than merely update
+                                // less often.
+                                if st.deferred > st.sent && st.sent > 0 {
+                                    ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                                        .on_hover_text(
+                                            "more entities are waiting for a turn than got one. \
+                                             They are not lost — they accrue priority — but if \
+                                             this stays high, raise interestBudget or lower the \
+                                             radius.",
+                                        );
+                                } else {
+                                    ui.small(line).on_hover_text(
+                                        "relevant = what this client may hear about at all; \
+                                         sent = what fit in the last snapshot's budget.",
+                                    );
+                                }
+                            }
                         }
                         if let Some(rb) = net_rollback {
                             ui.separator();

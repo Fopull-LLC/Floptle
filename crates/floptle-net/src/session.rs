@@ -189,6 +189,9 @@ pub struct NetSession {
     /// Per-client relevant sets and priority accumulators. Empty and unused
     /// while `interest.enabled` is false.
     interest_sets: crate::interest::InterestSets,
+    /// What the last snapshot cost each client — read by the 🌐 panel so the
+    /// feature is visible while it runs. Also empty while interest is off.
+    interest_stats: HashMap<PeerId, crate::interest::InterestStat>,
     /// Current synced values, refreshed by the driver each tick (diffed here).
     synced_now: SyncedVars,
     /// Runtime spawns alive right now, for late-joiner catch-up.
@@ -396,6 +399,7 @@ impl NetSession {
             last_synced: HashMap::new(),
             interest: crate::interest::InterestConfig::default(),
             interest_sets: crate::interest::InterestSets::default(),
+            interest_stats: HashMap::new(),
             synced_now: Vec::new(),
             spawned_docs: HashMap::new(),
             snap_count: 0,
@@ -807,6 +811,7 @@ impl NetSession {
         }
         self.interest = cfg;
         self.interest_sets.clear();
+        self.interest_stats.clear();
         self.last_sent.clear();
         self.last_synced.clear();
         self.last_anim.clear();
@@ -816,6 +821,18 @@ impl NetSession {
     /// The interest settings in force.
     pub fn interest(&self) -> crate::interest::InterestConfig {
         self.interest
+    }
+
+    /// What the last snapshot cost each connected client, in join order.
+    ///
+    /// Empty while interest management is off, which is the honest answer:
+    /// with it off every client is told about everything, so there is no set
+    /// to report and nothing being held back.
+    pub fn interest_stats(&self) -> Vec<(PeerId, crate::interest::InterestStat)> {
+        self.peers
+            .iter()
+            .filter_map(|p| self.interest_stats.get(p).map(|s| (*p, *s)))
+            .collect()
     }
 
     pub fn set_rollback(&mut self, on: bool, input_delay: u8, seed: u64) {
@@ -1350,6 +1367,22 @@ impl NetSession {
             }
 
             let chosen = self.interest_sets.get_mut(peer).choose(&candidates, radius, budget);
+            // What this client's snapshot cost, before the entries are built —
+            // `candidates` is everything that wanted a turn, `chosen` is what
+            // got one, and the difference is the budget doing its job.
+            self.interest_stats.insert(
+                peer,
+                crate::interest::InterestStat {
+                    relevant: relevant.len(),
+                    sent: chosen.len(),
+                    deferred: candidates.len().saturating_sub(chosen.len()),
+                    bytes: candidates
+                        .iter()
+                        .filter(|c| chosen.contains(&c.id))
+                        .map(|c| c.cost)
+                        .sum(),
+                },
+            );
             let mut entries = Vec::new();
             for id in &chosen {
                 let Some(r) = all.iter().find(|r| r.id == *id) else { continue };
@@ -1538,6 +1571,7 @@ impl NetSession {
             self.peer_margin.remove(&p);
             self.peer_late.remove(&p);
             self.interest_sets.drop_peer(p);
+            self.interest_stats.remove(&p);
             self.peer_rtt.remove(&p);
             self.pings_out.retain(|(_, q), _| *q != p);
             self.last_sent.retain(|(a, _), _| *a != Some(p));

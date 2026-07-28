@@ -29,7 +29,7 @@ pub mod value;
 pub mod wire;
 
 pub use impair::{ImpairHandle, Impaired, Impairment, IMPAIR_ENV};
-pub use interest::{Candidate, InterestConfig, InterestSets, PeerInterest};
+pub use interest::{Candidate, InterestConfig, InterestSets, InterestStat, PeerInterest};
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
@@ -823,6 +823,52 @@ mod tests {
             far_z.abs() < 1e-9,
             "500 m away is outside a 150 m radius — it must not have cost this client a \
              single byte, but it moved to z={far_z}"
+        );
+    }
+
+    /// The counters the 🌐 panel reads have to describe the same world the
+    /// snapshots do, or they are worse than no readout at all: a developer
+    /// tuning a radius against a lying number tunes it the wrong way.
+    #[test]
+    fn the_panel_readout_matches_what_actually_went_out() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_interest(interested());
+        let (mut sw, se) = interest_world();
+        let (mut cw, _) = interest_world();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 90, |w, t| {
+            for e in [se[1], se[2]] {
+                if let Some(tr) = w.get_mut::<Transform>(e) {
+                    tr.translation.z = t as f64 * 0.1;
+                }
+            }
+        });
+
+        let stats = server.interest_stats();
+        assert_eq!(stats.len(), 1, "one client connected, one row expected");
+        let (peer, st) = stats[0];
+        assert_eq!(peer, 1);
+        assert_eq!(
+            st.relevant, 2,
+            "the avatar and its 20 m neighbour are relevant; the node 500 m away is not — \
+             the readout must agree with the culling that actually happened"
+        );
+        assert!(st.sent > 0 && st.sent <= st.relevant, "sent={} relevant={}", st.sent, st.relevant);
+        assert!(st.bytes > 0, "entries were sent, so they cost something");
+        assert_eq!(
+            st.deferred, 0,
+            "two entities cannot exhaust a 16 KB/s budget — a non-zero deferred count here \
+             would mean the number is measuring something other than the budget"
+        );
+
+        // Off is the honest empty answer rather than a stale one.
+        server.set_interest(InterestConfig::default());
+        assert!(
+            server.interest_stats().is_empty(),
+            "with interest off every client hears everything, so there is no set to report"
         );
     }
 
