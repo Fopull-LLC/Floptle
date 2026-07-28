@@ -405,6 +405,10 @@ pub struct NetSession {
     referee_hashes: HashMap<u64, u64>,
     /// Host: `(tick, peer)` where a peer's state disagreed with the referee.
     referee_faults: Vec<(u64, PeerId)>,
+    /// Ticks where the referee disagreed with EVERY peer while the peers agreed
+    /// with each other — the referee is the one that is wrong, and the match
+    /// must not be killed for it.
+    referee_outliers: Vec<u64>,
     /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
     state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
     /// Ticks a desync was detected or announced for, for the driver to surface.
@@ -503,6 +507,7 @@ impl NetSession {
             record_out: Vec::new(),
             referee_hashes: HashMap::new(),
             referee_faults: Vec::new(),
+            referee_outliers: Vec::new(),
             state_hashes: HashMap::new(),
             desyncs_in: Vec::new(),
             events: Vec::new(),
@@ -1048,14 +1053,10 @@ impl NetSession {
             return;
         }
         self.referee_hashes.insert(tick, hash);
-        // Judge anything that already reported for this tick and was waiting.
-        let reported: Vec<(PeerId, u64)> =
-            self.state_hashes.get(&tick).cloned().unwrap_or_default();
-        for (p, h) in reported {
-            if h != hash {
-                self.referee_faults.push((tick, p));
-            }
-        }
+        // Judge anything that already reported for this tick and was waiting —
+        // through the same rule, so a verdict does not depend on whether the
+        // referee or the players got there first.
+        self.judge_against_referee(tick);
         // A long match must not accumulate one entry per checksum forever.
         let floor = tick.saturating_sub(600);
         self.referee_hashes.retain(|t, _| *t >= floor);
@@ -1065,6 +1066,56 @@ impl NetSession {
     /// referee's. Empty unless a referee is running.
     pub fn take_referee_faults(&mut self) -> Vec<(u64, PeerId)> {
         std::mem::take(&mut self.referee_faults)
+    }
+
+    /// Ticks where the REFEREE disagreed with every peer while the peers agreed
+    /// with each other — i.e. the referee is the one that is wrong.
+    pub fn take_referee_outliers(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.referee_outliers)
+    }
+
+    /// The referee's verdict on one tick, once every peer has reported.
+    ///
+    /// Deliberately not decided on first arrival. **The referee can be wrong
+    /// too, and when it is, it is wrong about everybody at once** — a cheat
+    /// changes one machine, an engine or content fault in the referee changes
+    /// only the referee. So "every peer disagrees with the referee, and they all
+    /// agree with each other" is overwhelmingly the second case, and answering
+    /// it by desyncing the whole match is the worst available response.
+    ///
+    /// It is also what shipped: v0.10.4's referee ran the match in freefall with
+    /// no floor while both players stood on a stage, so every online match died
+    /// at its first checksum with both players told they had desynced
+    /// (floptle/0041). The anti-cheat property is unchanged — a single peer that
+    /// disagrees is still judged against the referee, not against a quorum.
+    fn judge_against_referee(&mut self, tick: u64) {
+        let Some(&truth) = self.referee_hashes.get(&tick) else { return };
+        let expected = self.rollback_slots.len().max(1);
+        let Some(entry) = self.state_hashes.get(&tick) else { return };
+        if entry.len() < expected {
+            return;
+        }
+        let entry = self.state_hashes.remove(&tick).unwrap_or_default();
+        self.state_hashes.retain(|t, _| *t > tick);
+        let peers_agree = entry.windows(2).all(|w| w[0].1 == w[1].1);
+        if peers_agree && entry.len() >= 2 && entry.iter().all(|(_, h)| *h != truth) {
+            self.referee_outliers.push(tick);
+            return;
+        }
+        let mut any = false;
+        for (p, h) in &entry {
+            if *h != truth {
+                self.referee_faults.push((tick, *p));
+                any = true;
+            }
+        }
+        if any {
+            self.desyncs_in.push(tick);
+            let msg = Msg::Desync { tick }.encode();
+            for &p in &self.peers {
+                self.transport.send(p, Channel::Reliable, &msg);
+            }
+        }
     }
 
     /// The match log so far, if recording.
@@ -1245,18 +1296,22 @@ impl NetSession {
             return;
         }
         entry.push((peer, hash));
-        // With a referee running, a peer is judged the moment it reports —
-        // against a simulation that never guessed, not against a quorum of
-        // other players who might all be running the same modified build.
-        if let Some(&truth) = self.referee_hashes.get(&tick) {
-            if hash != truth {
-                self.referee_faults.push((tick, peer));
-                self.desyncs_in.push(tick);
-                let msg = Msg::Desync { tick }.encode();
-                for &p in &self.peers {
-                    self.transport.send(p, Channel::Reliable, &msg);
-                }
-            }
+        // With a referee running, peers are judged against a simulation that
+        // never guessed rather than against a quorum of other players who might
+        // all be running the same modified build.
+        //
+        // Judged once EVERY peer has reported, though, not on arrival — because
+        // the referee can be wrong too, and when it is, it is wrong about
+        // everybody at once. A cheat changes one machine; an engine or content
+        // fault in the referee changes only the referee. So "every peer
+        // disagrees with the referee, and they all agree with each other" is
+        // overwhelmingly the second case, and answering it by desyncing the
+        // whole match is the worst available response. It is what shipped:
+        // 0.10.4's referee ran the match in freefall with no floor while both
+        // players stood on a stage, so every online match died at its first
+        // checksum with both players told they had desynced (floptle/0041).
+        if self.referee_hashes.contains_key(&tick) {
+            self.judge_against_referee(tick);
             return;
         }
         if entry.len() < expected {

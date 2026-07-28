@@ -253,6 +253,31 @@ impl Editor {
         sim
     }
 
+    /// [`Self::build_play_sim`] for a world that is NOT `self.world` — the
+    /// referee's and a replay's ([`crate::shadow::ShadowSim`]).
+    ///
+    /// Same gravity field, same layers, same terrain volumes, same static
+    /// colliders. That identity is the shadow's entire claim to authority: it
+    /// agrees with the live simulation because it is running the same physics,
+    /// not because two implementations happened to land in the same place.
+    ///
+    /// Skips only the diagnostics `build_play_sim` prints — the live build
+    /// already said all of it, about the same scene, one line earlier.
+    pub(crate) fn build_sim_for_world(&self, world: &floptle_core::World) -> floptle_physics::Sim {
+        let layers = self.project.build_layers();
+        // The origin comes from OUR world on purpose: it is a precision anchor,
+        // and the two sims must round to the same one or every f64→f32 residual
+        // differs. The shadow is the same scene, so this is the same answer.
+        let origin = self.sim_origin_hint();
+        let gravity = Self::build_gravity_field(world, origin);
+        let terrain_vols = self.terrain_volumes(&layers);
+        let mut sim =
+            floptle_physics::Sim::build_layered(world, &terrain_vols, gravity, origin, layers);
+        drop(terrain_vols);
+        self.add_static_colliders_for_world(world, &mut sim);
+        sim
+    }
+
     /// Rebuild the live physics sim from the current scene. A no-op unless playing —
     /// called after a physics component (rigidbody / collider / type) changes mid-Play
     /// so the edit takes effect immediately. Bodies re-seed at their current transforms.

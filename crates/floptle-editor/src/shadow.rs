@@ -65,11 +65,17 @@ pub struct ShadowSim {
 }
 
 impl ShadowSim {
-    /// Build a shadow of `log`'s match from a scene document.
+    /// Build a shadow of `log`'s match from a scene document, **with test
+    /// physics**: no gravity, no static colliders, no layers.
     ///
     /// `local` is which peer this instance stands in for. For the referee that
     /// is the host; for a replay it is arbitrary — every peer's input is in the
     /// log, so nothing is ever sampled and the choice cannot affect the result.
+    ///
+    /// ⚠ Anything that has to AGREE with a live session wants
+    /// [`Self::build_with`] and the live session's own `Sim`. See its docs for
+    /// what using this instead cost.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn build(
         doc: &floptle_scene::SceneDoc,
         script_dir: &Path,
@@ -78,14 +84,47 @@ impl ShadowSim {
         local: PeerId,
         step: f32,
     ) -> Self {
+        Self::build_with(doc, script_dir, input_map, log, local, step, |world| {
+            Sim::build(
+                world,
+                &[],
+                floptle_physics::GravityField::uniform(floptle_core::math::Vec3::ZERO),
+                floptle_core::math::DVec3::ZERO,
+            )
+        })
+    }
+
+    /// [`Self::build`], with the caller supplying the physics.
+    ///
+    /// **The referee and the replay MUST use this**, handing over the same `Sim`
+    /// the live session builds. The shadow's whole claim is that it agrees with
+    /// the live simulation *by construction*; a `Sim` built differently breaks
+    /// that at the first tick, and the state checksum hashes body position and
+    /// velocity, so it breaks it visibly.
+    ///
+    /// The default in [`Self::build`] — no gravity, no static colliders, no
+    /// layers — is a TEST convenience and nothing more. It shipped as the
+    /// referee's physics, so the referee ran the match in freefall with no floor
+    /// while both players stood on a stage under gravity. Both peers therefore
+    /// disagreed with the authoritative simulation, and since the referee is the
+    /// sole judge when one is running, both were told they had desynced at the
+    /// first checksum (floptle/0041).
+    ///
+    /// It survived the test suite because the test fixture builds its live sim
+    /// the same zero-gravity way, so shadow and "live" agreed by being equally
+    /// wrong. See `a_referee_agrees_with_a_live_driver_under_real_gravity`.
+    pub fn build_with(
+        doc: &floptle_scene::SceneDoc,
+        script_dir: &Path,
+        input_map: floptle_input::InputMap,
+        log: InputLog,
+        local: PeerId,
+        step: f32,
+        make_sim: impl FnOnce(&World) -> Sim,
+    ) -> Self {
         let mut world = World::default();
         floptle_scene::spawn_into(doc, &mut world);
-        let mut sim = Sim::build(
-            &world,
-            &[],
-            floptle_physics::GravityField::uniform(floptle_core::math::Vec3::ZERO),
-            floptle_core::math::DVec3::ZERO,
-        );
+        let mut sim = make_sim(&world);
         let mut host = ScriptHost::new();
         host.set_input_map(input_map);
         // Filter the fighters out BEFORE the build pass, because that is what
@@ -300,13 +339,24 @@ end\n";
     }
 
     /// A two-fighter scene, as a document — the thing a replay is played from.
-    fn ring() -> floptle_scene::SceneDoc {
+    ///
+    /// ⚠ **`Matter` is not decoration here.** `floptle_scene::to_doc` iterates
+    /// `query::<Matter>()`, so an entity without one is not serialized at all.
+    /// This fixture had no `Matter` for the whole life of the feature, which
+    /// made every document it produced EMPTY — so every shadow bound zero
+    /// nodes, `fingerprint` returned `""`, and every test in this module
+    /// compared one empty string to another and passed. Two real referee faults
+    /// shipped through that hole (floptle/0039's build pass and 0041's
+    /// physics). [`ring_is_not_hollow`] is what stops it recurring.
+    fn ring(gravity: bool) -> floptle_scene::SceneDoc {
+        use floptle_core::Matter;
         let mut w = World::default();
         for i in 0..2 {
             let e = w.spawn();
             w.insert(e, Name(format!("P{}", i + 1)));
+            w.insert(e, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
             w.insert(e, Transform::from_translation(DVec3::new(i as f64 * 4.0 - 2.0, 1.0, 0.0)));
-            w.insert(e, RigidBody { radius: 0.5, gravity: false, ..Default::default() });
+            w.insert(e, RigidBody { radius: 0.5, gravity, ..Default::default() });
             w.insert(e, Replicated { mode: ReplicationMode::Rollback, ..Default::default() });
             w.insert(
                 e,
@@ -320,6 +370,24 @@ end\n";
             );
         }
         floptle_scene::to_doc("ring", &w)
+    }
+
+    /// The guard for the hole every other test in this module fell through: a
+    /// fixture that serializes to nothing makes its tests pass by comparing two
+    /// empty worlds, and says nothing while it does.
+    #[test]
+    fn ring_is_not_hollow() {
+        let doc = ring(false);
+        assert_eq!(doc.nodes.len(), 2, "the fixture scene must actually contain its fighters");
+        let mut sh =
+            ShadowSim::build(&doc, &script_dir("hollow"), fighter_map(), recorded_match(vec![SERVER, 1]), SERVER, STEP);
+        assert_eq!(
+            sh.driver.nodes().len(),
+            2,
+            "and a shadow built from it must BIND them — otherwise every comparison in \
+             this module is between two empty simulations"
+        );
+        assert!(!fingerprint(&mut sh).is_empty(), "and the fingerprint must have content to compare");
     }
 
     /// A scripted match, as an already-recorded log.
@@ -370,13 +438,97 @@ end\n";
         out
     }
 
+    /// FIELD REGRESSION (floptle/0041): the referee must agree with a LIVE
+    /// driver, and it only does if it is running the same physics.
+    ///
+    /// `ShadowSim::build`'s default `Sim` had no gravity, no static colliders
+    /// and no layers, and that default shipped as the referee's physics. So the
+    /// referee ran the match in freefall with no floor while both players stood
+    /// on a stage under gravity. The state checksum hashes body position and
+    /// velocity, so the first checksum disagreed — and because the referee is
+    /// the SOLE judge when one is running, both peers were told they had
+    /// desynced, half a second into every online match.
+    ///
+    /// Every existing test missed it because they compare a shadow to another
+    /// shadow, and the live-driver fixture in `rollback.rs` builds its `Sim` the
+    /// same zero-gravity way — so shadow and "live" agreed by being equally
+    /// wrong. This one builds the two sims from the same non-trivial physics and
+    /// compares across the seam, which is where the bug actually was.
+    #[test]
+    fn a_referee_agrees_with_a_live_driver_under_real_gravity() {
+        use crate::rollback::Ctx;
+        use floptle_core::math::Vec3;
+        use floptle_physics::GravityField;
+
+        let (doc, dir) = (ring(true), script_dir("gravity"));
+        let log = recorded_match(vec![SERVER, 1]);
+        // The physics BOTH sides get. Non-trivial on purpose: with zero gravity
+        // the bug under test is invisible, which is exactly how it shipped.
+        let physics =
+            |w: &World| Sim::build(w, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), floptle_core::math::DVec3::ZERO);
+
+        // The LIVE side: a driver fed the same log through the same hooks the
+        // editor's tick uses.
+        let mut world = World::default();
+        floptle_scene::spawn_into(&doc, &mut world);
+        let mut sim = physics(&world);
+        let mut host = ScriptHost::new();
+        host.set_input_map(fighter_map());
+        let fighters: std::collections::HashSet<u32> = world
+            .query::<Replicated>()
+            .filter(|(_, r)| r.mode.is_rollback())
+            .map(|(e, _)| e.index())
+            .collect();
+        host.extend_filters(fighters);
+        host.run(&mut world, &dir, STEP, 0.0);
+        let mut live = RollbackDriver::new(SERVER, log.peers.clone(), log.input_delay, log.seed);
+        live.rebind(&world, &mut sim, &host);
+        for t in 1..=30u64 {
+            for (peer, tick, input) in
+                log.at(t).map(|e| (e.peer, e.tick, e.input.clone())).collect::<Vec<_>>()
+            {
+                live.feed_logged(peer, tick, input);
+            }
+            let mut ctx = Ctx { world: &mut world, sim: &mut sim, host: &mut host, step: STEP };
+            live.advance(&mut ctx);
+        }
+
+        // The REFEREE: same scene, same log, its own world — and now its own
+        // copy of the same physics.
+        let mut r = ShadowSim::build_with(&doc, &dir, fighter_map(), log, SERVER, STEP, physics);
+        r.advance(Horizon::WholeLog, 10_000);
+
+        assert_eq!(r.tick(), 30, "the referee must reach the end of the log");
+        assert_eq!(r.driver.nodes().len(), 2, "both fighters must be bound on the referee's side");
+        assert_eq!(live.nodes().len(), 2, "and on the live side");
+        let (truth, mine) = (r.state_hash(30), live.state_hash(30));
+        assert!(truth.is_some() && mine.is_some(), "both sides must have tick 30 in the ring");
+        assert_eq!(
+            truth, mine,
+            "the referee disagrees with a live driver running the same match — which means \
+             it would rule every honest peer out of sync at the first checksum"
+        );
+
+        // And the negative control, so the test cannot pass by the physics not
+        // mattering: a referee on DIFFERENT physics must disagree. This is the
+        // assertion that fails on the shipped code.
+        let mut wrong = ShadowSim::build(&doc, &dir, fighter_map(), r.log.clone(), SERVER, STEP);
+        wrong.advance(Horizon::WholeLog, 10_000);
+        assert_ne!(
+            wrong.state_hash(30),
+            mine,
+            "a referee built with the wrong physics must NOT agree — if it does, this \
+             fixture cannot tell the two apart and the test proves nothing"
+        );
+    }
+
     /// THE property both features rest on: the inputs and the seed are the
     /// match. Two fresh worlds fed the same log must end up in bit-identical
     /// states — otherwise a replay is a re-enactment, and a referee's verdict
     /// is just a second opinion.
     #[test]
     fn a_recorded_match_replays_to_the_same_state() {
-        let (doc, dir) = (ring(), script_dir("replay"));
+        let (doc, dir) = (ring(false), script_dir("replay"));
         let log = recorded_match(vec![SERVER, 1]);
 
         let mut a = ShadowSim::build(&doc, &dir, fighter_map(), log.clone(), SERVER, STEP);
@@ -394,7 +546,7 @@ end\n";
     /// if it ever did, replays would disagree with the referee.
     #[test]
     fn which_peer_a_shadow_stands_in_for_does_not_change_the_match() {
-        let (doc, dir) = (ring(), script_dir("seat"));
+        let (doc, dir) = (ring(false), script_dir("seat"));
         let log = recorded_match(vec![SERVER, 1]);
         let mut host = ShadowSim::build(&doc, &dir, fighter_map(), log.clone(), SERVER, STEP);
         let mut joiner = ShadowSim::build(&doc, &dir, fighter_map(), log, 1, STEP);
@@ -408,7 +560,7 @@ end\n";
     /// its result authoritative rather than merely early.
     #[test]
     fn the_referee_stops_at_the_confirmed_frontier_and_never_guesses() {
-        let (doc, dir) = (ring(), script_dir("referee"));
+        let (doc, dir) = (ring(false), script_dir("referee"));
         // A log missing peer 1's input for tick 12 — a packet still in the air.
         let mut log = recorded_match(vec![SERVER, 1]);
         log.entries.retain(|e| !(e.tick == 12 && e.peer == 1));
@@ -430,7 +582,7 @@ end\n";
     /// run of the completed log.
     #[test]
     fn the_referee_catches_up_when_the_late_input_arrives() {
-        let (doc, dir) = (ring(), script_dir("catchup"));
+        let (doc, dir) = (ring(false), script_dir("catchup"));
         let full = recorded_match(vec![SERVER, 1]);
         let mut partial = full.clone();
         let late = partial
@@ -459,7 +611,7 @@ end\n";
     /// A referee must not stall the frame it is catching up in.
     #[test]
     fn catching_up_is_capped_per_call() {
-        let (doc, dir) = (ring(), script_dir("cap"));
+        let (doc, dir) = (ring(false), script_dir("cap"));
         let log = recorded_match(vec![SERVER, 1]);
         let mut r = ShadowSim::build(&doc, &dir, fighter_map(), log, SERVER, STEP);
         assert_eq!(r.advance(Horizon::Confirmed, 4), 4);

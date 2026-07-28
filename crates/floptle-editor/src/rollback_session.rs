@@ -218,13 +218,14 @@ impl Editor {
             self.script_host.input_system().borrow().map().clone(),
             self.game_tick.step,
         );
-        self.net_referee = Some(crate::shadow::ShadowSim::build(
+        self.net_referee = Some(crate::shadow::ShadowSim::build_with(
             &doc,
             &dir,
             map,
             log,
             floptle_net::SERVER,
             step,
+            |w| self.build_sim_for_world(w),
         ));
         self.console.push(
             floptle_script::LogLevel::Debug,
@@ -272,6 +273,26 @@ impl Editor {
                     "⚖ REFEREE: peer {peer}'s state at tick {tick} disagrees with the \
                      authoritative simulation. Either that machine desynced, or it is not \
                      running the game everyone else is. The referee's result is the real one."
+                ),
+                None,
+            );
+        }
+        // The other verdict, and the one that used to end matches: the referee
+        // against the field. A cheat changes one machine; a referee fault
+        // changes only the referee, so everybody disagreeing with it and
+        // nobody disagreeing with each other means IT is wrong. The match keeps
+        // going and this says why (floptle/0041).
+        let outliers =
+            self.net_server.as_mut().map(|s| s.take_referee_outliers()).unwrap_or_default();
+        for tick in outliers {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "⚖ REFEREE disagrees with EVERY peer at tick {tick}, while the peers all \
+                     agree with each other — so the referee is the one that is wrong, not the \
+                     match. Play continues and no desync is raised. This is an engine or \
+                     content fault in the second simulation (its physics, its scripts, or its \
+                     scene) and it is worth reporting; the players are fine."
                 ),
                 None,
             );
@@ -364,13 +385,14 @@ impl Editor {
             self.game_tick.step,
         );
         let ticks = log.last_tick();
-        let mut sh = crate::shadow::ShadowSim::build(
+        let mut sh = crate::shadow::ShadowSim::build_with(
             &doc,
             &dir,
             map,
             log,
             floptle_net::SERVER,
             step,
+            |w| self.build_sim_for_world(w),
         );
         sh.advance(crate::shadow::Horizon::WholeLog, u64::MAX);
         self.console.push(

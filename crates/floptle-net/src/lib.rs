@@ -1264,6 +1264,65 @@ mod tests {
         );
     }
 
+    /// FIELD REGRESSION (floptle/0041): a referee that disagrees with EVERYONE
+    /// is the one that is wrong, and must not take the match down with it.
+    ///
+    /// The referee is the sole judge when one is running — deliberately, because
+    /// a quorum of players could all be running the same modified build. But a
+    /// cheat changes ONE machine, while an engine or content fault in the
+    /// referee changes only the referee. So "every peer disagrees with the
+    /// referee and they all agree with each other" is overwhelmingly the second
+    /// case, and answering it by desyncing the whole match is the worst
+    /// available response. It shipped that way: v0.10.4's referee ran the match
+    /// in freefall with no floor, and every online match died at its first
+    /// checksum with both players told they had desynced.
+    #[test]
+    fn a_referee_that_disagrees_with_everyone_is_the_one_thats_wrong() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+        server.set_rollback(true, 2, MATCH_SEED);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 2, |_, _| {});
+        assert!(client.take_rollback_start().is_some());
+
+        // Both players agree with each other. The referee does not agree with
+        // either — because the referee is running different physics.
+        server.set_referee_hash(30, 0xBAD_BAD);
+        server.send_state_hash(30, 0xAAAA);
+        client.send_state_hash(30, 0xAAAA);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 6, |_, _| {});
+
+        assert_eq!(
+            server.take_referee_outliers(),
+            vec![30],
+            "the host must name the referee as the outlier"
+        );
+        assert!(
+            server.take_desyncs().is_empty() && client.take_desyncs().is_empty(),
+            "and must NOT end a match in which both players agree with each other"
+        );
+        assert!(
+            server.take_referee_faults().is_empty(),
+            "neither player is at fault, so neither is accused"
+        );
+
+        // The anti-cheat property is unchanged: ONE peer out of step is still
+        // judged against the referee, not against the other player.
+        server.set_referee_hash(60, 0xAAAA);
+        server.send_state_hash(60, 0xAAAA);
+        client.send_state_hash(60, 0xBBBB);
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 6, |_, _| {});
+        assert_eq!(
+            server.take_referee_faults(),
+            vec![(60, 1)],
+            "the peer that disagrees with the referee is named, and only that peer"
+        );
+        assert_eq!(server.take_desyncs(), vec![60], "and that IS a desync");
+        assert!(server.take_referee_outliers().is_empty());
+    }
+
     /// Desync detection is mandatory (§6). Agreement is silent; disagreement is
     /// loud on every peer — the alternative is two machines playing a subtly
     /// different match, each convinced it is right.

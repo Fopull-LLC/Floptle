@@ -1763,7 +1763,11 @@ impl Editor {
 
     /// Static colliders for an arbitrary world (the hidden server's) — same
     /// logic as the play world's builder.
-    fn add_static_colliders_for_world(&self, world: &World, sim: &mut floptle_physics::Sim) {
+    pub(crate) fn add_static_colliders_for_world(
+        &self,
+        world: &World,
+        sim: &mut floptle_physics::Sim,
+    ) {
         use floptle_core::math::{Mat4, Vec3};
         use floptle_core::Matter;
         let mut ents: Vec<Entity> = world
