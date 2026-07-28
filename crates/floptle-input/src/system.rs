@@ -552,6 +552,48 @@ mod tests {
             );
         }
 
+        // The REAL couch shape, and the one Fofighter actually ships: each
+        // seat's pad is pinned, P1 to pad 0 and P2 to pad 1. `Slot(n)` never
+        // consults the resolving slot — but the BINDING SCOPE does, and that is
+        // enough. Sampled at roster slot 1, only player-two's bindings serve,
+        // and they name a second pad that a lone joiner does not own. Their
+        // controller drives nothing, with no error anywhere.
+        let pinned_couch = InputMap {
+            actions: vec![Action {
+                name: "Punch".into(),
+                bindings: vec![
+                    Binding {
+                        player: Some(0),
+                        ..Binding::new(Source::Pad {
+                            id: PadId::Slot(0),
+                            ctrl: PadControl::Button(PadButton::West),
+                        })
+                    },
+                    Binding {
+                        player: Some(1),
+                        ..Binding::new(Source::Pad {
+                            id: PadId::Slot(1),
+                            ctrl: PadControl::Button(PadButton::West),
+                        })
+                    },
+                ],
+            }],
+            axes2: vec![],
+            axes1: vec![],
+            motions: vec![],
+            players: 2,
+            motion_axis: None,
+        };
+        assert!(
+            InputSystem::new(pinned_couch.clone()).sample_tick(&raw, 0, 0.016).is_held(0),
+            "the joiner's own pad, read at their device slot"
+        );
+        assert!(
+            !InputSystem::new(pinned_couch).sample_tick(&raw, 1, 0.016).is_held(0),
+            "sampled by roster slot, a lone joiner on a pad drove NOTHING — the scope picked \
+             player two's bindings, which name a pad that isn't plugged in"
+        );
+
         // The case that IS wrong: a joiner with TWO pads connected. `Any`
         // prefers the resolving slot's own pad, so roster slot 1 reads their
         // second controller and their first — the one in their hands — does
