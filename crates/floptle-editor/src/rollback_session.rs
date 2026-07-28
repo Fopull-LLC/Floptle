@@ -20,6 +20,20 @@ use crate::rollback::{Ctx, RollbackDriver};
 use crate::Editor;
 
 impl Editor {
+    /// The live driver's node ids — the set that belongs in BOTH script
+    /// filters for as long as it is running those nodes' hooks itself.
+    ///
+    /// Empty when no driver is running, which is what makes it safe to union
+    /// into every other filter computation unconditionally. The session's
+    /// filter setters are whole-set assignments, so without a single agreed
+    /// source for this half, `net_client_side_setup` (which re-runs on every
+    /// replicated spawn) and the rollback start would take turns erasing each
+    /// other — a mid-match spawn would have put the fighters back into the
+    /// global passes, running them twice per tick.
+    pub(crate) fn rollback_filter_eids(&self) -> std::collections::HashSet<u32> {
+        self.net_rollback.as_ref().map(|d| d.eids()).unwrap_or_default()
+    }
+
     /// Does the running scene simulate anything by rollback?
     pub(crate) fn scene_has_rollback(&self) -> bool {
         self.world
@@ -61,10 +75,11 @@ impl Editor {
         // The driver runs these nodes' hooks itself, every tick, in its own
         // order — so they leave the global passes entirely. `run_*_for` bypasses
         // both filters, which is the same arrangement the host already uses for
-        // remote-owned Predicted nodes.
-        let eids = d.eids();
-        self.script_host.set_script_filter(eids.clone());
-        self.script_host.set_frame_filter(eids);
+        // remote-owned Predicted nodes. ADDED to the session's filters, never
+        // assigned over them: on a client the session is already skipping every
+        // authority-driven node, and replacing the set would set all of those
+        // running again.
+        self.script_host.extend_filters(d.eids());
         // The warm-up ticks nobody sampled: seeded locally AND shipped, or the
         // confirmed frontier could never leave zero and every peer would stall
         // a few ticks into the match with nothing to wait for.
@@ -152,6 +167,14 @@ impl Editor {
         if self.net_rollback.is_none() {
             return;
         }
+        // 0. Hosting: pull whatever arrived since the last tick BEFORE draining,
+        //    the same tick-start pump the remote-Predicted path does. Without
+        //    it an input that landed during the frame waits a whole tick, and
+        //    every tick it waits is one more tick to re-simulate when it turns
+        //    out to contradict the guess.
+        if let Some(s) = self.net_server.as_mut() {
+            s.pump_server(&self.world, self.game_tick_no);
+        }
         // 1. Remote inputs first: a correction resolved before this tick costs
         //    one replay, the same one resolved after costs two.
         let incoming = match (self.net_server.as_mut(), self.net_play_client.as_mut()) {
@@ -171,18 +194,25 @@ impl Editor {
         // 2. Sample our own pad for the tick about to run, off the sampling
         //    runtimes — the tick domain belongs to the driver, and resolving
         //    through it here would advance input history twice per tick.
-        let sampled = self.net_rollback.as_ref().map(|d| d.net.current() + 1).unwrap_or(1);
-        let slot = self
-            .net_rollback
-            .as_ref()
-            .and_then(|d| d.slot_of(local))
-            .unwrap_or(0);
-        let ni = self.sample_local_net_input(slot, game_focused);
-        let Some(applied) = self.net_rollback.as_mut().map(|d| d.add_local(sampled, ni.clone()))
-        else {
-            return;
-        };
-        self.net_rollback_send(applied, ni);
+        //
+        //    `sample_tick` returns None while stalled — a tick may only ever be
+        //    sampled once (see its docs). A stalled frame therefore banks and
+        //    sends nothing, and leaves the pad's edges UNDRAINED on purpose:
+        //    press something during a stall and it lands on the first tick that
+        //    actually runs, instead of being eaten by a frame that went nowhere.
+        if let Some(sampled) = self.net_rollback.as_ref().and_then(|d| d.sample_tick()) {
+            let slot = self
+                .net_rollback
+                .as_ref()
+                .and_then(|d| d.slot_of(local))
+                .unwrap_or(0);
+            let ni = self.sample_local_net_input(slot, game_focused);
+            let Some(applied) = self.net_rollback.as_mut().map(|d| d.add_local(sampled, ni.clone()))
+            else {
+                return;
+            };
+            self.net_rollback_send(applied, ni);
+        }
 
         // 3. Advance — resolving any banked correction first.
         let step = self.game_tick.step;

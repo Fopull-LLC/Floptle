@@ -222,7 +222,30 @@ impl RollbackDriver {
                 ));
             }
         }
+        // One player slot per fighter, or the extras read neutral forever. It is
+        // deterministic (`set_tick_state` no-ops identically on every peer, so
+        // checksums stay green) and therefore completely silent: a fighter that
+        // simply never moves, in a match that never complains. Say it here.
+        let players = host.input_system().borrow().players();
+        if self.nodes.len() > players {
+            self.faults.push(format!(
+                "input.ron declares {players} player slot(s) but the scene has {} Rollback \
+                 node(s) — slot {players} and up have nowhere to read input from and will \
+                 stand still all match. Raise `players` in the project's input map.",
+                self.nodes.len(),
+            ));
+        }
         sim.set_driven_bodies(&self.eids());
+        // Every peer simulates every rollback node, so every peer's copy of the
+        // body has to be awake. On a client the session parks replicated bodies
+        // when it joins (snapshots own them) — these ones it doesn't, and this
+        // is the moment we take them back. Stated here rather than left to the
+        // session because the order of `Connected`, the `Welcome` and
+        // `RollbackStart` inside one client tick is subtle, and an inert
+        // fighter is a very quiet way to fail.
+        for n in &self.nodes {
+            sim.set_body_active(n.eid, true);
+        }
         // A rebind invalidates every saved tick: the ring is indexed by node
         // position, and the node list just changed.
         self.ring.clear();
@@ -327,12 +350,52 @@ impl RollbackDriver {
         self.stalled = false;
         self.last_checksum = 0;
         self.resimulated_ticks = 0;
+        // `desynced` deliberately SURVIVES a restart. A restart is how a roster
+        // change re-syncs the clock, not a fresh install: if the last match
+        // forked, the panel keeps saying so until the session actually ends,
+        // because "we desynced and then quietly restarted" is exactly the state
+        // a player needs to be told about. `net_rollback_stop` clears it by
+        // dropping the driver.
+    }
+
+    /// May this frame sample the local pad, and for which tick?
+    ///
+    /// `None` while stalled, and that is the whole point: a stall leaves the
+    /// frontier where it is, so the next frame would otherwise sample the SAME
+    /// tick a second time. A tick may only ever be sampled once. The second
+    /// sample overwrites the first locally, while on the wire the fan-out's
+    /// per-`(peer, tick)` dedup drops it — so this machine simulates the tick
+    /// with the newer input and every other machine simulates it with the
+    /// older one. That is a desync on every stall, which is to say on every
+    /// rough patch of the connection.
+    ///
+    /// Not sampling cannot stall the session shut: while stalled our own newest
+    /// input is `current + 1 + delay`, far past the confirmed frontier the
+    /// stall is waiting on, so the peer we are waiting for is never us.
+    pub fn sample_tick(&self) -> Option<u64> {
+        let next = self.net.current() + 1;
+        (!self.net.should_stall(next)).then_some(next)
     }
 
     /// Record the local player's sampled input. Returns the tick it will
     /// APPLY on (`sampled + delay`) — which is what goes on the wire, so peers
     /// never have to know our delay.
     pub fn add_local(&mut self, sampled: u64, input: NetInput) -> u64 {
+        let applied = self.net.applied_tick(sampled);
+        // Our own input arriving for a tick we already ran means that tick was
+        // simulated from a GUESS at our own pad — and nothing will ever correct
+        // it, because corrections are only raised for other peers. We would
+        // ship the real value, everyone else would use it, and we alone would
+        // keep the guess. It is a desync with no alarm on it, so put one here.
+        // The cause is always the same: sampling and advancing got out of step
+        // (see `sample_tick`), which the caller's frame order decides.
+        if applied <= self.net.current() {
+            self.faults.push(format!(
+                "rollback: local input for tick {applied} arrived after that tick was already \
+                 simulated — the frame sampled and advanced out of step, and this peer is now \
+                 running a tick nobody else is"
+            ));
+        }
         self.net.add_local(sampled, input)
     }
 
@@ -974,6 +1037,141 @@ end\n";
     }
 
     /// Past the depth cap the driver waits instead of guessing further (§2.3):
+    /// A link slow enough to stall the session repeatedly, with a pad whose
+    /// value depends on WHEN it was polled rather than on which tick it feeds.
+    ///
+    /// This is the shape of a real player's hands, and it is the case a
+    /// scripted match cannot test: a scripted input is the same value however
+    /// many times you ask for it, so re-sampling a tick is invisible. Poll a
+    /// changing pad twice for one tick and it is anything but — the second
+    /// value overwrites the first in our own history while the fan-out's
+    /// per-`(peer, tick)` dedup drops it on the way out, and the two machines
+    /// simulate that tick from different inputs. [`RollbackDriver::sample_tick`]
+    /// is what stops it, so the test drives sampling through exactly that
+    /// predicate rather than a copy of it.
+    #[test]
+    fn a_changing_pad_polled_across_a_stall_still_leaves_the_peers_agreeing() {
+        use floptle_net::{MemoryHub, NetSession, SERVER};
+
+        let hub = MemoryHub::new();
+        let mut host_net = NetSession::server(Box::new(hub.server_endpoint()), 0);
+        let mut peer_net = NetSession::client(Box::new(hub.connect()), 0);
+        let (hw, mut pw) = (World::default(), World::default());
+        let mut wall = 0u64;
+        let mut pump = |n: u64,
+                        wall: &mut u64,
+                        host_net: &mut NetSession,
+                        peer_net: &mut NetSession| {
+            for _ in 0..n {
+                hub.set_now(*wall);
+                host_net.tick_server(&hw, *wall);
+                peer_net.tick_client(&mut pw);
+                *wall += 1;
+            }
+        };
+        pump(4, &mut wall, &mut host_net, &mut peer_net);
+        host_net.set_rollback(true, 2, 0x5EED_1234_ABCD_0001);
+        pump(4, &mut wall, &mut host_net, &mut peer_net);
+        let (roster, delay, seed) =
+            peer_net.take_rollback_start().expect("the host announces the match");
+        // Only NOW does the link go bad: far past what delay 2 and a depth cap
+        // of 8 can absorb, so the session spends most of its life waiting —
+        // which is the point.
+        hub.set_conditions(14, 0.15);
+
+        let mut host = Fixture::new("stall_host");
+        let mut peer = Fixture::new("stall_peer");
+        let mut host_d = RollbackDriver::new(SERVER, roster.clone(), delay, seed);
+        let mut peer_d = RollbackDriver::new(1, roster, delay, seed);
+        host_d.rebind(&host.world, &mut host.sim, &host.host);
+        peer_d.rebind(&peer.world, &mut peer.sim, &peer.host);
+        for (applied, input) in host_d.net.prime_warmup() {
+            host_net.push_rollback_input(applied, input);
+        }
+        for (applied, input) in peer_d.net.prime_warmup() {
+            peer_net.send_rollback_input(applied, input);
+        }
+
+        // The pad reads differently on every frame, and differently per side.
+        let pad = |frame: u64, side: u64| match (frame + side * 3) % 5 {
+            0 => held(RIGHT),
+            1 => press(PUNCH),
+            2 => held(LEFT),
+            3 => held(RIGHT | LEFT),
+            _ => held(0),
+        };
+        let target = 24u64;
+        let mut stalls = 0u32;
+        // Deliberately `net_rollback_tick`'s exact order — pump, drain, sample,
+        // advance. Sampling before the drain would decide "stalled" against a
+        // frontier the very next line moves, and a frame that skips its sample
+        // but still advances leaves an applied tick with no local input in it
+        // forever. That ordering is load-bearing, so the test carries it.
+        for _ in 0..(target * 20) {
+            hub.set_now(wall);
+            host_net.tick_server(&hw, wall);
+            peer_net.tick_client(&mut pw);
+            wall += 1;
+            for (host_side, driver) in [(true, &mut host_d), (false, &mut peer_d)] {
+                let incoming = if host_side {
+                    host_net.take_rollback_inputs()
+                } else {
+                    peer_net.take_rollback_inputs()
+                };
+                let local = driver.net.local();
+                for (p, applied, input) in incoming {
+                    if p != local {
+                        driver.add_remote(p, applied, input);
+                    }
+                }
+            }
+            for (side, driver) in [(0u64, &mut host_d), (1u64, &mut peer_d)] {
+                // THE contract under test: ask the driver whether this frame
+                // may sample at all, and poll the pad only if it says yes.
+                let Some(sampled) = driver.sample_tick() else { continue };
+                let ni = pad(wall, side);
+                let applied = driver.add_local(sampled, ni.clone());
+                if side == 0 {
+                    host_net.push_rollback_input(applied, ni);
+                } else {
+                    peer_net.send_rollback_input(applied, ni);
+                }
+            }
+            host_d.advance(&mut host.ctx());
+            peer_d.advance(&mut peer.ctx());
+            // Counted off the DRIVER's own flag, not off `sample_tick` — the
+            // point is that the link stalled, not that we declined to sample.
+            stalls += u32::from(host_d.stalled) + u32::from(peer_d.stalled);
+            if host_d.net.confirmed() >= target && peer_d.net.confirmed() >= target {
+                break;
+            }
+        }
+        assert!(
+            stalls > 0,
+            "the link was supposed to be slow enough to stall — this test proves nothing without it"
+        );
+        assert!(
+            host_d.net.confirmed() >= target && peer_d.net.confirmed() >= target,
+            "the match never confirmed {target} ticks (host {}, peer {})",
+            host_d.net.confirmed(),
+            peer_d.net.confirmed(),
+        );
+        // Compared at a CONFIRMED tick, not at the live frontier. On a link this
+        // slow the newest few ticks on either machine are still provisional —
+        // simulated from guesses whose real inputs are literally still in the
+        // air — so two peers disagreeing there means nothing. Tick `target` has
+        // every peer's real input in it and will never be re-simulated again;
+        // if the machines disagree about THAT, they disagree about the match.
+        let (h, p) = (host_d.state_hash(target), peer_d.state_hash(target));
+        assert!(h.is_some(), "tick {target} fell off the host's ring before it could be compared");
+        assert_eq!(
+            h, p,
+            "a tick re-sampled across a stall made the two machines simulate different inputs"
+        );
+        assert!(host_d.faults.is_empty(), "host faults: {:?}", host_d.faults);
+        assert!(peer_d.faults.is_empty(), "peer faults: {:?}", peer_d.faults);
+    }
+
     /// the game degrades into "runs slightly slow", never into "the opponent
     /// teleports".
     #[test]

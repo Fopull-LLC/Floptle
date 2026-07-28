@@ -2359,6 +2359,14 @@ impl ScriptHost {
         self.frame_skip = skip;
     }
 
+    /// Add to the filters instead of replacing them, for a caller that owns
+    /// only part of the set (the rollback driver's nodes, which leave both
+    /// passes on top of whatever the session already skips).
+    pub fn extend_filters(&mut self, skip: impl IntoIterator<Item = u32> + Clone) {
+        self.script_skip.extend(skip.clone());
+        self.frame_skip.extend(skip);
+    }
+
     /// One lifecycle pass over `work`: per-frame (`start`/`update`), per-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`), with the same self-move
     /// write-back rules.

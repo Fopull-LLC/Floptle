@@ -5,7 +5,7 @@
 //! [`NetState`]; received RPCs/events dispatch back through
 //! `ScriptHost::dispatch_rpc` / `fire_net_event`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use floptle_net::{NetValue, ValueError};
@@ -369,11 +369,15 @@ pub(crate) fn install_net_api(
         let rb = net.rollback.clone();
         let draws = net.random_draws.clone();
         let logs = net.logs.clone();
+        // Said ONCE per session, not once per call: a fighter that rolls a
+        // number in `fixedUpdate` calls this 60 times a second, and a note
+        // repeated 60 times a second is not a note, it is a broken console.
+        let warned = Rc::new(Cell::new(false));
         t.set(
             "random",
             lua.create_function(move |_, (a, b): (Option<f64>, Option<f64>)| {
                 let info = rb.get();
-                if !info.active {
+                if !info.active && !warned.replace(true) {
                     // Offline it still works — a single-player run has nothing
                     // to agree with — but it is worth saying once that the
                     // determinism guarantee is not in force.

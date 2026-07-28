@@ -409,7 +409,81 @@ impl Editor {
             None,
         );
     }
+}
 
+/// What [`Editor::net_client_side_setup`] decided, before any of it is
+/// applied — split out so the join seam can be tested without an `Editor`.
+/// The bugs this shape exists to prevent are both invisible from inside a
+/// single call: they only appear when this runs a SECOND time, mid-match,
+/// on the next replicated spawn.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClientSidePlan {
+    /// Entities whose scripts sit out every pass.
+    pub skip: std::collections::HashSet<u32>,
+    /// Entities that sit out the PER-FRAME pass, or `None` to leave the
+    /// frame filter exactly as it was (no local avatar, no driver — the
+    /// pure-`Authority` client, whose behaviour must not change).
+    pub fskip: Option<std::collections::HashSet<u32>>,
+    /// Bodies to deactivate: snapshots own their motion from here.
+    pub park: Vec<u32>,
+    /// Our own avatar, if this client has one yet.
+    pub predicted: Option<Entity>,
+}
+
+/// Decide the client's filters and body parking from the replicated set.
+///
+/// `rollback` is the live driver's node set (empty when none is running).
+/// Those nodes are the exception to every rule here: every peer simulates
+/// them, so they are filtered out of both passes (the driver runs their
+/// hooks itself) but their bodies stay AWAKE (the driver steps them itself).
+/// Both halves are unioned onto whatever the session decided rather than
+/// replacing it, because this function and the rollback start each own only
+/// part of the answer.
+pub(crate) fn plan_client_side(
+    reps: &[(Entity, floptle_core::Replicated)],
+    my_owner: Option<u64>,
+    rollback: &std::collections::HashSet<u32>,
+) -> ClientSidePlan {
+    let mut plan = ClientSidePlan::default();
+    for (e, r) in reps {
+        let mine =
+            r.mode == ReplicationMode::Predicted && r.owner.is_some() && r.owner == my_owner;
+        if mine && plan.predicted.is_none() {
+            plan.predicted = Some(*e);
+            continue;
+        }
+        if !(r.transform || r.physics) {
+            continue; // var-only: scripts run on the client too
+        }
+        plan.skip.insert(e.index());
+        // A ROLLBACK node's body is NOT parked: `step_body` early-returns on
+        // an inactive body, so parking it would leave the fighter inert on
+        // every client — and because this runs again on each replicated
+        // spawn, it would freeze one mid-match. Before the driver engages
+        // the node parks like any other synced one, so it cannot drift
+        // under local input between joining and `RollbackStart`.
+        if r.mode.is_rollback() && rollback.contains(&e.index()) {
+            continue;
+        }
+        plan.park.push(e.index());
+    }
+    plan.skip.extend(rollback.iter().copied());
+    plan.fskip = match plan.predicted {
+        // The predicted node's `update` moves to the TICK clock (the server
+        // integrates it per tick — the client must match or they fight).
+        Some(pe) => {
+            let mut f: std::collections::HashSet<u32> =
+                rollback.iter().copied().collect();
+            f.insert(pe.index());
+            Some(f)
+        }
+        None if !rollback.is_empty() => Some(rollback.clone()),
+        None => None,
+    };
+    plan
+}
+
+impl Editor {
     /// Client-side session setup shared by the 2c harness and a real
     /// `quic://` join: every TRANSFORM/PHYSICS-synced authority node becomes
     /// snapshot-driven (scripts skipped, body deactivated — snapshots own it);
@@ -421,27 +495,17 @@ impl Editor {
     /// time (my peer id is unknown — everything snapshot-driven), then with
     /// `Some(my_peer)` when the Welcome lands.
     fn net_client_side_setup(&mut self, my_owner: Option<u64>, warn_if_none: bool) -> Option<Entity> {
-        let mut skip = std::collections::HashSet::new();
-        let mut predicted: Option<Entity> = None;
+        let roll = self.rollback_filter_eids();
         let reps: Vec<(Entity, floptle_core::Replicated)> = self
             .world
             .query::<floptle_core::Replicated>()
             .map(|(e, r)| (e, *r))
             .collect();
-        for (e, r) in reps {
-            let mine = r.mode == ReplicationMode::Predicted
-                && r.owner.is_some()
-                && r.owner == my_owner;
-            if mine && predicted.is_none() {
-                predicted = Some(e);
-                continue;
-            }
-            if !(r.transform || r.physics) {
-                continue; // var-only: scripts run on the client too
-            }
-            skip.insert(e.index());
+        let ClientSidePlan { skip, fskip, park, predicted } =
+            plan_client_side(&reps, my_owner, &roll);
+        for eid in park {
             if let Some(sim) = self.sim.as_mut() {
-                sim.set_body_active(e.index(), false);
+                sim.set_body_active(eid, false);
             }
         }
         self.script_host.set_script_filter(skip);
@@ -456,10 +520,8 @@ impl Editor {
             if let Some(sim) = self.sim.as_mut() {
                 sim.set_body_active(pe.index(), true);
             }
-            // The predicted node's `update` moves to the TICK clock (the server
-            // integrates it per tick — the client must match or they fight).
-            let mut fskip = std::collections::HashSet::new();
-            fskip.insert(pe.index());
+        }
+        if let Some(fskip) = fskip {
             self.script_host.set_frame_filter(fskip);
         }
         // Keep an existing predictor when it's still the same node — this
@@ -527,6 +589,12 @@ impl Editor {
         for (e, _) in &self.net_remote_predicted {
             skip.insert(e.index());
             fskip.insert(e.index());
+        }
+        // Same union as the client side: the rollback driver's nodes run under
+        // it, not under either global pass, and this must not erase that.
+        for eid in self.rollback_filter_eids() {
+            skip.insert(eid);
+            fskip.insert(eid);
         }
         self.script_host.set_script_filter(skip);
         self.script_host.set_frame_filter(fskip);
@@ -1778,5 +1846,116 @@ impl Editor {
             ghost(&hs.world, [1.0, 0.6, 0.15], &mut out);
         }
         self.script_gizmos.extend(out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use floptle_core::{Replicated, ReplicationMode};
+
+    use super::*;
+
+    /// The seam both blocking join-path bugs lived in: a client's `Rollback`
+    /// fighters were treated as ordinary snapshot-driven strangers, so their
+    /// bodies were parked (`step_body` early-returns on an inactive body ⇒ the
+    /// fighter never moves), and the filter was assigned rather than unioned,
+    /// so whichever of this and the rollback start ran last erased the other.
+    /// Neither is visible in a headless driver test, and both surface on the
+    /// FIRST real two-machine match.
+    fn scene() -> (Vec<(Entity, Replicated)>, Vec<Entity>) {
+        let mut w = World::default();
+        let mk = |w: &mut World| w.spawn();
+        // #0 an authority prop, #1/#2 the two fighters, #3 a var-only door,
+        // #4 this client's predicted avatar.
+        let es: Vec<Entity> = (0..5).map(|_| mk(&mut w)).collect();
+        let reps = vec![
+            (es[0], Replicated { mode: ReplicationMode::Authority, ..Default::default() }),
+            (es[1], Replicated { mode: ReplicationMode::Rollback, ..Default::default() }),
+            (es[2], Replicated { mode: ReplicationMode::Rollback, ..Default::default() }),
+            (
+                es[3],
+                Replicated {
+                    mode: ReplicationMode::Authority,
+                    transform: false,
+                    physics: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                es[4],
+                Replicated {
+                    mode: ReplicationMode::Predicted,
+                    owner: Some(7),
+                    ..Default::default()
+                },
+            ),
+        ];
+        (reps, es)
+    }
+
+    #[test]
+    fn a_joined_client_keeps_its_rollback_fighters_awake() {
+        let (reps, es) = scene();
+        let roll: HashSet<u32> = [es[1].index(), es[2].index()].into_iter().collect();
+        let plan = plan_client_side(&reps, Some(7), &roll);
+
+        assert!(
+            !plan.park.contains(&es[1].index()) && !plan.park.contains(&es[2].index()),
+            "a rollback fighter's body must stay active on every peer — the driver steps it"
+        );
+        assert!(plan.park.contains(&es[0].index()), "the authority prop is still snapshot-driven");
+        assert_eq!(plan.predicted, Some(es[4]), "our own avatar is still found");
+        // Both halves of the filter, not just the half whoever ran last owned.
+        assert!(plan.skip.contains(&es[0].index()), "the session's authority skip survived");
+        assert!(
+            plan.skip.contains(&es[1].index()) && plan.skip.contains(&es[2].index()),
+            "the driver's fighters run under it, not under the global pass"
+        );
+        assert!(!plan.skip.contains(&es[3].index()), "a var-only node still runs everywhere");
+        let fskip = plan.fskip.expect("a frame filter is owed");
+        assert!(
+            fskip.contains(&es[1].index())
+                && fskip.contains(&es[2].index())
+                && fskip.contains(&es[4].index()),
+            "fighters AND the avatar leave the per-frame pass, or they run twice a tick"
+        );
+    }
+
+    /// The mid-match re-run: a replicated spawn arrives, this runs again, and
+    /// nothing about the fighters may change.
+    #[test]
+    fn a_replicated_spawn_mid_match_does_not_disturb_the_fighters() {
+        let (reps, es) = scene();
+        let roll: HashSet<u32> = [es[1].index(), es[2].index()].into_iter().collect();
+        let first = plan_client_side(&reps, Some(7), &roll);
+        let again = plan_client_side(&reps, Some(7), &roll);
+        assert_eq!(first, again, "re-running the join setup must be idempotent");
+    }
+
+    /// Before `RollbackStart` lands there is no driver, and a fighter must park
+    /// like anything else — otherwise it falls, walks, or gets hit under local
+    /// input during the frames between joining and the match starting, and
+    /// nothing ever puts it back.
+    #[test]
+    fn before_the_driver_engages_a_rollback_node_parks_like_any_other() {
+        let (reps, es) = scene();
+        let plan = plan_client_side(&reps, Some(7), &HashSet::new());
+        assert!(
+            plan.park.contains(&es[1].index()) && plan.park.contains(&es[2].index()),
+            "with no driver running, a rollback node is just another synced node"
+        );
+    }
+
+    /// A pure-`Authority` client — no avatar, no rollback — must come out of
+    /// this exactly as it always did, frame filter untouched.
+    #[test]
+    fn a_plain_authority_client_is_unchanged() {
+        let (reps, es) = scene();
+        let plan = plan_client_side(&reps, None, &HashSet::new());
+        assert_eq!(plan.predicted, None, "nothing here is ours");
+        assert_eq!(plan.fskip, None, "no frame filter is owed, so none is written");
+        assert!(plan.park.contains(&es[4].index()), "an unowned avatar is snapshot-driven");
     }
 }
