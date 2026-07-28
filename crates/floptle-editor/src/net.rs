@@ -1635,11 +1635,14 @@ impl Editor {
 
     /// Tear the in-editor session down (Stop, `net.leave()`, or the panel).
     pub(crate) fn net_stop(&mut self, why: &str) {
+        // Before the early-out: a driver holds physics bodies away from the
+        // whole-world step, and leaving one behind would freeze the fighters
+        // with nothing left to advance them.
+        self.net_rollback_stop();
         if self.net_server.is_none() && self.net_client.is_none() && self.net_play_client.is_none()
         {
             return;
         }
-        self.net_rollback_stop();
         self.net_server = None;
         self.net_client = None;
         self.net_play_client = None;
