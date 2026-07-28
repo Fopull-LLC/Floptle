@@ -93,6 +93,16 @@ pub struct NetState {
     pub rtt_ms: f32,
     /// Client: our peer id once welcomed (`net.isMine` needs it).
     pub my_peer: Option<u64>,
+    /// Host, relay sessions only: the lobby code friends type in to join.
+    ///
+    /// The relay hands this back when the lobby registers, which is a moment
+    /// only the engine sees — so without mirroring it here a game could ask for
+    /// a relay session and then have no way to tell its own players the code.
+    /// The 🌐 panel had it and a lobby screen did not, which meant every game
+    /// shipping its own front end had to send players to an engine debug panel.
+    /// `None` offline, on a client, and on a direct/LAN host (there is no code
+    /// to show — joiners use the address).
+    pub lobby_code: Option<String>,
 }
 
 /// One `net.on(event, fn)` registration; owned by an `(entity, script)`
@@ -490,6 +500,16 @@ pub(crate) fn install_net_api(
         t.set(
             "isClient",
             lua.create_function(move |_, ()| Ok(n.state.borrow().role == NetRoleState::Client))?,
+        )?;
+    }
+    // net.lobbyCode() — the code friends type in, on a relay host. nil until
+    // the relay answers (a lobby screen should poll rather than read once), and
+    // nil for good on a client or a direct/LAN host, where there is no code.
+    {
+        let n = net.clone();
+        t.set(
+            "lobbyCode",
+            lua.create_function(move |_, ()| Ok(n.state.borrow().lobby_code.clone()))?,
         )?;
     }
     // net.isMine(node): is this node under MY control on this machine?

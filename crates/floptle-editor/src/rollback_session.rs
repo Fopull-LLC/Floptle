@@ -404,10 +404,16 @@ impl Editor {
         //    press something during a stall and it lands on the first tick that
         //    actually runs, instead of being eaten by a frame that went nowhere.
         if let Some(sampled) = self.net_rollback.as_ref().and_then(|d| d.sample_tick()) {
+            // The DEVICE slot, not the roster slot — see
+            // `RollbackDriver::local_device_slot`. The input is applied to the
+            // roster slot on every machine (the driver does that from `local`),
+            // but it is READ from this machine's own player-one hardware and
+            // bindings. Sampling by roster slot handed a joiner the couch's
+            // player-two layout, and a joiner on a gamepad nothing whatsoever.
             let slot = self
                 .net_rollback
                 .as_ref()
-                .and_then(|d| d.slot_of(local))
+                .map(|d| d.local_device_slot())
                 .unwrap_or(0);
             let ni = self.sample_local_net_input(slot, game_focused);
             let Some(applied) = self.net_rollback.as_mut().map(|d| d.add_local(sampled, ni.clone()))

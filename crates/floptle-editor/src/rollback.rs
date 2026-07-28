@@ -281,6 +281,34 @@ impl RollbackDriver {
         self.slots.iter().position(|p| *p == peer).map(|i| i as u8)
     }
 
+    /// Which **local device** slot this machine's own player reads.
+    ///
+    /// Not the same thing as [`Self::slot_of`], and conflating the two is what
+    /// made a joined client unplayable. A slot means two unrelated things:
+    ///
+    /// - **Roster slot** — which fighter this peer drives. Host 0, joiners 1+.
+    ///   It is the identity the input travels under, and the slot the input is
+    ///   applied to on every machine, so that fighter #2 is fighter #2
+    ///   everywhere.
+    /// - **Device slot** — whose keyboard and which gamepad the input is read
+    ///   *from*, and which per-player bindings apply (`Binding.player`).
+    ///
+    /// The couch case makes them look identical: two players share a keyboard,
+    /// player 2 is roster slot 1 *and* device slot 1, and sampling by roster
+    /// slot is right by coincidence. Over a network it is wrong. A joiner is
+    /// roster slot 1, but they are sitting alone at their own machine as its
+    /// player one: their bindings are the player-1 bindings, and their gamepad
+    /// enumerates at index 0. Sampled by roster slot they got the couch's
+    /// player-2 layout, and a joiner whose only device was a pad drove nothing
+    /// at all — their pad is device 0, which roster slot 1 never reads.
+    ///
+    /// So it is always 0: on the machine you are sitting at, you are player
+    /// one. Nothing changes for the host, whose roster slot is already 0 —
+    /// which is exactly why this only ever broke for the person who joined.
+    pub fn local_device_slot(&self) -> u8 {
+        0
+    }
+
     /// The state checksum for a saved tick (§6): the body snapshots and script
     /// state the driver holds for it, folded into one FNV-1a digest.
     ///
@@ -1197,6 +1225,34 @@ end\n";
 
     /// the game degrades into "runs slightly slow", never into "the opponent
     /// teleports".
+    /// The roster slot and the device slot are different numbers for a joiner,
+    /// and treating them as one made a joined client unplayable: sampled at
+    /// roster slot 1, they were handed the couch's player-two bindings while
+    /// their own keyboard drove nothing.
+    ///
+    /// The host never noticed, because the host's roster slot is 0 and its
+    /// device slot is 0 — the two agree by coincidence for exactly one peer in
+    /// the session, which is the one the developer is sitting at.
+    #[test]
+    fn a_joiners_device_slot_is_zero_even_though_it_plays_the_second_fighter() {
+        let joiner = RollbackDriver::new(P2, vec![P1, P2], 0, 0);
+        assert_eq!(joiner.slot_of(P2), Some(1), "a joiner drives the second fighter");
+        assert_eq!(
+            joiner.local_device_slot(),
+            0,
+            "…but reads its own machine's player-one hardware and bindings"
+        );
+
+        let host = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
+        assert_eq!(host.slot_of(P1), Some(0));
+        assert_eq!(
+            host.local_device_slot(),
+            0,
+            "for the host the two coincide — which is why this only ever broke for whoever \
+             joined, and never for the person testing it"
+        );
+    }
+
     #[test]
     fn past_the_depth_cap_the_driver_stalls_instead_of_guessing() {
         let mut f = Fixture::new("stall");

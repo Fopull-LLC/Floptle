@@ -442,6 +442,135 @@ mod tests {
         RawInput { keys: k.iter().copied().collect(), ..Default::default() }
     }
 
+    /// A couch map, the shape that made the networked bug invisible: one
+    /// keyboard, so each fighter's buttons are scoped to a player slot.
+    fn couch_map() -> InputMap {
+        let scoped = |k: Key, p: u8| Binding { player: Some(p), ..Binding::new(Source::Key(k)) };
+        InputMap {
+            actions: vec![Action {
+                name: "Punch".into(),
+                // Player one punches with J, player two with Numpad1.
+                bindings: vec![scoped(Key::KeyJ, 0), scoped(Key::Numpad1, 1)],
+            }],
+            axes2: vec![],
+            axes1: vec![],
+            motions: vec![],
+            players: 2,
+            motion_axis: None,
+        }
+    }
+
+    /// Why a rollback peer must sample its own DEVICE slot rather than its
+    /// roster slot.
+    ///
+    /// On a couch the two are the same number and everything works by
+    /// coincidence. Over a network they diverge: the joiner is roster slot 1,
+    /// but they are sitting alone at their own keyboard as its player one. Read
+    /// by roster slot, their J does nothing and they are silently handed the
+    /// other seat's Numpad layout.
+    #[test]
+    fn a_joiner_reads_its_own_player_one_bindings_not_the_couchs_player_two() {
+        let mut sys = InputSystem::new(couch_map());
+        let j = keys(&[Key::KeyJ]);
+
+        // Device slot 0 — this machine's own player one. What a joiner is.
+        let own = sys.sample_tick(&j, 0, 0.016);
+        assert!(
+            own.is_held(0),
+            "the local player pressed their own punch button; it must register"
+        );
+
+        // Roster slot 1 — what the driver used to pass, and the bug.
+        let mut sys = InputSystem::new(couch_map());
+        let by_roster = sys.sample_tick(&j, 1, 0.016);
+        assert!(
+            !by_roster.is_held(0),
+            "sampling by ROSTER slot reads player two's bindings, so the joiner's own \
+             keyboard drives nothing — this is the assertion that documents the bug, and \
+             it is why the driver samples local_device_slot() instead"
+        );
+    }
+
+    /// The gamepad half of the same story, which is narrower than it looks.
+    ///
+    /// A lone joiner's only pad enumerates at index 0, and roster slot 1 asks
+    /// for pad 1. Whether that matters depends entirely on how the pad is
+    /// bound, and the difference is worth pinning down because the two spellings
+    /// look interchangeable in the Input settings and are not:
+    ///
+    /// - `PadId::Any` — the default, and what most projects have — reads the
+    ///   slot's own pad and then **falls back to any connected pad**. The lone
+    ///   joiner is rescued by that fallback and always worked.
+    /// - `PadId::Slot(n)` — what a couch map uses to pin pad 0 to player one and
+    ///   pad 1 to player two — has no fallback by design, because the whole
+    ///   point is to keep the two seats apart. That joiner drove nothing.
+    #[test]
+    fn a_pinned_pad_follows_the_device_slot_while_an_any_pad_falls_back() {
+        use crate::source::{PadButton, PadControl, PadId};
+        let map_with = |id: PadId| InputMap {
+            actions: vec![Action {
+                name: "Punch".into(),
+                bindings: vec![Binding::new(Source::Pad {
+                    id,
+                    ctrl: PadControl::Button(PadButton::West),
+                })],
+            }],
+            axes2: vec![],
+            axes1: vec![],
+            motions: vec![],
+            players: 2,
+            motion_axis: None,
+        };
+        // One pad, plugged into this machine, holding West. Slot 1 is empty:
+        // there is no second player sitting here.
+        let mut pad = crate::raw::PadState { connected: true, ..Default::default() };
+        pad.buttons.insert(PadButton::West);
+        let raw =
+            RawInput { pads: vec![pad, crate::raw::PadState::default()], ..Default::default() };
+
+        // ONE pad, `Any`: the fallback rescues it. This case was never broken,
+        // whatever slot it was sampled at — asserted so nobody removes the
+        // fallback while tidying up.
+        let any = map_with(PadId::Any);
+        assert!(
+            InputSystem::new(any.clone()).sample_tick(&raw, 0, 0.016).is_held(0),
+            "an Any binding reads the slot's own pad"
+        );
+        assert!(
+            InputSystem::new(any.clone()).sample_tick(&raw, 1, 0.016).is_held(0),
+            "with one pad connected, Any falls back to it — which is what kept the common \
+             single-pad joiner working even while being sampled at the wrong slot"
+        );
+
+        // `Slot(n)` names a pad outright and never consults the resolving slot,
+        // so it is unaffected in both directions.
+        let pinned = map_with(PadId::Slot(0));
+        for slot in [0, 1] {
+            assert!(
+                InputSystem::new(pinned.clone()).sample_tick(&raw, slot, 0.016).is_held(0),
+                "Slot(0) means pad 0 whoever is asking"
+            );
+        }
+
+        // The case that IS wrong: a joiner with TWO pads connected. `Any`
+        // prefers the resolving slot's own pad, so roster slot 1 reads their
+        // second controller and their first — the one in their hands — does
+        // nothing.
+        let mut first = crate::raw::PadState { connected: true, ..Default::default() };
+        first.buttons.insert(PadButton::West);
+        let second = crate::raw::PadState { connected: true, ..Default::default() };
+        let two = RawInput { pads: vec![first, second], ..Default::default() };
+        assert!(
+            InputSystem::new(any.clone()).sample_tick(&two, 0, 0.016).is_held(0),
+            "device slot 0 is the pad they are actually holding"
+        );
+        assert!(
+            !InputSystem::new(any).sample_tick(&two, 1, 0.016).is_held(0),
+            "sampled by roster slot, a joiner with two pads connected drives their fighter \
+             from the wrong one"
+        );
+    }
+
     #[test]
     fn the_two_domains_do_not_eat_each_others_edges() {
         // The bug this prevents: a press seen by `update` is gone by the time

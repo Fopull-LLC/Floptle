@@ -382,6 +382,14 @@ function net.peers() end
 ---@param peer integer|nil
 ---@return number
 function net.ping(peer) end
+---The lobby code friends type in to join, on a host that used
+---`net.host{ relay = ... }`. Put it on your own lobby screen.
+---
+---nil until the relay answers (poll it, don't read it once), and nil for good
+---on a client or a direct/LAN host — there is no code there, joiners use the
+---address.
+---@return string|nil
+function net.lobbyCode() end
 ---Send a named remote call. On the server it goes to clients (all, or `to`);
 ---on a client it goes to the server. Args: scalars + tables (≤4 deep, ≤1KB).
 ---Handle with `function onRpc.name(args, sender) end`.

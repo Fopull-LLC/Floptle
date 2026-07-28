@@ -260,6 +260,41 @@ reach; it is stateless and forwards opaque bytes.
 Player slots are the scene's `Predicted`/`Rollback` nodes in order — #1 the
 host, #2+ the joiners — or spawn one per joiner from a script.
 
+### Showing the code on your own lobby screen
+
+`net.lobbyCode()` returns it, so players never have to open the engine's panel:
+
+```lua
+function update(node, dt)
+  local code = net.lobbyCode()
+  find("CodeLabel").text = code or "getting a code…"
+end
+```
+
+**Poll it, don't read it once.** It's `nil` until the relay answers — a round
+trip after `net.host{relay=…}` — and `nil` for good on a client or a direct/LAN
+host, where there's no code and joiners use the address.
+
+### A joiner plays with their own controls
+
+Two different things are called a "slot", and only one of them is about
+hardware:
+
+- The **roster slot** is which fighter a peer drives. Host 0, joiners 1+. It's
+  the same everywhere, so fighter #2 is fighter #2 on both machines.
+- The **device slot** is whose keyboard and which gamepad the input is read
+  from, and which per-player bindings apply.
+
+On a couch these are the same number. Over a network they aren't: a joiner is
+roster slot 1, but they're sitting alone at their own machine as *its* player
+one. The engine samples their own player-one bindings and applies the result to
+their roster slot — so **you don't need a separate binding set for joiners**,
+and the same controls work whether someone is player one or player two.
+
+One case still needs care: with `Pad(id: Any)` — the default — a player with
+**two controllers connected** may find the second one driving them. Pin it with
+`Pad(id: Slot(0))` if that's a problem.
+
 ---
 
 ## 6. Shipping

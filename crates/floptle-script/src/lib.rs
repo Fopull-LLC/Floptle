@@ -1173,6 +1173,7 @@ end
             peers: vec![1],
             rtt_ms: 20.0,
             my_peer: None,
+            lobby_code: None,
         });
         host.run(&mut world, &dir, 0.01, 0.01);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -1231,7 +1232,7 @@ end
         // the contract here; value-level checks ride the rpc/synced paths above.)
 
         // Client-side writes to synced warn.
-        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0, my_peer: Some(7) });
+        host.set_net_state(NetState { role: NetRoleState::Client, peers: vec![], rtt_ms: 0.0, my_peer: Some(7), lobby_code: None });
         host.dispatch_rpc(
             &mut world,
             "hurt",
@@ -1244,6 +1245,64 @@ end
         assert!(
             host.drain_logs().iter().any(|l| l.level == LogLevel::Warn && l.msg.contains("synced.hp")),
             "client synced write must warn"
+        );
+    }
+
+    /// A game has to be able to tell its own players the lobby code.
+    ///
+    /// The relay hands it back at a moment only the engine sees, so a front end
+    /// that couldn't read it had nowhere to get it — every game shipping a lobby
+    /// screen had to send players to the engine's own debug panel to find out
+    /// how their friends were supposed to join.
+    #[test]
+    fn a_lobby_screen_can_read_the_code_the_relay_handed_back() {
+        let dir = std::env::temp_dir().join("floptle_script_test_lobby_code");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "lobby",
+            "replicated = { code = \"\" }\n\
+             function update(node, dt)\n  synced.code = net.lobbyCode() or \"waiting\"\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst { kind: "lobby".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),
+        );
+        let mut host = ScriptHost::new();
+
+        // Before the relay answers: nil, so a lobby screen must poll rather
+        // than read once. This is the state a host sits in for a round trip.
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            peers: vec![],
+            rtt_ms: 0.0,
+            my_peer: None,
+            lobby_code: None,
+        });
+        host.run(&mut world, &dir, 0.016, 0.016);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let code = |h: &mut ScriptHost| match &h.collect_synced()[0].2[0].1 {
+            floptle_net::NetValue::Str(s) => s.clone(),
+            other => panic!("expected a string, got {other:?}"),
+        };
+        assert_eq!(code(&mut host), "waiting");
+
+        // The relay answers.
+        host.set_net_state(NetState {
+            role: NetRoleState::Server,
+            peers: vec![],
+            rtt_ms: 0.0,
+            my_peer: None,
+            lobby_code: Some("QK7RM".into()),
+        });
+        host.run(&mut world, &dir, 0.016, 0.032);
+        assert_eq!(
+            code(&mut host),
+            "QK7RM",
+            "the code must reach Lua, or a game cannot show it to the players who need it"
         );
     }
 
@@ -2914,6 +2973,7 @@ end
             peers: vec![2],
             rtt_ms: 0.0,
             my_peer: None,
+            lobby_code: None,
         });
         host.run(&mut world, &dir, 0.016, 0.016);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -2928,6 +2988,7 @@ end
             peers: vec![],
             rtt_ms: 0.0,
             my_peer: Some(2),
+            lobby_code: None,
         });
         host.run(&mut world, &dir, 0.016, 0.032);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -2971,7 +3032,7 @@ end
             }]),
         );
         let mut host = ScriptHost::new();
-        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0, my_peer: None });
+        host.set_net_state(NetState { role: NetRoleState::Server, peers: vec![7], rtt_ms: 0.0, my_peer: None, lobby_code: None });
         host.run(&mut world, &dir, 0.01, 0.01); // instantiate
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
 

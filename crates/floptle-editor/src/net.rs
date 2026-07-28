@@ -367,6 +367,9 @@ impl Editor {
                 peers: s.peers().to_vec(),
                 rtt_ms: s.peers().first().map(|&p| s.stats(p).rtt_ms).unwrap_or(0.0),
                 my_peer: None,
+                // The relay's answer, so a game can put the code on its own
+                // lobby screen instead of sending players to the 🌐 panel.
+                lobby_code: self.net_lobby_code.clone(),
             }
         } else {
             NetState::default()
@@ -1142,6 +1145,8 @@ impl Editor {
             peers: hs.session.peers().to_vec(),
             rtt_ms: hs.session.stats(hs.peer).rtt_ms,
             my_peer: None,
+            // The hidden harness server is loopback: no relay, no code.
+            lobby_code: None,
         });
         hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
@@ -1727,6 +1732,9 @@ impl Editor {
             peers: Vec::new(),
             rtt_ms: rtt,
             my_peer,
+            // A joiner already knows the code — they typed it. It is the host's
+            // to publish, so this stays None rather than echoing it back.
+            lobby_code: None,
         });
         self.script_host.set_net_owners(Self::collect_net_owners(&self.world));
     }

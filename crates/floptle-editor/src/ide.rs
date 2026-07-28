@@ -2582,6 +2582,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "net.isServer", insert: "net.isServer()", doc: "net.isServer() — true on the authoritative host." },
     ApiEntry { label: "net.isClient", insert: "net.isClient()", doc: "net.isClient() — true on a connected client." },
     ApiEntry { label: "net.peers", insert: "net.peers()", doc: "net.peers() — connected client peer ids (server)." },
+    ApiEntry { label: "net.lobbyCode", insert: "net.lobbyCode()", doc: "net.lobbyCode() — the code friends type in to join, on a host that used net.host{ relay = \"…\" }. Put it on your own lobby screen. nil until the relay answers (POLL it, don't read it once), and nil for good on a client or a direct/LAN host — there is no code there, joiners use the address." },
     ApiEntry { label: "net.ping", insert: "net.ping()", doc: "net.ping(peer?) — round-trip time in ms." },
     ApiEntry { label: "net.rpc", insert: "net.rpc(\"name\", {})", doc: "net.rpc(name, args, {to=peer, withInput=true}) — remote call: server→clients or client→server. withInput stamps a client intent with the tick it was seeing (for net.rewind). Handle with function onRpc.name(args, sender). Args: scalars + tables (≤4 deep, ≤1KB)." },
     ApiEntry { label: "net.rewind", insert: "net.rewind(peer, function()\n  \nend)", doc: "SERVER ONLY, inside onRpc for an rpc sent {withInput=true}: run the closure against the world as that peer PERCEIVED it — raycasts and other scripts' synced vars read the rewound tick (clamped ~250 ms). A parry that was up on the attacker's screen counts." },
