@@ -213,7 +213,7 @@ impl Editor {
                 .as_ref()
                 .map(|sim| {
                     sim.body_states()
-                        .map(|(e, vel, _, grounded, _)| (e, [vel.x, vel.y, vel.z], grounded))
+                        .map(|(e, vel, _, grounded, ..)| (e, [vel.x, vel.y, vel.z], grounded))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -987,7 +987,7 @@ impl Editor {
         hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
         let mut states = HashMap::new();
-        for (e, vel, up, grounded, height) in hs.sim.body_states() {
+        for (e, vel, up, grounded, height, pos) in hs.sim.body_states() {
             states.insert(
                 e.index(),
                 floptle_script::BodyState {
@@ -995,6 +995,7 @@ impl Editor {
                     up: [up.x, up.y, up.z],
                     grounded,
                     height,
+                    pos: [pos.x, pos.y, pos.z],
                 },
             );
         }
@@ -1129,7 +1130,7 @@ impl Editor {
         let bstates: floptle_net::BodyStates = hs
             .sim
             .body_states()
-            .map(|(e, vel, _, grounded, _)| (e, [vel.x, vel.y, vel.z], grounded))
+            .map(|(e, vel, _, grounded, ..)| (e, [vel.x, vel.y, vel.z], grounded))
             .collect();
         hs.session.update_body_states(bstates);
         hs.session
@@ -1337,7 +1338,7 @@ impl Editor {
                 {
                     let mut states = HashMap::new();
                     // up/height: reuse the live values (not part of rollback).
-                    if let Some((_, _, up, _, height)) =
+                    if let Some((_, _, up, _, height, _)) =
                         sim.body_states().find(|(e, ..)| e.index() == eid)
                     {
                         states.insert(
@@ -1347,6 +1348,7 @@ impl Editor {
                                 up: [up.x, up.y, up.z],
                                 grounded: bs.grounded,
                                 height,
+                                pos: bs.pos.to_array(),
                             },
                         );
                     }

@@ -2039,6 +2039,22 @@ impl EditorTabViewer<'_> {
                                          Overrides freeze rot.",
                                     )
                                     .changed();
+                                cmd.inspector_changed |= ui
+                                    .checkbox(&mut rb.pushbox_only, "pushbox only")
+                                    .on_hover_text(
+                                        "The solver never resolves this body's contacts — it \
+                                         integrates its velocity and nothing else: no gravity, \
+                                         no depenetration, no ground detection. It stays fully \
+                                         visible to raycasts and overlap queries, so it's a box \
+                                         you can HIT, not a box physics moves.\n\n\
+                                         This is the supported profile for ROLLBACK netcode. \
+                                         The contact solver is the part least likely to agree \
+                                         bit-for-bit between two machines, and a fighting game \
+                                         replaces it with integer frame data anyway. Your script \
+                                         owns gravity, the floor and pushout — and should move \
+                                         the body through node.tickX/tickY/tickZ, not node.x.",
+                                    )
+                                    .changed();
                             });
                         }
                     });

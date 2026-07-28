@@ -232,6 +232,17 @@ impl Rollback {
         self.prune();
     }
 
+    /// Move the simulated frontier back to `tick` — the editor's BACKWARDS
+    /// frame-step, which reads the driver's state ring instead of re-deriving
+    /// anything (§7 P5).
+    ///
+    /// Only the frontier moves; the input rings are untouched, so stepping
+    /// forward again re-simulates from exactly the same commands and lands on
+    /// exactly the same state. That is what makes it a *step*, not an undo.
+    pub fn rewind_to(&mut self, tick: u64) {
+        self.current = self.current.min(tick);
+    }
+
     /// Every peer's input for `tick`, real where known and repeat-last where not.
     ///
     /// Call this immediately before simulating `tick`; it records what was used,

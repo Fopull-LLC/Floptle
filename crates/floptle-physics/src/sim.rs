@@ -416,6 +416,7 @@ impl Sim {
         // blocks or gets blocked, but overlap fires the trigger hooks —
         // moving pickups, projectiles that pass through, sweeping zones.
         b.sensor = ecs.get::<floptle_core::Trigger>(e).is_some();
+        b.pushbox_only = rb.pushbox_only;
         let rot0 = ecs.get::<Transform>(e).map(|t| t.rotation).unwrap_or(Quat::IDENTITY);
         (b, rot0)
     }
@@ -846,14 +847,19 @@ impl Sim {
     /// mirror as single bodies, so `node.vx` / `node.up_x` / `node.grounded`
     /// read identically on a vessel root — cameras and controllers built for
     /// bodies work on assemblies unchanged.
-    pub fn compound_states(&self) -> Vec<(u32, Vec3, Vec3, bool)> {
+    pub fn compound_states(&self) -> Vec<(u32, Vec3, Vec3, bool, DVec3)> {
         self.cmap
             .iter()
             .map(|l| {
                 let c = &self.world.compounds[l.compound];
                 let g = self.world.gravity.accel_at(c.pos, &self.world.colliders);
                 let up = if g.length_squared() > 1e-6 { -g.normalize() } else { Vec3::Y };
-                (l.entity.index(), c.vel, up, c.grounded || c.anchored)
+                // The CoM in absolute world coordinates, matching what
+                // `body_states` reports — so `node.tickPos` on a vessel root
+                // answers with the compound's real pose rather than a
+                // convincing zero.
+                let pos = c.pos.as_dvec3() + self.world.origin;
+                (l.entity.index(), c.vel, up, c.grounded || c.anchored, pos)
             })
             .collect()
     }
@@ -1427,13 +1433,24 @@ impl Sim {
         }
     }
 
-    /// Per body: (entity, velocity, up, grounded, height) — so the editor can expose it
-    /// to scripts (`up` is −gravity, for surface-relative movement on planets; `height`
-    /// lets a controller read/animate its capsule height for crouching).
-    pub fn body_states(&self) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool, f32)> + '_ {
+    /// Per body: (entity, velocity, up, grounded, height, TICK position) — so the
+    /// editor can expose it to scripts (`up` is −gravity, for surface-relative
+    /// movement on planets; `height` lets a controller read/animate its capsule
+    /// height for crouching).
+    ///
+    /// The position is the body's own, in absolute world coordinates — NOT the
+    /// node's transform, which between ticks holds the *interpolated render
+    /// pose* (`docs/rollback-netcode-design.md` §3). Reading the render pose
+    /// inside `fixedUpdate` is an alpha-dependent read, which is a
+    /// frame-rate-dependent read, which no replay can reproduce; this is where
+    /// `node.tickX/tickY/tickZ/tickPos` come from.
+    pub fn body_states(
+        &self,
+    ) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool, f32, DVec3)> + '_ {
         self.map.iter().map(move |l| {
             let b = &self.world.bodies[l.body];
-            (l.entity, b.vel, b.up, b.grounded, b.height())
+            let pos = self.world.origin + DVec3::new(b.pos.x as f64, b.pos.y as f64, b.pos.z as f64);
+            (l.entity, b.vel, b.up, b.grounded, b.height(), pos)
         })
     }
 
@@ -1597,6 +1614,8 @@ impl Sim {
                 b.layer = layer;
                 // Live trigger toggles (the Inspector checkbox while playing).
                 b.sensor = ecs.get::<floptle_core::Trigger>(ent).is_some();
+                // Live toggles from the Inspector / `rig.pushboxOnly`.
+                b.pushbox_only = rb.pushbox_only;
                 if b.kinematic && !kinematic {
                     // Waking up into Dynamic: start from rest at the tracked pose.
                     b.vel = Vec3::ZERO;

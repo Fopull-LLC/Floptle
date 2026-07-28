@@ -293,6 +293,12 @@ pub struct RigidBodyDoc {
     /// Root of a compound assembly built from descendant RigidBody shapes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub assembly: bool,
+    /// Pushbox-only: the solver never resolves this body's contacts — it
+    /// integrates its velocity and nothing else. The rollback profile
+    /// (`docs/rollback-netcode-design.md` §3). Omitted when off, so every scene
+    /// that predates it loads unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pushbox_only: bool,
 }
 
 fn is_one(v: &f32) -> bool {
@@ -371,6 +377,7 @@ impl RigidBodyDoc {
             align_up: self.align_up,
             mass: self.mass,
             assembly: self.assembly,
+            pushbox_only: self.pushbox_only,
         }
     }
     pub fn from_rigidbody(rb: &RigidBody) -> Self {
@@ -389,6 +396,7 @@ impl RigidBodyDoc {
             align_up: rb.align_up,
             mass: rb.mass,
             assembly: rb.assembly,
+            pushbox_only: rb.pushbox_only,
         }
     }
 }
@@ -1766,6 +1774,7 @@ mod tests {
                         align_up: true, // exercise the align-to-gravity round-trip
                         mass: 3.5,      // exercise the assembly-field round-trips
                         assembly: true,
+                        pushbox_only: true, // exercise the rollback-profile round-trip
                     }),
                     celestial: Some(CelestialBodyDoc {
                         mu: 25000.0,

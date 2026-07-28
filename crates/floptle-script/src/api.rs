@@ -166,6 +166,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // authoring-time (the Inspector dropdown; it's a baked
                 // collider, not a body, so there's nothing here to toggle).
                 ("kinematic".to_string(), b(rb.mode == floptle_core::BodyMode::Kinematic)),
+                // Pushbox-only (1/0): the solver never resolves this body's
+                // contacts — it integrates its velocity and nothing else. The
+                // supported rollback profile; the script owns gravity, ground
+                // and separation (`docs/rollback-netcode-design.md` §3).
+                ("pushboxOnly".to_string(), b(rb.pushbox_only)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
                 // Shape kind: 0 = sphere, 1 = capsule, 2 = box.
@@ -392,6 +397,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                             };
                         }
                     }
+                    "pushboxOnly" => rb.pushbox_only = val != 0.0,
                     "radius" => rb.radius = val as f32,
                     "height" => rb.height = val as f32,
                     "shape" => {
@@ -621,6 +627,37 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 }
                 return Ok(Value::Nil);
             }
+            // `node.tickPos` / `node.tickX|Y|Z` — the BODY's pose at the start
+            // of this tick, in absolute world coordinates.
+            //
+            // `x`/`y`/`z` are the *interpolated render pose* between ticks, so
+            // building a hurtbox from them inside `fixedUpdate` is an
+            // alpha-dependent read: frame-rate-dependent, and therefore
+            // impossible for any replay to reproduce
+            // (`docs/rollback-netcode-design.md` §3). The own-node table
+            // carries live raw tick fields (possibly written earlier this
+            // hook), so prefer those; a cross-node handle reads the body
+            // bridge. Neither answers on a node with no body.
+            if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
+                let own = (
+                    this.raw_get::<f64>("tickX"),
+                    this.raw_get::<f64>("tickY"),
+                    this.raw_get::<f64>("tickZ"),
+                );
+                let p = match own {
+                    (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
+                    _ => bodies.borrow().get(&e).map(|b| b.pos),
+                };
+                let Some(p) = p else { return Ok(Value::Nil) };
+                return Ok(match key.as_str() {
+                    "tickX" => Value::Number(p[0]),
+                    "tickY" => Value::Number(p[1]),
+                    "tickZ" => Value::Number(p[2]),
+                    _ => Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                        glam::DVec3::new(p[0], p[1], p[2]),
+                    ))?),
+                });
+            }
             // Transform reads.
             {
                 let s = scene.borrow();
@@ -805,6 +842,58 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             body_pos.borrow_mut().insert(e, [v.x, v.y, v.z]);
                         }
                     }
+                }
+                return Ok(());
+            }
+            // `node.tickPos = vec3(...)` / `node.tickX = n` — move the BODY in
+            // the tick channel, without touching the render transform. The
+            // transform would be overwritten by the interpolated writeback
+            // anyway, which is what makes `node.x = node.x + d` inside
+            // fixedUpdate teleport a fighter back onto its visual position:
+            // the classic "the visuals take the knockback, the hitbox stays
+            // put" bug (`docs/rollback-netcode-design.md` §3).
+            if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
+                let own = this.raw_get::<f64>("tickX").is_ok();
+                let mut p = match (
+                    this.raw_get::<f64>("tickX"),
+                    this.raw_get::<f64>("tickY"),
+                    this.raw_get::<f64>("tickZ"),
+                ) {
+                    (Ok(x), Ok(y), Ok(z)) => [x, y, z],
+                    _ => match bodies.borrow().get(&e) {
+                        Some(b) => b.pos,
+                        // No body means no tick channel; a silent no-op here
+                        // would look exactly like a working teleport.
+                        None => {
+                            return Err(mlua::Error::RuntimeError(
+                                "node.tickPos is the physics body's tick pose — this node has \
+                                 no RigidBody. Use node.pos for a plain transform move."
+                                    .into(),
+                            ))
+                        }
+                    },
+                };
+                match key.as_str() {
+                    "tickX" => p[0] = as_num(&val).unwrap_or(p[0]),
+                    "tickY" => p[1] = as_num(&val).unwrap_or(p[1]),
+                    "tickZ" => p[2] = as_num(&val).unwrap_or(p[2]),
+                    _ => {
+                        let Some(v) = crate::math_api::vec3_of(&val) else {
+                            return Err(mlua::Error::RuntimeError(
+                                "node.tickPos takes a vec3 (or anything with x/y/z)".into(),
+                            ));
+                        };
+                        p = [v.x, v.y, v.z];
+                    }
+                }
+                if own {
+                    // The own-node read-back picks these up after the hook,
+                    // alongside every other body write.
+                    this.raw_set("tickX", p[0])?;
+                    this.raw_set("tickY", p[1])?;
+                    this.raw_set("tickZ", p[2])?;
+                } else {
+                    body_pos.borrow_mut().insert(e, p);
                 }
                 return Ok(());
             }

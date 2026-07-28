@@ -1746,6 +1746,20 @@ impl Editor {
                         // again — how you find out whether a jab is 4 frames of startup
                         // or 5.
                         ui.add_enabled_ui(paused, |ui| {
+                            // Backwards first, so the pair reads left-to-right as a
+                            // scrubber rather than as two unrelated buttons.
+                            if ui
+                                .button("⏮ Back  (Shift+F3)")
+                                .on_hover_text(
+                                    "put the simulation back exactly one gameplay tick.\n\n                                     A simulation isn't invertible, so this reads the \
+                                     ROLLBACK state ring rather than re-deriving anything: \
+                                     it needs a rollback session running, and reaches back \
+                                     as far as the ring keeps (about a fifth of a second).",
+                                )
+                                .clicked()
+                            {
+                                cmd.step_tick_back = true;
+                            }
                             if ui
                                 .button("⏭ Step  (F3)")
                                 .on_hover_text(
@@ -3702,7 +3716,7 @@ impl Editor {
             // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
             if let Some(sim) = self.sim.as_ref() {
                 let mut states = HashMap::new();
-                for (e, vel, up, grounded, height) in sim.body_states() {
+                for (e, vel, up, grounded, height, pos) in sim.body_states() {
                     states.insert(
                         e.index(),
                         floptle_script::BodyState {
@@ -3710,10 +3724,11 @@ impl Editor {
                             up: [up.x, up.y, up.z],
                             grounded,
                             height,
+                            pos: [pos.x, pos.y, pos.z],
                         },
                     );
                 }
-                for (eid, vel, up, grounded) in sim.compound_states() {
+                for (eid, vel, up, grounded, pos) in sim.compound_states() {
                     states.insert(
                         eid,
                         floptle_script::BodyState {
@@ -3721,6 +3736,7 @@ impl Editor {
                             up: [up.x, up.y, up.z],
                             grounded,
                             height: 0.0,
+                            pos: [pos.x, pos.y, pos.z],
                         },
                     );
                 }
@@ -3983,7 +3999,7 @@ impl Editor {
                     if let Some(sim) = self.sim.as_mut() {
                         // Fresh body state for THIS tick (post previous tick's physics).
                         let mut states = HashMap::new();
-                        for (e, vel, up, grounded, height) in sim.body_states() {
+                        for (e, vel, up, grounded, height, pos) in sim.body_states() {
                             states.insert(
                                 e.index(),
                                 floptle_script::BodyState {
@@ -3991,10 +4007,11 @@ impl Editor {
                                     up: [up.x, up.y, up.z],
                                     grounded,
                                     height,
+                                    pos: [pos.x, pos.y, pos.z],
                                 },
                             );
                         }
-                        for (eid, vel, up, grounded) in sim.compound_states() {
+                        for (eid, vel, up, grounded, pos) in sim.compound_states() {
                             states.insert(
                                 eid,
                                 floptle_script::BodyState {
@@ -4002,6 +4019,7 @@ impl Editor {
                                     up: [up.x, up.y, up.z],
                                     grounded,
                                     height: 0.0,
+                                    pos: [pos.x, pos.y, pos.z],
                                 },
                             );
                         }
@@ -4163,7 +4181,7 @@ impl Editor {
             // rendered and `node.vx/grounded` reads this frame's final values.
             if let Some(sim) = self.sim.as_mut() {
                 let mut states = HashMap::new();
-                for (e, vel, up, grounded, height) in sim.body_states() {
+                for (e, vel, up, grounded, height, pos) in sim.body_states() {
                     states.insert(
                         e.index(),
                         floptle_script::BodyState {
@@ -4171,13 +4189,14 @@ impl Editor {
                             up: [up.x, up.y, up.z],
                             grounded,
                             height,
+                            pos: [pos.x, pos.y, pos.z],
                         },
                     );
                 }
                 // Compound roots read like bodies too (node.vx / up_x /
                 // grounded on a vessel) — before the collider hand-off, since
                 // their gravity-up needs the collider set.
-                for (eid, vel, up, grounded) in sim.compound_states() {
+                for (eid, vel, up, grounded, pos) in sim.compound_states() {
                     states.insert(
                         eid,
                         floptle_script::BodyState {
@@ -4185,6 +4204,7 @@ impl Editor {
                             up: [up.x, up.y, up.z],
                             grounded,
                             height: 0.0,
+                            pos: [pos.x, pos.y, pos.z],
                         },
                     );
                 }
@@ -4702,6 +4722,9 @@ impl Editor {
         }
         if cmd.step_tick {
             self.step_tick(1);
+        }
+        if cmd.step_tick_back {
+            self.step_tick_back();
         }
         if cmd.toggle_pause {
             self.toggle_pause();

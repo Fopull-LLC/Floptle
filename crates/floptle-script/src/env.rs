@@ -192,11 +192,20 @@ pub(crate) fn stamp_node_table(
             t.raw_set("up_z", b.up[2] as f64)?;
             t.raw_set("grounded", b.grounded)?;
             t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
+            // The TICK pose channel (`docs/rollback-netcode-design.md` §3):
+            // the body's own position, not the interpolated render pose that
+            // `x`/`y`/`z` carry between ticks. Read it to build a hurtbox;
+            // write it to move the body without going through the transform.
+            t.raw_set("tickX", b.pos[0])?;
+            t.raw_set("tickY", b.pos[1])?;
+            t.raw_set("tickZ", b.pos[2])?;
         }
         // The node lost its RigidBody since the last hook — clear the stale body fields
         // rather than leaving the last tick's velocity readable on a table we now reuse.
         None => {
-            for k in ["vx", "vy", "vz", "up_x", "up_y", "up_z", "grounded", "height"] {
+            for k in
+                ["vx", "vy", "vz", "up_x", "up_y", "up_z", "grounded", "height", "tickX", "tickY", "tickZ"]
+            {
                 if t.raw_get::<Value>(k)? != Value::Nil {
                     t.raw_set(k, Value::Nil)?;
                 }
@@ -215,6 +224,7 @@ pub(crate) struct NodeStamp {
     pre: NodePre,
     vel: Option<[f32; 3]>,
     height: Option<f32>,
+    tick_pos: Option<[f64; 3]>,
 }
 
 /// Snapshot the table's current values, to compare the next hook against.
@@ -248,7 +258,17 @@ pub(crate) fn node_stamp(t: &Table, tr: &Transform) -> NodeStamp {
         (Ok(x), Ok(y), Ok(z)) => Some([x as f32, y as f32, z as f32]),
         _ => None,
     };
-    NodeStamp { pre, vel, height: t.raw_get::<f64>("height").ok().map(|h| h as f32) }
+    let tick_pos =
+        match (t.raw_get::<f64>("tickX"), t.raw_get::<f64>("tickY"), t.raw_get::<f64>("tickZ")) {
+            (Ok(x), Ok(y), Ok(z)) => Some([x, y, z]),
+            _ => None,
+        };
+    NodeStamp {
+        pre,
+        vel,
+        height: t.raw_get::<f64>("height").ok().map(|h| h as f32),
+        tick_pos,
+    }
 }
 
 /// What a script wrote to its own-node table between hooks.
@@ -257,6 +277,9 @@ pub(crate) struct DrainedWrites {
     pub(crate) moved: bool,
     pub(crate) vel: Option<[f32; 3]>,
     pub(crate) height: Option<f32>,
+    /// A write to `node.tickX/tickY/tickZ` (or `node.tickPos`) — a direct body
+    /// teleport in the tick channel, bypassing the render transform entirely.
+    pub(crate) tick_pos: Option<[f64; 3]>,
 }
 
 /// Apply writes made to the own-node table since [`node_stamp`] was taken, so a
@@ -285,6 +308,15 @@ pub(crate) fn drain_node_writes(
         && h as f32 != ph
     {
         out.height = Some(h as f32);
+    }
+    if let Some(pt) = prev.tick_pos
+        && let (Ok(x), Ok(y), Ok(z)) =
+            (t.raw_get::<f64>("tickX"), t.raw_get::<f64>("tickY"), t.raw_get::<f64>("tickZ"))
+    {
+        let now = [x, y, z];
+        if now != pt {
+            out.tick_pos = Some(now);
+        }
     }
     Ok(out)
 }

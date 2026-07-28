@@ -141,6 +141,9 @@ struct EditorCmd {
     toggle_pause: bool,
     /// Advance exactly one gameplay tick while paused (the ⏭ Step button / F3).
     step_tick: bool,
+    /// Put the simulation BACK one gameplay tick, out of the rollback state
+    /// ring (the ⏮ Back button / Shift+F3).
+    step_tick_back: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
     /// Open a folder in the OS file manager (empty path = the project root).
@@ -2775,6 +2778,7 @@ impl ApplicationHandler for Editor {
                             KeyCode::F1 => self.toggle_play(),
                             KeyCode::F2 if self.player_mode => {}
                             KeyCode::F2 => self.toggle_pause(),
+                            KeyCode::F3 if self.shift => self.step_tick_back(),
                             KeyCode::F3 => self.step_tick(1),
                             // Everything else is an EDITOR shortcut — suppressed in the
                             // Game view so it behaves like a real build.

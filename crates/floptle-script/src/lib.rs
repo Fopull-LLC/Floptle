@@ -732,11 +732,22 @@ pub struct BodyState {
     /// Current capsule standing height — a controller reads it and writes `node.height`
     /// to crouch (the engine resizes the capsule, feet planted).
     pub height: f32,
+    /// The BODY's world position at the start of this tick — what
+    /// `node.tickX/tickY/tickZ/tickPos` read, and what a write to them sets.
+    ///
+    /// Not the same thing as `node.x`. Between ticks the node's transform holds
+    /// the *interpolated render pose* (lerped by the frame's alpha), so reading
+    /// it inside `fixedUpdate` is a frame-rate-dependent read that no replay can
+    /// reproduce — and writing `node.x = node.x + d` there teleports the body
+    /// onto the visual position, which is the classic "the visuals take the
+    /// knockback but the hitbox stays put" bug
+    /// (`docs/rollback-netcode-design.md` §3).
+    pub pos: [f64; 3],
 }
 
 impl Default for BodyState {
     fn default() -> Self {
-        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false, height: 2.0 }
+        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false, height: 2.0, pos: [0.0; 3] }
     }
 }
 
@@ -1436,7 +1447,7 @@ end
         let mut bodies = HashMap::new();
         bodies.insert(
             e.index(),
-            BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0 },
+            BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0, pos: [0.0; 3] },
         );
         host.set_bodies(bodies);
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -2823,7 +2834,7 @@ end
         let mut bodies = HashMap::new();
         bodies.insert(
             e.index(),
-            BodyState { vel: [0.0, -2.0, 0.0], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0 },
+            BodyState { vel: [0.0, -2.0, 0.0], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0, pos: [0.0; 3] },
         );
         host.set_bodies(bodies);
         host.run(&mut world, &dir, 0.016, 0.016);
@@ -3348,6 +3359,102 @@ end
             errs.iter().any(|e| e.contains("broken") && e.contains("rolled back")),
             "the error must name the script and say what's wrong: {errs:?}"
         );
+    }
+
+    /// The tick-pose channel (`docs/rollback-netcode-design.md` §3).
+    ///
+    /// `node.x` between ticks is the INTERPOLATED render pose — lerped by the
+    /// frame's alpha, so reading it inside `fixedUpdate` is a frame-rate-
+    /// dependent read that no replay can reproduce, and `node.x = node.x + d`
+    /// teleports the body onto its visual position (the classic "the visuals
+    /// take the knockback but the hitbox stays put" bug). `node.tickX/tickY/
+    /// tickZ/tickPos` are the body's own pose, and writing them moves the body
+    /// without going near the transform.
+    #[test]
+    fn the_tick_pose_channel_reads_and_writes_the_body_not_the_render_transform() {
+        let dir = std::env::temp_dir().join("floptle_script_test_tick_pose");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "fighter",
+            "function fixedUpdate(node, dt)\n\
+               sawX, sawRender = node.tickX, node.x\n\
+               sawPos = node.tickPos.y\n\
+               if node.tickX < 100 then node.tickX = node.tickX + 5 end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        // The render transform is deliberately somewhere the body is NOT — that
+        // is exactly the situation mid-tick, and the two must not be confused.
+        world.insert(e, Transform::from_translation(glam::DVec3::new(-99.0, 0.0, 0.0)));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "fighter".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_bodies(HashMap::from([(
+            e.index(),
+            BodyState { pos: [10.0, 3.0, -2.0], ..Default::default() },
+        )]));
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+
+        let env = host.instance_env(e.index(), "fighter").unwrap();
+        assert_eq!(env.get::<f64>("sawX").unwrap(), 10.0, "tickX is the BODY's pose");
+        assert_eq!(env.get::<f64>("sawRender").unwrap(), -99.0, "…and node.x is not");
+        assert_eq!(env.get::<f64>("sawPos").unwrap(), 3.0, "tickPos is the same pose as a vec3");
+
+        // The write became a body teleport, not a transform edit.
+        let moved = host.take_body_pos_changes();
+        assert_eq!(moved.get(&e.index()).copied(), Some([15.0, 3.0, -2.0]));
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.x,
+            -99.0,
+            "the render transform must be left exactly alone"
+        );
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// A node with no rigidbody has no tick channel, and saying so beats a
+    /// silent no-op that looks like a working teleport.
+    #[test]
+    fn the_tick_pose_channel_is_absent_without_a_body() {
+        let dir = std::env::temp_dir().join("floptle_script_test_tick_pose_nobody");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "prop",
+            "function fixedUpdate(node, dt)\n\
+               missing = (node.tickPos == nil) and (node.tickX == nil)\n\
+               refused = not pcall(function() node.tickX = 5 end)\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "prop".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        let env = host.instance_env(e.index(), "prop").unwrap();
+        assert!(env.get::<bool>("missing").unwrap(), "no body, no tick pose");
+        assert!(env.get::<bool>("refused").unwrap(), "and writing it is an error, not a no-op");
     }
 
     /// The `replaying` gate (`docs/rollback-netcode-design.md` §4): a

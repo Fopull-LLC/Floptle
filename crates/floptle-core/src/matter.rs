@@ -220,6 +220,25 @@ pub struct RigidBody {
     /// the root's own shape fields are ignored). Multi-part vehicles,
     /// decoupling rockets, breakable structures. Requires `Dynamic` mode.
     pub assembly: bool,
+    /// **PUSHBOX ONLY** — the solver never resolves this body's contacts. It
+    /// integrates its velocity and nothing else: no gravity, no depenetration
+    /// against colliders or terrain, no ground detection, no position locks.
+    /// It still exists for raycasts, hulls and overlap queries, which is the
+    /// point — it is a box you can hit, not a box the physics engine moves.
+    ///
+    /// This is the supported profile for rollback
+    /// (`docs/rollback-netcode-design.md` §3, §8). Determinism across builds
+    /// and platforms is only *expected*, not proven, and the iterative
+    /// depenetration relaxation — order-dependent, sampling SDF terrain — is
+    /// the part most likely to disagree in the last bit and turn a match into
+    /// two different matches. A fighting game does not want it anyway: the
+    /// floor, gravity, walls and pushout are integer frame data owned by the
+    /// controller script, which is both exact and the genre's actual design.
+    ///
+    /// The script therefore owns separation. Pair it with
+    /// `node.tickX/tickY/tickZ/tickPos` — a position channel that is NOT the
+    /// interpolated render transform.
+    pub pushbox_only: bool,
 }
 
 impl Default for RigidBody {
@@ -238,6 +257,7 @@ impl Default for RigidBody {
             align_up: false,
             mass: 1.0,
             assembly: false,
+            pushbox_only: false,
         }
     }
 }

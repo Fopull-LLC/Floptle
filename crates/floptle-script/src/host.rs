@@ -2977,6 +2977,9 @@ impl ScriptHost {
             if let Some(h) = drained.height {
                 self.body_height_changes.borrow_mut().insert(eid, h);
             }
+            if let Some(p) = drained.tick_pos {
+                self.body_pos_changes.borrow_mut().insert(eid, p);
+            }
         }
         crate::env::stamp_node_table(&node, tr, body)?;
         if let Some((_, stamp)) = slot.as_mut() {
@@ -3063,6 +3066,19 @@ impl ScriptHost {
             );
             if x != pre.x || y != pre.y || z != pre.z {
                 self.body_pos_changes.borrow_mut().insert(eid, [x, y, z]);
+            }
+            // A write to the TICK channel is a body teleport that never touches
+            // the render transform — which is the whole point of having it
+            // (`docs/rollback-netcode-design.md` §3). It is read back AFTER the
+            // transform write above, so a script that sets both gets the one it
+            // meant: the deterministic one.
+            let tick = [
+                node.get::<f64>("tickX").unwrap_or(b.pos[0]),
+                node.get::<f64>("tickY").unwrap_or(b.pos[1]),
+                node.get::<f64>("tickZ").unwrap_or(b.pos[2]),
+            ];
+            if tick != b.pos {
+                self.body_pos_changes.borrow_mut().insert(eid, tick);
             }
         }
         let out = apply_node(&node, tr, &pre);

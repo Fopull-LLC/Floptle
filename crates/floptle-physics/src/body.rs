@@ -78,6 +78,12 @@ pub struct Body {
     /// Unlike `active = false`, a driven body is fully live: it collides, it
     /// raycasts, its transform writes back. Only *who calls the step* differs.
     pub driven: bool,
+    /// PUSHBOX ONLY (`RigidBody::pushbox_only`): integrate velocity, and stop
+    /// there — no gravity, no depenetration, no ground detection, no locks. The
+    /// body remains fully visible to raycasts and hulls; the script owns where
+    /// it is allowed to be. The supported rollback profile
+    /// (`docs/rollback-netcode-design.md` §3).
+    pub pushbox_only: bool,
 }
 
 impl Body {
@@ -101,6 +107,7 @@ impl Body {
             kinematic: false,
             sensor: false,
             driven: false,
+            pushbox_only: false,
         }
     }
 

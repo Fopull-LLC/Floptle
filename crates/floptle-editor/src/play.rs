@@ -690,6 +690,58 @@ impl Editor {
         self.tick_steps = self.tick_steps.saturating_add(n);
     }
 
+    /// Frame-step BACKWARDS: put the simulation back exactly one gameplay tick
+    /// (`docs/rollback-netcode-design.md` §7 P5 — closes 0024's deferred item).
+    ///
+    /// A simulation is not invertible, so this is not a general feature: it
+    /// reads the rollback driver's state ring, which exists because rollback
+    /// needs it anyway. That means it works in a rollback session and reaches
+    /// back exactly as far as the ring does — a fifth of a second — and says so
+    /// plainly rather than doing nothing when it can't.
+    pub(crate) fn step_tick_back(&mut self) {
+        if !self.playing {
+            return;
+        }
+        self.paused = true;
+        self.tick_steps = 0;
+        let step = self.game_tick.step;
+        let stepped = match (self.net_rollback.take(), self.sim.as_mut()) {
+            (Some(mut d), Some(sim)) => {
+                let mut ctx = crate::rollback::Ctx {
+                    world: &mut self.world,
+                    sim,
+                    host: &mut self.script_host,
+                    step,
+                };
+                let at = d.step_back(&mut ctx);
+                self.net_rollback = Some(d);
+                at
+            }
+            (d, _) => {
+                self.net_rollback = d;
+                None
+            }
+        };
+        match stepped {
+            Some(t) => {
+                self.game_tick_no = self.game_tick_no.saturating_sub(1);
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("⏮ stepped back to rollback tick {t}"),
+                    None,
+                );
+            }
+            None => self.console.push(
+                floptle_script::LogLevel::Warn,
+                "⏮ nothing to step back to. Backwards frame-step reads the ROLLBACK state \
+                 ring, so it needs a rollback session running, and it only reaches as far \
+                 back as the ring keeps (about a fifth of a second)."
+                    .into(),
+                None,
+            ),
+        }
+    }
+
     /// Resolve a `scene.load(...)` argument to a scene file: a name ("arena"),
     /// a scenes-relative name ("arenas/desert"), or a project-relative path
     /// ("scenes/arena.ron"). Escapes are REJECTED — in multiplayer the string

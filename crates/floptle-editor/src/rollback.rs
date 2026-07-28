@@ -355,6 +355,30 @@ impl RollbackDriver {
         Some(next)
     }
 
+    /// Step the simulation BACKWARDS one tick, from the state ring
+    /// (`docs/rollback-netcode-design.md` §7 P5 — closes 0024's deferred item).
+    ///
+    /// Frame-stepping forwards is easy; stepping back is not, because a
+    /// simulation is not invertible. It only works here because rollback
+    /// already keeps every recent tick's exact state for its own reasons —
+    /// backwards stepping is that ring, read by a human instead of by a
+    /// correction. That is also its limit: it reaches back exactly as far as
+    /// the ring does, and no further.
+    ///
+    /// Returns the tick now standing, or `None` when the ring can't reach back
+    /// any further.
+    pub fn step_back(&mut self, ctx: &mut Ctx) -> Option<u64> {
+        let current = self.net.current();
+        if current == 0 {
+            return None;
+        }
+        let saved = self.ring.iter().find(|s| s.tick == current)?.clone();
+        self.apply(ctx, &saved);
+        self.ring.retain(|s| s.tick < current);
+        self.net.rewind_to(current - 1);
+        Some(current - 1)
+    }
+
     /// Restore the last state before the earliest invalidated tick and
     /// re-simulate to the present, with no rendering in between.
     fn resolve_pending(&mut self, ctx: &mut Ctx) {
@@ -466,7 +490,7 @@ impl RollbackDriver {
 
     fn feed_bodies(ctx: &mut Ctx) {
         let mut states = std::collections::HashMap::new();
-        for (e, vel, up, grounded, height) in ctx.sim.body_states() {
+        for (e, vel, up, grounded, height, pos) in ctx.sim.body_states() {
             states.insert(
                 e.index(),
                 floptle_script::BodyState {
@@ -474,6 +498,7 @@ impl RollbackDriver {
                     up: [up.x, up.y, up.z],
                     grounded,
                     height,
+                    pos: [pos.x, pos.y, pos.z],
                 },
             );
         }
@@ -551,17 +576,18 @@ impl RollbackDriver {
         }
     }
 
-    /// Drop saved ticks nothing can reach any more (§2.1).
+    /// Drop saved ticks the ring no longer has room for.
+    ///
+    /// One rule, not two. §2.1 *permits* dropping everything at or below the
+    /// confirmed frontier, and an earlier cut did — which left a healthy
+    /// session holding a single saved tick, since in a healthy session every
+    /// tick confirms immediately. The depth cap already bounds the memory, and
+    /// the ticks that pruning would have thrown away are exactly what backwards
+    /// frame-stepping reads (§7 P5). So the cap is the only rule, and what it
+    /// keeps is useful rather than merely permitted.
     fn trim_ring(&mut self) {
         let cap = (self.net.max_depth + RING_MARGIN) as usize;
         while self.ring.len() > cap {
-            self.ring.pop_front();
-        }
-        // Everything at or below the confirmed frontier is settled and can never
-        // be re-simulated — except the newest one, which stays as the checksum
-        // anchor (§6).
-        let confirmed = self.net.confirmed();
-        while self.ring.len() > 1 && self.ring[1].tick <= confirmed {
             self.ring.pop_front();
         }
     }
@@ -1133,6 +1159,101 @@ end\n";
         assert_ne!(clean, 0);
         assert_eq!(clean, same, "two agreeing runs must publish the same checksum");
         assert_ne!(clean, drifted, "one tick of divergence must change it");
+    }
+
+    /// Backwards frame-step (§7 P5): a fighting game is authored in single
+    /// frames, and "was that jab active on 4 or on 5" is a question you answer
+    /// by stepping back to look — which is only possible because rollback
+    /// already keeps the exact state of every recent tick.
+    ///
+    /// Stepping back and forward again must land on the state that was there
+    /// before, or it is a fancy undo rather than a frame-step.
+    #[test]
+    fn stepping_back_and_forward_again_lands_on_the_same_state() {
+        let script = script_of_the_match();
+        let mut f = Fixture::new("stepback");
+        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+        d.rebind(&f.world, &mut f.sim, &f.host);
+        for (t, p1, p2) in &script {
+            d.add_local(*t, p1.clone());
+            d.add_remote(P2, *t, p2.clone());
+            d.advance(&mut f.ctx());
+        }
+        let at_end = f.fingerprint(&d);
+        let end_tick = d.net.current();
+
+        // Back four frames — far enough to cross the punch on tick 12.
+        for back in 1..=4u64 {
+            assert_eq!(d.step_back(&mut f.ctx()), Some(end_tick - back), "step {back} back");
+        }
+        let stepped_back = f.fingerprint(&d);
+        assert_ne!(stepped_back, at_end, "the world must actually have moved back");
+
+        // …and forward again, on the same inputs, to the same place.
+        for _ in 0..4 {
+            assert!(d.advance(&mut f.ctx()).is_some());
+        }
+        assert_eq!(d.net.current(), end_tick);
+        assert_eq!(
+            f.fingerprint(&d),
+            at_end,
+            "stepping back and forward again must reproduce the state exactly"
+        );
+
+        // The ring is the limit, and reaching it is a clean stop rather than a
+        // wrong answer.
+        let mut steps = 0;
+        while d.step_back(&mut f.ctx()).is_some() {
+            steps += 1;
+            assert!(steps < 100, "step_back must terminate");
+        }
+        assert!(steps > 0, "at least one step back must have been possible");
+    }
+
+    /// A pushbox-only body integrates its velocity and nothing else — no
+    /// gravity, no depenetration, no ground detection (§3, §8). The script owns
+    /// where the fighter is allowed to be, which is both the deterministic
+    /// profile and how the genre actually works.
+    #[test]
+    fn a_pushbox_only_body_integrates_but_is_never_solved() {
+        use floptle_physics::GravityField;
+
+        let mut world = World::default();
+        let mut ents = Vec::new();
+        for (i, pushbox) in [(0usize, false), (1, true)] {
+            let e = world.spawn();
+            world.insert(e, Transform::from_translation(DVec3::new(i as f64 * 4.0, 5.0, 0.0)));
+            world.insert(
+                e,
+                RigidBody { radius: 0.5, pushbox_only: pushbox, ..Default::default() },
+            );
+            ents.push(e);
+        }
+        let mut sim = Sim::build(
+            &world,
+            &[],
+            GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+            DVec3::ZERO,
+        );
+        sim.set_body_velocity(ents[1].index(), Vec3::new(3.0, 0.0, 0.0));
+        for _ in 0..60 {
+            sim.step_tick(1.0 / 60.0, None);
+        }
+        let solved = sim.body_snapshot(ents[0].index()).unwrap();
+        let pushbox = sim.body_snapshot(ents[1].index()).unwrap();
+        assert!(solved.pos.y < 4.0, "the ordinary body falls, got {}", solved.pos.y);
+        assert_eq!(pushbox.pos.y, 5.0, "the pushbox does NOT: gravity is the script's job");
+        assert!(
+            (pushbox.pos.x - (4.0 + 3.0)).abs() < 1e-4,
+            "…but it still moves under its own velocity, got {}",
+            pushbox.pos.x
+        );
+        assert!(!pushbox.grounded, "and it is never told it landed on anything");
+        // It is still a box you can hit — that is the entire point of the name.
+        assert!(
+            sim.body_hulls(&world).iter().any(|h| h.eid == ents[1].index()),
+            "a pushbox must stay visible to raycasts and overlap queries"
+        );
     }
 
     /// A `Rollback` node whose scripts define neither hook is almost always a

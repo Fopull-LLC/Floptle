@@ -611,6 +611,23 @@ impl PhysicsWorld {
             self.bodies[bi].prev_pos = self.bodies[bi].pos;
             return;
         }
+        if self.bodies[bi].pushbox_only {
+            // Integrate the velocity, and stop. Everything below this line —
+            // gravity, the depenetration relaxation, ground detection, the
+            // position locks — is exactly the machinery a rollback session
+            // cannot rely on to agree in the last bit on two different
+            // machines, and exactly the machinery a fighting game replaces with
+            // integer frame data anyway (`docs/rollback-netcode-design.md` §3).
+            //
+            // Not `kinematic`: this body still MOVES under its own velocity, so
+            // the controller's whole existing velocity channel keeps working.
+            // It just moves without being negotiated with.
+            let b = &mut self.bodies[bi];
+            b.prev_pos = b.pos;
+            b.pos += b.vel * dt;
+            b.contact = None;
+            return;
+        }
         {
             self.bodies[bi].prev_pos = self.bodies[bi].pos; // interpolation anchor
             // Semi-implicit Euler: orient up to −gravity, integrate gravity, then move.
